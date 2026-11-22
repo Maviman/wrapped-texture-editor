@@ -19,3 +19,7 @@ test-assets/shapes/high_poly_sphere.obj
 Thumbs.db
 desktop.ini
 __pycache__/
+
+# Toolchain shim made by tools/setup-toolchain.ps1, downloaded sample models
+.toolchain/
+samples/

@@ -3,12 +3,19 @@
 // it on a worker, one at a time; `on_output` hands the result back (`apply_final_bake`); `settle` waits for the bake in
 // flight and bakes the rest on the UI thread before the commands that keep stamp pixels (save, export, the export
 // dialog, merge down, rasterize).
+//
+// Round 8 (R8-2, ROUND8_PLAN 4.1): the Preview bakes of wrapped stamps run on a worker too (`WrapJobs`): one silent
+// job at a time, latest wins (the job is made from the stamp as it is when the job starts); the stamp shows its last
+// finished picture until the next one lands; a landed picture whose stamp moved since asks for the next job
+// (`due_again`). The selected wrapped stamp without a cached parameterization (after an open, an undo) gets it from a
+// param-only job. A Final of a stamp whose wrap job is in flight starts after that job lands. `settle` never waits for
+// wrap jobs (their outputs are stale after the flush).
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use eframe::egui;
-use wte_core::{FinalBake, StampBakeOutput, StampId};
+use wte_core::{FinalBake, Placement, StampBakeOutput, StampId, StampJobKind, WrapPreview};
 
 use crate::app::WteApp;
 use crate::jobs::{JobOutput, Jobs};
@@ -17,6 +24,63 @@ use crate::state::AppState;
 /// Status-bar titles of the bake job (non-modal; the status bar shows the title).
 const TITLE_STAMP: &str = "Finishing stamp";
 const TITLE_TEXT: &str = "Finishing text";
+/// Titles (thread names) of the silent wrap jobs; the status bar does not show them.
+const TITLE_WRAP_PREVIEW: &str = "Wrap preview";
+const TITLE_WRAP_PARAM: &str = "Wrap fit";
+
+/// Round 8 (R8-2): the wrap Preview or param-only job in flight, a Preview output held while a stroke is open, the
+/// param-only request of the selected stamp and counters. Lives in `AppState::wrap_jobs`.
+#[derive(Default)]
+pub struct WrapJobs {
+    in_flight: Option<WrapFlight>,
+    /// A Preview output that arrived while a stroke was open, with its scene generation; applied when it ends.
+    held: Option<(u64, Box<StampBakeOutput>)>,
+    /// The selected wrapped stamp whose parameterization is not cached: asked for by the Transform tool in every frame
+    /// it is needed (`request_param`), taken by the next `pump` when no wrap job is in flight.
+    want_param: Option<StampId>,
+    /// The stamp and placement whose param-only job found no surface to wrap onto: not asked for again.
+    pub(crate) param_failed: Option<(StampId, Placement)>,
+    /// What the jobs did (tests, the scenario and the log).
+    pub counters: WrapJobCounters,
+}
+
+/// Counts of `WrapJobs` since the start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WrapJobCounters {
+    pub previews_started: u64,
+    pub previews_applied: u64,
+    /// Applied previews whose stamp had moved since the job started (the next job follows).
+    pub previews_due_again: u64,
+    /// Preview outputs dropped (Esc, undo, a Final, another document, a removed stamp).
+    pub previews_stale: u64,
+    pub params_started: u64,
+    pub params_applied: u64,
+    /// Parameterizations made on the UI thread by `TransformTool::ensure_wrap_param` (synchronous mode only).
+    pub ui_params: u64,
+}
+
+/// The one wrap job running on a worker.
+struct WrapFlight {
+    id: StampId,
+    kind: StampJobKind,
+    /// `Session::scene_generation` when it started.
+    generation: u64,
+    started: Instant,
+    /// The stamp's placement when the job was made (a param-only job that brings nothing for it: no surface).
+    placement: Placement,
+}
+
+impl WrapJobs {
+    /// The Transform tool asks for the parameterization of the selected wrapped stamp (async mode).
+    pub(crate) fn request_param(&mut self, id: StampId) {
+        self.want_param = Some(id);
+    }
+
+    /// The stamp and kind of the wrap job in flight.
+    pub(crate) fn in_flight(&self) -> Option<(StampId, StampJobKind)> {
+        self.in_flight.as_ref().map(|f| (f.id, f.kind))
+    }
+}
 
 /// The bake in flight and an output held while a stroke is open. Lives in `AppState::final_bakes`.
 #[derive(Default)]
@@ -27,6 +91,8 @@ pub struct FinalBakes {
     /// When each waiting stamp was first seen unbaked at the end of a frame's dispatch (`after_dispatch`): the frame of
     /// its Final. The "applied after T ms" log line measures T from here (else from the start of the job).
     marked: HashMap<StampId, Instant>,
+    /// Round 8: the stamp and the "applied after" milliseconds of the last applied Final (the scenario's log).
+    last_applied: Option<(StampId, f64)>,
 }
 
 /// The one bake job running on a worker.
@@ -43,6 +109,11 @@ impl FinalBakes {
     #[cfg(test)]
     pub fn in_flight(&self) -> bool {
         self.in_flight.is_some()
+    }
+
+    /// Round 8: the stamp and the "applied after" milliseconds of the last applied Final bake.
+    pub(crate) fn last_applied(&self) -> Option<(StampId, f64)> {
+        self.last_applied
     }
 }
 
@@ -62,8 +133,11 @@ pub(crate) fn pump_with(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Conte
             apply_output(state, generation, output, None);
         }
     }
+    // Round 8: the wrap Preview / param-only jobs first; a Final of the stamp whose wrap job is in flight waits for it.
+    pump_wrap(state, jobs, ctx);
     if state.final_bakes.in_flight.is_none()
         && state.final_bakes.held.is_none()
+        && !final_waits_for_wrap_job(state)
         && let Some(session) = state.session.as_mut()
         && let Some(job) = session.doc.next_final_bake()
     {
@@ -85,6 +159,143 @@ pub(crate) fn pump_with(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Conte
     update_pending(state);
 }
 
+/// Round 8 (R8-2): applies a held Preview output once no stroke is open; when no wrap job is in flight starts the
+/// Preview job of the lowest waiting wrapped stamp (`Document::next_wrap_preview_job`, made from the stamp as it is
+/// now: latest wins), else the param-only job the Transform tool asked for. None while a stroke is open.
+fn pump_wrap(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) {
+    if let Some((generation, output)) = state.wrap_jobs.held.take() {
+        if state.doc().is_some_and(|d| d.stroke_active()) {
+            state.wrap_jobs.held = Some((generation, output));
+        } else {
+            apply_wrap(state, generation, output, None);
+        }
+    }
+    let want = state.wrap_jobs.want_param.take();
+    if state.wrap_jobs.in_flight.is_some() || state.wrap_jobs.held.is_some() {
+        return;
+    }
+    let Some(session) = state.session.as_mut() else { return };
+    // Only while the document defers wrapped Previews (the asynchronous mode): otherwise a wrapped stamp waiting in the
+    // deferred set waits for the views' throttled Preview bake on the UI thread (`view::bake_stale_previews`), as in
+    // round 6, and `next_wrap_preview_job` must not take it.
+    if session.doc.stroke_active() || !session.doc.defers_wrap_previews() {
+        return;
+    }
+    let generation = session.scene_generation;
+    let job = match session.doc.next_wrap_preview_job() {
+        Some(job) => job,
+        None => match want.and_then(|id| session.doc.wrap_param_job(id)) {
+            Some(job) => job,
+            None => return,
+        },
+    };
+    let (id, kind) = (job.stamp(), job.kind());
+    let Some(placement) = session.doc.stamp(id).map(|s| s.placement) else { return };
+    let preview = kind == StampJobKind::Preview;
+    let spawned = if preview {
+        jobs.spawn_silent(ctx, TITLE_WRAP_PREVIEW, move |_| JobOutput::WrapPreview { generation, output: Box::new(job.run_isolated()) })
+    } else {
+        jobs.spawn_silent(ctx, TITLE_WRAP_PARAM, move |_| JobOutput::WrapParam { generation, output: Box::new(job.run_isolated()) })
+    };
+    if !spawned {
+        // No worker thread: the wrapped Previews go back to the UI thread (round 6); the Final bake brings the picture
+        // and the parameterization of the stamp whose job was lost.
+        log::warn!("wrap {}: stamp {}: no worker thread, wrapped Previews are baked on the UI thread", if preview { "preview" } else { "fit" }, id.0);
+        session.doc.set_defer_wrap_previews(false);
+        return;
+    }
+    let counters = &mut state.wrap_jobs.counters;
+    if preview {
+        counters.previews_started += 1;
+        log::info!("wrap preview: stamp {} job started", id.0);
+    } else {
+        counters.params_started += 1;
+        log::info!("wrap fit: stamp {} param-only job started", id.0);
+    }
+    state.wrap_jobs.in_flight = Some(WrapFlight { id, kind, generation, started: Instant::now(), placement });
+}
+
+/// True while the wrap job in flight belongs to a stamp of the open document that waits for its Final bake: the Final
+/// starts after that job lands (plan 4.1; with its parameterization when the job's serves).
+fn final_waits_for_wrap_job(state: &AppState) -> bool {
+    let (Some(flight), Some(session)) = (state.wrap_jobs.in_flight.as_ref(), state.session.as_ref()) else { return false };
+    flight.generation == session.scene_generation && session.doc.stamp_is_unbaked(flight.id)
+}
+
+/// Called from `io_flows::on_job_output` with the output of a wrap Preview or param-only job.
+pub fn on_wrap_output(app: &mut WteApp, generation: u64, output: Box<StampBakeOutput>) {
+    on_wrap_output_with(&mut app.state, generation, output);
+}
+
+/// `on_wrap_output` on the app state.
+pub(crate) fn on_wrap_output_with(state: &mut AppState, generation: u64, output: Box<StampBakeOutput>) {
+    // One wrap job in flight at a time: this is its output.
+    let flight = state.wrap_jobs.in_flight.take();
+    apply_wrap(state, generation, output, flight);
+    update_pending(state);
+}
+
+/// Applies a wrap job's output to the open document when it belongs to it (same scene generation); a Preview output
+/// is held while a stroke is open. Logs the outcome ("wrap preview: ..." / "wrap fit: ...").
+fn apply_wrap(state: &mut AppState, generation: u64, output: Box<StampBakeOutput>, flight: Option<WrapFlight>) {
+    let id = output.stamp();
+    let kind = output.kind();
+    let worker_ms = output.elapsed().as_secs_f64() * 1000.0;
+    let after = flight.as_ref().map_or(worker_ms, |f| f.started.elapsed().as_secs_f64() * 1000.0);
+    let preview = kind == StampJobKind::Preview;
+    let what = if preview { "wrap preview" } else { "wrap fit" };
+    let Some(session) = state.session.as_mut().filter(|s| s.scene_generation == generation) else {
+        log::info!("{what}: stamp {} result dropped (other document)", id.0);
+        if preview {
+            state.wrap_jobs.counters.previews_stale += 1;
+        }
+        return;
+    };
+    let counters = &mut state.wrap_jobs.counters;
+    if preview {
+        if session.doc.stroke_active() {
+            log::debug!("wrap preview: stamp {} held until the stroke ends", id.0);
+            state.wrap_jobs.held = Some((generation, output));
+            return;
+        }
+        match session.doc.apply_wrap_preview(*output) {
+            WrapPreview::Applied { due_again } => {
+                counters.previews_applied += 1;
+                counters.previews_due_again += u64::from(due_again);
+                log::info!("wrap preview: stamp {} applied after {after:.0} ms (worker {worker_ms:.0} ms, due again: {due_again})", id.0);
+            }
+            WrapPreview::Stale => {
+                counters.previews_stale += 1;
+                log::info!("wrap preview: stamp {} result dropped (stale) after {after:.0} ms (worker {worker_ms:.0} ms)", id.0);
+            }
+        }
+        return;
+    }
+    if session.doc.apply_wrap_param(*output) {
+        counters.params_applied += 1;
+        log::info!("wrap fit: stamp {} parameterization landed after {after:.0} ms (worker {worker_ms:.0} ms)", id.0);
+    } else if let Some(f) = flight
+        && session.doc.stamp(id).map(|s| s.placement) == Some(f.placement)
+        && session.doc.stamp_wrap_stats(id).is_none()
+    {
+        // Made for the stamp as it still is and nothing came: no surface within reach. Not asked for again.
+        log::info!("wrap fit: stamp {} has no surface to wrap onto ({after:.0} ms)", id.0);
+        state.wrap_jobs.param_failed = Some((id, f.placement));
+    } else {
+        log::info!("wrap fit: stamp {} result dropped (stale) after {after:.0} ms", id.0);
+    }
+}
+
+/// Round 8: called from `App::logic` after the Transform tool's `ensure_wrap_param`: starts the param-only job that
+/// tool just asked for when no wrap job is in flight (else a later `pump` does, when the job in flight lands), and
+/// updates `wrap_jobs_pending`.
+pub(crate) fn after_tools(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) {
+    if state.wrap_jobs.want_param.is_some() && state.wrap_jobs.in_flight.is_none() {
+        pump_wrap(state, jobs, ctx);
+    }
+    update_pending(state);
+}
+
 /// Called from `App::ui` after the frame's actions were dispatched (a Final of a gizmo release or of a tool gesture
 /// that ends on a timer happens earlier in the same frame). Two things:
 /// - a Final that left a stamp waiting while no bake is in flight asks for the next frame, whose `pump` starts the bake.
@@ -100,6 +311,11 @@ pub(crate) fn after_dispatch(state: &mut AppState, ctx: &egui::Context) {
 
 /// The work of `after_dispatch`; true when the next frame must come even without input (its `pump` starts the bake).
 fn needs_frame_after_dispatch(state: &mut AppState) -> bool {
+    // check:B: a Final that waits for its stamp's wrap job does not start in the next frame either; the job's landing
+    // asks for the frame that starts it (`Jobs`: a finished worker requests a repaint). Without this every frame of the
+    // wait (up to a whole Preview job: 0.3-0.6 s on ABeautifulGame, seconds on high_poly_sphere) asked for the next one,
+    // and the software renderer drew at the display rate beside the worker.
+    let waits_for_wrap = final_waits_for_wrap_job(state);
     let bakes = &mut state.final_bakes;
     let Some(doc) = state.session.as_ref().map(|s| &s.doc) else {
         bakes.marked.clear();
@@ -114,7 +330,10 @@ fn needs_frame_after_dispatch(state: &mut AppState) -> bool {
         }
     }
     let waiting = bakes.held.is_some() || doc.has_unbaked_stamps();
-    bakes.in_flight.is_none() && waiting && !doc.stroke_active()
+    // Round 8: a wrapped stamp's Preview edit of this frame (a wheel notch, typing) waits for the next frame's `pump`
+    // to start its job.
+    let wrap_waiting = state.wrap_jobs.in_flight.is_none() && doc.has_stale_wrap_previews();
+    ((bakes.in_flight.is_none() && waiting && !waits_for_wrap) || wrap_waiting) && !doc.stroke_active()
 }
 
 /// Called from `io_flows::on_job_output` with the output of a bake job.
@@ -194,6 +413,7 @@ fn apply_output(state: &mut AppState, generation: u64, output: Box<StampBakeOutp
             let since = state.final_bakes.marked.remove(&id).or(started);
             let after = since.map_or(worker_ms, |t| t.elapsed().as_secs_f64() * 1000.0);
             log::info!("final bake: stamp {} applied after {after:.0} ms (worker {worker_ms:.0} ms, empty: {empty})", id.0);
+            state.final_bakes.last_applied = Some((id, after));
             if state.await_first_bake == Some(id) {
                 state.await_first_bake = None;
                 if empty {
@@ -221,17 +441,26 @@ fn apply_output(state: &mut AppState, generation: u64, output: Box<StampBakeOutp
 }
 
 /// `final_bakes_pending` = a bake in flight, an output held, or a stamp of the open document waiting for its bake.
+/// Round 8: `wrap_jobs_pending` = a wrap job in flight, a Preview output held, a wrapped stamp waiting for its Preview
+/// job, or a param-only job asked for.
 fn update_pending(state: &mut AppState) {
     let waiting = state.doc().is_some_and(|d| d.has_unbaked_stamps());
     state.final_bakes_pending = state.final_bakes.in_flight.is_some() || state.final_bakes.held.is_some() || waiting;
+    let wrap = &state.wrap_jobs;
+    let wrap_waiting = state.doc().is_some_and(|d| d.has_stale_wrap_previews());
+    state.wrap_jobs_pending = wrap.in_flight.is_some() || wrap.held.is_some() || wrap.want_param.is_some() || wrap_waiting;
 }
 
 /// Drops what belongs to the previous document when a new one is installed (`io_flows::install_document`): a held
 /// output and the awaited first bake. A bake in flight finishes on its own; its result is dropped by its generation.
+/// Round 8: the same for the wrap jobs (a held Preview, the param-only request and its failure mark).
 pub(crate) fn reset_for_new_document(state: &mut AppState) {
     state.final_bakes.held = None;
     state.final_bakes.marked.clear();
     state.await_first_bake = None;
+    state.wrap_jobs.held = None;
+    state.wrap_jobs.want_param = None;
+    state.wrap_jobs.param_failed = None;
 }
 
 #[cfg(test)]
@@ -597,5 +826,498 @@ mod tests {
         assert!(!state.final_bakes_pending && !state.doc().unwrap().has_unbaked_stamps());
         assert!(wrapped(&state, id));
         assert_eq!(stamp_pixels(&state), settled, "the stale Project result changed nothing");
+    }
+
+    // ----- round 8 (R8-2, ROUND8_PLAN 4.2): wrapped Previews as latest-wins jobs -----
+
+    /// `stamp_state` with the Stamp tool in Wrap; `deferred`: the app's asynchronous mode (Finals and wrapped
+    /// Previews on workers, as `install_document` sets it up).
+    fn wrap_state(deferred: bool) -> AppState {
+        let mut state = stamp_state(deferred);
+        state.tools.stamp.mode = wte_core::SurfaceMode::Wrap;
+        state.doc_mut().unwrap().set_defer_wrap_previews(deferred);
+        state
+    }
+
+    /// The placement of stamp `id` turned by `radians` (a new spine: the parameterization of the old one never serves).
+    fn turned(state: &AppState, id: StampId, radians: f32) -> Placement {
+        match state.doc().unwrap().stamp(id).unwrap().placement {
+            Placement::Projected(p) => Placement::Projected(p.rotated(radians)),
+            other => other,
+        }
+    }
+
+    /// What `deliver_next` handed over.
+    #[derive(Debug, PartialEq)]
+    enum Delivered {
+        Final,
+        Wrap(StampJobKind),
+    }
+
+    /// Waits for the next job output and hands it over as `App::logic` does.
+    fn deliver_next(state: &mut AppState, jobs: &mut Jobs) -> Delivered {
+        let start = Instant::now();
+        loop {
+            if let Some(done) = jobs.poll().into_iter().next() {
+                return match done.output {
+                    JobOutput::StampBake { generation, output } => {
+                        on_output_with(state, generation, output);
+                        Delivered::Final
+                    }
+                    JobOutput::WrapPreview { generation, output } | JobOutput::WrapParam { generation, output } => {
+                        let kind = output.kind();
+                        on_wrap_output_with(state, generation, output);
+                        Delivered::Wrap(kind)
+                    }
+                    _ => panic!("another job's output"),
+                };
+            }
+            assert!(start.elapsed() < Duration::from_secs(120), "no job delivered");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A wrapped stamp placed and its first Final landed (asynchronous mode).
+    fn placed_wrapped(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) -> StampId {
+        let id = place(state);
+        pump_with(state, jobs, ctx);
+        assert_eq!(deliver_next(state, jobs), Delivered::Final);
+        assert!(!state.final_bakes_pending && !state.wrap_jobs_pending);
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_some());
+        id
+    }
+
+    #[test]
+    fn a_drag_of_a_wrapped_stamp_bakes_its_previews_on_a_worker_and_the_latest_wins() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        let sync_id = place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+        let before = stamp_pixels(&state);
+        // Ten Preview moves of one drag, no output handed over in between: one job at a time, nothing on the UI thread
+        // (check:B: the core's counter of parameterizations made on this thread stays put).
+        for k in 0..10 {
+            let built = wte_core::param_counter::get();
+            let at = turned(&state, id, 0.03);
+            state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+            let doc = state.doc().unwrap();
+            assert!(doc.stamp_wrap_stats(id).is_none(), "move {k}: no parameterization of the moved placement on the UI thread");
+            assert_eq!(stamp_pixels(&state), before, "move {k}: nothing baked on the UI thread");
+            pump_with(&mut state, &mut jobs, &ctx);
+            assert_eq!(wte_core::param_counter::get(), built, "move {k}: a parameterization was built on the UI thread");
+            assert!(state.wrap_jobs_pending && jobs.running_count() == 1, "move {k}: one job in flight");
+            assert_eq!(state.wrap_jobs.in_flight(), Some((id, StampJobKind::Preview)));
+            assert!(jobs.busy().is_none(), "the wrap job has no status-bar title");
+            let sync_at = turned(&sync, sync_id, 0.03);
+            sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_at, Commit::Preview).unwrap();
+        }
+        assert_eq!(state.wrap_jobs.counters.previews_started, 1, "latest wins: one job while the first runs");
+        // The first job (made for the first move) lands: the last good picture, and the stamp is due again.
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!((state.wrap_jobs.counters.previews_applied, state.wrap_jobs.counters.previews_due_again), (1, 1));
+        assert_ne!(stamp_pixels(&state), before, "the first job's picture is shown");
+        assert!(state.doc().unwrap().has_stale_wrap_previews() && state.wrap_jobs_pending);
+        // The next pump starts the job of the last placement; it lands with the synchronous Preview's pixels.
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.counters.previews_started, 2);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!((state.wrap_jobs.counters.previews_applied, state.wrap_jobs.counters.previews_due_again), (2, 1));
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!jobs.any_running() && !state.wrap_jobs_pending, "nothing left to do");
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync), "the last Preview = the synchronous Preview of the last placement");
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_some(), "the job brought the parameterization");
+        // The release: the Final (on its worker) equals the synchronous Final.
+        state.doc_mut().unwrap().flush_pending_edit();
+        sync.doc_mut().unwrap().flush_pending_edit();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Final);
+        assert!(!state.final_bakes_pending && !state.wrap_jobs_pending);
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+        assert_eq!(state.wrap_jobs.counters.ui_params, 0);
+    }
+
+    #[test]
+    fn esc_or_undo_while_a_wrap_preview_job_runs_keeps_the_old_pixels() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let before = stamp_pixels(&state);
+        let placed = state.doc().unwrap().stamp(id).unwrap().placement;
+        // Esc.
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        assert!(state.doc_mut().unwrap().cancel_pending_edit());
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!(state.wrap_jobs.counters.previews_stale, 1);
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!jobs.any_running() && !state.wrap_jobs_pending && !state.final_bakes_pending);
+        assert_eq!(stamp_pixels(&state), before, "Esc: the old pixels");
+        // Undo (it flushes the Preview edit, then undoes it): the job's output is stale, the old pixels come back.
+        let at = turned(&state, id, -0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        assert_eq!(state.doc_mut().unwrap().undo().as_deref(), Some("Edit Stamp"));
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!(state.wrap_jobs.counters.previews_stale, 2);
+        for _ in 0..10 {
+            pump_with(&mut state, &mut jobs, &ctx);
+            if !jobs.any_running() {
+                break;
+            }
+            deliver_next(&mut state, &mut jobs);
+        }
+        assert!(!jobs.any_running() && !state.final_bakes_pending && !state.wrap_jobs_pending);
+        assert_eq!(state.doc().unwrap().stamp(id).unwrap().placement, placed);
+        assert_eq!(stamp_pixels(&state), before, "Undo: the old pixels");
+        assert_eq!(state.wrap_jobs.counters.previews_applied, 0);
+    }
+
+    #[test]
+    fn a_wrap_preview_of_another_document_is_dropped() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        // New / Open: another session (as `install_document` sets it up), with a wrapped stamp of the same id.
+        let mut next = wrap_state(true);
+        let other = placed_wrapped(&mut next, &mut Jobs::new(), &ctx);
+        assert_eq!(other, id);
+        let mut session = next.session.take().unwrap();
+        session.scene_generation = 2;
+        state.session = Some(session);
+        reset_for_new_document(&mut state);
+        let before = stamp_pixels(&state);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!(stamp_pixels(&state), before, "the old document's Preview changed nothing");
+        assert_eq!((state.wrap_jobs.counters.previews_stale, state.wrap_jobs.counters.previews_applied), (1, 0));
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!jobs.any_running() && !state.wrap_jobs_pending);
+    }
+
+    #[test]
+    fn a_selected_wrapped_stamp_without_parameterization_gets_it_from_a_param_only_job() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        // A Final turn, its bake, then Undo: the caches come back, the parameterization does not.
+        let at = turned(&state, id, 0.3);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Final).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Final);
+        assert_eq!(state.doc_mut().unwrap().undo().as_deref(), Some("Edit Stamp"));
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_none() && !state.doc().unwrap().stamp_is_unbaked(id));
+        state.session.as_mut().unwrap().selected_stamp = Some(id);
+        let before = stamp_pixels(&state);
+        // The Transform tool asks for a param-only job instead of making it on the UI thread; `after_tools` starts it.
+        let mut tools = ToolController::new();
+        assert!(!tools.ensure_wrap_param(&mut state), "nothing made on the UI thread");
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.in_flight(), Some((id, StampJobKind::ParamOnly)));
+        assert!(state.wrap_jobs_pending && jobs.busy().is_none());
+        // While it runs the tool asks again; nothing more starts.
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(jobs.running_count(), 1);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::ParamOnly));
+        let doc = state.doc().unwrap();
+        assert!(doc.stamp_wrap_stats(id).is_some(), "the stats line has its numbers");
+        assert!(!doc.stamp_wrap_outline(id, 8).is_empty(), "the outline can be drawn");
+        assert_eq!(stamp_pixels(&state), before, "no pixel changed");
+        assert_eq!((state.wrap_jobs.counters.params_started, state.wrap_jobs.counters.params_applied), (1, 1));
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert!(!jobs.any_running() && !state.wrap_jobs_pending, "nothing more to do");
+        assert_eq!(state.wrap_jobs.counters.ui_params, 0);
+    }
+
+    #[test]
+    fn a_final_waits_for_its_stamps_wrap_preview_job() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        let sync_id = place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.25);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        // The release while the Preview job runs: the Final waits for it.
+        state.doc_mut().unwrap().flush_pending_edit();
+        assert!(state.doc().unwrap().stamp_is_unbaked(id));
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!state.final_bakes.in_flight() && jobs.running_count() == 1, "the Final waits");
+        // check:B: and asks for no frame meanwhile (the job's landing does).
+        assert!(!needs_frame_after_dispatch(&mut state), "a frame per frame while the Final waits for the Preview job");
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!(state.wrap_jobs.counters.previews_stale, 1, "after the release the Preview is stale");
+        // check:B (core request 1): its parameterization serves the released placement and is cached (no pixel change).
+        let from_job = state.doc().unwrap().stamp_wrap_stats(id).expect("the stale Preview's parameterization is cached");
+        let built = wte_core::param_counter::get();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.final_bakes.in_flight(), "then the Final starts");
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Final);
+        assert_eq!(wte_core::param_counter::get(), built);
+        // The Final reused it: the same statistics, build time included (a second build would have its own time).
+        assert_eq!(state.doc().unwrap().stamp_wrap_stats(id), Some(from_job), "the Final built the parameterization again");
+        let sync_at = turned(&sync, sync_id, 0.25);
+        sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_at, Commit::Final).unwrap();
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+    }
+
+    // ----- check:B (ROUND8_PLAN 6 row 4): the races of the wrap Preview jobs -----
+
+    /// Hands over job outputs and pumps until nothing runs and nothing waits (at most `n` outputs).
+    fn drain(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context, n: usize) {
+        for _ in 0..n {
+            pump_with(state, jobs, ctx);
+            if !jobs.any_running() {
+                break;
+            }
+            deliver_next(state, jobs);
+        }
+        pump_with(state, jobs, ctx);
+        assert!(!jobs.any_running() && !state.final_bakes_pending && !state.wrap_jobs_pending, "work left after the drain");
+    }
+
+    #[test]
+    fn esc_after_a_landed_wrap_preview_restores_the_old_pixels() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let before = stamp_pixels(&state);
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!(state.wrap_jobs.counters.previews_applied, 1);
+        assert_ne!(stamp_pixels(&state), before, "the Preview landed");
+        assert!(state.doc_mut().unwrap().cancel_pending_edit());
+        assert_eq!(stamp_pixels(&state), before, "Esc: the pixels from before the drag");
+        drain(&mut state, &mut jobs, &ctx, 4);
+        assert_eq!(stamp_pixels(&state), before);
+    }
+
+    #[test]
+    fn a_stale_preview_landing_after_a_newer_edit_is_dropped_and_the_newer_edit_wins() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        let sync_id = place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        // Drag 1: its Preview job runs; the release; drag 2 starts before the job lands.
+        let first = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, first, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        state.doc_mut().unwrap().flush_pending_edit();
+        let second = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, second, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!state.final_bakes.in_flight(), "the stamp is edited again: no Final of drag 1");
+        let shown = stamp_pixels(&state);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!((state.wrap_jobs.counters.previews_stale, state.wrap_jobs.counters.previews_applied), (1, 0));
+        assert_eq!(stamp_pixels(&state), shown, "the older edit's Preview changed nothing");
+        // Drag 2's own job: the synchronous Preview of the same edits.
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.in_flight(), Some((id, StampJobKind::Preview)));
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!(state.wrap_jobs.counters.previews_applied, 1);
+        let sync_first = turned(&sync, sync_id, 0.2);
+        sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_first, Commit::Final).unwrap();
+        let sync_second = turned(&sync, sync_id, 0.2);
+        sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_second, Commit::Preview).unwrap();
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync), "drag 2's Preview");
+        // Its release: the Final equals the synchronous one; undo goes back to drag 1's result.
+        state.doc_mut().unwrap().flush_pending_edit();
+        sync.doc_mut().unwrap().flush_pending_edit();
+        drain(&mut state, &mut jobs, &ctx, 4);
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync), "drag 2's Final");
+        assert_eq!(state.doc_mut().unwrap().undo().as_deref(), Some("Edit Stamp"));
+        assert_eq!(sync.doc_mut().unwrap().undo().as_deref(), Some("Edit Stamp"));
+        drain(&mut state, &mut jobs, &ctx, 4);
+        assert_eq!(state.doc().unwrap().stamp(id).unwrap().placement, first);
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync), "undo: drag 1's Final");
+    }
+
+    #[test]
+    fn a_stamp_deleted_while_its_preview_job_runs_is_left_alone_and_undo_brings_it_back() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        let sync_id = place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        state.doc_mut().unwrap().remove_stamp(id).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!state.final_bakes.in_flight() && !state.final_bakes_pending, "nothing waits for a removed stamp");
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!((state.wrap_jobs.counters.previews_stale, state.wrap_jobs.counters.previews_applied), (1, 0));
+        assert!(state.doc().unwrap().stamp(id).is_none() && stamp_pixels(&state).is_empty());
+        drain(&mut state, &mut jobs, &ctx, 2);
+        // Undo of the delete: the stamp comes back waiting for the Final of its drag, which then lands.
+        assert_eq!(state.doc_mut().unwrap().undo().as_deref(), Some("Delete Stamp"));
+        assert!(state.doc().unwrap().stamp_is_unbaked(id));
+        drain(&mut state, &mut jobs, &ctx, 4);
+        let sync_at = turned(&sync, sync_id, 0.2);
+        sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_at, Commit::Final).unwrap();
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+    }
+
+    #[test]
+    fn a_stroke_during_a_wrap_preview_job_holds_its_output_until_it_ends() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        let sync_id = place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        let before = stamp_pixels(&state);
+        // A stroke starts (it ends the pending edit: the stamp waits for its Final, which cannot run during a stroke).
+        let doc = state.doc_mut().unwrap();
+        let paint = doc.sets[0].layers.iter().find(|l| l.is_raster() && !l.locked).map(|l| l.id).unwrap();
+        doc.set_active_layer(wte_core::TextureSetId(0), Some(paint)).unwrap();
+        doc.stroke_begin(&BrushParams::default()).unwrap();
+        assert!(state.doc().unwrap().stamp_is_unbaked(id));
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert!(state.wrap_jobs.held.is_some() && state.wrap_jobs_pending, "held during the stroke");
+        assert_eq!(state.wrap_jobs.counters, WrapJobCounters { previews_started: 1, ..WrapJobCounters::default() });
+        for _ in 0..3 {
+            pump_with(&mut state, &mut jobs, &ctx);
+            assert!(!jobs.any_running() && state.wrap_jobs.held.is_some(), "nothing starts and nothing lands during a stroke");
+        }
+        assert_eq!(stamp_pixels(&state), before);
+        state.doc_mut().unwrap().stroke_end();
+        // The stroke ends: the held output is dropped (its edit ended) and the Final starts with its parameterization.
+        let built = wte_core::param_counter::get();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.held.is_none() && state.final_bakes.in_flight());
+        assert_eq!(state.wrap_jobs.counters.previews_stale, 1);
+        let from_job = state.doc().unwrap().stamp_wrap_stats(id).expect("the held Preview's parameterization is cached");
+        drain(&mut state, &mut jobs, &ctx, 2);
+        assert_eq!(wte_core::param_counter::get(), built);
+        assert_eq!(state.doc().unwrap().stamp_wrap_stats(id), Some(from_job), "the Final reused it");
+        let sync_at = turned(&sync, sync_id, 0.2);
+        sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_at, Commit::Final).unwrap();
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+    }
+
+    #[test]
+    fn save_during_a_wrap_preview_job_settles_without_waiting_for_it() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        let sync_id = place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        // Save: the flush, then settle (the snapshot follows): the Final is baked here, the Preview job is not awaited.
+        state.doc_mut().unwrap().flush_pending_edit();
+        settle_with(&mut state, &mut jobs);
+        assert!(!state.doc().unwrap().has_unbaked_stamps() && !state.final_bakes_pending);
+        assert!(jobs.any_running() && state.wrap_jobs.in_flight().is_some(), "the Preview job was not awaited");
+        let sync_at = turned(&sync, sync_id, 0.2);
+        sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_at, Commit::Final).unwrap();
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync), "the saved pixels are the Final's");
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!(state.wrap_jobs.counters.previews_stale, 1);
+        drain(&mut state, &mut jobs, &ctx, 2);
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync), "the late Preview changed nothing");
+    }
+
+    #[test]
+    fn a_wrap_preview_landing_after_a_turn_to_project_in_the_same_edit_is_dropped() {
+        // check:B: a Preview edit of the open pending edit turns the stamp to Project while its wrap Preview job runs:
+        // the projected Preview is baked on the calling thread at once; the late wrapped picture must not replace it.
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.in_flight().is_some());
+        let Placement::Projected(p) = at else { panic!("3D") };
+        let projected = Placement::Projected(Projector { mode: wte_core::SurfaceMode::Project, ..p });
+        state.doc_mut().unwrap().set_stamp_placement(id, projected, Commit::Preview).unwrap();
+        let shown = stamp_pixels(&state);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::Preview));
+        assert_eq!((state.wrap_jobs.counters.previews_stale, state.wrap_jobs.counters.previews_applied), (1, 0));
+        assert_eq!(stamp_pixels(&state), shown, "the projected Preview stays");
+        state.doc_mut().unwrap().flush_pending_edit();
+        drain(&mut state, &mut jobs, &ctx, 2);
+        let mut sync = stamp_state(false);
+        let sync_id = place(&mut sync);
+        sync.doc_mut().unwrap().set_stamp_placement(sync_id, projected, Commit::Final).unwrap();
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+    }
+
+    #[test]
+    fn the_synchronous_mode_keeps_wrapped_previews_on_the_ui_thread() {
+        // Found by the scenario (`WTE_SYNC_FINAL_BAKES=1`): with the views' throttle on (`set_defer_preview_bakes`, as
+        // `install_document` sets it) a wrapped stamp's Preview waits in the deferred set; `pump` must leave it to the
+        // throttled bake on the UI thread when the document does not defer wrapped Previews.
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(false);
+        let id = place(&mut state);
+        let before = stamp_pixels(&state);
+        let doc = state.doc_mut().unwrap();
+        doc.set_defer_preview_bakes(true);
+        let at = turned(&state, id, 0.2);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!jobs.any_running() && !state.wrap_jobs_pending && state.wrap_jobs.counters == WrapJobCounters::default());
+        let doc = state.doc_mut().unwrap();
+        assert!(doc.has_stale_previews() && !doc.has_stale_wrap_previews(), "waits for the views' throttled bake");
+        doc.bake_stale_previews();
+        assert_ne!(stamp_pixels(&state), before);
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_some());
+    }
+
+    #[test]
+    fn projected_stamps_keep_their_previews_on_the_ui_thread() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = stamp_state(true);
+        state.doc_mut().unwrap().set_defer_wrap_previews(true);
+        let id = place(&mut state);
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Final);
+        let before = stamp_pixels(&state);
+        let bigger = scaled_placement(&state, id, 1.3);
+        state.doc_mut().unwrap().set_stamp_placement(id, bigger, Commit::Preview).unwrap();
+        let doc = state.doc().unwrap();
+        assert!(!doc.has_stale_wrap_previews() && !doc.has_stale_previews());
+        assert_ne!(stamp_pixels(&state), before, "baked on the calling thread at once");
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!jobs.any_running() && !state.wrap_jobs_pending);
+        assert_eq!(state.wrap_jobs.counters, WrapJobCounters::default());
     }
 }

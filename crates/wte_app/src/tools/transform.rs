@@ -252,10 +252,17 @@ impl TransformTool {
     /// its bake is pending (the bake brings one), not during a pending edit (check:B: its throttled Preview bakes bring
     /// one) and not again for a placement that had no surface within reach.
     /// Logged with its time. Returns true when it made one.
+    ///
+    /// Round 8 (R8-2): while the document's wrapped Previews go to jobs (the asynchronous mode), it makes nothing here:
+    /// it asks `stamp_bakes` for a param-only job (`WrapJobs::request_param`) and the stats line says "Wrapping..." until
+    /// that lands; a placement for which that job found no surface is not asked for again.
     pub(crate) fn ensure_wrap_param(&mut self, state: &mut AppState) -> bool {
         let Some((id, placement)) = selected(state) else { return false };
         let Placement::Projected(p) = placement else { return false };
-        if p.mode != SurfaceMode::Wrap || self.wrap_failed == Some((id, placement)) {
+        if p.mode != SurfaceMode::Wrap
+            || self.wrap_failed == Some((id, placement))
+            || state.wrap_jobs.param_failed == Some((id, placement))
+        {
             return false;
         }
         let Some(doc) = state.doc_mut() else { return false };
@@ -265,8 +272,13 @@ impl TransformTool {
         if doc.stamp_wrap_stats(id).is_some() || doc.stamp_is_unbaked(id) || doc.has_pending_edit() {
             return false;
         }
+        if doc.defers_wrap_previews() {
+            state.wrap_jobs.request_param(id);
+            return false;
+        }
         let start = std::time::Instant::now();
         let stats = doc.ensure_wrap_param(id);
+        state.wrap_jobs.counters.ui_params += 1;
         let ms = start.elapsed().as_secs_f64() * 1e3;
         match stats {
             Some(s) => {

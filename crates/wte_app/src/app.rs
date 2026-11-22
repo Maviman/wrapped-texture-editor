@@ -288,8 +288,10 @@ impl eframe::App for WteApp {
         // Round 5 (R5-1): apply a finished Final stamp bake and start the next one.
         crate::stamp_bakes::pump(self);
         // Round 6 (R6-2): a selected wrapped stamp whose parameterization is not cached (after open / undo / redo)
-        // gets it before the panels and views draw its stats line and outline.
+        // gets it before the panels and views draw its stats line and outline. Round 8 (R8-2): in the asynchronous mode
+        // the tool asks for a param-only job instead (`stamp_bakes`), started here.
         self.tools.ensure_wrap_param(&mut self.state);
+        crate::stamp_bakes::after_tools(&mut self.state, &mut self.jobs, ctx);
         self.state.busy = self.jobs.busy();
         drop(jobs);
         if let Some(runner) = &mut self.selftest {

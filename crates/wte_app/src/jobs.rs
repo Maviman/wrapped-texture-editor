@@ -89,6 +89,11 @@ pub enum JobOutput {
     /// Round 5 (R5-1): the Full bake of one stamp or text (`stamp_bakes`); `generation` = `Session::scene_generation`
     /// when the bake started. An output of another session is dropped.
     StampBake { generation: u64, output: Box<StampBakeOutput> },
+    /// Round 8 (R8-2): the Preview bake of a wrapped stamp (`stamp_bakes`, a silent job: no status-bar title);
+    /// `generation` as for `StampBake`.
+    WrapPreview { generation: u64, output: Box<StampBakeOutput> },
+    /// Round 8 (R8-2): the parameterization of a wrapped stamp only (after an open or an undo; a silent job).
+    WrapParam { generation: u64, output: Box<StampBakeOutput> },
 }
 
 /// The sample of one font family: "Abc 123" in its own face as a coverage bitmap (`FontCatalog::sample`).
@@ -109,6 +114,8 @@ pub struct Finished {
 struct RunningJob {
     title: String,
     modal: bool,
+    /// Round 8: not shown in the status bar (`busy` skips it): the wrap Preview and param-only jobs.
+    silent: bool,
     progress: Arc<JobProgress>,
     rx: mpsc::Receiver<JobOutput>,
 }
@@ -146,6 +153,25 @@ impl Jobs {
         stage: &str,
         f: impl FnOnce(&JobProgress) -> JobOutput + Send + 'static,
     ) -> bool {
+        self.start(ctx, title, modal, false, stage, f)
+    }
+
+    /// Round 8 (R8-2): a non-modal job the status bar does not show (`busy` skips it) and whose start and end are
+    /// logged at debug level only (a drag starts one per landed Preview): the wrap Preview and param-only jobs. False
+    /// when no worker thread could be started (logged; `f` is dropped).
+    pub fn spawn_silent(&mut self, ctx: &egui::Context, title: &str, f: impl FnOnce(&JobProgress) -> JobOutput + Send + 'static) -> bool {
+        self.start(ctx, title, false, true, "", f)
+    }
+
+    fn start(
+        &mut self,
+        ctx: &egui::Context,
+        title: &str,
+        modal: bool,
+        silent: bool,
+        stage: &str,
+        f: impl FnOnce(&JobProgress) -> JobOutput + Send + 'static,
+    ) -> bool {
         let progress = Arc::new(JobProgress::new(ctx, stage));
         let (tx, rx) = mpsc::channel();
         let worker_progress = Arc::clone(&progress);
@@ -154,15 +180,23 @@ impl Jobs {
         let spawned = std::thread::Builder::new().name(thread_name).spawn(move || {
             let started = std::time::Instant::now();
             let out = f(&worker_progress);
-            log::info!("job \"{log_title}\" finished in {:.2} s", started.elapsed().as_secs_f64());
+            if silent {
+                log::debug!("job \"{log_title}\" finished in {:.2} s", started.elapsed().as_secs_f64());
+            } else {
+                log::info!("job \"{log_title}\" finished in {:.2} s", started.elapsed().as_secs_f64());
+            }
             // The receiver is gone only when the app is shutting down.
             let _ = tx.send(out);
             worker_progress.ctx.request_repaint();
         });
         match spawned {
             Ok(_) => {
-                log::info!("job \"{title}\" started (modal: {modal})");
-                self.running.push(RunningJob { title: title.to_owned(), modal, progress, rx });
+                if silent {
+                    log::debug!("job \"{title}\" started (silent)");
+                } else {
+                    log::info!("job \"{title}\" started (modal: {modal})");
+                }
+                self.running.push(RunningJob { title: title.to_owned(), modal, silent, progress, rx });
                 true
             }
             Err(e) => {
@@ -205,9 +239,9 @@ impl Jobs {
         out
     }
 
-    /// The first modal job, else the first job.
+    /// The first modal job, else the first job that is not silent (round 8: `spawn_silent`).
     pub fn busy(&self) -> Option<BusyInfo> {
-        let job = self.running.iter().find(|j| j.modal).or_else(|| self.running.first())?;
+        let job = self.running.iter().find(|j| j.modal).or_else(|| self.running.iter().find(|j| !j.silent))?;
         Some(BusyInfo {
             title: job.title.clone(),
             stage: job.progress.stage(),
@@ -227,6 +261,12 @@ impl Jobs {
     /// True while any job runs.
     pub fn any_running(&self) -> bool {
         !self.running.is_empty()
+    }
+
+    /// The number of running jobs.
+    #[cfg(test)]
+    pub fn running_count(&self) -> usize {
+        self.running.len()
     }
 
     /// True while a modal job runs.
@@ -329,6 +369,31 @@ mod tests {
         assert!(jobs.wait_for("Finishing stamp").is_none());
         stop_tx.send(()).unwrap();
         assert!(matches!(&wait_for(&mut jobs)[..], [JobOutput::Fonts(_)]));
+    }
+
+    #[test]
+    fn a_silent_job_runs_and_delivers_but_is_not_shown_in_the_status_bar() {
+        // Round 8 (R8-2): the wrap Preview jobs are silent; another job is still shown while one runs.
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        assert!(jobs.spawn_silent(&ctx, "Wrap preview", move |_| {
+            go_rx.recv().ok();
+            JobOutput::Extracted { result: Ok(Vec::new()), dir: PathBuf::from("w") }
+        }));
+        assert!(jobs.any_running() && !jobs.modal_running());
+        assert!(jobs.busy().is_none(), "a silent job has no status-bar title");
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        jobs.spawn(&ctx, "Fonts", false, move |_| {
+            stop_rx.recv().ok();
+            JobOutput::Fonts(FontCatalog::bundled())
+        });
+        assert_eq!(jobs.busy().unwrap().title, "Fonts");
+        go_tx.send(()).unwrap();
+        assert!(matches!(&wait_for(&mut jobs)[..], [JobOutput::Extracted { .. }]));
+        stop_tx.send(()).unwrap();
+        assert!(matches!(&wait_for(&mut jobs)[..], [JobOutput::Fonts(_)]));
+        assert!(!jobs.any_running());
     }
 
     #[test]

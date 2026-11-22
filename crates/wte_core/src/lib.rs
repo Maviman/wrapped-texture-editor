@@ -80,7 +80,7 @@ pub use pixel_ops::*;
 pub use progress::*;
 pub use stamp::*;
 pub use stamp_bake::*;
-pub use stamp_job::{FinalBake, StampBakeJob, StampBakeOutput};
+pub use stamp_job::{FinalBake, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview};
 pub use stroke::*;
 pub use texel_map::*;
 pub use tip_bake::*;

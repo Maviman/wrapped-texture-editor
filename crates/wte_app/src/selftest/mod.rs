@@ -510,9 +510,10 @@ impl Runner {
         }
     }
 
-    /// True while the runner waits for pending Final stamp bakes (`BakeWait` on and a bake pending).
+    /// True while the runner waits for pending Final stamp bakes (`BakeWait` on and a bake pending). Round 8: also for
+    /// the wrapped stamps' Preview and param-only jobs (`AppState::wrap_jobs_pending`).
     fn waits_for_bakes(&self, state: &AppState) -> bool {
-        self.bake_wait && state.final_bakes_pending
+        self.bake_wait && (state.final_bakes_pending || state.wrap_jobs_pending)
     }
 
     /// Requests a capture of the next painted frame (`shot`: the name of a mid-run capture, `None` = `OUT.png`).
@@ -604,6 +605,7 @@ fn is_idle(state: &AppState, tools_busy: bool) -> bool {
     state.busy.is_none()
         && !tools_busy
         && !state.final_bakes_pending
+        && !state.wrap_jobs_pending
         && !state.gpu_mips_stale
         && state.doc().is_none_or(|d| !d.has_pending_edit() && !d.has_pending_composite())
 }

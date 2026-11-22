@@ -244,6 +244,9 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
         }
         JobOutput::FontSamples(samples) => crate::text_ops::on_font_samples(app, samples),
         JobOutput::StampBake { generation, output } => crate::stamp_bakes::on_output(app, generation, output),
+        JobOutput::WrapPreview { generation, output } | JobOutput::WrapParam { generation, output } => {
+            crate::stamp_bakes::on_wrap_output(app, generation, output)
+        }
     }
 }
 
@@ -535,6 +538,9 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
     doc.set_defer_preview_bakes(true);
     // Round 5 (R5-1): Final bakes run on a worker (`stamp_bakes`) when the app is in that mode.
     doc.set_defer_final_bakes(app.state.async_final_bakes);
+    // Round 8 (R8-2): and so do the Preview bakes of wrapped stamps (latest wins, `stamp_bakes`); with
+    // `WTE_SYNC_FINAL_BAKES=1` they stay on the UI thread (the comparison mode).
+    doc.set_defer_wrap_previews(app.state.async_final_bakes);
     crate::stamp_bakes::reset_for_new_document(&mut app.state);
     app.state.preview_bakes = crate::state::PreviewBakeClock::default();
     let mut camera = OrbitCamera::default();

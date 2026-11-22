@@ -6077,6 +6077,34 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
             }
             changed_since(s, sc, "ws_h0")
         }),
+        // (2b) Round 8 (plan 4.1): the sphere is curved, so the wrap is relaxed; once, whole, no cut.
+        Step::Assert("(2b) relaxed on the sphere: seams 0, dup <= 1 %, scatter <= 2 %", |s, sc| {
+            let st = ws_stats(s, sc)?;
+            let q = ws_quality(s, sc)?;
+            log::info!(
+                "wrap_surface (2b): relaxed {}, seams {} {:?}, stretch {:.1} %, rejected {:.2} %, flipped {}, cg_iters {}; dup {:.3} % (plan <= 1 %), scatter {:.3} % (plan <= 2 %), bins {}",
+                st.relaxed,
+                st.seams,
+                st.seams_by_rule,
+                st.stretch * 100.0,
+                st.rejected * 100.0,
+                st.flipped,
+                st.cg_iters,
+                q.dup * 100.0,
+                q.scatter * 100.0,
+                q.bins
+            );
+            if !st.relaxed {
+                return Err("S on the sphere was not relaxed".to_owned());
+            }
+            if st.seams != 0 {
+                return Err(format!("{} seam edges inside the picture {:?}", st.seams, st.seams_by_rule));
+            }
+            if q.dup > 0.01 || q.scatter > 0.02 {
+                return Err(format!("dup {:.3} %, scatter {:.3} %", q.dup * 100.0, q.scatter * 100.0));
+            }
+            Ok(())
+        }),
         Step::Setup("(2) remember H1", |s, sc| remember_composite(s, sc, "ws_h1")),
         Step::WaitFrames(2),
         Step::Shot("wrapped"),
@@ -6244,9 +6272,14 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
         Step::WaitIdle,
         Step::Assert("(5) Undo: the 30 % state", |s, sc| ws_hash_is(s, sc, "ws_front")),
         // (6)
-        Step::Setup("(6) remember the anchor and the history", |s, sc| {
+        Step::Setup("(6) remember the anchor, the history and the wrap job counters", |s, sc| {
             let (_, p) = ws_s(s, sc)?;
             t7_store_vec3(sc, ["ws_ox", "ws_oy", "ws_oz"], p.origin);
+            let c = s.wrap_jobs.counters;
+            sc.values.insert("ws_pv_started", c.previews_started);
+            sc.values.insert("ws_pv_applied", c.previews_applied);
+            sc.values.insert("ws_pv_stale", c.previews_stale);
+            sc.values.insert("ws_ui_params", c.ui_params);
             remember_undo(s, sc)
         }),
         Step::Dyn("(6) drag the body of S by a quarter of the view", |s, _| {
@@ -6276,6 +6309,10 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
             }
             Ok(())
         }),
+        // (6b) Round 8 (plan 4.1, R8-2): in the asynchronous mode the drag's Previews were jobs (no parameterization on
+        // the UI thread), at least one landed, none is left; the composite after the Final is logged (equal with
+        // `WTE_SYNC_FINAL_BAKES=1`, where no job runs).
+        Step::Assert("(6b) the drag's wrapped Previews ran as jobs and landed", ws_drag_jobs),
         // (7)
         Step::Setup("(7) Text tool: \"WRAP AROUND\" in Wrap", |s, _| {
             s.tools.text.content = "WRAP AROUND".to_owned();
@@ -6446,9 +6483,32 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
         }),
         Step::WaitIdle,
         Step::Setup("(10) log the wrap (Jump small gaps on)", |s, sc| ws_log_path_stamp(s, sc, "on")),
+        // Round 8: the Color section collapsed, so the screenshot shows the stamp's whole Transform options with the
+        // stats lines ("Wrapped over N triangles", "Fitted to the curved surface ...", "Cut where ...").
+        Step::Dyn("(10) collapse the Color section", |s, _| {
+            let r = panel_rect(s, PanelHit::ColorSection)?;
+            Ok(vec![Step::ScreenPointer { path: vec![r.min + egui::vec2(24.0, 9.0)] }])
+        }),
+        Step::WaitIdle,
+        Step::WaitFrames(3),
+        Step::Assert("(10) ink <= 1.3, dup <= 3 %, scatter <= 5 % with Jump small gaps off and on", |_, sc| {
+            let mut bad = Vec::new();
+            for (jump, keys) in [("off", WS_Q_OFF), ("on", WS_Q_ON)] {
+                let [ink, dup, scatter] = keys.map(|k| remembered(sc, k).map(|v| f32::from_bits(v as u32)));
+                let (ink, dup, scatter) = (ink?, dup?, scatter?);
+                if ink.is_nan() || ink > 1.3 || dup.is_nan() || dup > 0.03 || scatter.is_nan() || scatter > 0.05 {
+                    bad.push(format!("Jump {jump}: ink {ink:.4}, dup {:.3} %, scatter {:.3} %", dup * 100.0, scatter * 100.0));
+                }
+            }
+            if bad.is_empty() { Ok(()) } else { Err(bad.join("; ")) }
+        }),
     ]);
     steps
 }
+
+/// Scratch keys of step 10's measures (ink / picture, dup, scatter as `f32` bits) with Jump small gaps off and on.
+const WS_Q_OFF: [&str; 3] = ["ws_ink_off", "ws_dup_off", "ws_scatter_off"];
+const WS_Q_ON: [&str; 3] = ["ws_ink_on", "ws_dup_on", "ws_scatter_on"];
 
 /// Registers the 512 x 256 `cells` picture as a blob and makes it the Stamp tool's image.
 fn ws_setup_cells(state: &mut AppState, _: &mut Scratch) -> Result<(), String> {
@@ -6497,6 +6557,51 @@ fn ws_ink_ratio(state: &AppState, sc: &Scratch) -> Result<f32, String> {
 fn ws_stats(state: &AppState, sc: &Scratch) -> Result<WrapStats, String> {
     let (id, _) = ws_s(state, sc)?;
     doc_of(state)?.stamp_wrap_stats(id).ok_or_else(|| "S has no wrap statistics (no parameterization cached)".to_owned())
+}
+
+/// S's wrap quality (round 8, `Document::stamp_wrap_quality`: from its baked texels and cached parameterization).
+fn ws_quality(state: &AppState, sc: &Scratch) -> Result<wte_core::WrapQuality, String> {
+    let (id, _) = ws_s(state, sc)?;
+    doc_of(state)?.stamp_wrap_quality(id).ok_or_else(|| "S has no wrap quality (no parameterization cached)".to_owned())
+}
+
+/// Step 6b: the wrap job counters since step 6's Setup. Asynchronous mode: the drag started Preview jobs, at least one
+/// landed, no parameterization was made on the UI thread by the app, the document defers wrapped Previews and nothing
+/// is left in flight or waiting. Synchronous mode (`WTE_SYNC_FINAL_BAKES=1`): no job was used. The composite is logged
+/// in both modes (the gate compares them).
+fn ws_drag_jobs(state: &AppState, sc: &Scratch) -> Result<(), String> {
+    let c = state.wrap_jobs.counters;
+    let since = |now: u64, key: &str| remembered(sc, key).map(|was| now.saturating_sub(was));
+    let started = since(c.previews_started, "ws_pv_started")?;
+    let applied = since(c.previews_applied, "ws_pv_applied")?;
+    let stale = since(c.previews_stale, "ws_pv_stale")?;
+    let ui = since(c.ui_params, "ws_ui_params")?;
+    let doc = doc_of(state)?;
+    log::info!(
+        "wrap_surface (6b): {} mode, Preview jobs started {started}, applied {applied}, dropped {stale}; parameterizations on the UI thread by the app {ui}; composite after the Final {:016x}",
+        if state.async_final_bakes { "asynchronous" } else { "synchronous" },
+        composite_hash(doc)
+    );
+    if !state.async_final_bakes {
+        return if doc.defers_wrap_previews() || started != 0 {
+            Err(format!("the synchronous mode used Preview jobs ({started}) or defers them"))
+        } else {
+            Ok(())
+        };
+    }
+    if !doc.defers_wrap_previews() {
+        return Err("the document does not defer wrapped Previews in the asynchronous mode".to_owned());
+    }
+    if started == 0 || applied == 0 {
+        return Err(format!("the drag started {started} Preview jobs, {applied} landed"));
+    }
+    if ui != 0 {
+        return Err(format!("{ui} parameterizations were made on the UI thread"));
+    }
+    if state.wrap_jobs.in_flight().is_some() || doc.has_stale_wrap_previews() {
+        return Err("a wrap job is still in flight or a Preview is waiting after the drag".to_owned());
+    }
+    Ok(())
 }
 
 /// The sphere sample's centre and radius (half of the smallest bounds extent).
@@ -6708,8 +6813,10 @@ fn ws_reopened(state: &AppState, sc: &Scratch) -> Result<(), String> {
     Ok(())
 }
 
-/// Step 10: logs the wrap of the stamp placed on the PATH model (its statistics; the bake times are the `wrap:` and
-/// `final bake:` lines of the core and `stamp_bakes`) and asserts ink on the model.
+/// Step 10: logs the wrap of the stamp placed on the PATH model (its statistics, round 8: its `WrapQuality`, the ink
+/// ratio, the parameterization's time and the Final's "applied after" time; the core's `wrap:` and the
+/// `final bake:` lines have the rest), asserts ink on the model and keeps ink / picture, dup and scatter for the
+/// step's last assert (`WS_Q_OFF` / `WS_Q_ON`; logged first for both, so that a failure with Jump off still logs Jump on).
 fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Result<(), String> {
     let (id, placement) = placed_stamp(state, false)?;
     sc.values.insert("ws_id", id.0);
@@ -6717,13 +6824,34 @@ fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Resu
     let doc = doc_of(state)?;
     let ink = doc.stamp_ink_area(id);
     let area = 4.0 * p.half_size.x.abs() * p.half_size.y.abs();
+    let ratio = ink / area.max(f32::MIN_POSITIVE);
+    let stats = doc.stamp_wrap_stats(id);
+    let quality = doc.stamp_wrap_quality(id);
+    let applied = state.final_bakes.last_applied().filter(|(s, _)| *s == id).map(|(_, ms)| ms);
     log::info!(
-        "wrap_surface (10) Jump small gaps {jump}: mode {:?}, options {:?}, ink area {ink:.6} ({:.4} of the picture), stats {:?}",
+        "wrap_surface (10) Jump small gaps {jump}: mode {:?}, options {:?}, ink area {ink:.6} ({ratio:.4} of the picture), stats {stats:?}",
         p.mode,
         p.wrap,
-        ink / area.max(f32::MIN_POSITIVE),
-        doc.stamp_wrap_stats(id)
     );
+    log::info!(
+        "wrap_surface (10) Jump small gaps {jump} quality: ink / picture {ratio:.4} (plan <= 1.3), dup {} (plan <= 3 %), scatter {} (plan <= 5 %), bins {}; param {} ms, relaxed {}, seams {} {:?}, stretch {}, rejected {}, jumps {}; Final applied after {} ms",
+        quality.map_or("-".to_owned(), |q| format!("{:.3} %", q.dup * 100.0)),
+        quality.map_or("-".to_owned(), |q| format!("{:.3} %", q.scatter * 100.0)),
+        quality.map_or(0, |q| q.bins),
+        stats.map_or("-".to_owned(), |s| format!("{:.1}", s.micros as f64 / 1e3)),
+        stats.is_some_and(|s| s.relaxed),
+        stats.map_or(0, |s| s.seams),
+        stats.map(|s| s.seams_by_rule),
+        stats.map_or("-".to_owned(), |s| format!("{:.1} %", s.stretch * 100.0)),
+        stats.map_or("-".to_owned(), |s| format!("{:.2} %", s.rejected * 100.0)),
+        stats.map_or(0, |s| s.jumps),
+        applied.map_or("-".to_owned(), |ms| format!("{ms:.0}")),
+    );
+    let keys = if jump == "on" { WS_Q_ON } else { WS_Q_OFF };
+    let (dup, scatter) = quality.map_or((f32::NAN, f32::NAN), |q| (q.dup, q.scatter));
+    for (key, v) in keys.into_iter().zip([ratio, dup, scatter]) {
+        sc.values.insert(key, u64::from(v.to_bits()));
+    }
     if p.mode != SurfaceMode::Wrap {
         return Err("the stamp is not wrapped".to_owned());
     }

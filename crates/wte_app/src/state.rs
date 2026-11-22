@@ -955,6 +955,11 @@ pub struct AppState {
     pub await_first_bake: Option<StampId>,
     /// The bake in flight and an output held while a stroke is open (`stamp_bakes`).
     pub final_bakes: crate::stamp_bakes::FinalBakes,
+    /// Round 8 (R8-2): the wrapped stamps' Preview and param-only jobs (`stamp_bakes`; on when `async_final_bakes`).
+    pub wrap_jobs: crate::stamp_bakes::WrapJobs,
+    /// Mirror for the self-test runner and the tests: a wrap job is in flight, an output held, a wrapped stamp waits
+    /// for its Preview job or a param-only job was asked for (`stamp_bakes`).
+    pub wrap_jobs_pending: bool,
 }
 
 /// When the deferred stamp Preview bakes (`Document::bake_stale_previews`) may run next: after a bake that took `t`,
@@ -1043,6 +1048,8 @@ impl AppState {
             final_bakes_pending: false,
             await_first_bake: None,
             final_bakes: crate::stamp_bakes::FinalBakes::default(),
+            wrap_jobs: crate::stamp_bakes::WrapJobs::default(),
+            wrap_jobs_pending: false,
         }
     }
 

@@ -24,7 +24,7 @@ use crate::pixel_ops::PremulMips;
 use crate::stamp::{BakeQuality, Projector};
 use crate::stamp_bake::{BAND_ROWS, MIN_SIZE, SAMPLE_ALPHA_MAX, SCRATCH_BUDGET, crop_scratch, scratch_groups, shade, tint_factors};
 use crate::texel_map::{Fragment, TexelMap, raster_tri};
-use crate::wrap_param::{WrapLayer, WrapParam};
+use crate::wrap_param::{OwnerGrid, WrapLayer, WrapParam};
 
 /// Overlap: the along range of a turn's layer, `[lo, hi)` on coordinate `axis`, and its period (0 for an open turn).
 #[derive(Copy, Clone)]
@@ -41,6 +41,9 @@ impl Clip {
     }
 }
 
+/// The jobs of one layer: its turn range, its owner grid, the jobs per set.
+type LayerJobs<'a> = (Option<Clip>, Option<&'a OwnerGrid>, Vec<Vec<WrapJob>>);
+
 /// One triangle of a wrap bake.
 struct WrapJob {
     tri: TriId,
@@ -48,6 +51,9 @@ struct WrapJob {
     clip: [f32; 4],
     lod: f32,
     corners: [Vec2; 3],
+    /// Round 8: the corners' depth `g` and the triangle's longest 3D edge (the owner test).
+    depth: [f32; 3],
+    edge: f32,
 }
 
 /// Everything a fragment of a wrap bake needs.
@@ -66,7 +72,7 @@ struct WrapCtx<'a> {
 impl WrapCtx<'_> {
     /// The picture pixel of one fragment when its alpha beats `stored` (max-alpha rule), else `None`.
     #[inline]
-    fn fragment(&self, job: &WrapJob, clip: Option<Clip>, f: &Fragment, stored: u8) -> Option<[u8; 4]> {
+    fn fragment(&self, job: &WrapJob, clip: Option<Clip>, owner: Option<&OwnerGrid>, f: &Fragment, stored: u8) -> Option<[u8; 4]> {
         let b = f.bary;
         let c = &job.corners;
         let mut l = c[0] * b[0] + c[1] * b[1] + c[2] * b[2];
@@ -82,6 +88,16 @@ impl WrapCtx<'_> {
         // Written so that NaN is rejected.
         if !(l.x.abs() <= self.limit_x && l.y.abs() <= self.limit_y) {
             return None;
+        }
+        // Round 8 (2.2-4): the owner test. The picture point goes to the surface place nearest the spine along the
+        // surface; a fragment deeper than the cell's owner by more than the tolerance is another place: dropped.
+        if let Some(grid) = owner
+            && let Some(k) = grid.index(l.x, l.y)
+        {
+            let d = &job.depth;
+            if !grid.keeps(k, d[0] * b[0] + d[1] * b[1] + d[2] * b[2], job.edge) {
+                return None;
+            }
         }
         // A fragment that cannot beat the stored alpha needs no sample (`shade` rounds monotonically).
         if stored > 0 && (((SAMPLE_ALPHA_MAX * self.tint[3]).min(1.0) * 255.0 + 0.5) as u8) <= stored {
@@ -174,7 +190,7 @@ fn footprint_once(c: &[Vec2; 3], uv_px: &[Vec2; 3], lx: f32, ly: f32, clip: Opti
 fn layer_jobs(mesh: &MeshData, maps: &[Arc<TexelMap>], layer: &WrapLayer, ctx: &WrapCtx<'_>, src_px_per_world: f32) -> Vec<Vec<WrapJob>> {
     let mut jobs: Vec<Vec<WrapJob>> = maps.iter().map(|_| Vec::new()).collect();
     let clip = Clip::of(layer);
-    for (&tri, corners) in layer.tris.iter().zip(&layer.corners) {
+    for (i, (&tri, corners)) in layer.tris.iter().zip(&layer.corners).enumerate() {
         let Some(set) = mesh.tri_set(tri) else { continue };
         let Some(map) = maps.get(set.index()) else { continue };
         if map.width == 0 || map.height == 0 {
@@ -207,6 +223,8 @@ fn layer_jobs(mesh: &MeshData, maps: &[Arc<TexelMap>], layer: &WrapLayer, ctx: &
             clip: clip_box,
             lod: (src_px_per_world * texel_world * stretch).max(1.0).log2(),
             corners: c,
+            depth: layer.depth.get(i).copied().unwrap_or([0.0; 3]),
+            edge: layer.edge.get(i).copied().unwrap_or(0.0),
         });
     }
     jobs
@@ -239,7 +257,8 @@ fn span(lo: f32, hi: f32, size: i64) -> (i64, i64) {
 
 /// Rasters the jobs of one set (of one layer) into the scratch `pixels` of `area`, in 64-row bands; each texel
 /// sees its fragments in job order (ascending triangle), so the result does not depend on the thread count.
-fn raster_set(mesh: &MeshData, map: &TexelMap, area: &Area, jobs: &[WrapJob], ctx: &WrapCtx<'_>, clip: Option<Clip>, pixels: &mut [u8]) {
+#[allow(clippy::too_many_arguments)]
+fn raster_set(mesh: &MeshData, map: &TexelMap, area: &Area, jobs: &[WrapJob], ctx: &WrapCtx<'_>, clip: Option<Clip>, owner: Option<&OwnerGrid>, pixels: &mut [u8]) {
     let (h, bw) = (map.height as i64, area.width());
     let bh = (area.y1 - area.y0) as usize;
     let band_count = bh.div_ceil(BAND_ROWS);
@@ -272,7 +291,7 @@ fn raster_set(mesh: &MeshData, map: &TexelMap, area: &Area, jobs: &[WrapJob], ct
                 if stored == u8::MAX {
                     return;
                 }
-                if let Some(pixel) = ctx.fragment(job, clip, &f, stored) {
+                if let Some(pixel) = ctx.fragment(job, clip, owner, &f, stored) {
                     pixels[i..i + 4].copy_from_slice(&pixel);
                 }
             });
@@ -315,14 +334,17 @@ pub fn bake_wrapped(
         tint: tint_factors(tint),
     };
     // Jobs per layer (bottom first) and set.
-    let layers: Vec<(Option<Clip>, Vec<Vec<WrapJob>>)> =
-        param.layers.iter().map(|layer| (Clip::of(layer), layer_jobs(mesh, maps, layer, &ctx, src_px_per_world))).collect();
+    let layers: Vec<LayerJobs<'_>> = param
+        .layers
+        .iter()
+        .map(|layer| (Clip::of(layer), layer.owner.as_ref(), layer_jobs(mesh, maps, layer, &ctx, src_px_per_world)))
+        .collect();
     // The scratch box per set: the union of the footprints of every layer.
     let mut areas: Vec<Area> = Vec::new();
     for (s, map) in maps.iter().enumerate() {
         let (w, h) = (map.width as i64, map.height as i64);
         let (mut x0, mut x1, mut y0, mut y1) = (w, 0, h, 0);
-        for job in layers.iter().flat_map(|l| &l.1[s]) {
+        for job in layers.iter().flat_map(|l| &l.2[s]) {
             let (a, b) = span(job.clip[0], job.clip[2], w);
             x0 = x0.min(a);
             x1 = x1.max(b);
@@ -343,16 +365,16 @@ pub fn bake_wrapped(
             let map = &*maps[area.set];
             let mut scratch = vec![0u8; area.bytes()];
             if !multi {
-                let (clip, jobs) = &layers[0];
-                raster_set(mesh, map, area, &jobs[area.set], &ctx, *clip, &mut scratch);
+                let (clip, owner, jobs) = &layers[0];
+                raster_set(mesh, map, area, &jobs[area.set], &ctx, *clip, *owner, &mut scratch);
             } else {
                 let mut layer_scratch = vec![0u8; area.bytes()];
                 let row = area.width() * 4;
-                for (clip, jobs) in &layers {
+                for (clip, owner, jobs) in &layers {
                     if jobs[area.set].is_empty() {
                         continue;
                     }
-                    raster_set(mesh, map, area, &jobs[area.set], &ctx, *clip, &mut layer_scratch);
+                    raster_set(mesh, map, area, &jobs[area.set], &ctx, *clip, *owner, &mut layer_scratch);
                     scratch.par_chunks_mut(row).zip(layer_scratch.par_chunks_mut(row)).for_each(|(dst, src)| {
                         blend_row(dst, src, 255, BlendMode::Normal);
                         src.fill(0);

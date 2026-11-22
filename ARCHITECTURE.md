@@ -110,6 +110,18 @@ longer than the way round winds on like tape, later turns on top). The project f
 wrapped stamps or set options still opens in round 5. Parameterizations are cached per stamp (`bakes.wrap_params`,
 5.14, reuse rule 6.5a); the deferred Final bakes of round 5 carry them (`StampBakeJob`). 2D (UV) stamps are unchanged.
 
+### 1.6b Round 8, package A (wrap: once, whole, smooth)
+
+The wrap's front is ordered and bounded by the geodesic distance from the picture's centre line (fast marching), not by
+the unfolded position; where the seed layout is not exact where the picture lies (curved, bumpy, closed surfaces) it is
+cut only by fixed seam rules (ends meet, halves meet, orientation / non-manifold, cone tips, handles) and relaxed (LSCM,
+then ARAP, hand-written deterministic conjugate gradients, the centre line pinned); flat, cylindrical, conical and
+folded surfaces keep round 6's exact seed (early-out). An owner test in the bake gives each picture point to the
+surface place nearest the centre line along the surface. Wrapped stamps' Preview bakes and parameterizations can run
+as jobs (`StampJobKind`, `next_wrap_preview_job`, `apply_wrap_preview`, `wrap_param_job`, `apply_wrap_param`) for
+package B. `Document::stamp_wrap_quality` measures how once and how whole a picture lies (dup / scatter). Details
+6.5a "Round 8". Not done in package A: the per-mesh welded graph and growth from the anchor (plan 2.5 items 1-2, step 6).
+
 ### 1.7 Round 7 (brush speed)
 
 Round 7 (`target\round7_design\ROUND7_PLAN.md`) makes 3D dabs on very heavy models cheaper and properly parallel,
@@ -178,8 +190,9 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a |
-| `wrap_bake.rs` | round 6 A | `bake_wrapped` (6.5a "Bake") |
-| `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan (test-only module) |
+| `wrap_bake.rs` | round 6 A | `bake_wrapped` (6.5a "Bake"; round 8: the owner test) |
+| `wrap_relax.rs` | round 8 A | child module `wrap_param::relax`: seams S1-S5, wedges, LSCM / ARAP with the matrix-free CG, the owner grid (6.5a "Round 8") |
+| `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan and (round 8) WA4 / WA4b, WA20-WA27, WA29 and `r8_quality_survey` (test-only module) |
 | `doc_stamps.rs` | C4; round 6 A | stamp/text commands on `Document`, source mip cache, `stamp_at`; round 6: the wrap dispatch of `bake_and_apply`, `ensure_wrap_param`, `stamp_wrap_*`, `stamp_ink_area` |
 | `text/mod.rs` | S | `TextSpec` (with `fx: TextFx`), `FontRef`, `TextAlign`, `Outline`, `TextLayout`, `PlacedGlyph`; round 4: `TextFx`, `Gap`, `Warp`, `WarpStyle`, `TextPath`, `PathShape`, `TextFrame`, `RasterQuality`, `TextRaster`, the limits (`GAP_MIN_EM` ... `MAX_STYLED_PIXELS`), `TextSpec::new`/`sanitize_fx`/`floats`/`floats_mut`/`differs_only_in_spacing` (complete + tests) |
 | `text/font_catalog.rs` | C4; round 4 T3 | `FontCatalog` (fontdb; the Windows font folders, file sizes read once, faces shared per file), `FontCache` (fontdue), bundled fonts, `FaceTraits`, `face_traits`, `FontCatalog::sample` (picker samples drawn with the styled painter's outline and coverage code) |
@@ -1288,7 +1301,19 @@ pub struct WrapParam { /* layers (one per turn, bottom first) of (TriId, three s
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct WrapStats { pub verts: u32, pub tris: u32, pub cut_tris: u32, pub covered: f32 /* share of the picture with
     surface under it */, pub met_itself: bool, pub reached_edge: bool, pub limited: bool, pub jumps: u32,
-    pub turns: u32, pub micros: u64 }
+    pub turns: u32, pub micros: u64,
+    // Round 8: relaxed (false: the exact seed was kept), seam edges inside the picture (all rules and per rule
+    // S1..S5), relaxed triangles flipped inside the picture, the 95th percentile of |area ratio - 1| inside the picture,
+    // the share of the laid picture area the owner test drops (cell-centre estimate), CG iterations.
+    pub relaxed: bool, pub seams: u32, pub seams_by_rule: [u32; 5], pub flipped: u32, pub stretch: f32,
+    pub rejected: f32, pub cg_iters: u32 }
+/// Round 8 (`Document::stamp_wrap_quality`): ink area, the share of picture bins found in two places (`dup`, > 6 bins
+/// apart), the share of neighbouring bin pairs lying apart (`scatter`), the inked bins.
+pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub bins: u32 }
+// Round 8 constants (pub): WRAP_STOP_SLACK 1.7 (plan 1.3, see 6.5a), ISO_TOL 2e-4, CONE_CUT_DEG 45, SEAM_NEAR 3,
+// OWNER_MAX_CELLS 1024, OWNER_TOL 2, RELAX_ARAP_ITERS 6, RELAX_CG_BUDGET 2500, PAR_MIN_UNKNOWNS 16384, PAR_CHUNK 8192;
+// check:A: ENDS_MEET 2, HOLE_FILL 8 (S1 on an open spine, S5's small holes; 6.5a), COT_MAX 1e3 (private).
+// WrapParam::src_size(), texel_world(): the inputs it was made for.
 /// None when the projector is unusable (non-finite, zero size, empty source) or no triangle lies within reach.
 pub fn wrap_param(mesh: &MeshData, bvh: &Bvh, maps: &[Arc<TexelMap>], src_size: [u32; 2], p: &Projector) -> Option<WrapParam>;
 impl WrapParam {
@@ -1564,6 +1589,9 @@ pub struct Document {
 // (6.5a "Reuse"): derived data, not in snapshots, not saved, not part of the structure state; at most 16 entries, least
 // recently used dropped first; an entry is used only when it `serves` the stamp's placement; `remove_stamp` drops its
 // entry and every insertion drops entries of stamps that no longer exist. (In `bakes` so that `Document` keeps its size.)
+// Round 8: `BakeSets` also holds `defer_wrap_previews: bool` (`set_defer_wrap_previews`) and `edit_serial: u64` (bumped
+// when the first stamp joins `preview_baked`, i.e. per pending edit; a wrap Preview job's output applies only in the
+// edit it was made in).
 // compile-time check in document.rs: fn _assert_send<T: Send>() {}  _assert_send::<Document>();
 
 impl Document {                                     // implemented by the scaffold
@@ -3205,6 +3233,105 @@ bit-identical. A scale that stays in the reach bucket (0-25 % to spare), a tint,
 and the bucket, and every Final after a Preview reuse it; a move or a turn recomputes.
 
 
+**Round 8 (`wrap_relax.rs`, a child module of `wrap_param.rs`; plan R8 2-3): the picture lies once, whole and smooth.**
+Steps 4-7 above are changed as follows (the rest stands).
+
+4'. **Geodesic front.** The heap key is `g`, the geodesic distance from the spine: strip seeds get their exact distance
+   in the strip's development (`hypot(across, distance outside the spine's along range)`); a vertex reached through a
+   triangle with two final corners gets the fast-marching triangle update (a plane wave with unit gradient through the
+   triangle, taken only when it is causal: the wave enters through the edge of the two final corners), else the edge
+   update `g_v + |vw|`; the tentative key is the smallest. A vertex is laid only while `g <= WRAP_STOP_SLACK (1.7; plan 1.3) x the
+   bucketed across reach`: the laid set is the geodesic tube round the spine, never surface whose *unfolded* position
+   happens to land in the picture (round 6's ink of 4.6-9.1 x on steep bumps). Positions, consensus, `one_front`,
+   never-fold and fallback rules are unchanged. Every laid vertex also stores `foot` (the arc length of its spine
+   point; seeds: their along coordinate clamped to the spine's range) and `side` (+1 / -1 of the spine, 0 within
+   `1e-9 diag` of it), inherited from the producing vertex (a producer on the spine gives the vertex's own side). Jump
+   small gaps: a front jump starts only from a vertex whose layout position lies inside the reach rectangle and lands
+   only inside it (the footprint rule; the reach rectangle = the picture's half extents with border and texel margin,
+   bucketed, so reuse stays exact); its landing corners get `g_v + |q - p_v| + |x - q|` and `v`'s labels. The spine's
+   own jumps are bounded by its reach.
+5'. **Seed result and early-out.** Halo and tears as steps 5-6 (the seed). When every seed triangle whose 2D box meets
+   the reach rectangle has all three edge ratios (2D / 3D) within `1 +- ISO_TOL` (`2e-4`), or is a tear whose final
+   corners differ by S1 / S2 (a closure), the seed is stored as it is (`relaxed = false`): round 6's exact result on
+   flat, cylinder, cone, folds, box edges, Jump across coplanar parts and Overlap turns, no solver cost. Halo triangles
+   with only one laid corner do not decide (check:A: they are placed by that corner's frame rule on either path, a
+   projection that is "torn" wherever the surface turns, and the relaxation cannot change them; WA16's block sides).
+   The several-turn stacks of Overlap always keep the seed (builder's deviation 4).
+6'. **Seams** (else), over the laid triangles (all three corners final, not degenerate), one rule each:
+   S1 ends meet: the turn is closed (period P) and the feet of an edge's ends differ by more than P / 2; on an open
+   spine (check:A: the traces pass beside each other without sharing a triangle, e.g. round a tapering stem) the feet
+   differ by more than `ENDS_MEET` (2) x `(g_a + |ab| + g_b)` and by more than `SEAM_NEAR` x the longer of their longest
+   incident edges, and the seed is torn across the edge;
+   S2 halves meet: the ends lie on opposite sides and both farther than `SEAM_NEAR` (3) x their longest incident edge
+   from the spine (`g`); S3: a non-manifold edge (three or more laid triangles) or an orientation flip across it (the
+   two triangles' `orient` disagree with the edge's traversal; Moebius, Klein; check:A: not when either is a sliver,
+   whose orientation rounding can turn over); S4 cone cut: from every interior vertex
+   (its whole fan laid, manifold) with |angle deficit| > `CONE_CUT_DEG` (45 degrees) one path along the steepest ascent
+   of `g` over uncut laid edges (ties: lower position) until the laid set's boundary or a seam; S5 topology: a dual
+   spanning tree over the laid triangles across uncut manifold edges, grown in `g` order (a triangle's `g` = its
+   largest corner's) from the anchor triangle; the other laid edges form a graph with the laid set's boundary and the
+   S1-S4 seams (fixed); vertices of degree 1 are pruned repeatedly (never across a fixed edge, never at a cone); the
+   unfixed edges left (the generators of a handle) are cut. check:A: for this rule zero-area triangles whose corners
+   are laid fill their slit, and every boundary loop of the laid set except the longest (its rim) whose length is at
+   most `HOLE_FILL` (8) x the longest edge at its vertices is filled by a virtual face of the dual tree (a crack, a
+   T-junction whose zero-area filler the import dropped, an unlaid bump top): no cut leads to a small hole.
+   **Wedges**: the corners round a vertex joined over uncut manifold edges (union-find); one unknown 2D position per
+   wedge, so the layout is continuous everywhere except on seams by construction. **Components**: laid triangles joined
+   over the same edges.
+7'. **Relaxation** per component: strip components first, then jumped parts in jump order, then the rest by lowest `g`.
+   Pins: each strip seed in the wedge of its strip triangle (the centre line stays exact); a jumped part's landing
+   triangle, re-placed from its source vertex's relaxed position and the turn between the seed and the relaxed layout
+   of the source's first laid triangle; a component with fewer than three pinned wedges also pins the wedges of its
+   lowest-`g` triangle at their seed positions. Energies over the triangles with 3D area >= `1e-12 diag^2` and no angle
+   whose |cotangent| exceeds `COT_MAX` (1e3; the plan's cotangent clamp: slivers leave the energies; the others'
+   wedges keep their seed when they have no other triangle), each triangle's development oriented by `orient`, `J =
+   sum_k x_k g_k^T` (`g_k` the gradient basis of the development). First **LSCM** (conformal energy `A/2 ((J00 - J11)^2 +
+   (J01 + J10)^2)`), warm-started from the seed, then up to `RELAX_ARAP_ITERS` (6) **ARAP** iterations (local step: the
+   closest rotation per triangle, 2x2 polar decomposition, det > 0; global step: `A/2 |J - R|^2`; stop when the energy
+   drops by less than 0.5 %). Both by a matrix-free preconditioned (Jacobi) conjugate gradient on the free unknowns:
+   LSCM to a residual of 1e-6 of the right-hand side or 600 iterations, ARAP 1e-5 / 200, `RELAX_CG_BUDGET` (2,500)
+   iterations per component in all. Deterministic: per-triangle terms (in parallel in fixed chunks of `PAR_CHUNK` from
+   `PAR_MIN_UNKNOWNS` unknowns up) are gathered per unknown in incidence order, dot products are added chunk by chunk in
+   chunk order: the same bits with 1 or N threads. Triangles that are not laid (halo, degenerate) get their final corners
+   from their vertices' relaxed positions (the wedge of the vertex's first laid triangle) and the missing ones by the
+   hinge (two final corners) or the relaxed frame of the final corner nearest the spine (one). `flipped` counts laid
+   triangles inside the picture whose relaxed orientation is reversed; `seams` / `seams_by_rule` the seam edges inside
+   the picture; `cut_tris` (relaxed) the triangles with a seam edge inside the picture.
+8'. **Store.** Per layer also each triangle's corner depths `g` (f32; a corner the front did not lay: its tentative
+   `g`, else the nearest final corner's plus the 3D distance) and longest 3D edge, and (a layer not clipped to an
+   Overlap turn's range) the **owner grid** over the reach rectangle: at most `OWNER_MAX_CELLS` (1,024) cells on the
+   long side; per cell the smallest `g` of the stored triangles overlapping it (separating axes; the linear `g` at the
+   cell's corners clamped to the triangle's range) and that owner's longest edge. `rejected` = the share of the cell
+   centres inside the picture covered by a stored triangle where the owner test drops it. `stretch` = the 95th
+   percentile of |2D area / 3D area - 1| of the stored triangles meeting the picture (slivers and triangles below
+   `1e-12 diag^2` left out).
+
+**Owner test** (`bake_wrapped`). A fragment at picture point `l` with interpolated depth `g_f` is kept only when
+`g_f <= g_min(cell) + OWNER_TOL (2) x (cell diagonal + its triangle's longest edge + the owner's longest edge)`: each
+picture point goes to the surface place nearest the spine along the surface, never to a second place farther than the
+tolerance (the sticker rule); on an injective layout it rejects nothing (WA25). `surface_of` (the outline, text-path
+handles) picks, of the triangles containing the point, the one of lowest `g` there.
+
+**Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
+
+**Round 8 jobs** (`stamp_job.rs`, `doc_stamps.rs`; plan 3.4). `StampJobKind { Full, Preview, ParamOnly }` on
+`StampBakeJob` / `StampBakeOutput` (`kind()`), plus the pending-edit serial. `Preview`: the parameterization (the cached
+one when it serves) and `bake_wrapped(.., Preview)` with the picture the synchronous Preview uses; `ParamOnly`: the
+parameterization only (logged `(fresh, param only)`). `Document::set_defer_wrap_previews(on)` (default off): a Preview
+edit of a wrapped stamp then only marks it waiting (`has_stale_wrap_previews`; `has_stale_previews` /
+`bake_stale_previews` leave it alone; projected and UV stamps unchanged); `next_wrap_preview_job()` takes the lowest
+waiting wrapped stamp; `apply_wrap_preview(out) -> WrapPreview { Applied { due_again }, Stale }`: applied when the stamp
+exists, is in the same pending edit (`preview_baked`, serial) and the mesh and maps are the job's, also when it changed
+since (then it waits again, `due_again`); its parameterization is cached when it serves the current placement; Esc,
+undo, redo, a Final, another document, a removed stamp or a stamp no longer wrapped (check:B): `Stale`; a stroke:
+`Stale` and the stamp waits again. A `Stale` Preview output of the same mesh and maps still leaves its parameterization in
+the cache when it serves the stamp's current placement (no pixel change; check:B, package B's request 1): the Final that
+waited for that job reuses it (plan 2.5-3). `wrap_param::param_counter::get()` (check:B, request 2): parameterizations
+started on the calling thread (one thread-local add per `wrap_param`; the app tests read it).
+`wrap_param_job(id)` (only when the cache does not serve the placement) and `apply_wrap_param(out) -> bool` (caches it
+when it serves; no pixel changes). Turning the mode off bakes waiting stamps here. The synchronous mode and the job
+give the same Preview bytes (WA29).
+
 ### 6.6 Compositing and blend modes [C2]
 
 Per-pixel math (W3C compositing, straight alpha, values 0..1, `as = alpha_src * layer_opacity`):
@@ -3857,6 +3984,10 @@ pub struct StampSettings { pub source: Option<BlobId>, pub source_name: String,
                            // session only, new sessions start in Project (ROUND6_PLAN 11 Q1); `WteApp::new` sets Wrap
                            // when WTE_STAMP_MODE=wrap (state::stamp_mode_from_env; logged "new 3D stamps: ...")
                            pub mode: wte_core::SurfaceMode /* Project */, pub wrap: wte_core::WrapOptions /* off, Ends meet */ }
+// Round 8 (R8-2) env rule: `AppState::async_final_bakes` (WTE_SYNC_FINAL_BAKES unset or not "1") also switches the
+// wrapped stamps' Preview bakes to jobs (`install_document`: `doc.set_defer_wrap_previews(async_final_bakes)`);
+// WTE_SYNC_FINAL_BAKES=1 keeps Finals and wrapped Previews on the UI thread (the gate's comparison mode). New AppState
+// fields: `wrap_jobs: stamp_bakes::WrapJobs`, `wrap_jobs_pending: bool` (8.9).
 pub struct TextSettings { pub content: String /* "Text" */,
                           pub family: String /* DEFAULT_FONT_FAMILY */, pub style: String /* DEFAULT_FONT_STYLE */,
                           pub color: [u8; 4], pub align: TextAlign, pub line_spacing: f32 /* 1.0 */,
@@ -4689,7 +4820,12 @@ by `WteApp::logic` after `stamp_bakes::pump`, before the panels and views draw):
 holds no parameterization of its placement (after open / undo / redo), whose bake is not pending and with no pending
 edit open (check:B: a drag's throttled Preview bakes bring it; never one per drag frame on the side) gets
 `doc.ensure_wrap_param(id)` on the UI thread, logged "wrap: selected stamp N got its parameterization in X ms ..."; a
-placement without surface is not retried every frame. *Text on a Curve* (`text_path.rs`): for a wrapped text the curve
+placement without surface is not retried every frame. Round 8 (R8-2): while the document defers wrapped Previews
+(`doc.defers_wrap_previews()`, the asynchronous mode) it makes nothing on the UI thread: it asks for a param-only job
+(`state.wrap_jobs.request_param(id)`, started by `stamp_bakes::after_tools` in the same logic pass); the stats line
+shows "Wrapping..." and the outline appears when the job lands; a placement for which that job found no surface
+(`wrap_jobs.param_failed`) is not asked for again. `ui_params` counts the synchronous builds. The warm-up job of plan
+4.1 (`wrap_mesh_prep`) is not built: the core has no welded-graph cache yet (package A step 6). *Text on a Curve* (`text_path.rs`): for a wrapped text the curve
 points and the drawn curve lie on the surface (`path_points_on`: the flat frame's point taken to stamp-local
 coordinates, then `stamp_wrap_surface`; the flat point where it returns `None`); dragging a point raycasts the model
 and converts with `stamp_wrap_local(id, hit.tri, hit.bary)` (`screen_to_em_on`; the projector plane where the ray
@@ -4943,7 +5079,10 @@ carries a catalog face).
     N triangles" from `doc.stamp_wrap_stats(id)` ("Wrapping..." while it is `None`) plus warning lines when `covered <
     0.98` ("P % of the picture runs off the surface: an edge, a hole or the end of the part"), when `met_itself` and not
     Overlap ("The ends meet at the back"), `turns > 1` ("Wound N times"), `jumps > 0` ("Continued onto N separate
-    parts"), `limited` ("Too large for this model: the wrap stops at 1 million vertices / 8 turns"); and the rows Depth
+    parts"), `limited` ("Too large for this model: the wrap stops at 1 million vertices / 8 turns"). Round 8 (plan 4.1):
+    between "Wrapped over N triangles" and the warnings two weak lines (`tool_options::wrap_stats_texts`): "Fitted to the
+    curved surface: stretched up to P %" when `relaxed` and `stretch >= 0.05` (P = round(stretch x 100)), and "Cut where
+    it cannot lie flat (a corner, a handle, or where its edges meet)" when `seams > 0`; and the rows Depth
     front / back, Fit depth to surface, Angle limits, Backface cull and Occlusion are hidden (kept in the placement for
     switching back; Flip X / Y stay). The Layers badge's hover text of a wrapped 3D stamp is "Wrapped on the surface of
     the model: ..." (`layers::stamp_is_wrapped`, `layers::kind_tip`).
@@ -5205,6 +5344,9 @@ pub enum JobOutput {
     FontSamples(Vec<FontSample { family: String, image: Option<(u32, u32, Vec<u8>)> }>),                   // text_ops::on_font_samples
     // round 5 (R5-1)
     StampBake { generation: u64 /* Session::scene_generation at the start */, output: Box<StampBakeOutput> },  // stamp_bakes::on_output
+    // round 8 (R8-2): silent jobs of stamp_bakes::WrapJobs, both handled by stamp_bakes::on_wrap_output
+    WrapPreview { generation: u64, output: Box<StampBakeOutput> },  // a wrapped stamp's Preview bake
+    WrapParam { generation: u64, output: Box<StampBakeOutput> },    // a wrapped stamp's parameterization only
 }
 /// A finished job; `cancel_requested` = the user pressed the progress dialog's Cancel while it ran.
 pub struct Finished { pub output: JobOutput, pub cancel_requested: bool }
@@ -5217,10 +5359,14 @@ impl Jobs {
     /// worker thread could be started.
     pub fn spawn_staged(&mut self, ctx: &egui::Context, title: &str, modal: bool, stage: &str,
                         f: impl FnOnce(&JobProgress) -> JobOutput + Send + 'static) -> bool;
+    /// Round 8: a non-modal job the status bar does not show (`busy` skips it; start / end logged at debug level): the
+    /// wrap Preview and param-only jobs. False when no worker thread could be started.
+    pub fn spawn_silent(&mut self, ctx: &egui::Context, title: &str,
+                        f: impl FnOnce(&JobProgress) -> JobOutput + Send + 'static) -> bool;
     /// Round 5: removes the running job with that title and blocks on its receiver. Used only by `stamp_bakes::settle`.
     pub fn wait_for(&mut self, title: &str) -> Option<JobOutput>;
     pub fn poll(&mut self) -> Vec<Finished>;
-    pub fn busy(&self) -> Option<BusyInfo>;           // the first modal job, else the first job
+    pub fn busy(&self) -> Option<BusyInfo>;           // the first modal job, else the first job that is not silent
     pub fn cancel_modal(&self);
     pub fn any_running(&self) -> bool;
     pub fn modal_running(&self) -> bool;
@@ -5254,6 +5400,39 @@ pub(crate) fn after_dispatch(state: &mut AppState, ctx: &egui::Context);
 // AppState (round 5): async_final_bakes (false in AppState::new and the app tests; WteApp::new: true unless
 // WTE_SYNC_FINAL_BAKES=1), final_bakes_pending, await_first_bake: Option<StampId>, final_bakes: FinalBakes.
 // install_document: doc.set_defer_final_bakes(state.async_final_bakes); a held output and await_first_bake are dropped.
+//
+// Round 8 (R8-2, ROUND8_PLAN 4.1): wrapped Previews as latest-wins jobs (stamp_bakes.rs; ARCHITECTURE 5.20, core 3.4).
+// install_document also calls doc.set_defer_wrap_previews(state.async_final_bakes): with WTE_SYNC_FINAL_BAKES=1 the
+// wrapped Previews stay on the UI thread (the comparison mode); projected / UV Previews are unchanged in both modes.
+#[derive(Default)] pub struct WrapJobs {
+    in_flight: Option<WrapFlight>,                   // one wrap job at a time: { id, kind, generation, started, placement }
+    held: Option<(u64, Box<StampBakeOutput>)>,       // a Preview output that arrived while a stroke was open
+    want_param: Option<StampId>,                     // the Transform tool's request (async mode), taken by pump
+    pub(crate) param_failed: Option<(StampId, Placement)>, // a param-only job found no surface: not asked again
+    pub counters: WrapJobCounters,                   // previews started / applied / due again / stale, params started /
+}                                                    // applied, ui_params (TransformTool::ensure_wrap_param, sync mode)
+// pump (before the Final part): a held Preview output is applied once no stroke is open; when no wrap job is in flight
+// and no stroke is open, doc.next_wrap_preview_job() (the lowest waiting wrapped stamp, made from the stamp as it is now:
+// latest wins) else doc.wrap_param_job(want_param) is spawned with Jobs::spawn_silent ("Wrap preview" / "Wrap fit": not
+// in the status bar; run_isolated); no worker thread -> doc.set_defer_wrap_previews(false) (round-6 behaviour).
+// A Final does not start while the wrap job in flight belongs to a stamp that waits for its Final (same generation):
+// it starts after that job lands (plan 4.1; the Preview output is stale after the flush, and its parameterization is
+// cached when it serves the released placement, so the Final reuses it: core 5.20, check:B). While the Final waits,
+// after_dispatch asks for no frame (the landing job asks for one).
+pub fn on_wrap_output(app: &mut WteApp, generation: u64, output: Box<StampBakeOutput>); // JobOutput::WrapPreview / WrapParam
+// Another generation -> dropped. Preview: held while a stroke is open, else doc.apply_wrap_preview: Applied { due_again }
+// (the last finished picture; due_again: the stamp moved since, pump starts its next job in the same logic pass) or
+// Stale (Esc, undo, redo, a Final, a removed stamp). ParamOnly: doc.apply_wrap_param (stats and outline, no pixel);
+// nothing for an unchanged placement -> param_failed.
+pub(crate) fn after_tools(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context); // App::logic after ensure_wrap_param:
+// starts the param-only job just asked for when no wrap job is in flight; updates wrap_jobs_pending.
+// after_dispatch also asks for the next frame when a wrapped stamp waits for its Preview job and none is in flight.
+// settle never waits for wrap jobs. reset_for_new_document also drops held / want_param / param_failed.
+// AppState (round 8): wrap_jobs: WrapJobs, wrap_jobs_pending (in flight, held, a wrapped stamp waiting, a param asked).
+// Log lines: "wrap preview: stamp N job started", "wrap preview: stamp N applied after T ms (worker W ms, due again: b)",
+// "wrap preview: stamp N result dropped (stale|other document) ...", "wrap fit: stamp N param-only job started",
+// "wrap fit: stamp N parameterization landed after T ms (worker W ms)", "wrap fit: stamp N has no surface to wrap onto".
+// FinalBakes::last_applied() (round 8): the stamp and "applied after" ms of the last applied Final (scenario step 10).
 // io_flows.rs
 pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool);
 /// doc.is_modified() || doc.has_pending_edit(): what the unsaved prompts (close, open, new, sample, drop) and the title's
@@ -5595,6 +5774,8 @@ pub fn timeouts(name: &str) -> Option<(Duration, Duration)>;
   treats waiting bakes as part of the step: an input step also waits while `state.final_bakes_pending`, and a `Do` step
   is followed by the same wait (it ends in the first frame without a pending bake, so it costs no frame when nothing is
   pending). `Step::BakeWait(false)` switches both waits off (and `true` on again) for `final_bake_async`.
+  Round 8: both waits and `WaitIdle` also cover the wrapped stamps' Preview and param-only jobs
+  (`state.wrap_jobs_pending`; those jobs are silent, so `state.busy` does not show them).
 - **Input steps** (round 4, S2): An input step (`Pointer`, `Click`, `ScreenPointer`, `Scroll`, `Hover`, `Key`)
 is complete when its injected frames are processed **and the tools are not busy** (`ToolController::is_busy`), so a
 pointer step ends only when its stroke is complete, however long its paint trails (FEATURE_BRUSH 7.3).
@@ -5656,7 +5837,7 @@ the import scenarios write their files with `samples::to_obj` and `encode_png` i
 | `text_preview_path` (PATH) | Gate 3 (measurement, FEATURE_TEXT 8.4): opens the model like `workflow_path`; places "WTE 2026" in 3D as `text_warp` does; Arc 50 % (`Final`, timed); twenty `UpdateStampSource(.., Preview)` of the bend, one per frame, between the log steps `gate: twenty preview edits start` / `end`; one `Final` (timed) | the twenty Previews are one pending edit and add no history entry; the Final adds one entry with the last bend |
 | `final_bake_async` [PATH] | Round 5 (R5-1): Sphere (or the PATH model). With the bake wait on: an image stamp placed and dragged (composite H1), Undo. Then with `BakeWait(false)`, each next step starting while the bake runs: (a) the same drag, `Undo` in the frame after the release, `Redo`; (b) the drag, at once a second drag, `Undo`; (d) a `Final` scale and `MergeDown` of the stamp's home layer in the next frame, against the same two steps with the wait on; (c) a text stamp gets an Arc warp (`Final`) and `SaveAs(<out_stem>_fba.wtep)` in the next frame, then `OpenProject` of it; (f) a `Final` scale of the text and `RunExport` (flat PNG and per-layer PNGs) in the next frame, against the same two steps with the wait on (into `<out_stem>_fba_export_ref`); (e) a `Final` scale of the text and `DeleteStamp` in the next frame. A second image stamp, each pass against the same steps with the wait on: (g) a `Final` scale, then `SetViewMode(Preview)`, `SetTool(Brush)`, `FrameModel`, the earlier view mode and Transform at once; (i) a paint layer made active, Brush, a `Final` scale and a stroke across the model in the next frame; (k) a `Final` scale and `ShowExport` in the next frame, `CloseDialog`; (h) a `Final` scale and `RasterizeLayer` of the home layer in the next frame. A third image stamp: (j) a `Final` scale and `ConfirmPending(OpenSample(Sphere))` in the next frame; then an image stamp for the screenshot | (a), (b): composite == H1; (d): composite and paint layers equal the reference; (c): saved, not modified, no unbaked stamp; the reopened composite equals the in-memory one; (f): the files of `<out_stem>_fba_export` equal the reference byte for byte; (e): no text stamp and no text layer, nothing pending; (g): composite equals the reference; (i): two history entries (Final, stroke) and the composite equals the reference; (k): the export dialog is open in the next frame and no stamp waits; (h): no image stamp left, composite and paint layers equal the reference; (j): the new document has no stamp and nothing waits. In the asynchronous mode the log shows at least one `final bake: stamp N result dropped (stale)` (a), `result dropped (other document)` (j) and `final bake: settle waited T ms` (c, d, f, k, h); with `WTE_SYNC_FINAL_BAKES=1` the same hashes |
 | `brush_hover` | Gate 3 (measurement, FEATURE_BRUSH P11): Sphere, 3D view, Brush tool, Brush tab, Circular Size 64; 60 idle frames, 60 `Hover` frames across the model with Circular, then with Sphere + Cube, each stretch between `gate: ...` steps (read with `WTE_FRAME_LOG`) | the Brush tab is shown; the Cube cursor was drawn (`tool_probe.cursor_footprint` > 0) |
-| `wrap_surface` [PATH] | Round 6 (R6-2, ROUND6_PLAN 5.2): built-in Sphere, 3D view, the generated 512 x 256 `cells` picture (`samples::cells_picture`) as the stamp image. (1) Stamp tool 30 %, Project, click left of the centre: S, composite H0. (2) `UpdateStampPlacement(S, Projector { mode: Wrap, .. }, Final)`. (3) back to Project; `Undo`, `Undo`, `Redo` x2. (4) Wrap again; S stretched along its spine (width only) to 1.2 x the sphere's circumference: a band round the sphere (H2). (4b) Overlap (Final); `Undo`; Overlap, Project, Wrap; Ends meet. (4c) Jump small gaps (Final); `Undo`. (4d) Project (Final), 3 frames; `Undo`. (5) back to 30 % (Final); S moved onto the UV seam (the meridian of texel columns 0 and width-1 at the middle row) with its long axis across it (Final); `Undo`. (6) a body drag of a quarter of the view width. (7) Text tool in Wrap, "WRAP AROUND" at the tool's default size (6 %), placed below the centre, Arc warp bend 30 % (`UpdateStampSource`, Final). (8) `BakeWait(false)`: S to Project (Final) and `Undo` in the next frame. (9) S to Overlap + Jump small gaps (Final), S selected (`Shot("before_save")`), `SaveAs(<out_stem>_wrap.wtep)`, `OpenProject` of it. Without a PATH the screenshot shows S selected in the reopened project (the text selected first, then S; the Color section collapsed so the whole Transform options show). Named shots: `_wrapped` (after 2), `_band` (4), `_overlap` (4b), `_text` (7), `_before_save` (9). (10) with a PATH (accepted and left for the sphere at the start, opened again at the end): 3D view, the picture at 40 % in Wrap at the centre of the view (or the best `stamp_spots` hit when the centre misses), then Jump small gaps on (Final); the screenshot shows that model | (2) `stamp_ink_area` / picture area 0.93-1.07, `covered` >= 0.999, `cut_tris` 0, one entry, composite changed (H1); (3) Project = H0, then H1, H0, H0 in Project; (4) `met_itself`; of the texels whose `locate` point lies within 0.9 hh of the great circle of S's spine >= 99 % inked, smear (`cells` colour test of 4.7) <= 1 % of the opaque ones; (4b) `turns` 3, one entry; in the two overlap stretches (angle from the anchor 0.83 pi..0.97 pi on either side, inside the 0.8 pi..pi where two turns lie) >= 90 % of the opaque texels show a colour of the picture's right half (the later turn on top); `Undo` = H2; Overlap again = the Overlap state, also after Project and back (Overlap kept); Ends meet = H2; (4c) H2 byte for byte, `jumps` 0, one entry; after `Undo` off and H2; (4d) `tool_probe.wrap_controls == Some(false)` in Project, `Some(true)` after `Undo`; (5) seam score (mean largest channel difference of the composite over the texel pairs of columns 0 / width-1 opaque in S, surface points within 1.25 texel widths) <= 1.25 x the interior score + 2 levels, at least 20 pairs; after `Undo` the 30 % state; (6) the gizmo is `wrapped` without a depth box; the anchor moved >= 0.3 r along the surface, ink 0.93-1.07, one entry, still Wrap; (7) the text is wrapped with a warp, ink area > 0, `covered` >= 0.999 (`scenarios::WS_TEXT_COVERED`; steps 2 and 7 log a 32 x 16 map of the picture points without surface, `ws_holes`); (8) S wrapped, the composite of before the toggle; (9) the reopened composite equals the saved one, both stamps Wrap, S with both options, the text with none, `read_manifest`: `min_reader_version` 3, `mode` "wrap" on both and `wrap_gaps` / `wrap_overlap` only on S; (10) logs `wrap_surface (10) Jump small gaps off / on: ..., ink area, stats` (the bake times are the core's `wrap:` and the `final bake:` lines); ink area > 0 both times. Every assert logs its measured values as `wrap_surface (<step>) ...` |
+| `wrap_surface` [PATH] | Round 6 (R6-2, ROUND6_PLAN 5.2): built-in Sphere, 3D view, the generated 512 x 256 `cells` picture (`samples::cells_picture`) as the stamp image. (1) Stamp tool 30 %, Project, click left of the centre: S, composite H0. (2) `UpdateStampPlacement(S, Projector { mode: Wrap, .. }, Final)`. (3) back to Project; `Undo`, `Undo`, `Redo` x2. (4) Wrap again; S stretched along its spine (width only) to 1.2 x the sphere's circumference: a band round the sphere (H2). (4b) Overlap (Final); `Undo`; Overlap, Project, Wrap; Ends meet. (4c) Jump small gaps (Final); `Undo`. (4d) Project (Final), 3 frames; `Undo`. (5) back to 30 % (Final); S moved onto the UV seam (the meridian of texel columns 0 and width-1 at the middle row) with its long axis across it (Final); `Undo`. (6) a body drag of a quarter of the view width. (7) Text tool in Wrap, "WRAP AROUND" at the tool's default size (6 %), placed below the centre, Arc warp bend 30 % (`UpdateStampSource`, Final). (8) `BakeWait(false)`: S to Project (Final) and `Undo` in the next frame. (9) S to Overlap + Jump small gaps (Final), S selected (`Shot("before_save")`), `SaveAs(<out_stem>_wrap.wtep)`, `OpenProject` of it. Without a PATH the screenshot shows S selected in the reopened project (the text selected first, then S; the Color section collapsed so the whole Transform options show). Named shots: `_wrapped` (after 2), `_band` (4), `_overlap` (4b), `_text` (7), `_before_save` (9). (10) with a PATH (accepted and left for the sphere at the start, opened again at the end): 3D view, the picture at 40 % in Wrap at the centre of the view (or the best `stamp_spots` hit when the centre misses), then Jump small gaps on (Final); the screenshot shows that model | (2) `stamp_ink_area` / picture area 0.93-1.07, `covered` >= 0.999, `cut_tris` 0, one entry, composite changed (H1); (3) Project = H0, then H1, H0, H0 in Project; (4) `met_itself`; of the texels whose `locate` point lies within 0.9 hh of the great circle of S's spine >= 99 % inked, smear (`cells` colour test of 4.7) <= 1 % of the opaque ones; (4b) `turns` 3, one entry; in the two overlap stretches (angle from the anchor 0.83 pi..0.97 pi on either side, inside the 0.8 pi..pi where two turns lie) >= 90 % of the opaque texels show a colour of the picture's right half (the later turn on top); `Undo` = H2; Overlap again = the Overlap state, also after Project and back (Overlap kept); Ends meet = H2; (4c) H2 byte for byte, `jumps` 0, one entry; after `Undo` off and H2; (4d) `tool_probe.wrap_controls == Some(false)` in Project, `Some(true)` after `Undo`; (5) seam score (mean largest channel difference of the composite over the texel pairs of columns 0 / width-1 opaque in S, surface points within 1.25 texel widths) <= 1.25 x the interior score + 2 levels, at least 20 pairs; after `Undo` the 30 % state; (6) the gizmo is `wrapped` without a depth box; the anchor moved >= 0.3 r along the surface, ink 0.93-1.07, one entry, still Wrap; (7) the text is wrapped with a warp, ink area > 0, `covered` >= 0.999 (`scenarios::WS_TEXT_COVERED`; steps 2 and 7 log a 32 x 16 map of the picture points without surface, `ws_holes`); (8) S wrapped, the composite of before the toggle; (9) the reopened composite equals the saved one, both stamps Wrap, S with both options, the text with none, `read_manifest`: `min_reader_version` 3, `mode` "wrap" on both and `wrap_gaps` / `wrap_overlap` only on S; (10) logs `wrap_surface (10) Jump small gaps off / on: ..., ink area, stats` (the bake times are the core's `wrap:` and the `final bake:` lines); ink area > 0 both times. Round 8 (ROUND8_PLAN 4.1): (2b) after (2): `relaxed`, `seams` 0, `stamp_wrap_quality` dup <= 1 %, scatter <= 2 % (logged with stretch, rejected, flipped, cg_iters); (6b) after (6), from `state.wrap_jobs.counters` since (6)'s Setup: asynchronous mode: the document defers wrapped Previews, the drag started >= 1 Preview job and >= 1 landed, `ui_params` unchanged (no parameterization on the UI thread by the app), nothing in flight or waiting afterwards; `WTE_SYNC_FINAL_BAKES=1`: no job used; the composite after the Final is logged in both (equal); (10) also logs `... quality:` ink / picture, dup, scatter, bins, the parameterization's ms, relaxed, seams per rule, stretch, rejected, jumps and the Final's "applied after" ms for Jump off and on, then one assert over both: ink / picture <= 1.3, dup <= 3 %, scatter <= 5 % (scenario count unchanged). Every assert logs its measured values as `wrap_surface (<step>) ...` |
 
 Round 4: 37 scenarios (25 of round 3, the ten above and the gate's two measuring scenarios `text_preview_path` and
 `brush_hover`); round 5 adds `final_bake_async` (38); round 6 adds `wrap_surface` (39); `scenarios::tests` checks the count. Gate 3 added named mid-run captures (`Step::Shot`) for the report:
@@ -6042,6 +6223,21 @@ families draw a sample; `style_name` table (300 => "Light", 400 italic =>
   jumps, WA1 limits, also with a lifted third part; 1 / 2 / 5 threads), `check_a_overlap_at_many_turns` (5 turns at 3.7 x
   round against the ground truth, 8 at 10 x, a vertical spine); `tests/project_roundtrip.rs`
   `reopened_wrapped_stamps_rebuild_their_parameterization_exactly`.
+- Round 8 (package A, `wrap_tests.rs`; plan R8 3.5): `r8_quality_survey` (the quality measure on round 6's failure
+  cases, printed), `wa4_r8_bumpy_plates_receive_the_picture_once_whole_and_smooth` (WA4 at 30 / 45 / 60 degrees, WA4b),
+  `wa20_a_bumpy_ball_...`, `wa21_a_closed_piece_...`, `wa22_a_torus_...`, `wa23_a_cone_tip_and_a_cube_corner_...`,
+  `wa24_jump_small_gaps_is_bounded_by_the_footprint`, `wa25_the_owner_test_is_inert_where_the_layout_is_exact`,
+  `wa26_the_relaxed_wrap_is_deterministic`, `wa27_a_relaxed_parameterization_is_reused_exactly`,
+  `wa29_wrap_preview_and_param_jobs`. The plan's limits are asserted; the cases the builder measured outside them are
+  listed in `target\round8\notes\pkg_a.md`. check:A (round 8): `check_a8_shapes_that_try_to_break_the_relaxed_wrap`
+  (a mug with its handle, Jump on / off; round a torus' inner ring; a cone with the spine through its tip; a closed lathe
+  piece, Jump on equals off; a bumpy band with Overlap and Ends meet: no panic, finite, 1 / 5 threads equal, the sweep's
+  limits where asserted), `check_a8_slivers_and_zero_area_triangles_in_the_relaxation`,
+  `check_a8_huge_tiny_and_boundary_stamps_on_the_relaxed_path`, `check_a8_the_parallel_relaxation_equals_the_serial_one`
+  (the parallel kernels forced on: 1 and 12 threads equal the serial bits),
+  `check_a8_undo_and_a_new_edit_while_a_preview_job_runs`; in `wrap_relax.rs`: the CG budget and caps, huge gradients
+  and a NaN start, the parallel kernels against the serial ones on a 170 x 170 grid, the fast-marching update and the
+  sliver rule.
 
 - M1 (gate, between the waves): `tip_field::tests::a_part_cut_off_at_the_border_stays_inside_its_bound`; `tests/brush_tips.rs`: `a_baked_ball_dab_matches_the_ball` (C13 dab part), `unused_parts_do_not_change_the_printed_square` (F16 dab part, asserts the measured state and logs the miss).
 
@@ -6133,6 +6329,25 @@ pixels, parameterization cached by the applied bake, `settle` waits for a wrappe
 its bake runs changes nothing); `view::tests::a_wrapped_stamps_2d_outline_runs_along_its_inked_texels`; the transform
 test also checks that `ensure_wrap_param` makes nothing during a pending edit (the throttled Preview bakes bring the
 parameterization). Core: `wrap_tests::checkb_a_coarse_mesh_leaves_no_wedge_without_surface_inside_the_picture`.
+
+**Round 8 app tests** (package B, R8-2, ROUND8_PLAN 4.2), `stamp_bakes::tests::`
+`a_drag_of_a_wrapped_stamp_bakes_its_previews_on_a_worker_and_the_latest_wins` (10 Preview moves in the asynchronous
+mode: one job in flight, no status-bar title, nothing baked and no parameterization of a moved placement on the UI
+thread; the first job lands as the last good picture with `due_again`, the next job is made for the last placement and
+equals the synchronous Preview's pixels; the Final equals the synchronous Final), `esc_or_undo_while_a_wrap_preview_job_runs_keeps_the_old_pixels`,
+`a_wrap_preview_of_another_document_is_dropped`, `a_selected_wrapped_stamp_without_parameterization_gets_it_from_a_param_only_job`
+(after an undo: the Transform tool asks, `after_tools` starts one job, stats and outline come with it, no pixel
+changes, no build on the UI thread), `a_final_waits_for_its_stamps_wrap_preview_job` (then equals the synchronous
+Final), `projected_stamps_keep_their_previews_on_the_ui_thread`; `jobs::tests::a_silent_job_runs_and_delivers_but_is_not_shown_in_the_status_bar`;
+`panels::tool_options::tests::a_relaxed_or_cut_wrap_says_so_under_the_stats_line`. Scenario `wrap_surface` steps 2b,
+6b and 10 (8.11). check:B (the job races): the drag test also reads `wte_core::param_counter` (no build on the UI
+thread); `a_final_waits_for_its_stamps_wrap_preview_job` also checks that the Final reuses the job's parameterization
+and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_restores_the_old_pixels`,
+`a_stale_preview_landing_after_a_newer_edit_is_dropped_and_the_newer_edit_wins`,
+`a_stamp_deleted_while_its_preview_job_runs_is_left_alone_and_undo_brings_it_back`,
+`a_stroke_during_a_wrap_preview_job_holds_its_output_until_it_ends`,
+`save_during_a_wrap_preview_job_settles_without_waiting_for_it`,
+`a_wrap_preview_landing_after_a_turn_to_project_in_the_same_edit_is_dropped`.
 
 ---
 

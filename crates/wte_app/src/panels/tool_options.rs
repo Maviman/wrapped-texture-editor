@@ -99,25 +99,55 @@ fn wrap_stats_lines(ui: &mut egui::Ui, stats: Option<WrapStats>, opts: WrapOptio
         return;
     };
     help(ui, &format!("Wrapped over {} triangles", s.tris));
-    let warn = |ui: &mut egui::Ui, text: String| {
-        ui.add(egui::Label::new(egui::RichText::new(text).color(ui.visuals().warn_fg_color)).wrap());
-    };
+    for line in wrap_stats_texts(&s, opts) {
+        match line {
+            WrapLine::Help(text) => help(ui, &text),
+            WrapLine::Warn(text) => {
+                ui.add(egui::Label::new(egui::RichText::new(text).color(ui.visuals().warn_fg_color)).wrap());
+            }
+        }
+    }
+}
+
+/// Least `WrapStats::stretch` (95th percentile of |area ratio - 1|) for which a relaxed wrap says how much it stretched.
+const STRETCH_LINE_MIN: f32 = 0.05;
+
+/// One line under "Wrapped over N triangles": plain help text or a warning.
+#[derive(Clone, Debug, PartialEq)]
+enum WrapLine {
+    Help(String),
+    Warn(String),
+}
+
+/// The lines under "Wrapped over N triangles" of `wrap_stats_lines`, in order. Round 8 (R8-1, plan 4.1): a relaxed wrap
+/// that stretched by 5 % or more says so (help text: it is the intended behaviour on a curved surface), and seams
+/// inside the picture are named; the round-6 warnings follow unchanged.
+fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
+    let mut out = Vec::new();
+    if s.relaxed && s.stretch >= STRETCH_LINE_MIN {
+        let pct = (s.stretch * 100.0).round().max(1.0);
+        out.push(WrapLine::Help(format!("Fitted to the curved surface: stretched up to {pct:.0} %")));
+    }
+    if s.seams > 0 {
+        out.push(WrapLine::Help("Cut where it cannot lie flat (a corner, a handle, or where its edges meet)".to_owned()));
+    }
     if s.covered < 0.98 {
         let off = ((1.0 - s.covered) * 100.0).round().max(1.0);
-        warn(ui, format!("{off:.0} % of the picture runs off the surface: an edge, a hole or the end of the part"));
+        out.push(WrapLine::Warn(format!("{off:.0} % of the picture runs off the surface: an edge, a hole or the end of the part")));
     }
     if s.met_itself && !opts.overlap {
-        warn(ui, "The ends meet at the back".to_owned());
+        out.push(WrapLine::Warn("The ends meet at the back".to_owned()));
     }
     if s.turns > 1 {
-        warn(ui, format!("Wound {} times", s.turns));
+        out.push(WrapLine::Warn(format!("Wound {} times", s.turns)));
     }
     if s.jumps > 0 {
-        warn(ui, format!("Continued onto {} separate part{}", s.jumps, if s.jumps == 1 { "" } else { "s" }));
+        out.push(WrapLine::Warn(format!("Continued onto {} separate part{}", s.jumps, if s.jumps == 1 { "" } else { "s" })));
     }
     if s.limited {
-        warn(ui, "Too large for this model: the wrap stops at 1 million vertices / 8 turns".to_owned());
+        out.push(WrapLine::Warn("Too large for this model: the wrap stops at 1 million vertices / 8 turns".to_owned()));
     }
+    out
 }
 
 /// Width of the label column of the option grids.
@@ -636,6 +666,57 @@ mod tests {
 
     fn projector() -> Projector {
         Projector::from_surface(Vec3::new(0.0, 0.0, 1.0), Vec3::Z, Vec3::Y, Vec2::new(0.2, 0.1), 0.2)
+    }
+
+    /// Round 8 (plan 4.1 / 4.2): the two new lines under "Wrapped over N triangles".
+    #[test]
+    fn a_relaxed_or_cut_wrap_says_so_under_the_stats_line() {
+        let base = wte_core::WrapStats {
+            verts: 100,
+            tris: 180,
+            cut_tris: 0,
+            covered: 1.0,
+            met_itself: false,
+            reached_edge: false,
+            limited: false,
+            jumps: 0,
+            turns: 1,
+            micros: 1000,
+            relaxed: false,
+            seams: 0,
+            seams_by_rule: [0; 5],
+            flipped: 0,
+            stretch: 0.0,
+            rejected: 0.0,
+            cg_iters: 0,
+        };
+        let opts = WrapOptions::default();
+        assert!(wrap_stats_texts(&base, opts).is_empty(), "an exact (seed) wrap adds no line");
+        let fitted = "Fitted to the curved surface: stretched up to 35 %";
+        let cut = "Cut where it cannot lie flat (a corner, a handle, or where its edges meet)";
+        let relaxed = wte_core::WrapStats { relaxed: true, stretch: 0.349, ..base };
+        assert_eq!(wrap_stats_texts(&relaxed, opts), vec![WrapLine::Help(fitted.to_owned())]);
+        // Below 5 % the stretch is not worth a line; a seed layout never says "fitted".
+        assert!(wrap_stats_texts(&wte_core::WrapStats { stretch: 0.049, ..relaxed }, opts).is_empty());
+        assert!(wrap_stats_texts(&wte_core::WrapStats { relaxed: false, ..relaxed }, opts).is_empty());
+        let both = wte_core::WrapStats { seams: 3, seams_by_rule: [0, 3, 0, 0, 0], met_itself: true, ..relaxed };
+        assert_eq!(
+            wrap_stats_texts(&both, opts),
+            vec![
+                WrapLine::Help(fitted.to_owned()),
+                WrapLine::Help(cut.to_owned()),
+                WrapLine::Warn("The ends meet at the back".to_owned())
+            ]
+        );
+        // The round-6 warnings stay as they were, after the new lines.
+        let off = wte_core::WrapStats { covered: 0.5, jumps: 2, ..base };
+        assert_eq!(
+            wrap_stats_texts(&off, opts),
+            vec![
+                WrapLine::Warn("50 % of the picture runs off the surface: an edge, a hole or the end of the part".to_owned()),
+                WrapLine::Warn("Continued onto 2 separate parts".to_owned())
+            ]
+        );
     }
 
     #[test]

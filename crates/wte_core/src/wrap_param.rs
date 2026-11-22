@@ -49,6 +49,23 @@ pub const GAP_JUMP: f64 = 0.01;
 pub const WRAP_MAX_TURNS: u32 = 8;
 /// Anchor: candidate triangles within this distance (times the diagonal) of the nearest one compete for the anchor.
 const ANCHOR_TIE: f64 = 1e-4;
+/// Round 8: the front stops at this many times the bucketed across reach (geodesic distance from the spine), so a
+/// relaxed layout still covers the picture. The plan's 1.3 left the picture's corners on halo triangles on WA4 at 60
+/// degrees (13 halo triangles inside the picture, dup 1.5 %, a corner cell 2.16 x); 1.7 leaves none there (builder's
+/// measurements: 1.5 and 1.7 met WA4b, 1.7 with more margin).
+pub const WRAP_STOP_SLACK: f64 = 1.7;
+
+// Round 8: seams, wedges, the relaxation and the owner grid (`wrap_relax.rs`, a child module: it reads the patch and
+// the layout state).
+#[path = "wrap_relax.rs"]
+mod relax;
+pub(crate) use relax::OwnerGrid;
+/// check:A (round 8): the relaxation's parallel threshold, lowered by a test of the parallel path.
+#[cfg(test)]
+pub(crate) fn relax_par_min_for_tests() -> &'static std::sync::atomic::AtomicUsize {
+    &relax::PAR_MIN_TEST
+}
+pub use relax::{CONE_CUT_DEG, ISO_TOL, OWNER_MAX_CELLS, OWNER_TOL, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
 
 /// What a parameterization covers and how it went (for the panel, the log and the tests).
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -71,6 +88,35 @@ pub struct WrapStats {
     pub turns: u32,
     /// Time to build.
     pub micros: u64,
+    /// Round 8: the layout was relaxed (false: the seed was exact where the picture lies and is kept, 2.2-3).
+    pub relaxed: bool,
+    /// Round 8: seam edges inside the picture (relaxed layouts; all rules), and per rule S1..S5.
+    pub seams: u32,
+    pub seams_by_rule: [u32; 5],
+    /// Round 8: relaxed triangles inside the picture whose orientation flipped.
+    pub flipped: u32,
+    /// Round 8: 95th percentile of |area ratio - 1| (layout over 3D) of the triangles inside the picture.
+    pub stretch: f32,
+    /// Round 8: share of the laid picture area the owner test drops (estimated at the owner grid's cell centres).
+    pub rejected: f32,
+    /// Round 8: conjugate-gradient iterations of the relaxation (all layers and components).
+    pub cg_iters: u32,
+}
+
+/// Round 8 (plan 3.3): how once and how whole the picture of a wrapped stamp lies on the model, measured from its
+/// baked texels (`Document::stamp_wrap_quality`). Picture points are binned in cells of `c = 2 x max(source pixel in
+/// world units, texel_world)`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct WrapQuality {
+    /// `Document::stamp_ink_area` of the stamp.
+    pub ink_area: f32,
+    /// Share of the inked bins whose surface points spread over more than `6 c` (the same picture spot in two places).
+    pub dup: f32,
+    /// Share of the 4-neighbour pairs of inked bins whose surface centroids lie more than `6 c` apart (scraps and cut
+    /// lines; a seam adds a thin line of such pairs).
+    pub scatter: f32,
+    /// Inked bins.
+    pub bins: u32,
 }
 
 /// One layer (turn) of a parameterization: per triangle its stamp-local corner coordinates, ascending `TriId`.
@@ -83,6 +129,11 @@ pub(crate) struct WrapLayer {
     /// A closed turn: its period along `axis` (a fragment outside `clip` is moved by it).
     pub(crate) period: Option<f32>,
     pub(crate) axis: usize,
+    /// Round 8: per triangle the depth `g` (geodesic distance from the spine) of its corners and its longest 3D edge.
+    pub(crate) depth: Vec<[f32; 3]>,
+    pub(crate) edge: Vec<f32>,
+    /// Round 8: the owner grid of the owner test (`None` for a layer clipped to an Overlap turn's range).
+    pub(crate) owner: Option<OwnerGrid>,
     /// Uniform grid over the layer's coordinate box for `surface_of` (built on first use).
     grid: OnceLock<Grid>,
 }
@@ -294,6 +345,8 @@ struct Patch {
     on_boundary: Vec<bool>,
     /// Shortest incident edge per vertex (3D).
     min_edge: Vec<f64>,
+    /// Round 8: longest incident edge per vertex (3D; seam rule S2).
+    max_edge: Vec<f64>,
     /// Rank of each vertex in position order (`position_order`): the tie-break of every vertex comparison.
     rank: Vec<u32>,
     diag: f64,
@@ -440,6 +493,7 @@ impl Patch {
         debug_assert!(changed || tv.len() == candidates.len());
         let mut on_boundary = vec![false; n];
         let mut min_edge = vec![f64::INFINITY; n];
+        let mut max_edge = vec![0.0f64; n];
         for group in edges.groups() {
             let he = group[0];
             let [a, b] = edge_of(tv[(he / 3) as usize], (he % 3) as usize);
@@ -451,6 +505,8 @@ impl Patch {
             if len > 0.0 {
                 min_edge[a as usize] = min_edge[a as usize].min(len);
                 min_edge[b as usize] = min_edge[b as usize].min(len);
+                max_edge[a as usize] = max_edge[a as usize].max(len);
+                max_edge[b as usize] = max_edge[b as usize].max(len);
             }
         }
         // Parts: union-find over the triangles' vertices.
@@ -508,6 +564,7 @@ impl Patch {
             part_box,
             on_boundary,
             min_edge,
+            max_edge,
             rank,
             diag,
         }
@@ -633,11 +690,12 @@ struct SpineKey {
 }
 
 impl SpineKey {
-    /// `|across| + ` the distance outside the spine's along range (4.3 step 4).
-    fn key(&self, p: DVec2) -> f64 {
+    /// Round 8: the distance of a developed strip position from the spine segment (a seed's exact geodesic `g`).
+    fn dist(&self, p: DVec2) -> f64 {
         let along = p.dot(self.e);
         let across = p.dot(rot90(self.e));
-        across.abs() + (self.lo - along).max(along - self.hi).max(0.0)
+        let out = (self.lo - along).max(along - self.hi).max(0.0);
+        across.hypot(out)
     }
 }
 
@@ -648,6 +706,8 @@ struct Seed {
     p: DVec2,
     frame: Frame,
     normal: DVec3,
+    /// Round 8: the strip triangle that gives the position (its wedge is pinned by the relaxation).
+    tri: u32,
 }
 
 /// Layout state of one turn.
@@ -656,7 +716,19 @@ struct Layout<'a> {
     spine: SpineKey,
     state: Vec<State>,
     p2: Vec<DVec2>,
+    /// Round 8: the front's key is the geodesic distance `g` from the spine (fast-marching from the strip seeds, 2.2-1):
+    /// tentative while the vertex waits, final when laid.
     key: Vec<f64>,
+    /// Round 8: arc length of the vertex's spine point and its side of the spine (+1 / -1, 0 on it), inherited from
+    /// the producer (seams S1 / S2).
+    foot: Vec<f64>,
+    side: Vec<i8>,
+    /// Round 8: the strip triangle of each strip seed (`NONE` for others) and the front jumps (source vertex, landing
+    /// triangle) in order.
+    seed_tri: Vec<u32>,
+    jump_log: Vec<(u32, u32)>,
+    /// Round 8: the picture rectangle grown by its border (Jump small gaps lands only inside it, 2.2-5).
+    footprint: [f64; 2],
     frame: Vec<Frame>,
     normal: Vec<DVec3>,
     seed: Vec<bool>,
@@ -688,6 +760,11 @@ impl<'a> Layout<'a> {
             state: vec![State::Unknown; n],
             p2: vec![DVec2::ZERO; n],
             key: vec![f64::INFINITY; n],
+            foot: vec![0.0; n],
+            side: vec![0; n],
+            seed_tri: vec![NONE; n],
+            jump_log: Vec::new(),
+            footprint: [f64::INFINITY; 2],
             frame: vec![Frame::default(); n],
             normal: vec![DVec3::ZERO; n],
             seed: vec![false; n],
@@ -724,7 +801,10 @@ impl<'a> Layout<'a> {
         self.p2[v] = s.p;
         self.frame[v] = s.frame;
         self.normal[v] = s.normal;
-        self.key[v] = self.spine.key(s.p);
+        self.key[v] = self.spine.dist(s.p);
+        self.foot[v] = s.p.dot(self.spine.e).clamp(self.spine.lo, self.spine.hi.max(self.spine.lo));
+        self.side[v] = relax::side_of(s.p.dot(rot90(self.spine.e)), self.patch.diag);
+        self.seed_tri[v] = s.tri;
         self.heap.push(Entry { key: self.key[v], rank: self.patch.rank[v], v: s.v });
     }
 
@@ -795,8 +875,9 @@ impl<'a> Layout<'a> {
         p.is_finite().then_some(p)
     }
 
-    /// Adds a candidate for `w` and updates its tentative position (consensus rule).
-    fn add_cand(&mut self, w: u32, cand: Cand) {
+    /// Adds a candidate for `w` and updates its tentative position (consensus rule); `g` is the candidate's geodesic
+    /// distance (the tentative key is the smallest).
+    fn add_cand(&mut self, w: u32, cand: Cand, g: f64) {
         let wi = w as usize;
         if self.seed[wi] || self.state[wi] == State::Final {
             return;
@@ -882,7 +963,7 @@ impl<'a> Layout<'a> {
         self.p2[wi] = p;
         self.best[wi] = best;
         self.state[wi] = State::Tentative;
-        let key = self.spine.key(p);
+        let key = if g.is_finite() { self.key[wi].min(g) } else { self.key[wi] };
         self.key[wi] = key;
         let entry = Entry { key, rank: self.patch.rank[wi], v: w };
         if self.cands[best as usize].other == NONE {
@@ -996,6 +1077,10 @@ impl<'a> Layout<'a> {
                 self.frame[vi] = self.frame[c.from as usize];
                 self.normal[vi] = self.normal[c.from as usize];
             }
+            // Round 8: the labels of the producer (a producer on the spine gives the vertex's own side).
+            let from = c.from as usize;
+            self.foot[vi] = self.foot[from];
+            self.side[vi] = if self.side[from] != 0 { self.side[from] } else { relax::side_of(self.p2[vi].dot(rot90(self.spine.e)), patch.diag) };
         }
         let pv = self.p2[vi];
         let kv = self.key[vi];
@@ -1017,7 +1102,11 @@ impl<'a> Layout<'a> {
                     let (a, w) = if fa { (a, w) } else { (w, a) };
                     if let Some(p) = self.hinge(t, v, a, w, pv, self.p2[a as usize]) {
                         let ka = self.key[a as usize];
-                        self.add_cand(w, Cand { p, k0: kv.max(ka), k1: kv.min(ka), tri: t, from: v, other: a, next: NONE });
+                        // Round 8: the geodesic distance of `w` (triangle update, else along the edges).
+                        let (qv, qa, qw) = (patch.pos[vi], patch.pos[a as usize], patch.pos[w as usize]);
+                        let edge = (kv + qv.distance(qw)).min(ka + qa.distance(qw));
+                        let g = relax::fmm_update(qv, qa, qw, kv, ka).map_or(edge, |f| f.min(edge));
+                        self.add_cand(w, Cand { p, k0: kv.max(ka), k1: kv.min(ka), tri: t, from: v, other: a, next: NONE }, g);
                     }
                 }
                 (false, false) => {
@@ -1026,7 +1115,8 @@ impl<'a> Layout<'a> {
                     for x in [a, w] {
                         let p = pv + frame.apply(patch.pos[x as usize] - qv);
                         if p.is_finite() {
-                            self.add_cand(x, Cand { p, k0: kv, k1: kv, tri: t, from: v, other: NONE, next: NONE });
+                            let g = kv + qv.distance(patch.pos[x as usize]);
+                            self.add_cand(x, Cand { p, k0: kv, k1: kv, tri: t, from: v, other: NONE, next: NONE }, g);
                         }
                     }
                 }
@@ -1036,7 +1126,7 @@ impl<'a> Layout<'a> {
 
     /// Steps 5-7 for this turn: the halo, the tears and the stored triangles (local index, corners), plus the cut
     /// count and the area of the triangles inside the picture (and the turn's along range `clip`, Overlap).
-    fn finish(&mut self, hw: f64, hh: f64, clip: Option<(usize, f64, f64)>, period: Option<f64>) -> (Vec<(u32, [DVec2; 3])>, u32, f64) {
+    fn finish(&mut self, hw: f64, hh: f64, clip: Option<(usize, f64, f64)>, period: Option<f64>) -> (SeedTris, u32, f64) {
         let patch = self.patch;
         let mut out = Vec::new();
         let mut cut = 0u32;
@@ -1066,7 +1156,7 @@ impl<'a> Layout<'a> {
                     }
                 }
                 if q.iter().all(|p| p.is_finite()) {
-                    out.push((t, q));
+                    out.push((t, q, false));
                 }
                 continue;
             }
@@ -1111,7 +1201,8 @@ impl<'a> Layout<'a> {
                 let l2 = q[i].distance(q[j]);
                 l3 > 0.0 && !(l2 <= TEAR_RATIO * l3 && l2 * TEAR_RATIO >= l3)
             });
-            if flipped || stretched || !q.iter().all(|p| p.is_finite()) {
+            let torn = flipped || stretched || !q.iter().all(|p| p.is_finite());
+            if torn {
                 let nt = patch.geo[t as usize] * o;
                 let nr = if self.normal[c[r] as usize] == DVec3::ZERO { nt } else { self.normal[c[r] as usize] };
                 let turn = DQuat::from_rotation_arc(nt, nr);
@@ -1126,22 +1217,31 @@ impl<'a> Layout<'a> {
                     continue;
                 }
             }
-            covered += match (clip, period) {
-                (Some((axis, _, _)), Some(t)) => [-t, 0.0, t]
-                    .iter()
-                    .map(|&shift| {
-                        let mut moved = q;
-                        for p in &mut moved {
-                            p[axis] += shift;
-                        }
-                        clipped_area(moved, hw, hh, clip)
-                    })
-                    .sum::<f64>(),
-                _ => clipped_area(q, hw, hh, clip),
-            };
-            out.push((t, q));
+            covered += layer_area(q, hw, hh, clip, period);
+            out.push((t, q, torn));
         }
         (out, cut, covered)
+    }
+}
+
+/// The seed result of one turn: per triangle its local index, corners and whether it was torn.
+type SeedTris = Vec<(u32, [DVec2; 3], bool)>;
+
+/// The area of the layer triangle `q` inside the picture (and the turn's along range; a closed turn counts its copies
+/// one period either way).
+fn layer_area(q: [DVec2; 3], hw: f64, hh: f64, clip: Option<(usize, f64, f64)>, period: Option<f64>) -> f64 {
+    match (clip, period) {
+        (Some((axis, _, _)), Some(t)) => [-t, 0.0, t]
+            .iter()
+            .map(|&shift| {
+                let mut moved = q;
+                for p in &mut moved {
+                    p[axis] += shift;
+                }
+                clipped_area(moved, hw, hh, clip)
+            })
+            .sum::<f64>(),
+        _ => clipped_area(q, hw, hh, clip),
     }
 }
 
@@ -1330,7 +1430,7 @@ fn enter_turn(spine: &mut Spine, tr: &mut Trace, pick: usize, mask: u16, end0: &
 /// Traces the spine from the anchor both ways (4.3 step 3; Overlap 4.3b; the spine's jump 4.3a). The two traces
 /// advance alternately (the one with the smaller arc length first, + on ties), so a picture longer than the way round
 /// has its ends meet opposite the anchor.
-fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, opts: WrapOptions, jumper: &mut Option<Jumper<'_>>) -> Spine {
+fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, footprint: f64, opts: WrapOptions, jumper: &mut Option<Jumper<'_>>) -> Spine {
     let ntri = patch.tv.len();
     // The turns that crossed each triangle (`turn_bit`).
     let mut crossed: Vec<u16> = vec![0; ntri];
@@ -1390,8 +1490,9 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, opts: WrapOptions, ju
         if let Some(j) = jumper.as_mut() {
             let own = patch.part[patch.tv[tr.tri as usize][0] as usize];
             spine_parts[own as usize] = true;
-            if j.near(own) {
-                let end = dt.min(reach - tr.s).max(0.0);
+            // Round 8 (2.2-5): the spine jumps only within the picture's half length and border.
+            if j.near(own) && tr.s < footprint {
+                let end = dt.min(reach - tr.s).min(footprint - tr.s).max(0.0);
                 let step = 0.5 * j.gap;
                 let mut t = step.min(end);
                 loop {
@@ -1465,7 +1566,7 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, opts: WrapOptions, ju
                 let s_or = if tr.nu.dot(u.cross(w_out)) < 0.0 { -1.0 } else { 1.0 };
                 (n, exit, d, (u.cross(w_in) * s_or).normalize_or_zero())
             }
-            None => match jumper.as_mut().and_then(|j| j.spine_jump(exit, tr.d, tr.nu, tr.tri, &|part| !spine_parts[part as usize])) {
+            None => match jumper.as_mut().filter(|_| tr.s <= footprint).and_then(|j| j.spine_jump(exit, tr.d, tr.nu, tr.tri, &|part| !spine_parts[part as usize])) {
                 Some((n, q, d, nu, gap)) => {
                     spine.jumps += 1;
                     tr.s += gap;
@@ -1646,16 +1747,27 @@ impl<'a> Jumper<'a> {
         if !near {
             return;
         }
+        // Round 8 (2.2-5): a jump starts only where the picture's own footprint lies.
+        let fp = layout.footprint;
+        let pv0 = layout.p2[vi];
+        if !(pv0.x.abs() <= fp[0] && pv0.y.abs() <= fp[1]) {
+            return;
+        }
         let found = {
             let entered = &layout.entered;
             self.nearest_other(p, own, &|part| !entered[part as usize], layout.normal[vi], None)
         };
         let Some((t, q, gap)) = found else { return };
         let part = self.patch.part[self.patch.tv[t as usize][0] as usize];
-        layout.enter(part);
-        layout.jumps += 1;
         let (pv, fv, nv) = (layout.p2[vi], layout.frame[vi], layout.normal[vi]);
         let pq = pv + fv.apply(q - p);
+        // Round 8: and lands only inside it.
+        if !(pq.x.abs() <= fp[0] && pq.y.abs() <= fp[1]) {
+            return;
+        }
+        layout.enter(part);
+        layout.jumps += 1;
+        layout.jump_log.push((v, t));
         // The landing triangle, developed rigidly with q at pq, its plane turned onto v's tangent plane.
         let g = self.patch.geo[t as usize];
         let nt = if g.dot(nv) < 0.0 { -g } else { g };
@@ -1679,8 +1791,11 @@ impl<'a> Jumper<'a> {
             layout.p2[xi] = xp;
             layout.frame[xi] = Frame { rx: turn.inverse() * fv.rx, ry: turn.inverse() * fv.ry };
             layout.normal[xi] = nt;
-            // Seeds of a jump keep the order of the jump: the key of the vertex it started from plus the gap.
-            layout.key[xi] = key;
+            // Seeds of a jump keep the order of the jump: the depth of the vertex it started from plus the gap (round 8:
+            // plus the corner's distance from the landing point), and its labels.
+            layout.key[xi] = key + self.patch.pos[xi].distance(q);
+            layout.foot[xi] = layout.foot[vi];
+            layout.side[xi] = layout.side[vi];
             layout.heap.push(Entry { key: layout.key[xi], rank: self.patch.rank[xi], v: x });
         }
     }
@@ -1709,6 +1824,26 @@ impl<'a> Jumper<'a> {
     }
 }
 
+/// Round 8 (request 2 of package B, applied by check:B): the number of parameterizations this thread has started
+/// (`wrap_param`), for the app tests of plan 4.2 ("no parameterization built on the UI thread"). One thread-local add
+/// per call, as `doc_stamps::raster_counter`.
+pub mod param_counter {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bump() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Parameterizations started by this thread so far.
+    pub fn get() -> u64 {
+        COUNT.with(Cell::get)
+    }
+}
+
 // ----- the public entry -----
 
 /// The parameterization of the surface around the wrapped stamp `p` (4.3). `None` when the projector is unusable
@@ -1720,13 +1855,16 @@ pub fn wrap_param(
     src_size: [u32; 2],
     p: &Projector,
 ) -> Option<WrapParam> {
+    param_counter::bump();
     let started = Instant::now();
     let diag = mesh.diag() as f64;
     let texel_world = max_texel_world(maps);
     let reach = reach_of(p, src_size, texel_world, diag)?;
     let opts = p.wrap;
     let [along_r, across_r] = reach.reach;
-    let mut radius = along_r + across_r;
+    // Round 8: the front lays the surface within `WRAP_STOP_SLACK x across_r` of the spine (Euclidean <= geodesic).
+    let slack = relax::knob("WTE_TEST_STOP_SLACK", WRAP_STOP_SLACK);
+    let mut radius = along_r + slack * across_r;
     if opts.jump_gaps {
         radius += 4.0 * GAP_JUMP * diag;
     }
@@ -1805,10 +1943,19 @@ pub fn wrap_param(
     let anchor = Anchor { tri: anchor_l, point: dvec(point), d, nu, e };
 
     let mut jumper = if opts.jump_gaps { Jumper::new(mesh, bvh, &patch) } else { None };
-    let spine = trace_spine(&patch, &anchor, along_r, opts, &mut jumper);
+    // Round 8: every layout decision that a footprint bounds uses the bucketed reach (the picture's half extents with
+    // its border and texel margin, rounded up), so a parameterization reused for another size in the same bucket stays
+    // bit-identical to a fresh one (4.4): the spine's jumps (its trace stops at the reach anyway), the front's jumps,
+    // the early-out region and the owner grid.
+    let spine = trace_spine(&patch, &anchor, along_r, along_r, opts, &mut jumper);
     drop(jumper);
     let (hw, hh) = (reach.hw, reach.hh);
     let rect = [hw, hh];
+    let footprint = if reach.spine_y { [across_r, along_r] } else { [along_r, across_r] };
+    let picture = [hw + 2.0 * hw / src_size[0] as f64, hh + 2.0 * hh / src_size[1] as f64];
+    let stop = slack * across_r;
+    let mut stretches: Vec<f64> = Vec::new();
+    let mut rejected = (0usize, 0usize);
     let mut stats = WrapStats {
         verts: 0,
         tris: 0,
@@ -1820,6 +1967,13 @@ pub fn wrap_param(
         jumps: spine.jumps,
         turns: 1,
         micros: 0,
+        relaxed: false,
+        seams: 0,
+        seams_by_rule: [0; 5],
+        flipped: 0,
+        stretch: 0.0,
+        rejected: 0.0,
+        cg_iters: 0,
     };
     // The turns to lay: turn 0 (the Ends-meet spine), then with Overlap every later turn that starts inside the
     // picture, each with its along range (4.3b).
@@ -1855,24 +2009,78 @@ pub fn wrap_param(
                 layout.orient[st.tri as usize] = if area < 0.0 { -1 } else { 1 };
             }
             for (i, &v) in patch.tv[st.tri as usize].iter().enumerate() {
-                layout.add_seed(Seed { v, p: st.corners[i], frame: st.frame, normal: st.normal });
+                layout.add_seed(Seed { v, p: st.corners[i], frame: st.frame, normal: st.normal, tri: st.tri });
             }
             // A part the spine reached (also across a gap) is laid from its strip, never again by a front jump.
             layout.enter(patch.part[patch.tv[st.tri as usize][0] as usize]);
         }
         let mut turn_jumper = if opts.jump_gaps { Jumper::new(mesh, bvh, &patch) } else { None };
-        layout.run(across_r, rect, &mut turn_jumper);
+        layout.footprint = footprint;
+        layout.run(stop, rect, &mut turn_jumper);
         let clip = multi.then_some((axis, lo, hi));
-        let period = if multi { period.filter(|t| *t > 0.0) } else { None };
-        let (tris, cut, area) = layout.finish(hw, hh, clip, period);
+        let closed = period.filter(|t| *t > 0.0);
+        let period = if multi { closed } else { None };
+        let (seed, cut, seed_area) = layout.finish(hw, hh, clip, period);
         stats.verts += layout.finals as u32;
-        stats.cut_tris += cut;
         stats.reached_edge |= layout.reached_edge;
         stats.limited |= layout.limited;
         stats.jumps += layout.jumps;
+        // Round 8 (3.2 steps 4-6): the seed is kept where it is exact (developable surfaces, closures); else the layout
+        // is cut by the seam rules and relaxed. Overlap turns of a several-turn stack keep the seed (round 6): their
+        // ends are not closures the seam rules know (a turn's range is shorter than the band), and WA18 needs them exact.
+        let (tris, area) = if multi || layout.seed_is_exact(&seed, footprint, closed) {
+            stats.cut_tris += cut;
+            (seed.iter().map(|(t, q, _)| (*t, *q, layout.corner_g(*t))).collect::<Vec<_>>(), seed_area)
+        } else {
+            let r = layout.relax(&seed, picture, closed, anchor_l);
+            if relax::knob("WTE_TEST_RELAX_DEBUG", false) {
+                let laid = layout.laid();
+                let (mut inside_laid, mut inside_halo) = (0, 0);
+                for (t, q, _) in &r.tris {
+                    if relax::meets(q, rect) {
+                        if laid[*t as usize] { inside_laid += 1 } else { inside_halo += 1 }
+                    }
+                }
+                eprintln!("relax: turn {turn_id}: {} stored, inside the picture {inside_laid} laid, {inside_halo} halo; flipped {}", r.tris.len(), r.flipped);
+                for (t, q, _) in &r.tris {
+                    let p3 = patch.corners(*t);
+                    let a3 = 0.5 * (p3[1] - p3[0]).cross(p3[2] - p3[0]).length();
+                    let a2 = 0.5 * cross2(q[1] - q[0], q[2] - q[0]).abs();
+                    if relax::meets(q, picture) && !patch.degenerate(*t) && (a2 / a3 - 1.0).abs() > 0.5 {
+                        eprintln!("relax:   tri {} laid {} area 2D {a2:.3e} 3D {a3:.3e} corners {q:?}", patch.tris[*t as usize], laid[*t as usize]);
+                    }
+                }
+            }
+            stats.relaxed = true;
+            stats.seams += r.seams;
+            for (a, b) in stats.seams_by_rule.iter_mut().zip(r.seams_by_rule) {
+                *a += b;
+            }
+            stats.cut_tris += r.cut_tris;
+            stats.flipped += r.flipped;
+            stats.cg_iters += r.cg_iters;
+            let area = r.tris.iter().map(|(_, q, _)| layer_area(*q, hw, hh, clip, period)).sum::<f64>();
+            (r.tris, area)
+        };
         covered += area;
+        for (t, q, _) in &tris {
+            if patch.degenerate(*t) || !relax::meets(q, picture) {
+                continue;
+            }
+            let p3 = patch.corners(*t);
+            let a3 = 0.5 * (p3[1] - p3[0]).cross(p3[2] - p3[0]).length();
+            let a2 = 0.5 * cross2(q[1] - q[0], q[2] - q[0]).abs();
+            // check:A: slivers and near-zero-area triangles (left out of the energies, 3.1) are left out here too: their
+            // area ratio says nothing (check_a8's slivered plate reported a stretch of 2.7e6 %).
+            if a3 >= 1e-12 * patch.diag * patch.diag && !relax::sliver(p3) && (a2 / a3).is_finite() {
+                stretches.push((a2 / a3 - 1.0).abs());
+            }
+        }
         let along_clip = clip.map(|(_, lo, hi)| [lo as f32, hi as f32]);
-        layers.push((turn_id, make_layer(&patch, tris, along_clip, period.map(|t| t as f32), axis)));
+        let (layer, rej) = make_layer(&patch, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
+        rejected.0 += rej.0;
+        rejected.1 += rej.1;
+        layers.push((turn_id, layer));
     }
     if layers.is_empty() {
         return None;
@@ -1885,6 +2093,9 @@ pub fn wrap_param(
     stats.turns = layers.len() as u32;
     stats.tris = layers.iter().map(|l| l.1.tris.len() as u32).sum();
     stats.covered = (covered / (4.0 * hw * hh)).clamp(0.0, 1.0) as f32;
+    stretches.sort_by(f64::total_cmp);
+    stats.stretch = stretches.get(((stretches.len() as f64 * 0.95) as usize).min(stretches.len().saturating_sub(1))).copied().unwrap_or(0.0) as f32;
+    stats.rejected = if rejected.1 == 0 { 0.0 } else { (rejected.0 as f64 / rejected.1 as f64) as f32 };
     stats.micros = started.elapsed().as_micros() as u64;
     Some(WrapParam {
         mesh_addr: mesh as *const MeshData as usize,
@@ -1903,17 +2114,50 @@ pub fn wrap_param(
     })
 }
 
-/// The stored layer of one turn: ascending mesh triangle, f32 corners.
-fn make_layer(patch: &Patch, mut tris: Vec<(u32, [DVec2; 3])>, clip: Option<[f32; 2]>, period: Option<f32>, axis: usize) -> WrapLayer {
+/// The stored layer of one turn: ascending mesh triangle, f32 corners and corner depths, longest 3D edges, and (a
+/// layer not clipped to an Overlap turn's range) the owner grid over the reach rectangle `reach` (half extents).
+/// Also returns the owner test's cell centres inside `picture`: (rejected, all).
+fn make_layer(
+    patch: &Patch,
+    mut tris: Vec<(u32, [DVec2; 3], [f64; 3])>,
+    clip: Option<[f32; 2]>,
+    period: Option<f32>,
+    axis: usize,
+    reach: [f64; 2],
+    picture: [f64; 2],
+) -> (WrapLayer, (usize, usize)) {
     tris.sort_by_key(|e| patch.tris[e.0 as usize]);
-    WrapLayer {
+    let edge: Vec<f64> = tris
+        .iter()
+        .map(|e| {
+            let p = patch.corners(e.0);
+            p[0].distance(p[1]).max(p[1].distance(p[2])).max(p[2].distance(p[0]))
+        })
+        .collect();
+    // The corners as stored (f32) are what the bake interpolates: the grid is built from them.
+    let stored: Vec<([DVec2; 3], [f64; 3], f64)> = tris
+        .iter()
+        .zip(&edge)
+        .map(|(e, &l)| (e.1.map(|q| DVec2::new(q.x as f32 as f64, q.y as f32 as f64)), e.2.map(|g| g as f32 as f64), l as f32 as f64))
+        .collect();
+    let (owner, rej) = if clip.is_none() {
+        let (grid, rej) = OwnerGrid::build(&stored, reach, 0.0, picture);
+        (Some(grid), rej)
+    } else {
+        (None, (0, 0))
+    };
+    let layer = WrapLayer {
         tris: tris.iter().map(|e| patch.tris[e.0 as usize]).collect(),
         corners: tris.iter().map(|e| e.1.map(|q| [q.x as f32, q.y as f32])).collect(),
         clip,
         period,
         axis,
+        depth: tris.iter().map(|e| e.2.map(|g| g as f32)).collect(),
+        edge: edge.iter().map(|&l| l as f32).collect(),
+        owner,
         grid: OnceLock::new(),
-    }
+    };
+    (layer, rej)
 }
 
 /// Barycentric weights of `p` in the triangle `(a, b, c)` (centroid for a degenerate one).
@@ -2020,6 +2264,16 @@ impl WrapParam {
         self.stats
     }
 
+    /// The source size the parameterization was made for.
+    pub fn src_size(&self) -> [u32; 2] {
+        self.src_size
+    }
+
+    /// The largest texel size (world units) of the texel maps it was made with.
+    pub fn texel_world(&self) -> f32 {
+        self.texel_world
+    }
+
     /// `stats` for the picture of `p` (a projector this parameterization serves): `covered` is measured for `p`'s
     /// size. A parameterization is reused for a scale inside its reach bucket (4.4), and its stored `covered` is the
     /// share of the picture it was built for; a larger picture may run off the surface where the smaller did not.
@@ -2124,8 +2378,11 @@ impl WrapParam {
         }
         let layer = self.top();
         let grid = layer.grid();
-        // The first triangle containing the point; else the one it is least outside of, within a small tolerance.
+        // Round 8: of the triangles containing the point the one nearest the spine along the surface (lowest depth
+        // `g` there, then the first): the owner test's rule; else the one the point is least outside of, within a
+        // small tolerance.
         let mut best: Option<(f32, usize, [f32; 3])> = None;
+        let mut owner: Option<(f32, usize, [f32; 3])> = None;
         for &i in grid.cell_items(local) {
             let c = layer.corners[i as usize];
             let (a, b, d) = (Vec2::from(c[0]), Vec2::from(c[1]), Vec2::from(c[2]));
@@ -2137,14 +2394,16 @@ impl WrapParam {
             let w1 = (a - d).perp_dot(local - d) / area;
             let w2 = 1.0 - w0 - w1;
             let inside = w0.min(w1).min(w2);
-            if inside >= -1e-5 && best.is_none_or(|(b, _, _)| inside > b) {
-                best = Some((inside, i as usize, [w0, w1, w2]));
-                if inside >= 0.0 {
-                    break;
+            if inside >= 0.0 {
+                let g = layer.depth.get(i as usize).map_or(0.0, |z| z[0] * w0 + z[1] * w1 + z[2] * w2);
+                if owner.is_none_or(|(o, _, _)| g < o) {
+                    owner = Some((g, i as usize, [w0, w1, w2]));
                 }
+            } else if inside >= -1e-5 && best.is_none_or(|(b, _, _)| inside > b) {
+                best = Some((inside, i as usize, [w0, w1, w2]));
             }
         }
-        let (_, i, bary) = best?;
+        let (_, i, bary) = owner.or(best)?;
         let tri = layer.tris[i];
         if tri >= mesh.tri_count() {
             return None;

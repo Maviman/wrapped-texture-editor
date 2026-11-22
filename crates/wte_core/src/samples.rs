@@ -931,6 +931,222 @@ pub fn uv_cube_on_floor() -> RawMesh {
     RawMesh { triangles, materials: vec![material("Floor", [0.8, 0.8, 0.8, 1.0], Some(0))] }
 }
 
+/// Round 8 (wrap quality): a bumpy ball. An icosphere subdivided `subdiv` times (20 x 4^subdiv triangles) whose radius
+/// is `1 + h`, `h` the sum of `bumps` Gaussian bumps (width 0.18 rad) centred on a Fibonacci spiral of the sphere, of a
+/// height that gives a steepest slope of about `slope_deg` against the sphere. Six UV islands (gnomonic projection of
+/// each triangle onto the cube face of its centroid direction, cells of a 3 x 2 atlas). No explicit normals. One
+/// material "Bumps" referencing texture 0.
+pub fn bumpy_sphere(subdiv: u32, bumps: u32, slope_deg: f32) -> RawMesh {
+    let t = (1.0 + 5f32.sqrt()) / 2.0;
+    let mut dirs: Vec<Vec3> = [
+        (-1.0, t, 0.0),
+        (1.0, t, 0.0),
+        (-1.0, -t, 0.0),
+        (1.0, -t, 0.0),
+        (0.0, -1.0, t),
+        (0.0, 1.0, t),
+        (0.0, -1.0, -t),
+        (0.0, 1.0, -t),
+        (t, 0.0, -1.0),
+        (t, 0.0, 1.0),
+        (-t, 0.0, -1.0),
+        (-t, 0.0, 1.0),
+    ]
+    .iter()
+    .map(|&(x, y, z)| Vec3::new(x, y, z).normalize())
+    .collect();
+    let mut faces: Vec<[u32; 3]> = vec![
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+    for _ in 0..subdiv.min(7) {
+        let mut mid: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut next = Vec::with_capacity(faces.len() * 4);
+        let mut midpoint = |a: u32, b: u32, dirs: &mut Vec<Vec3>| -> u32 {
+            let key = (a.min(b), a.max(b));
+            *mid.entry(key).or_insert_with(|| {
+                dirs.push(((dirs[a as usize] + dirs[b as usize]) * 0.5).normalize());
+                (dirs.len() - 1) as u32
+            })
+        };
+        for &[a, b, c] in &faces {
+            let ab = midpoint(a, b, &mut dirs);
+            let bc = midpoint(b, c, &mut dirs);
+            let ca = midpoint(c, a, &mut dirs);
+            next.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+        }
+        faces = next;
+    }
+    let n = bumps.max(1);
+    let golden = PI * (3.0 - 5f32.sqrt());
+    let centres: Vec<Vec3> = (0..n)
+        .map(|k| {
+            let y = 1.0 - 2.0 * (k as f32 + 0.5) / n as f32;
+            let r = (1.0 - y * y).max(0.0).sqrt();
+            let phi = k as f32 * golden;
+            Vec3::new(r * phi.cos(), y, r * phi.sin())
+        })
+        .collect();
+    let sigma = 0.18f32;
+    // Steepest slope of a * exp(-(d / sigma)^2) is a * sqrt(2) * exp(-1/2) / sigma.
+    let amplitude = slope_deg.clamp(0.0, 89.0).to_radians().tan() * sigma / (2f32.sqrt() * (-0.5f32).exp());
+    let radius = |d: Vec3| -> f32 {
+        1.0 + centres
+            .iter()
+            .map(|c| {
+                let ang = d.dot(*c).clamp(-1.0, 1.0).acos();
+                amplitude * (-(ang / sigma) * (ang / sigma)).exp()
+            })
+            .sum::<f32>()
+    };
+    let positions: Vec<Vec3> = dirs.iter().map(|&d| d * radius(d)).collect();
+    // Cube faces in `push_box` order (+X, -X, +Y, -Y, +Z, -Z): (normal, right, up).
+    let axes: [(Vec3, Vec3, Vec3); 6] = [
+        (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+    ];
+    let mut triangles = Vec::with_capacity(faces.len());
+    for &[a, b, c] in &faces {
+        let centroid = dirs[a as usize] + dirs[b as usize] + dirs[c as usize];
+        let f = (0..6).max_by(|&i, &j| centroid.dot(axes[i].0).total_cmp(&centroid.dot(axes[j].0))).unwrap_or(0);
+        let (nrm, right, up) = axes[f];
+        let [u0, u1, v0, v1] = atlas_cell(f as u32, 3, 2);
+        let uv = |v: u32| {
+            let d = dirs[v as usize];
+            let depth = d.dot(nrm).max(1e-3);
+            let (x, y) = (d.dot(right) / depth, d.dot(up) / depth);
+            Vec2::new(u0 + (0.5 + 0.4 * x) * (u1 - u0), v0 + (0.5 - 0.4 * y) * (v1 - v0))
+        };
+        triangles.push(RawTriangle {
+            positions: [positions[a as usize], positions[b as usize], positions[c as usize]],
+            normals: None,
+            uvs: Some([uv(a), uv(b), uv(c)]),
+            material: 0,
+        });
+    }
+    RawMesh { triangles, materials: vec![material("Bumps", [0.8, 0.8, 0.8, 1.0], Some(0))] }
+}
+
+/// Round 8 (wrap quality): a closed, pawn-like surface of revolution about +Y (base disk of radius 0.5 at y = 0, a
+/// stem, a collar and a round head up to y = 1.34), 48 segments round, profile steps of at most 0.04. Outward
+/// winding, poles as triangle fans. One UV island: `u` round (seam column duplicated on the +X side), `v` along the
+/// profile from the top. No explicit normals. One material "Piece" referencing texture 0.
+pub fn lathe_piece() -> RawMesh {
+    let seg = 48u32;
+    // Profile (r, y) from the bottom pole to the top pole.
+    let mut corners: Vec<(f32, f32)> =
+        vec![(0.0, 0.0), (0.5, 0.0), (0.5, 0.08), (0.42, 0.14), (0.3, 0.22), (0.22, 0.4), (0.18, 0.6), (0.17, 0.75), (0.3, 0.8), (0.3, 0.84), (0.17, 0.88)];
+    let (hc, hr) = (1.1f32, 0.24f32);
+    let phi0 = -(0.17f32 / hr).acos();
+    for k in 0..=12 {
+        let phi = phi0 + (PI / 2.0 - phi0) * k as f32 / 12.0;
+        let r = if k == 12 { 0.0 } else { hr * phi.cos() };
+        corners.push((r, hc + hr * phi.sin()));
+    }
+    let mut profile: Vec<(f32, f32)> = vec![corners[0]];
+    for w in corners.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        let steps = (len / 0.04).ceil().max(1.0) as u32;
+        for s in 1..=steps {
+            let t = s as f32 / steps as f32;
+            profile.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+        }
+    }
+    let mut arc = vec![0.0f32; profile.len()];
+    for k in 1..profile.len() {
+        let (a, b) = (profile[k - 1], profile[k]);
+        arc[k] = arc[k - 1] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    }
+    let total = arc[arc.len() - 1];
+    let point = |k: usize, i: u32| {
+        let a = TAU * (i % seg) as f32 / seg as f32;
+        let (r, y) = profile[k];
+        Vec3::new(r * a.cos(), y, -r * a.sin())
+    };
+    let uv = |k: usize, i: f32| Vec2::new(0.02 + 0.96 * i / seg as f32, 0.02 + 0.96 * (1.0 - arc[k] / total));
+    let mut triangles = Vec::new();
+    for k in 0..profile.len() - 1 {
+        for i in 0..seg {
+            let (fi, fj) = (i as f32, (i + 1) as f32);
+            if profile[k].0 == 0.0 {
+                // Bottom pole: the quad's one non-degenerate half, (pole, i + 1, i), faces down (outward).
+                let pole = (point(k, 0), uv(k, fi + 0.5));
+                triangles.push(RawTriangle {
+                    positions: [pole.0, point(k + 1, i + 1), point(k + 1, i)],
+                    normals: None,
+                    uvs: Some([pole.1, uv(k + 1, fj), uv(k + 1, fi)]),
+                    material: 0,
+                });
+            } else if profile[k + 1].0 == 0.0 {
+                let pole = (point(k + 1, 0), uv(k + 1, fi + 0.5));
+                triangles.push(RawTriangle {
+                    positions: [point(k, i), point(k, i + 1), pole.0],
+                    normals: None,
+                    uvs: Some([uv(k, fi), uv(k, fj), pole.1]),
+                    material: 0,
+                });
+            } else {
+                push_quad(
+                    &mut triangles,
+                    [point(k, i), point(k, i + 1), point(k + 1, i + 1), point(k + 1, i)],
+                    [uv(k, fi), uv(k, fj), uv(k + 1, fj), uv(k + 1, fi)],
+                    None,
+                    0,
+                );
+            }
+        }
+    }
+    RawMesh { triangles, materials: vec![material("Piece", [0.8, 0.8, 0.8, 1.0], Some(0))] }
+}
+
+/// Round 8 (Jump small gaps bounded): `n x n` separate closed cubes of side 0.5, one unit apart (centres at
+/// `(i - (n - 1) / 2, 0.25, j - (n - 1) / 2)`), standing on a separate floor quad (y = 0, facing +Y, half extent
+/// `n / 2 + 0.5`); no two parts share a vertex. Islands: the cubes' faces (`push_box` order) in a 10 x 16 grid of
+/// `u` 0..0.5; the floor `u` 0.5..0.99, `v` 0.01..0.99. One material "Floor" referencing texture 0.
+pub fn cubes_on_floor(n: u32) -> RawMesh {
+    let n = n.clamp(1, 5);
+    let mut triangles = Vec::new();
+    let off = (n as f32 - 1.0) * 0.5;
+    for j in 0..n {
+        for i in 0..n {
+            let c = Vec3::new(i as f32 - off, 0.0, j as f32 - off);
+            let base = (j * n + i) * 6;
+            let cell = |f: usize| {
+                let [u0, u1, v0, v1] = atlas_cell(base + f as u32, 10, 16);
+                [u0 * 0.5, u1 * 0.5, v0, v1]
+            };
+            push_box(&mut triangles, c + Vec3::new(-0.25, 0.0, -0.25), c + Vec3::new(0.25, 0.5, 0.25), Some(std::array::from_fn(cell)), 0);
+        }
+    }
+    let e = n as f32 * 0.5 + 0.5;
+    let floor = [Vec3::new(-e, 0.0, e), Vec3::new(e, 0.0, e), Vec3::new(e, 0.0, -e), Vec3::new(-e, 0.0, -e)];
+    push_island_quad(&mut triangles, floor, [0.5, 0.99, 0.01, 0.99], 0);
+    RawMesh { triangles, materials: vec![material("Floor", [0.8, 0.8, 0.8, 1.0], Some(0))] }
+}
+
 // ----- model-file writers -----
 
 /// Standard base64 with padding.

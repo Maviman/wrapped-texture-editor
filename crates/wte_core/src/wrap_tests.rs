@@ -1837,3 +1837,642 @@ fn checkb_a_coarse_mesh_leaves_no_wedge_without_surface_inside_the_picture() {
         assert!(st.covered >= 0.9999 && holes == 0 && st.cut_tris == 0, "{origin:?} {half:?}: {holes} holes, {st:?}");
     }
 }
+
+// ----- round 8 (plan 3.5): the picture lies once, whole and smooth -----
+
+use crate::wrap_param::WrapQuality;
+
+/// Round 8: a document with the cells picture wrapped at `p` on `raw` (texture side `side`): its quality (plan 3.3),
+/// its stats and its ink area over the picture's area.
+pub(crate) fn r8_measure(raw: RawMesh, side: u32, p: Projector) -> (WrapQuality, WrapStatsAlias, f64, Document, StampId) {
+    let (mut doc, id) = doc_with_stamp(raw, side, p);
+    let stats = doc.ensure_wrap_param(id).expect("a parameterization");
+    let q = doc.stamp_wrap_quality(id).expect("a quality");
+    let area = 4.0 * p.half_size.x.abs() as f64 * p.half_size.y.abs() as f64;
+    (q, stats, q.ink_area as f64 / area, doc, id)
+}
+
+/// One measuring line: the quality, the ink ratio and the stats.
+pub(crate) fn r8_line(what: &str, q: &WrapQuality, s: &WrapStatsAlias, ink: f64) -> String {
+    format!(
+        "{what}: ink / picture {ink:.4}, dup {:.3} %, scatter {:.3} %, bins {}, covered {:.5}, cut {}, verts {}, tris {}, {:.1} ms",
+        100.0 * q.dup,
+        100.0 * q.scatter,
+        q.bins,
+        s.covered,
+        s.cut_tris,
+        s.verts,
+        s.tris,
+        s.micros as f64 / 1e3
+    )
+}
+
+/// The bumpy ball of WA20 (`samples::bumpy_sphere(5, 24, 60)`) and a wrapped projector on it, its picture 40 % of
+/// the model's diagonal (2:1).
+pub(crate) fn r8_bumpy_ball() -> (RawMesh, Projector) {
+    let raw = samples::bumpy_sphere(5, 24, 60.0);
+    let model = Model::new(raw.clone(), 64);
+    let (pos, n) = surface_point(&model, Vec3::new(0.3, 0.2, 1.0));
+    let d = model.mesh.diag();
+    (raw, wrapped(pos, n, Vec3::Y, Vec2::new(0.2 * d, 0.1 * d)))
+}
+
+/// Round 8 survey (plan 3.3, first build step): the quality measure on the failure cases of round 6 (WA4 at 60
+/// degrees, the bumpy ball, a picture taller than a torus' girth, a closed lathe piece). Printed, not asserted: the
+/// acceptance tests below assert the limits.
+#[test]
+fn r8_quality_survey() {
+    let amplitude = 60f32.to_radians().tan() / (std::f32::consts::TAU * 2.0);
+    let (ball, ball_p) = r8_bumpy_ball();
+    let cases: Vec<(&str, RawMesh, Projector)> = vec![
+        ("WA4 2 periods 60 deg", samples::bumpy_plate_periods(64, amplitude, 2.0), wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, Vec2::new(0.3, 0.15))),
+        ("WA20 bumpy ball", ball, ball_p),
+        ("WA22 torus, taller than the girth", torus(64, 24), wrapped(Vec3::new(1.3, 0.0, 0.0), Vec3::X, Vec3::Y, Vec2::new(1.5, 1.2))),
+        ("WA21 lathe piece", samples::lathe_piece(), wrapped(Vec3::new(0.18, 0.6, 0.0), Vec3::X, Vec3::Y, Vec2::new(1.34, 1.34))),
+    ];
+    for (what, raw, p) in cases {
+        let (q, s, ink, _, _) = r8_measure(raw, SIDE, p);
+        println!("R8 survey {}", r8_line(what, &q, &s, ink));
+    }
+}
+/// Round 8: WA4 measures plus the quality (dup, scatter) of one bumpy plate.
+fn bumpy_r8(periods: f32, slope_deg: f32) -> (f64, f64, f64, f64, WrapStatsAlias, WrapQuality) {
+    let amplitude = slope_deg.to_radians().tan() / (std::f32::consts::TAU * periods);
+    let half = Vec2::new(0.3, 0.15);
+    let p = wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, half);
+    let (doc, id) = doc_with_stamp(samples::bumpy_plate_periods(64, amplitude, periods), SIDE, p);
+    let area = 4.0 * half.x as f64 * half.y as f64;
+    let ink = doc.stamp_ink_area(id) as f64;
+    let expected = area / 32.0;
+    let cells = cell_areas(&doc, id);
+    let (lo, hi) = cells.iter().fold((f64::INFINITY, 0.0f64), |(lo, hi), &c| (lo.min(c / expected), hi.max(c / expected)));
+    println!("WA4 {periods} periods {slope_deg} deg cells (rows top down): {:?}", cells.iter().map(|c| (c / expected * 100.0).round() / 100.0).collect::<Vec<_>>());
+    let image = doc.layer(doc.stamp_layers(id)[0].1).unwrap().to_dense(SIDE, SIDE);
+    let (inked, smeared) = smear_counts(&image);
+    (ink / area, lo, hi, smeared as f64 / inked.max(1) as f64, doc.stamp_wrap_stats(id).unwrap(), doc.stamp_wrap_quality(id).unwrap())
+}
+
+/// WA4 (round 8): the bumpy plate at 30, 45 and 60 degrees (2 periods), WA4b: 4 periods at 60 degrees. The plan's
+/// limits are asserted.
+#[test]
+fn wa4_r8_bumpy_plates_receive_the_picture_once_whole_and_smooth() {
+    // (periods, slope, ink range, cell range)
+    let cases = [(2.0f32, 30.0f32, (0.90, 1.10), (0.75, 1.30)), (2.0, 45.0, (0.90, 1.10), (0.75, 1.30)), (2.0, 60.0, (0.90, 1.10), (0.75, 1.30)), (4.0, 60.0, (0.85, 1.15), (0.65, 1.50))];
+    let mut failed = Vec::new();
+    for (periods, slope, ink_lim, cell_lim) in cases {
+        let (ink, lo, hi, smear, s, q) = bumpy_r8(periods, slope);
+        let line = format!(
+            "WA4 {periods} periods, {slope} deg: ink {ink:.4} (limit {:.2}-{:.2}), cells {lo:.3}..{hi:.3} (limit {:.2}-{:.2}), smear {:.3} % (1 %), covered {:.5} (0.999), dup {:.3} % (1 %), scatter {:.3} % (2 %), seams {} (0), relaxed {}, flipped {}, stretch {:.3}, rejected {:.4}, cg {}, {:.1} ms",
+            ink_lim.0, ink_lim.1, cell_lim.0, cell_lim.1, 100.0 * smear, s.covered, 100.0 * q.dup, 100.0 * q.scatter, s.seams, s.relaxed, s.flipped, s.stretch, s.rejected, s.cg_iters, s.micros as f64 / 1e3
+        );
+        println!("{line}");
+        let ok = (ink_lim.0..=ink_lim.1).contains(&ink)
+            && lo >= cell_lim.0
+            && hi <= cell_lim.1
+            && smear <= 0.01
+            && s.covered >= 0.999
+            && q.dup <= 0.01
+            && q.scatter <= 0.02
+            && s.seams == 0
+            && (slope <= 30.0 || s.relaxed);
+        if !ok {
+            failed.push(line);
+        }
+    }
+    assert!(failed.is_empty(), "WA4 limits not met:\n{}", failed.join("\n"));
+}
+
+/// The picture's cell areas over the expected share: (lo, hi).
+fn cell_range(doc: &Document, id: StampId, area: f64) -> (f64, f64) {
+    let expected = area / 32.0;
+    cell_areas(doc, id).iter().fold((f64::INFINITY, 0.0f64), |(lo, hi), &c| (lo.min(c / expected), hi.max(c / expected)))
+}
+
+/// WA20: the bumpy ball (high_poly_sphere's case, small).
+#[test]
+fn wa20_a_bumpy_ball_receives_the_picture_once_whole_and_smooth() {
+    let (raw, p) = r8_bumpy_ball();
+    let (q, s, ink, doc, id) = r8_measure(raw, SIDE, p);
+    let area = 4.0 * p.half_size.x as f64 * p.half_size.y as f64;
+    let (lo, hi) = cell_range(&doc, id, area);
+    println!(
+        "WA20 {}, cells {lo:.3}..{hi:.3} (limit 0.70-1.40), seams {} {:?} (0), relaxed {}, flipped {}, stretch {:.3}, rejected {:.4}, cg {}",
+        r8_line("bumpy ball", &q, &s, ink),
+        s.seams,
+        s.seams_by_rule,
+        s.relaxed,
+        s.flipped,
+        s.stretch,
+        s.rejected,
+        s.cg_iters
+    );
+    assert!((0.85..=1.15).contains(&ink), "ink {ink}");
+    assert!(lo >= 0.70 && hi <= 1.40, "cells {lo}..{hi}");
+    assert!(q.dup <= 0.01 && q.scatter <= 0.02, "{q:?}");
+    assert!(s.seams == 0 && s.covered >= 0.99, "{s:?}");
+}
+
+/// WA21: a closed lathe piece under a picture twice its height (square): covered once, cut only where the edges
+/// meet.
+#[test]
+fn wa21_a_closed_piece_is_covered_once_with_cuts_where_the_edges_meet() {
+    let p = wrapped(Vec3::new(0.18, 0.6, 0.0), Vec3::X, Vec3::Y, Vec2::new(1.34, 1.34));
+    let (q, s, ink, doc, _) = r8_measure(samples::lathe_piece(), SIDE, p);
+    let total: f64 = (0..doc.mesh.tri_count())
+        .map(|t| {
+            let p = doc.mesh.tri_positions(t);
+            0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length() as f64
+        })
+        .sum();
+    let picture = 4.0 * 1.34f64 * 1.34;
+    let share = ink * picture / total;
+    println!(
+        "WA21 {}, inked share of the piece {share:.4} (limit 0.95), seams by rule {:?} (only S1 / S2), flipped {} of {} ({:.3} %, limit 1 %)",
+        r8_line("lathe piece", &q, &s, ink),
+        s.seams_by_rule,
+        s.flipped,
+        s.tris,
+        100.0 * s.flipped as f64 / s.tris.max(1) as f64
+    );
+    assert!(share >= 0.95, "share {share}");
+    assert!(q.dup <= 0.01, "{q:?}");
+    assert!(s.seams_by_rule[2..].iter().all(|&n| n == 0), "{s:?}");
+    assert!(s.flipped as f64 <= 0.01 * s.tris as f64, "{s:?}");
+}
+
+/// WA22: a torus under a picture taller than the tube's girth, then larger than the whole torus (the handle: S5).
+#[test]
+fn wa22_a_torus_is_covered_once() {
+    for (what, half) in [("taller than the girth", Vec2::new(1.5, 1.2)), ("larger than the torus", Vec2::new(5.0, 4.0))] {
+        let p = wrapped(Vec3::new(1.3, 0.0, 0.0), Vec3::X, Vec3::Y, half);
+        let (q, s, ink, _, _) = r8_measure(torus(64, 24), SIDE, p);
+        println!("WA22 {}, seams by rule {:?}", r8_line(what, &q, &s, ink), s.seams_by_rule);
+        assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{what}: {q:?}");
+    }
+}
+
+/// WA23: a cone tip and a cube corner: one cut path from the tip / corner (S4), WA5's corner limits.
+#[test]
+fn wa23_a_cone_tip_and_a_cube_corner_are_cut_once() {
+    let cases: Vec<(&str, RawMesh, Projector)> = vec![
+        ("cone tip", cone_fan(48), wrapped(Vec3::new(0.0, 1.0, 0.0), Vec3::Y, Vec3::NEG_Z, Vec2::new(0.4, 0.4))),
+        ("cube corner", samples::seam_cube(1.5), wrapped(Vec3::new(0.55, 0.55, 0.75), Vec3::Z, Vec3::Y, Vec2::new(0.45, 0.45))),
+    ];
+    for (what, raw, p) in cases {
+        let (q, s, ink, doc, id) = r8_measure(raw, SIDE, p);
+        let mut smear = (0usize, 0usize);
+        for (set, layer) in doc.stamp_layers(id) {
+            let st = doc.set(set).unwrap();
+            let (a, b) = smear_counts(&doc.layer(layer).unwrap().to_dense(st.width, st.height));
+            smear.0 += a;
+            smear.1 += b;
+        }
+        let share = smear.1 as f64 / smear.0.max(1) as f64;
+        println!("WA23 {}, seams by rule {:?}, smear {:.3} % (0.5 %), relaxed {}", r8_line(what, &q, &s, ink), s.seams_by_rule, 100.0 * share, s.relaxed);
+        // One cut from the tip / corner: an S4 cone cut (relaxed), or the closure where the fronts meet behind it (the
+        // seed kept by the early-out: the cone and the cube corner are developable away from their tip).
+        assert!(s.seams_by_rule[3] >= 1 || (!s.relaxed && s.cut_tris >= 1), "{what}: no cut from the tip: {s:?}");
+        // The plan's 0.70 (WA5's corner) is reachable at a cube corner (270 of 360 degrees round it); this cone's
+        // surface spans 161 degrees round its tip, so a flat picture centred there has surface under 161 / 360 of it.
+        let reachable = if what == "cone tip" { 0.95 * 0.5 / 1.25f64.sqrt() } else { 0.70 };
+        assert!(share <= 0.005 && s.covered as f64 >= reachable && s.cut_tris <= 8, "{what}: {s:?}");
+    }
+}
+
+/// WA24: Jump small gaps enters only parts under the picture's footprint, and every picture spot lies once.
+#[test]
+fn wa24_jump_small_gaps_is_bounded_by_the_footprint() {
+    // WA17's setup: the picture from the floor up the cube's side.
+    let p = with_options(wrapped(Vec3::new(0.0, 0.0, 1.2), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false);
+    let (q, s, ink, doc, id) = r8_measure(samples::uv_cube_on_floor(), SIDE, p);
+    let (cube, _) = ink_in(&doc, id, 0..12);
+    println!("WA24 cube on floor: {}, cube texels {cube}, jumps {}", r8_line("WA17", &q, &s, ink), s.jumps);
+    assert!(cube > 1000, "the cube's side receives nothing");
+    assert!((0.95..=1.10).contains(&ink) && q.dup <= 0.01, "ink {ink}, {q:?}");
+    // A 5 x 5 grid of cubes: the picture centred between four of them.
+    let p = with_options(wrapped(Vec3::new(0.5, 0.0, 0.5), Vec3::Y, Vec3::NEG_Z, Vec2::new(0.8, 0.8)), true, false);
+    let (q, s, ink, _, _) = r8_measure(samples::cubes_on_floor(5), SIDE, p);
+    // Parts under the footprint: the floor and the cubes whose base meets the picture square (x, z in -0.3..1.3).
+    let under = 1 + (0..5)
+        .flat_map(|j| (0..5).map(move |i| (i as f32 - 2.0, j as f32 - 2.0)))
+        .filter(|&(x, z)| x + 0.25 >= -0.3 && x - 0.25 <= 1.3 && z + 0.25 >= -0.3 && z - 0.25 <= 1.3)
+        .count() as u32;
+    println!("WA24 grid: {}, parts entered {} (limit {under})", r8_line("cubes", &q, &s, ink), s.jumps + 1);
+    assert!(s.jumps < under, "entered {} parts, {under} lie under the picture", s.jumps + 1);
+    assert!(ink <= 1.15 && q.dup <= 0.02, "ink {ink}, {q:?}");
+}
+
+/// WA25: where the layout is exact the owner test drops nothing and the seed is kept (no relaxation).
+#[test]
+fn wa25_the_owner_test_is_inert_where_the_layout_is_exact() {
+    let src = cells();
+    let cyl = Model::new(samples::cylinder(SEG, 1.0, 2.0), 512);
+    let half = Vec2::new((0.45 * perimeter()) as f32, 0.5);
+    let mut cases: Vec<(&str, &Model, Projector)> = Vec::new();
+    let (pos, n, _) = cylinder_anchor(Some(20), 0.1);
+    cases.push(("WA1 away from the seam", &cyl, wrapped(pos, n, Vec3::Y, half)));
+    let (pos, n, _) = cylinder_anchor(None, 0.1);
+    cases.push(("WA1 on the seam", &cyl, wrapped(pos, n, Vec3::Y, half)));
+    let (pos, n, _) = cylinder_anchor(Some(20), 0.0);
+    cases.push(("WA3", &cyl, wrapped(pos, n, Vec3::Y, Vec2::new((0.75 * perimeter()) as f32, 0.5))));
+    cases.push(("WA18 1.5 turns", &cyl, with_options(wrapped(pos, n, Vec3::Y, Vec2::new((0.75 * perimeter()) as f32, 0.5)), false, true)));
+    cases.push(("WA18 2.5 turns", &cyl, with_options(wrapped(pos, n, Vec3::Y, Vec2::new((1.25 * perimeter()) as f32, 0.5)), false, true)));
+    let cube = Model::new(samples::seam_cube(1.5), 512);
+    cases.push(("WA5 edge", &cube, wrapped(Vec3::new(0.35, -0.1, 0.75), Vec3::Z, Vec3::Y, Vec2::new(0.7, 0.3))));
+    let (raw, _) = two_blocks_gap(0.005);
+    let blocks = Model::new(raw, 512);
+    for half in [Vec2::new(0.6, 0.2), Vec2::new(0.6, 0.03)] {
+        cases.push(("WA16", &blocks, with_options(wrapped(Vec3::new(0.7, 1.0, 0.5), Vec3::Y, Vec3::NEG_Z, half), true, false)));
+    }
+    for (what, model, p) in cases {
+        let param = model.param(&src, &p).expect("a parameterization");
+        let s = param.stats();
+        println!("WA25 {what}: relaxed {}, rejected {:.5}, cut {}, covered {:.4}", s.relaxed, s.rejected, s.cut_tris, s.covered);
+        assert!(!s.relaxed && s.rejected == 0.0, "{what}: {s:?}");
+    }
+}
+
+/// WA26: determinism with relaxation and jumps: 1, 2 and 5 threads, Preview and Full, two runs.
+#[test]
+fn wa26_the_relaxed_wrap_is_deterministic() {
+    let src = cells();
+    let (ball, ball_p) = r8_bumpy_ball();
+    let cases: Vec<(RawMesh, Projector)> = vec![
+        (ball, ball_p),
+        (torus(64, 24), wrapped(Vec3::new(1.3, 0.0, 0.0), Vec3::X, Vec3::Y, Vec2::new(1.5, 1.2))),
+        (samples::cubes_on_floor(5), with_options(wrapped(Vec3::new(0.5, 0.0, 0.5), Vec3::Y, Vec3::NEG_Z, Vec2::new(0.8, 0.8)), true, false)),
+    ];
+    let pools: Vec<rayon::ThreadPool> = [1, 2, 5].iter().map(|&n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap()).collect();
+    for (raw, p) in cases {
+        let model = Model::new(raw, 512);
+        for quality in [BakeQuality::Preview, BakeQuality::Full] {
+            let a = snapshot(&model, &src, &p, quality);
+            for pool in &pools {
+                assert!(pool.install(|| snapshot(&model, &src, &p, quality)) == a, "{quality:?}: depends on the thread count");
+            }
+            assert!(snapshot(&model, &src, &p, quality) == a, "{quality:?}: depends on the run");
+        }
+    }
+}
+
+/// WA27: reuse after relaxation (WA11 on the bumpy ball): a scale inside the bucket, a tint and a flip reuse, and the
+/// reused bake equals a fresh one.
+#[test]
+fn wa27_a_relaxed_parameterization_is_reused_exactly() {
+    let (raw, p0) = r8_bumpy_ball();
+    let model = Model::new(raw.clone(), 512);
+    let diag = model.mesh.diag() as f64;
+    let tw = model.maps.iter().map(|m| m.stats.texel_world).fold(0.0f32, f32::max) as f64;
+    let half_for = |k: i32, pixels: u32| ((diag * 1.25f64.powi(k) * 1.002 - 2.0 * tw) / (1.0 + 2.0 / pixels as f64)) as f32;
+    let p = Projector { half_size: Vec2::new(half_for(-3, PIC[0]), half_for(-4, PIC[1])), ..p0 };
+    let (mut doc, id) = doc_with_stamp(raw.clone(), 512, p);
+    let (first, fresh0) = doc.wrap_cache_probe(id);
+    let first = first.expect("the bake cached its parameterization");
+    assert!(first.stats().relaxed, "the bumpy ball must be relaxed: {:?}", first.stats());
+    let same = |doc: &Document, what: &str| {
+        let (now, fresh) = doc.wrap_cache_probe(id);
+        assert!(Arc::ptr_eq(&now.unwrap(), &first) && fresh == fresh0, "{what} recomputed the parameterization");
+    };
+    let scaled = Projector { half_size: p.half_size * 1.2, ..p };
+    doc.set_stamp_placement(id, Placement::Projected(scaled), Commit::Final).unwrap();
+    same(&doc, "a scale of 1.2");
+    let reused_bake = doc_state(&mut doc);
+    doc.set_stamp_tint(id, [255, 200, 100, 255], Commit::Final).unwrap();
+    same(&doc, "a tint");
+    doc.set_stamp_placement(id, Placement::Projected(Projector { flip_x: true, ..scaled }), Commit::Final).unwrap();
+    same(&doc, "a flip");
+    let (mut fresh_doc, _) = doc_with_stamp(raw, 512, scaled);
+    let fresh_bake = doc_state(&mut fresh_doc);
+    assert_eq!(fresh_bake.sets, reused_bake.sets, "the reused and the fresh parameterization bake differently");
+}
+
+/// WA29: the wrap Preview and ParamOnly jobs (3.4).
+#[test]
+fn wa29_wrap_preview_and_param_jobs() {
+    use crate::stamp_job::{StampJobKind, WrapPreview};
+    let (raw, p) = r8_bumpy_ball();
+    let moved = |k: f32| Projector { origin: p.origin + Vec3::new(0.02 * k, 0.01 * k, 0.0), ..p };
+    // The synchronous Preview and the job's Preview give the same bytes.
+    let (mut sync, id) = doc_with_stamp(raw.clone(), 256, p);
+    sync.set_stamp_placement(id, Placement::Projected(moved(1.0)), Commit::Preview).unwrap();
+    let want = doc_state(&mut sync);
+    let (mut doc, id2) = doc_with_stamp(raw.clone(), 256, p);
+    assert_eq!(id, id2);
+    doc.set_defer_wrap_previews(true);
+    let before = doc_state(&mut doc);
+    doc.set_stamp_placement(id, Placement::Projected(moved(1.0)), Commit::Preview).unwrap();
+    assert_eq!(doc_state(&mut doc).sets, before.sets, "a deferred wrapped Preview baked on the calling thread");
+    assert!(doc.has_stale_wrap_previews() && !doc.has_stale_previews());
+    let job = doc.next_wrap_preview_job().expect("a Preview job");
+    assert_eq!(job.kind(), StampJobKind::Preview);
+    assert!(doc.next_wrap_preview_job().is_none());
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Applied { due_again: false });
+    assert_eq!(doc_state(&mut doc).sets, want.sets, "the job's Preview differs from the synchronous one");
+    // Moved since: the last good picture is applied and the stamp waits again.
+    doc.set_stamp_placement(id, Placement::Projected(moved(2.0)), Commit::Preview).unwrap();
+    let job = doc.next_wrap_preview_job().unwrap();
+    doc.set_stamp_placement(id, Placement::Projected(moved(3.0)), Commit::Preview).unwrap();
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Applied { due_again: true });
+    assert!(doc.has_stale_wrap_previews());
+    // Esc, a Final, undo and another document make an output stale; nothing changes.
+    let job = doc.next_wrap_preview_job().unwrap();
+    assert!(doc.cancel_pending_edit());
+    let state = doc_state(&mut doc);
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Stale, "Esc");
+    assert_eq!(doc_state(&mut doc).sets, state.sets);
+    doc.set_stamp_placement(id, Placement::Projected(moved(4.0)), Commit::Preview).unwrap();
+    let job = doc.next_wrap_preview_job().unwrap();
+    doc.set_stamp_placement(id, Placement::Projected(moved(4.0)), Commit::Final).unwrap();
+    let state = doc_state(&mut doc);
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Stale, "Final");
+    assert_eq!(doc_state(&mut doc).sets, state.sets);
+    doc.set_stamp_placement(id, Placement::Projected(moved(5.0)), Commit::Preview).unwrap();
+    let job = doc.next_wrap_preview_job().unwrap();
+    doc.undo();
+    let state = doc_state(&mut doc);
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Stale, "undo");
+    assert_eq!(doc_state(&mut doc).sets, state.sets);
+    let (mut other, _) = doc_with_stamp(raw.clone(), 256, p);
+    other.set_defer_wrap_previews(true);
+    other.set_stamp_placement(id, Placement::Projected(moved(6.0)), Commit::Preview).unwrap();
+    doc.set_stamp_placement(id, Placement::Projected(moved(6.0)), Commit::Preview).unwrap();
+    let job = other.next_wrap_preview_job().unwrap();
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Stale, "another document");
+    doc.set_stamp_placement(id, Placement::Projected(moved(6.0)), Commit::Final).unwrap();
+    // ParamOnly: after an undo the cache does not serve the placement; the job fills it without a pixel change.
+    doc.undo();
+    assert!(doc.stamp_wrap_stats(id).is_none());
+    let job = doc.wrap_param_job(id).expect("a ParamOnly job");
+    assert_eq!(job.kind(), StampJobKind::ParamOnly);
+    let state = doc_state(&mut doc);
+    assert!(doc.apply_wrap_param(job.run()));
+    assert_eq!(doc_state(&mut doc).sets, state.sets, "a ParamOnly job changed pixels");
+    assert!(doc.stamp_wrap_stats(id).is_some() && doc.wrap_param_job(id).is_none());
+    // Turning the mode off bakes a waiting stamp here.
+    doc.set_stamp_placement(id, Placement::Projected(moved(7.0)), Commit::Preview).unwrap();
+    doc.set_defer_wrap_previews(false);
+    assert!(!doc.has_stale_wrap_previews());
+}
+
+// ----- check:A (round 8): trying to break the relaxed wrap (plan 6, process row 2) -----
+
+/// check:A: `raw` with its UVs squeezed into the u range `u0..u0 + w` (two parts sharing one texture set).
+fn uv_squeezed(mut raw: RawMesh, u0: f32, w: f32) -> RawMesh {
+    for t in &mut raw.triangles {
+        if let Some(uv) = t.uvs.as_mut() {
+            *uv = uv.map(|q| Vec2::new(u0 + w * q.x, q.y));
+        }
+    }
+    raw
+}
+
+/// check:A: a mug: the open cylinder (r 1, h 2, u in 0..0.5) and a handle (a torus of major radius 0.5, minor 0.15, in
+/// the x-y plane, centred at x = 1.3: it runs into the cylinder; u in 0.5..1). Two parts; the handle has genus 1.
+fn mug() -> RawMesh {
+    let mut out = uv_squeezed(grid_cylinder(SEG, 32), 0.0, 0.5);
+    let handle = uv_squeezed(torus(48, 16), 0.5, 0.5);
+    out.triangles.extend(handle.triangles.into_iter().map(|mut t| {
+        t.positions = t.positions.map(|p| Vec3::new(0.5 * p.x + 1.3, -0.5 * p.z, 0.5 * p.y));
+        t.normals = None;
+        t
+    }));
+    out
+}
+
+/// check:A: the open cylinder of `samples::cylinder` (r 1, y in -1..1) with `rows` rows of quads (one UV island).
+fn grid_cylinder(seg: u32, rows: u32) -> RawMesh {
+    let point = |i: u32, j: u32| {
+        let a = std::f32::consts::TAU * (i % seg) as f32 / seg as f32;
+        Vec3::new(a.cos(), -1.0 + 2.0 * j as f32 / rows as f32, -a.sin())
+    };
+    let mut out = Vec::new();
+    for j in 0..rows {
+        for i in 0..seg {
+            let (u0, u1) = (0.02 + 0.96 * i as f32 / seg as f32, 0.02 + 0.96 * (i + 1) as f32 / seg as f32);
+            let (v0, v1) = (0.02 + 0.96 * (rows - j - 1) as f32 / rows as f32, 0.02 + 0.96 * (rows - j) as f32 / rows as f32);
+            raw_quad(&mut out, [point(i, j), point(i + 1, j), point(i + 1, j + 1), point(i, j + 1)], [u0, u1, v0, v1]);
+        }
+    }
+    textured("Body", out)
+}
+
+/// check:A: a 64 x 32 cylinder with radial bumps (`k` round, `rows` half periods along the axis, relative amplitude
+/// `a`): a bumpy closed band.
+fn bumpy_band(a: f32, k: f32, rows: f32) -> RawMesh {
+    let mut raw = grid_cylinder(SEG, 32);
+    for t in &mut raw.triangles {
+        t.positions = t.positions.map(|p| {
+            let s = 1.0 + a * (k * p.z.atan2(p.x)).sin() * (rows * std::f32::consts::FRAC_PI_2 * p.y).cos();
+            Vec3::new(p.x * s, p.y, p.z * s)
+        });
+        t.normals = None;
+    }
+    raw
+}
+
+/// check:A: `raw` (a grid of `n` x `n` quads, two triangles each) with the first edge of some triangles split at a
+/// point `off` (relative) from its midpoint towards the opposite corner, the gap filled by the triangle (a, m, b): a
+/// sliver (`off` > 0). `sparse`: only the first triangle of every third quad in both directions, alternating between a
+/// sliver and a zero-area filler (`off` = 0: the import drops it, leaving an isolated crack, a T-junction); else every
+/// triangle with a sliver (the mesh stays closed).
+fn slivered(raw: RawMesh, n: usize, off: f32, sparse: bool) -> RawMesh {
+    let mut out = Vec::with_capacity(raw.triangles.len() * 3);
+    for (i, t) in raw.triangles.iter().enumerate() {
+        let (qx, qy) = ((i / 2) % n, (i / 2) / n);
+        let pick = !sparse || (i % 2 == 0 && qx % 3 == 1 && qy % 3 == 1);
+        if !pick {
+            out.push(t.clone());
+            continue;
+        }
+        let [a, b, c] = t.positions;
+        let uv = t.uvs.unwrap_or([Vec2::ZERO; 3]);
+        let o = if !sparse || (qx / 3 + qy / 3) % 2 == 0 { off } else { 0.0 };
+        let m = (a + b) * 0.5 + (c - (a + b) * 0.5) * o;
+        let mu = (uv[0] + uv[1]) * 0.5 + (uv[2] - (uv[0] + uv[1]) * 0.5) * o;
+        out.push(RawTriangle { positions: [a, m, c], uvs: Some([uv[0], mu, uv[2]]), normals: None, material: t.material });
+        out.push(RawTriangle { positions: [m, b, c], uvs: Some([mu, uv[1], uv[2]]), normals: None, material: t.material });
+        out.push(RawTriangle { positions: [a, b, m], uvs: Some([uv[0], uv[1], mu]), normals: None, material: t.material });
+    }
+    RawMesh { triangles: out, materials: raw.materials }
+}
+
+/// check:A: every coordinate of a parameterization is finite and its stats are in range.
+fn assert_sane(what: &str, param: &WrapParam) {
+    let s = param.stats();
+    for (_, corners) in testkit::layers(param) {
+        assert!(corners.iter().flatten().flatten().all(|v| v.is_finite()), "{what}: a non-finite coordinate");
+    }
+    assert!(s.covered.is_finite() && (0.0..=1.0).contains(&s.covered), "{what}: {s:?}");
+    assert!(s.stretch.is_finite() && s.rejected.is_finite() && (0.0..=1.0).contains(&s.rejected), "{what}: {s:?}");
+}
+
+/// check:A: shapes the plan names (process row 2): a mug's handle (Jump on: the handle is another part with genus 1),
+/// a cone with the spine through its tip, a closed piece with Jump on (one part: Jump changes nothing), Overlap on a
+/// bumpy band. No panic, finite, deterministic on 1 and 5 threads; the quality is printed and checked against the
+/// sweep's limits (ink <= 1.3 of the inked surface where the picture lies once, dup <= 3 %, scatter <= 5 %).
+#[test]
+fn check_a8_shapes_that_try_to_break_the_relaxed_wrap() {
+    let src = cells();
+    let pools: Vec<rayon::ThreadPool> = [1, 5].iter().map(|&n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap()).collect();
+    let lathe_p = wrapped(Vec3::new(0.18, 0.6, 0.0), Vec3::X, Vec3::Y, Vec2::new(0.6, 0.3));
+    // The cone of `cone_fan` (tip (0, 1, 0), base radius 0.5): a point half way up, the picture's x along the slope.
+    let slope_n = Vec3::new(1.0, 0.5, 0.0).normalize();
+    let cases: Vec<(&str, RawMesh, Projector, bool)> = vec![
+        ("mug, Jump on", mug(), with_options(wrapped(Vec3::new(1.0, 0.0, 0.0), Vec3::X, Vec3::Y, Vec2::new(0.9, 0.7)), true, false), false),
+        ("mug, Jump off", mug(), wrapped(Vec3::new(1.0, 0.0, 0.0), Vec3::X, Vec3::Y, Vec2::new(0.9, 0.7)), false),
+        ("torus, round the inner ring", torus(64, 24), wrapped(Vec3::new(0.7, 0.0, 0.0), Vec3::NEG_X, Vec3::Y, Vec2::new(1.6, 0.25)), true),
+        ("cone, spine through the tip", cone_fan(200), wrapped(Vec3::new(0.25, 0.5, 0.0), slope_n, Vec3::Z, Vec2::new(0.7, 0.15)), true),
+        ("cone 48, spine through the tip", cone_fan(48), wrapped(Vec3::new(0.25, 0.5, 0.0), slope_n, Vec3::Z, Vec2::new(0.7, 0.3)), true),
+        ("lathe piece, Jump off", samples::lathe_piece(), lathe_p, true),
+        ("lathe piece, Jump on", samples::lathe_piece(), with_options(lathe_p, true, false), true),
+        ("bumpy band, Overlap 2.5 x round", bumpy_band(0.08, 8.0, 3.0), with_options(wrapped(Vec3::new(1.0, 0.0, 0.0), Vec3::X, Vec3::Y, Vec2::new((1.25 * perimeter()) as f32, 0.4)), false, true), false),
+        ("bumpy band, Ends meet", bumpy_band(0.08, 8.0, 3.0), wrapped(Vec3::new(1.0, 0.0, 0.0), Vec3::X, Vec3::Y, Vec2::new((0.75 * perimeter()) as f32, 0.4)), true),
+    ];
+    let mut failed = Vec::new();
+    let mut lathe_bytes = Vec::new();
+    for (what, raw, p, limits) in cases {
+        let model = Model::new(raw.clone(), 512);
+        let param = model.param(&src, &p).unwrap_or_else(|| panic!("{what}: no parameterization"));
+        assert_sane(what, &param);
+        let s = param.stats();
+        let reference = snapshot(&model, &src, &p, BakeQuality::Full);
+        for pool in &pools {
+            assert!(pool.install(|| snapshot(&model, &src, &p, BakeQuality::Full)) == reference, "{what}: thread count changed the bake");
+        }
+        if what.starts_with("lathe") {
+            lathe_bytes.push(bake_bytes(&model, &src, &p));
+        }
+        let (q, _, ink, _, _) = r8_measure(raw, 512, p);
+        // The ink over the inked share of the picture (a picture larger than the surface under it has ink < covered).
+        let ink_once = ink / (s.covered as f64).max(1e-6);
+        println!(
+            "check:A8 {}, ink / covered {ink_once:.4}, relaxed {}, seams {} {:?}, flipped {}, stretch {:.3}, rejected {:.4}, jumps {}, turns {}",
+            r8_line(what, &q, &s, ink),
+            s.relaxed,
+            s.seams,
+            s.seams_by_rule,
+            s.flipped,
+            s.stretch,
+            s.rejected,
+            s.jumps,
+            s.turns
+        );
+        if limits && !(ink_once <= 1.3 && q.dup <= 0.03 && q.scatter <= 0.05) {
+            failed.push(format!("{what}: ink / covered {ink_once:.4}, {q:?}"));
+        }
+    }
+    assert!(lathe_bytes.len() == 2 && lathe_bytes[0] == lathe_bytes[1], "Jump on changed a one-part closed piece");
+    assert!(failed.is_empty(), "sweep limits not met:\n{}", failed.join("\n"));
+}
+
+/// check:A: slivers and zero-area triangles in the relaxation (WA4's 45-degree plate: every triangle split with a
+/// sliver filling the gap, and a sparse set of T-junction cracks whose zero-area fillers the import drops): finite, no
+/// fold, no seam round a crack, the same quality as the clean plate within a few %.
+#[test]
+fn check_a8_slivers_and_zero_area_triangles_in_the_relaxation() {
+    let amplitude = 45f32.to_radians().tan() / (std::f32::consts::TAU * 2.0);
+    let p = wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, Vec2::new(0.3, 0.15));
+    let src = cells();
+    let clean = samples::bumpy_plate_periods(64, amplitude, 2.0);
+    let (qc, sc, inkc, _, _) = r8_measure(clean.clone(), SIDE, p);
+    println!("check:A8 {}", r8_line("clean plate 45 deg", &qc, &sc, inkc));
+    for (off, sparse) in [(1e-4f32, false), (1e-6, false), (1e-4, true)] {
+        let raw = slivered(clean.clone(), 64, off, sparse);
+        let model = Model::new(raw.clone(), 512);
+        let param = model.param(&src, &p).expect("a parameterization");
+        assert_sane("slivered", &param);
+        let (q, s, ink, _, _) = r8_measure(raw, SIDE, p);
+        println!("check:A8 {}, relaxed {}, seams {}, flipped {}, stretch {:.3}, rejected {:.4}, cg {}", r8_line(&format!("slivered x{off} sparse {sparse}"), &q, &s, ink), s.relaxed, s.seams, s.flipped, s.stretch, s.rejected, s.cg_iters);
+        // Slivers leave the energies (|cot| > 1e3, plan 3.1); the stray S2 edge measured at the spine's end with
+        // dense slivers (one edge, outside the picture's cells) is allowed, no other seam.
+        assert!(s.relaxed && s.seams <= 1 && s.seams_by_rule[0] + s.seams_by_rule[2..].iter().sum::<u32>() == 0 && s.covered >= 0.999, "{s:?}");
+        assert!((ink - inkc).abs() <= 0.03 && q.dup <= 0.01 && q.scatter <= 0.02, "slivers changed the quality: ink {ink} vs {inkc}, {q:?}");
+    }
+}
+
+/// check:A: sizes and places on the relaxed path: a huge picture (3 x the bumpy ball), a tiny one (1e-3 of it), and a
+/// stamp at the corner and the edge of WA4's 45-degree plate (a quarter and a half on the surface). No panic, finite,
+/// the boundary cases cover their share once.
+#[test]
+fn check_a8_huge_tiny_and_boundary_stamps_on_the_relaxed_path() {
+    let src = cells();
+    let (ball, p0) = r8_bumpy_ball();
+    let model = Model::new(ball, 256);
+    let d = model.mesh.diag();
+    for (what, half) in [("huge", Vec2::new(3.0 * d, 1.5 * d)), ("tiny", Vec2::new(1e-3 * d, 5e-4 * d))] {
+        let p = Projector { half_size: half, ..p0 };
+        let started = Instant::now();
+        let param = model.param(&src, &p);
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        if let Some(param) = param {
+            assert_sane(what, &param);
+            for quality in [BakeQuality::Full, BakeQuality::Preview] {
+                model.bake(&param, &src, &p, quality);
+            }
+            println!("check:A8 bumpy ball {what}: {ms:.0} ms, {:?}", param.stats());
+        } else {
+            println!("check:A8 bumpy ball {what}: no parameterization ({ms:.0} ms)");
+        }
+    }
+    let amplitude = 45f32.to_radians().tan() / (std::f32::consts::TAU * 2.0);
+    for (what, origin, share) in [("plate corner", Vec3::new(0.5, 0.5, 0.0), 0.25), ("plate edge", Vec3::new(0.5, 0.0, 0.0), 0.5)] {
+        let p = wrapped(origin, Vec3::Z, Vec3::Y, Vec2::new(0.2, 0.1));
+        let (q, s, ink, _, _) = r8_measure(samples::bumpy_plate_periods(64, amplitude, 2.0), SIDE, p);
+        println!("check:A8 {}, want covered {share}, relaxed {}, seams {}, flipped {}", r8_line(what, &q, &s, ink), s.relaxed, s.seams, s.flipped);
+        assert!(s.reached_edge && (s.covered as f64 - share).abs() < 0.05, "{what}: {s:?}");
+        assert!(q.dup <= 0.01 && q.scatter <= 0.02, "{what}: {q:?}");
+    }
+}
+
+/// check:A: the relaxation's parallel kernels (from `PAR_MIN_UNKNOWNS` unknowns; none of the test meshes reaches it)
+/// give the bits of the serial ones: the bumpy ball with the threshold lowered to 1, on 1 and 12 threads.
+#[test]
+fn check_a8_the_parallel_relaxation_equals_the_serial_one() {
+    use std::sync::atomic::Ordering;
+    let src = cells();
+    let (raw, p) = r8_bumpy_ball();
+    let model = Model::new(raw, 256);
+    let serial = snapshot(&model, &src, &p, BakeQuality::Full);
+    let serial_layers = testkit::layers(&model.param(&src, &p).unwrap());
+    crate::wrap_param::relax_par_min_for_tests().store(1, Ordering::Relaxed);
+    let runs: Vec<_> = [1usize, 12]
+        .iter()
+        .map(|&n| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
+            pool.install(|| (snapshot(&model, &src, &p, BakeQuality::Full), testkit::layers(&model.param(&src, &p).unwrap())))
+        })
+        .collect();
+    crate::wrap_param::relax_par_min_for_tests().store(crate::wrap_param::PAR_MIN_UNKNOWNS, Ordering::Relaxed);
+    for (snap, layers) in runs {
+        assert!(layers == serial_layers, "the parallel relaxation gives other coordinates");
+        assert!(snap == serial, "the parallel relaxation bakes differently");
+    }
+}
+
+/// check:A: an undo while a wrap Preview job runs, then a new Preview edit of the same stamp before the late output
+/// lands: the output is stale (another pending edit); a removed stamp's output is stale too.
+#[test]
+fn check_a8_undo_and_a_new_edit_while_a_preview_job_runs() {
+    use crate::stamp_job::WrapPreview;
+    let (raw, p) = r8_bumpy_ball();
+    let moved = |k: f32| Projector { origin: p.origin + Vec3::new(0.02 * k, 0.01 * k, 0.0), ..p };
+    let (mut doc, id) = doc_with_stamp(raw, 256, p);
+    doc.set_defer_wrap_previews(true);
+    doc.set_stamp_placement(id, Placement::Projected(moved(1.0)), Commit::Final).unwrap();
+    doc.set_stamp_placement(id, Placement::Projected(moved(2.0)), Commit::Preview).unwrap();
+    let job = doc.next_wrap_preview_job().expect("a Preview job");
+    doc.undo();
+    doc.set_stamp_placement(id, Placement::Projected(moved(3.0)), Commit::Preview).unwrap();
+    let state = doc_state(&mut doc);
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Stale, "an output of an undone edit was applied to a new one");
+    assert_eq!(doc_state(&mut doc).sets, state.sets);
+    // The new edit's own job applies.
+    let job = doc.next_wrap_preview_job().expect("the new edit's job");
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Applied { due_again: false });
+    doc.set_stamp_placement(id, Placement::Projected(moved(4.0)), Commit::Final).unwrap();
+    doc.set_stamp_placement(id, Placement::Projected(moved(5.0)), Commit::Preview).unwrap();
+    let job = doc.next_wrap_preview_job().unwrap();
+    doc.remove_stamp(id).unwrap();
+    assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Stale, "a removed stamp's output");
+    assert!(doc.stamp(id).is_none());
+}

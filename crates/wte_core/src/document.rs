@@ -143,6 +143,11 @@ pub(crate) struct BakeSets {
     /// Round 6: the parameterizations of wrapped stamps (4.4). Derived data: not in snapshots, not saved, not part of
     /// the structure state (kept in this boxed struct so that `Document` stays small).
     pub(crate) wrap_params: WrapCache,
+    /// Round 8 (3.4): wrapped stamps' Preview bakes go to jobs (`set_defer_wrap_previews`).
+    pub(crate) defer_wrap_previews: bool,
+    /// Round 8: the serial of the open pending edit (bumped when the first stamp joins `preview_baked`); a wrap Preview
+    /// job's output applies only within the edit it was made in.
+    pub(crate) edit_serial: u64,
 }
 
 // Compile-time thread-safety checks (section 4.6).

@@ -41,6 +41,18 @@ pub(crate) enum JobPicture {
     TextDraw { spec: Box<TextSpec>, own: Option<OwnFace>, fallback: Arc<fontdue::Font> },
 }
 
+/// Round 8 (3.4): what a job does.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StampJobKind {
+    /// The Full bake of a stamp (round 5).
+    Full,
+    /// The Preview bake of a wrapped stamp off the UI thread: its parameterization (the cached one when it serves)
+    /// and `bake_wrapped(.., Preview)` (`Document::next_wrap_preview_job`, `apply_wrap_preview`).
+    Preview,
+    /// The parameterization of a wrapped stamp only, no pixels (`Document::wrap_param_job`, `apply_wrap_param`).
+    ParamOnly,
+}
+
 /// Owned inputs of one Full bake of one stamp. `Send + 'static`: everything is owned or shared by `Arc`.
 pub struct StampBakeJob {
     pub(crate) id: StampId,
@@ -52,6 +64,9 @@ pub struct StampBakeJob {
     pub(crate) picture: JobPicture,
     /// Round 6: the stamp's cached parameterization (wrapped stamps); `run` uses it when it serves the placement.
     pub(crate) wrap: Option<Arc<WrapParam>>,
+    /// Round 8: what the job does, and the document's pending-edit serial it was made in (Preview jobs).
+    pub(crate) kind: StampJobKind,
+    pub(crate) serial: u64,
 }
 
 /// The parameterization a wrapped bake used and whether it was built for it (`true`) or reused.
@@ -80,6 +95,9 @@ pub struct StampBakeOutput {
     pub(crate) elapsed: Duration,
     /// Round 6: the parameterization of a wrapped bake (`apply_final_bake` caches it).
     pub(crate) wrap: Option<UsedWrap>,
+    /// Round 8: the job's kind and pending-edit serial.
+    pub(crate) kind: StampJobKind,
+    pub(crate) serial: u64,
 }
 
 /// What `Document::apply_final_bake` did with an output.
@@ -93,6 +111,16 @@ pub enum FinalBake {
     Stale,
     /// A stroke is open: nothing changed; apply the output again after the stroke.
     Busy(Box<StampBakeOutput>),
+}
+
+/// Round 8 (3.4): what `Document::apply_wrap_preview` did with the output of a wrapped stamp's Preview job.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WrapPreview {
+    /// The pixels were applied (the last good picture). `due_again`: the stamp changed since the job was made (it is
+    /// waiting for its next Preview job: `next_wrap_preview_job`).
+    Applied { due_again: bool },
+    /// The output belongs to an earlier state (Esc, undo, redo, a Final, another document, a removed stamp): dropped.
+    Stale,
 }
 
 // Compile-time thread-safety checks (section 4.6).
@@ -130,10 +158,16 @@ impl StampBakeJob {
         matches!(self.object.source, StampSource::Text(_))
     }
 
+    /// Round 8: what the job does.
+    pub fn kind(&self) -> StampJobKind {
+        self.kind
+    }
+
     /// Bakes on the calling thread's rayon pool (the synchronous path). Never creates a pool.
     pub fn run(self) -> StampBakeOutput {
         let started = Instant::now();
-        let StampBakeJob { id, object, mesh, bvh, maps, picture, wrap } = self;
+        let StampBakeJob { id, object, mesh, bvh, maps, picture, wrap, kind, serial } = self;
+        let quality = if kind == StampJobKind::Preview { BakeQuality::Preview } else { BakeQuality::Full };
         let mut drawn = None;
         let mut used = None;
         let result = (|| -> Result<Vec<(TextureSetId, SparseBuf)>, EditError> {
@@ -149,12 +183,17 @@ impl StampBakeJob {
                 }
             };
             Ok(match object.placement {
+                Placement::Projected(p) if p.mode == SurfaceMode::Wrap && kind == StampJobKind::ParamOnly => {
+                    used = wrap_param_only(id, &mesh, &bvh, &maps, mips.size(), &p, wrap);
+                    Vec::new()
+                }
                 Placement::Projected(p) if p.mode == SurfaceMode::Wrap => {
-                    let (baked, w) = wrap_bake(id, &mesh, &bvh, &maps, &mips, object.tint, &p, wrap, BakeQuality::Full);
+                    let (baked, w) = wrap_bake(id, &mesh, &bvh, &maps, &mips, object.tint, &p, wrap, quality);
                     used = w;
                     baked
                 }
-                Placement::Projected(p) => bake_projected(&mesh, &bvh, &maps, &mips, object.tint, &p, BakeQuality::Full),
+                _ if kind == StampJobKind::ParamOnly => Vec::new(),
+                Placement::Projected(p) => bake_projected(&mesh, &bvh, &maps, &mips, object.tint, &p, quality),
                 Placement::Uv(p) => {
                     let map = maps.get(p.set.index()).ok_or(EditError::UnknownSet)?;
                     let buf = bake_uv(&mips, object.tint, &p, map);
@@ -162,7 +201,7 @@ impl StampBakeJob {
                 }
             })
         })();
-        StampBakeOutput { id, object, mesh, maps, result, picture: drawn, elapsed: started.elapsed(), wrap: used }
+        StampBakeOutput { id, object, mesh, maps, result, picture: drawn, elapsed: started.elapsed(), wrap: used, kind, serial }
     }
 
     /// `run` inside the core's bake pool (`available_parallelism - 1` threads, at least 1): the bake's data-parallel
@@ -205,7 +244,7 @@ pub(crate) fn wrap_bake(
     let baked = bake_wrapped(mesh, maps, &param, mips, tint, p, quality);
     let s = param.stats_for(p);
     let line = format!(
-        "wrap: stamp {} param {} verts {} tris in {:.1} ms ({}), covered {:.1} %, cut {}, turns {}, jumps {}; bake {:.1} ms ({:?})",
+        "wrap: stamp {} param {} verts {} tris in {:.1} ms ({}), covered {:.1} %, cut {}, turns {}, jumps {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}; bake {:.1} ms ({:?})",
         id.0,
         s.verts,
         s.tris,
@@ -215,6 +254,11 @@ pub(crate) fn wrap_bake(
         s.cut_tris,
         s.turns,
         s.jumps,
+        s.relaxed,
+        s.seams,
+        s.stretch * 100.0,
+        s.rejected * 100.0,
+        s.cg_iters,
         started.elapsed().as_secs_f64() * 1e3 - param_ms,
         quality,
     );
@@ -223,6 +267,40 @@ pub(crate) fn wrap_bake(
         BakeQuality::Preview => log::debug!("{line}"),
     }
     (baked, Some(UsedWrap { param, fresh }))
+}
+
+/// Round 8 (3.4): the parameterization of stamp `id` only (a `ParamOnly` job): the cached one when it serves `p`, else
+/// a fresh one (logged as `wrap: stamp N param ... (fresh, param only)`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn wrap_param_only(
+    id: StampId,
+    mesh: &Arc<MeshData>,
+    bvh: &Bvh,
+    maps: &[Arc<TexelMap>],
+    src_size: [u32; 2],
+    p: &Projector,
+    cached: Option<Arc<WrapParam>>,
+) -> Option<UsedWrap> {
+    if let Some(w) = cached.filter(|w| w.serves_inputs(mesh, maps, src_size, p)) {
+        return Some(UsedWrap { param: w, fresh: false });
+    }
+    let param = Arc::new(wrap_param(mesh, bvh, maps, src_size, p)?);
+    let s = param.stats_for(p);
+    log::info!(
+        "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh, param only), covered {:.1} %, cut {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}",
+        id.0,
+        s.verts,
+        s.tris,
+        s.micros as f64 / 1e3,
+        s.covered * 100.0,
+        s.cut_tris,
+        s.relaxed,
+        s.seams,
+        s.stretch * 100.0,
+        s.rejected * 100.0,
+        s.cg_iters
+    );
+    Some(UsedWrap { param, fresh: true })
 }
 
 impl std::fmt::Debug for StampBakeOutput {
@@ -255,5 +333,10 @@ impl StampBakeOutput {
     /// True when the bake failed.
     pub fn is_error(&self) -> bool {
         self.result.is_err()
+    }
+
+    /// Round 8: the kind of the job that made it.
+    pub fn kind(&self) -> StampJobKind {
+        self.kind
     }
 }

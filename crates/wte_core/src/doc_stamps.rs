@@ -29,7 +29,7 @@ use crate::pixel::{PixelBuf, SparseBuf};
 use crate::pixel_ops::{PremulMips, resize, unpremultiply};
 use crate::stamp::{BakeQuality, Placement, Projector, StampObject, StampSource, SurfaceMode, text_stamp_name};
 use crate::stamp_bake::{bake_projected, bake_uv, fit_projector_depth, projector_depth_is_auto};
-use crate::stamp_job::{FinalBake, JobPicture, OwnFace, StampBakeJob, StampBakeOutput, text_fonts_of, wrap_bake};
+use crate::stamp_job::{FinalBake, JobPicture, OwnFace, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview, text_fonts_of, wrap_bake};
 use crate::texel_map::SurfacePoint;
 use crate::wrap_param::{WrapParam, WrapStats, wrap_param};
 use crate::text::frame::{Keep, refit_placement};
@@ -969,12 +969,17 @@ impl Document {
             // replaces every cache a Preview bake would write: it gets no Preview bake first (fix round 3, R3-4: each
             // Final edit cost two bakes). A deferred Preview bake still waiting (`preview_stale`) ends with that flush.
             if commit == Commit::Preview {
-                if self.defer_preview_bakes {
-                    // Baked by `bake_stale_previews` (or by the final bake of the flush).
+                if self.defer_preview_bakes || self.wrap_preview_deferred(id) {
+                    // Baked by `bake_stale_previews` (or by the final bake of the flush); round 8: a wrapped stamp's by
+                    // its Preview job (`next_wrap_preview_job`).
                     self.bakes.preview_stale.insert(id);
                 } else if let Err(e) = self.bake_and_apply(id, BakeQuality::Preview) {
                     log::warn!("stamp {}: the preview bake failed: {e}", id.0);
                 }
+            }
+            // Round 8: a new pending edit gets a new serial.
+            if self.preview_baked.is_empty() {
+                self.bakes.edit_serial += 1;
             }
             self.preview_baked.insert(id);
         }
@@ -995,16 +1000,22 @@ impl Document {
         }
     }
 
-    /// True when a deferred Preview bake is waiting (`set_defer_preview_bakes`).
+    /// True when a deferred Preview bake is waiting (`set_defer_preview_bakes`). Round 8: wrapped stamps waiting for
+    /// their Preview job (`set_defer_wrap_previews`) are not counted (`has_stale_wrap_previews`).
     pub fn has_stale_previews(&self) -> bool {
-        !self.bakes.preview_stale.is_empty()
+        self.bakes.preview_stale.iter().any(|&id| !self.wrap_preview_deferred(id))
     }
 
     /// Runs the deferred Preview bakes (ascending stamp id). No history entry; the stamps stay in the pending edit.
+    /// Round 8: a wrapped stamp stays waiting for its Preview job while `set_defer_wrap_previews` is on.
     pub fn bake_stale_previews(&mut self) {
         let ids: Vec<StampId> = std::mem::take(&mut self.bakes.preview_stale).into_iter().collect();
         for id in ids {
             if self.stamp(id).is_none() {
+                continue;
+            }
+            if self.wrap_preview_deferred(id) {
+                self.bakes.preview_stale.insert(id);
                 continue;
             }
             if let Err(e) = self.bake_and_apply(id, BakeQuality::Preview) {
@@ -1380,6 +1391,8 @@ impl Document {
             maps: self.texel_maps(),
             picture,
             wrap,
+            kind: StampJobKind::Full,
+            serial: self.bakes.edit_serial,
         })
     }
 
@@ -1524,6 +1537,222 @@ impl Document {
             }
         }
         total as f32
+    }
+
+    /// Round 8 (plan 3.3): how once and how whole the picture of wrapped stamp `id` lies, from its baked texels and the
+    /// cached parameterization of its placement (`None` without one: see `ensure_wrap_param`; `None` for a stamp that
+    /// is not wrapped). Over the inked texels (alpha >= 128, gutter texels excluded) the surface point (`locate`) and
+    /// its picture point (`local_of`, top turn) are taken; picture points are binned in cells of
+    /// `c = 2 x max(source pixel in world units, texel_world)`. `dup`: share of the inked bins whose surface points
+    /// spread over more than `6 c` (the diagonal of their bounding box); `scatter`: share of the 4-neighbour pairs of
+    /// inked bins whose surface centroids lie more than `6 c` apart. For tests, the scenario and the gate.
+    pub fn stamp_wrap_quality(&self, id: StampId) -> Option<crate::wrap_param::WrapQuality> {
+        use glam::DVec3;
+        let p = self.wrapped_projector(id)?;
+        let w = self.serving_wrap_param(id)?;
+        let (hw, hh) = (p.half_size.x.abs() as f64, p.half_size.y.abs() as f64);
+        let [sw, sh] = w.src_size();
+        let src_px = (2.0 * hw / sw.max(1) as f64).max(2.0 * hh / sh.max(1) as f64);
+        let c = 2.0 * src_px.max(w.texel_world() as f64);
+        if !(c > 0.0 && c.is_finite()) {
+            return None;
+        }
+        // Per bin: bounding box, sum and count of the surface points.
+        let mut bins: std::collections::BTreeMap<(i64, i64), (DVec3, DVec3, DVec3, u32)> = std::collections::BTreeMap::new();
+        for (set, layer) in self.stamp_layers(id) {
+            let (Some(set), Some(layer)) = (self.set(set), self.layer(layer)) else { continue };
+            let cache = match &layer.kind {
+                crate::layer::LayerKind::Stamp { cache, .. } | crate::layer::LayerKind::Text { cache, .. } => cache,
+                crate::layer::LayerKind::Raster(_) => continue,
+            };
+            let map = &set.texel_map;
+            for part in cache.parts() {
+                let r = part.rect;
+                for y in r.y0..r.y1 {
+                    for x in r.x0..r.x1 {
+                        if part.get(x, y)[3] < 128 {
+                            continue;
+                        }
+                        let Some((_, false)) = map.owner(x as u32, y as u32) else { continue };
+                        let Some(sp) = map.locate(&self.mesh, x as u32, y as u32) else { continue };
+                        let Some(l) = w.local_of(sp.tri, sp.bary) else { continue };
+                        let key = ((l.x as f64 / c).floor() as i64, (l.y as f64 / c).floor() as i64);
+                        let q = DVec3::new(sp.position.x as f64, sp.position.y as f64, sp.position.z as f64);
+                        let e = bins.entry(key).or_insert((q, q, DVec3::ZERO, 0));
+                        e.0 = e.0.min(q);
+                        e.1 = e.1.max(q);
+                        e.2 += q;
+                        e.3 += 1;
+                    }
+                }
+            }
+        }
+        let far = 6.0 * c;
+        let dup = bins.values().filter(|b| b.0.distance(b.1) > far).count();
+        let (mut pairs, mut apart) = (0usize, 0usize);
+        for (&(x, y), b) in &bins {
+            let centroid = b.2 / b.3 as f64;
+            for key in [(x + 1, y), (x, y + 1)] {
+                if let Some(o) = bins.get(&key) {
+                    pairs += 1;
+                    if centroid.distance(o.2 / o.3 as f64) > far {
+                        apart += 1;
+                    }
+                }
+            }
+        }
+        Some(crate::wrap_param::WrapQuality {
+            ink_area: self.stamp_ink_area(id),
+            dup: dup as f32 / bins.len().max(1) as f32,
+            scatter: apart as f32 / pairs.max(1) as f32,
+            bins: bins.len() as u32,
+        })
+    }
+
+    /// True when stamp `id` is wrapped and its Preview bakes go to jobs (`set_defer_wrap_previews`).
+    fn wrap_preview_deferred(&self, id: StampId) -> bool {
+        self.bakes.defer_wrap_previews && self.wrapped_projector(id).is_some()
+    }
+
+    /// Round 8 (3.4): while on, a Preview edit of a wrapped stamp bakes nothing on the calling thread: the stamp waits in
+    /// the deferred set for its Preview job (`next_wrap_preview_job`, run anywhere, `apply_wrap_preview`); projected and
+    /// UV stamps are unchanged (their Previews stay on the calling thread). Default off. Turning it off bakes the
+    /// waiting stamps here (unless `set_defer_preview_bakes` holds them).
+    pub fn set_defer_wrap_previews(&mut self, on: bool) {
+        self.bakes.defer_wrap_previews = on;
+        if !on && !self.defer_preview_bakes {
+            self.bake_stale_previews();
+        }
+    }
+
+    /// True while wrapped stamps' Preview bakes go to jobs.
+    pub fn defers_wrap_previews(&self) -> bool {
+        self.bakes.defer_wrap_previews
+    }
+
+    /// True when a wrapped stamp waits for its Preview job.
+    pub fn has_stale_wrap_previews(&self) -> bool {
+        self.bakes.preview_stale.iter().any(|&id| self.wrap_preview_deferred(id))
+    }
+
+    /// Round 8 (3.4): the Preview job of the lowest waiting wrapped stamp (taken out of the deferred set), made for the
+    /// stamp as it is now and the open pending edit's serial. The picture is the one the synchronous Preview bake uses
+    /// (`source_mips` at Preview quality: a text's draft picture is drawn here, as before), so the job's bytes equal the
+    /// synchronous Preview's. A stamp whose inputs cannot be prepared is logged and skipped.
+    pub fn next_wrap_preview_job(&mut self) -> Option<StampBakeJob> {
+        loop {
+            let id = self.bakes.preview_stale.iter().copied().find(|&id| self.wrapped_projector(id).is_some())?;
+            self.bakes.preview_stale.remove(&id);
+            match self.make_wrap_job(id, StampJobKind::Preview) {
+                Ok(job) => return Some(job),
+                Err(e) => log::warn!("stamp {}: the preview bake cannot start: {e}", id.0),
+            }
+        }
+    }
+
+    /// A Preview or ParamOnly job of wrapped stamp `id` (the Preview picture, the cached parameterization).
+    fn make_wrap_job(&mut self, id: StampId, kind: StampJobKind) -> Result<StampBakeJob, EditError> {
+        let object = self.stamp(id).ok_or(EditError::UnknownStamp)?.clone();
+        let mips = self.source_mips(id, &object.source, raster_quality(BakeQuality::Preview))?;
+        let picture = match object.source {
+            StampSource::Image { .. } => JobPicture::Image(mips),
+            StampSource::Text(_) => JobPicture::TextCached(mips),
+        };
+        Ok(StampBakeJob {
+            id,
+            wrap: self.bakes.wrap_params.get(id),
+            object,
+            mesh: Arc::clone(&self.mesh),
+            bvh: Arc::clone(&self.bvh),
+            maps: self.texel_maps(),
+            picture,
+            kind,
+            serial: self.bakes.edit_serial,
+        })
+    }
+
+    /// True when `out` was made for this document's mesh and texel maps.
+    fn same_inputs(&self, out: &StampBakeOutput) -> bool {
+        Arc::ptr_eq(&out.mesh, &self.mesh)
+            && out.maps.len() == self.sets.len()
+            && out.maps.iter().zip(&self.sets).all(|(m, set)| Arc::ptr_eq(m, &set.texel_map))
+    }
+
+    /// Round 8 (3.4): applies the output of a wrap Preview job. Applied when the stamp exists, is still in the same
+    /// open pending edit (`preview_baked`, the job's serial) and the mesh and maps are the job's — also when the stamp
+    /// changed since (the last good picture): then it waits again for its next job (`due_again`). Its parameterization
+    /// is cached when it serves the current placement. Esc, undo, redo, a Final (a flush), a removed stamp or another
+    /// document's output: `Stale`, nothing changes. A stroke in progress: `Stale` and the stamp waits again.
+    pub fn apply_wrap_preview(&mut self, out: StampBakeOutput) -> WrapPreview {
+        let id = out.id;
+        // check:B: a stamp that is no longer wrapped (turned to Project in the same pending edit) never takes a wrapped
+        // picture: its own Preview comes from the calling thread.
+        let live = out.kind == StampJobKind::Preview
+            && self.wrapped_projector(id).is_some()
+            && self.preview_baked.contains(&id)
+            && out.serial == self.bakes.edit_serial
+            && self.same_inputs(&out);
+        if !live {
+            // Round 8 (request 1 of package B, applied by check:B): a Preview job that lands after the release (a
+            // Final / flush) was often made for the final placement: its parameterization is cached when it serves the
+            // stamp now (no pixels change), so the Final job that waited for it reuses it instead of building it again
+            // (plan 2.5-3). A parameterization that serves is the one a fresh build would give (WA27), so storing it
+            // after Esc / undo is harmless too.
+            if out.kind == StampJobKind::Preview
+                && self.same_inputs(&out)
+                && let Some(used) = out.wrap
+                && self.wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
+            {
+                self.store_wrap_param(id, used.param, used.fresh);
+            }
+            return WrapPreview::Stale;
+        }
+        if self.stroke.is_some() {
+            self.bakes.preview_stale.insert(id);
+            return WrapPreview::Stale;
+        }
+        let due_again = self.stamp(id).is_some_and(|s| *s != out.object);
+        let StampBakeOutput { result, wrap, .. } = out;
+        match result {
+            Ok(baked) => self.apply_bake(id, baked),
+            Err(e) => log::warn!("stamp {}: the preview bake failed: {e}", id.0),
+        }
+        if let Some(used) = wrap
+            && self.wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
+        {
+            self.store_wrap_param(id, used.param, used.fresh);
+        }
+        if due_again {
+            self.bakes.preview_stale.insert(id);
+        }
+        WrapPreview::Applied { due_again }
+    }
+
+    /// Round 8 (3.4): the ParamOnly job of wrapped stamp `id` when the cache holds no parameterization of its current
+    /// placement (after an open, an undo): the off-thread form of `ensure_wrap_param`. `None` when there is nothing to do.
+    pub fn wrap_param_job(&mut self, id: StampId) -> Option<StampBakeJob> {
+        self.wrapped_projector(id)?;
+        if self.serving_wrap_param(id).is_some() {
+            return None;
+        }
+        self.make_wrap_job(id, StampJobKind::ParamOnly).ok()
+    }
+
+    /// Round 8 (3.4): caches the parameterization of a ParamOnly job's output when it serves stamp's current placement
+    /// on this document's mesh and maps (true); no pixel changes.
+    pub fn apply_wrap_param(&mut self, out: StampBakeOutput) -> bool {
+        if out.kind != StampJobKind::ParamOnly || !self.same_inputs(&out) {
+            return false;
+        }
+        let id = out.id;
+        let Some(p) = self.wrapped_projector(id) else { return false };
+        match out.wrap {
+            Some(used) if used.param.serves(&self.mesh, &p) => {
+                self.store_wrap_param(id, used.param, used.fresh);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Test access: the cached parameterization of stamp `id` and the number of fresh builds so far.

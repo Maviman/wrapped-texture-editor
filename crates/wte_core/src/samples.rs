@@ -1389,6 +1389,62 @@ pub fn step_corner() -> RawMesh {
     RawMesh { triangles, materials: vec![material("Step", [0.8, 0.8, 0.8, 1.0], Some(0))] }
 }
 
+/// Round 9 (WA35, T5): a capped cylinder: the side of `cylinder(64, 1.0, 2.0)` (the same positions per column, `y` in
+/// -1..1, here in 16 rows; `u = 0.02 + 0.96 i / 64`, `v` 0.5 at the top to 0.98 at the bottom) with a hemispherical
+/// dome on top (8 rings to the pole at `y = 2`, sharing the side's top ring; `v` 0.48 at its rim to 0.02 at the pole,
+/// the same `u` per segment). One material "Capped" referencing texture 0. The first `2 x 64 x 16` triangles are the
+/// side.
+pub fn capped_cylinder() -> RawMesh {
+    let (seg, rows, rings) = (64u32, 16u32, 8u32);
+    let ring = |i: u32, k: u32| {
+        let a = TAU * (i % seg) as f32 / seg as f32;
+        let phi = 0.5 * PI * k as f32 / rings as f32;
+        let (r, y) = if k == 0 { (1.0f32, 1.0f32) } else { (phi.cos(), 1.0 + phi.sin()) };
+        Vec3::new(r * a.cos(), y, -r * a.sin())
+    };
+    let side = |i: u32, j: u32| {
+        let a = TAU * (i % seg) as f32 / seg as f32;
+        Vec3::new(a.cos(), -1.0 + 2.0 * j as f32 / rows as f32, -a.sin())
+    };
+    let u = |i: u32| 0.02 + 0.96 * i as f32 / seg as f32;
+    let side_v = |j: u32| 0.98 - 0.48 * j as f32 / rows as f32;
+    let dome_v = |k: u32| 0.48 - 0.46 * k as f32 / rings as f32;
+    let mut triangles = Vec::new();
+    for j in 0..rows {
+        for i in 0..seg {
+            push_quad(
+                &mut triangles,
+                [side(i, j), side(i + 1, j), side(i + 1, j + 1), side(i, j + 1)],
+                [Vec2::new(u(i), side_v(j)), Vec2::new(u(i + 1), side_v(j)), Vec2::new(u(i + 1), side_v(j + 1)), Vec2::new(u(i), side_v(j + 1))],
+                None,
+                0,
+            );
+        }
+    }
+    for k in 0..rings - 1 {
+        for i in 0..seg {
+            push_quad(
+                &mut triangles,
+                [ring(i, k), ring(i + 1, k), ring(i + 1, k + 1), ring(i, k + 1)],
+                [Vec2::new(u(i), dome_v(k)), Vec2::new(u(i + 1), dome_v(k)), Vec2::new(u(i + 1), dome_v(k + 1)), Vec2::new(u(i), dome_v(k + 1))],
+                None,
+                0,
+            );
+        }
+    }
+    let pole = Vec3::new(0.0, 2.0, 0.0);
+    for i in 0..seg {
+        let k = rings - 1;
+        triangles.push(RawTriangle {
+            positions: [ring(i, k), ring(i + 1, k), pole],
+            normals: None,
+            uvs: Some([Vec2::new(u(i), dome_v(k)), Vec2::new(u(i + 1), dome_v(k)), Vec2::new(0.5 * (u(i) + u(i + 1)), 0.02)]),
+            material: 0,
+        });
+    }
+    RawMesh { triangles, materials: vec![material("Capped", [0.8, 0.8, 0.8, 1.0], Some(0))] }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

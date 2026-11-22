@@ -69,7 +69,13 @@ pub(crate) use relax::{OwnerGrid, owner_scale};
 pub(crate) fn relax_par_min_for_tests() -> &'static std::sync::atomic::AtomicUsize {
     &relax::PAR_MIN_TEST
 }
-pub use relax::{BURY_REACH, CONE_CUT_DEG, CONE_RADIUS, ISO_TOL, OWNER_MAX_CELLS, OWNER_SAME, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
+/// Round 9 (T5), test builds: the exact region's switch and outcome on the calling thread (`relax::EXACT_REGION`,
+/// `relax::EXACT_OUTCOME`).
+#[cfg(test)]
+pub(crate) fn relax_exact_for_tests() -> (&'static std::thread::LocalKey<std::cell::Cell<bool>>, &'static std::thread::LocalKey<std::cell::Cell<(u32, bool)>>) {
+    (&relax::EXACT_REGION, &relax::EXACT_OUTCOME)
+}
+pub use relax::{BURY_REACH, CONE_CUT_DEG, CONE_RADIUS, EXACT_STRAIN, ISO_TOL, OWNER_MAX_CELLS, OWNER_SAME, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
 
 /// What a parameterization covers and how it went (for the panel, the log and the tests).
 #[derive(Copy, Clone, Debug, PartialEq)]

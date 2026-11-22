@@ -2754,6 +2754,8 @@ fn wa26_wa27_round9_cases_are_deterministic() {
         ("WA24", samples::uv_cube_on_floor(), with_options(wrapped(Vec3::new(0.0, 0.0, 1.2), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false)),
         ("WA31 8,192", samples::uv_cube_on_floor_n(64), floor_p),
         ("WA32 torus", torus.1, torus.2),
+        // check:A: WA35's capped cylinder (the exact region).
+        ("WA35 capped cylinder", samples::capped_cylinder(), wrapped(cylinder_anchor(Some(20), 0.9).0, cylinder_anchor(Some(20), 0.9).1, Vec3::Y, Vec2::new(0.3, 0.6))),
     ];
     let pools: Vec<rayon::ThreadPool> = [1, 2, 5].iter().map(|&n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap()).collect();
     for (what, raw, p) in cases {
@@ -3037,4 +3039,196 @@ fn check_a9_threads_and_texture_sizes() {
         assert_eq!(WrapStatsAlias { micros: 0, ..a.stats() }, WrapStatsAlias { micros: 0, ..b.stats() }, "{what}: the stats differ");
         println!("A9 {what}: 1 = 12 threads, 256^2 = 2,048^2");
     }
+}
+
+// ----- round 9, A5 (T5): the exact region (check:A) -----
+
+/// A plate `x`, `y` in -0.5..0.5 facing +Z, 80 x 80 quads, with one smooth bump `z = h exp(-(d / w)^2)` round `c`
+/// (steepest slope `slope_deg`; cut to 0 beyond `3 w`), one UV island.
+fn a9_bump_plate(c: Vec2, w: f32, slope_deg: f32) -> RawMesh {
+    // The steepest slope of `h exp(-(d/w)^2)` is `h sqrt(2) exp(-1/2) / w`.
+    let h = slope_deg.to_radians().tan() * w / (std::f32::consts::SQRT_2 * (-0.5f32).exp());
+    let n = 80u32;
+    let at = |i: u32, j: u32| {
+        let (x, y) = (i as f32 / n as f32 - 0.5, j as f32 / n as f32 - 0.5);
+        let d2 = (Vec2::new(x, y) - c).length_squared() / (w * w);
+        let z = if d2 < 9.0 { h * (-d2).exp() } else { 0.0 };
+        Vec3::new(x, y, z)
+    };
+    let mut t = Vec::new();
+    a9_grid(&mut t, n, n, [0.02, 0.98, 0.02, 0.98], &at);
+    textured("BumpPlate", t)
+}
+
+/// A flat cone (apex `(0, h, 0)`, base radius 1, 64 x 16) whose apex angle deficit is `deficit_deg`, and its `h`.
+fn a9_flat_cone(deficit_deg: f32) -> (RawMesh, f32) {
+    let sin_a = 1.0 - deficit_deg / 360.0;
+    let h = (1.0 - sin_a * sin_a).sqrt() / sin_a;
+    let (seg, rings) = (64u32, 16u32);
+    let at = |i: u32, k: u32| {
+        let a = std::f32::consts::TAU * (i % seg) as f32 / seg as f32;
+        let r = k as f32 / rings as f32;
+        if k == 0 { Vec3::new(0.0, h, 0.0) } else { Vec3::new(r * a.cos(), h * (1.0 - r), -r * a.sin()) }
+    };
+    let mut t = Vec::new();
+    for k in 0..rings {
+        for i in 0..seg {
+            let isl = a9_sub([0.02, 0.98, 0.02, 0.98], i, k, seg, rings);
+            if k == 0 {
+                t.push(raw_tri([at(i, 1), at(i + 1, 1), at(i, 0)], [Vec2::new(isl[0], isl[2]), Vec2::new(isl[1], isl[2]), Vec2::new(0.5 * (isl[0] + isl[1]), isl[3])]));
+            } else {
+                raw_quad(&mut t, [at(i, k + 1), at(i + 1, k + 1), at(i + 1, k), at(i, k)], isl);
+            }
+        }
+    }
+    (textured("FlatCone", t), h)
+}
+
+/// The bake of `p` on `model` against an analytic layout: per texel of set 0, the picture point `truth(triangle,
+/// barycentrics)` (stamp-local, `None` to skip), compared with `truth_pixel` inside the picture by 2 source texels.
+fn a9_compare(model: &Model, image: &PixelBuf, src: &PremulMips, p: &Projector, truth: &dyn Fn(u32, [f64; 3]) -> Option<(f64, f64)>) -> Errors {
+    let (hw, hh) = (p.half_size.x.abs() as f64, p.half_size.y.abs() as f64);
+    let (bx, by) = (2.0 * hw / PIC[0] as f64, 2.0 * hh / PIC[1] as f64);
+    let map = &model.maps[0];
+    let mut errors = Errors::default();
+    for y in 0..map.height {
+        for x in 0..map.width {
+            let Some(sp) = map.locate(&model.mesh, x, y) else { continue };
+            let Some((a, h)) = truth(sp.tri, sp.bary.map(|v| v as f64)) else { continue };
+            if a.abs() > hw - 2.0 * bx || h.abs() > hh - 2.0 * by {
+                continue;
+            }
+            let pos = model.mesh.tri_positions(sp.tri);
+            let uv = model.mesh.tri_uvs(sp.tri).map(|q| q * Vec2::new(map.width as f32, map.height as f32));
+            let tw = ((0.5 * (pos[1] - pos[0]).cross(pos[2] - pos[0]).length()) / (0.5 * (uv[1] - uv[0]).perp_dot(uv[2] - uv[0]).abs())).sqrt();
+            errors.add(image.get(x, y), truth_pixel(src, p, a, h, tw));
+        }
+    }
+    errors
+}
+
+/// WA35 (round 9, T5): the exact region. A capped cylinder with the picture half on the side, half on the dome: the
+/// side's texels are the exact unrolling, the dome is relaxed; a plate with one 45 degree bump in the picture: the
+/// flat texels are exact, the bump is relaxed; a 20 degree cone (the exact pins disagree round its apex): the strain
+/// check falls back to the strip pins (the result is the one without the exact region).
+#[test]
+fn wa35_exact_parts_stay_exact() {
+    use crate::wrap_param::relax_exact_for_tests as exact;
+    let src = cells();
+    let mut failed: Vec<String> = Vec::new();
+    let mut check = |ok: bool, what: String| {
+        if !ok {
+            failed.push(what);
+        }
+    };
+    let wa1 = |e: &Errors| e.n > 1000 && e.share() >= 0.999 && e.max <= 8;
+    // The capped cylinder: on face 20, the picture from y 0.3 to 1.5 (0.7 on the side, 0.5 over the dome's rim).
+    let model = Model::new(samples::capped_cylinder(), SIDE);
+    let (pos, n, along0) = cylinder_anchor(Some(20), 0.9);
+    let p = wrapped(pos, n, Vec3::Y, Vec2::new(0.3, 0.6));
+    let param = model.param(&src, &p).expect("a parameterization");
+    let (pinned, fell_back) = exact().1.with(|o| o.get());
+    let s = param.stats();
+    let image = &model.bake(&param, &src, &p, BakeQuality::Full)[0];
+    let side_tris = 2 * 64 * 16;
+    let side_truth = |tri: u32, b: [f64; 3]| -> Option<(f64, f64)> {
+        if tri >= side_tris {
+            return None;
+        }
+        // `cylinder_truth`'s unrolling (the side has the WA1 cylinder's columns).
+        let pos = model.mesh.tri_positions(tri);
+        let uvs = model.mesh.tri_uvs(tri);
+        let col = |u: f32| ((u as f64 - 0.02) / 0.96 * SEG as f64).round();
+        let along: [f64; 3] = std::array::from_fn(|i| col(uvs[i].x) * side() - along0);
+        let per = perimeter();
+        let centroid = (along[0] + along[1] + along[2]) / 3.0;
+        let shift = -per * (centroid / per).round();
+        Some(((0..3).map(|i| b[i] * (along[i] + shift)).sum(), (0..3).map(|i| b[i] * pos[i].y as f64).sum::<f64>() - 0.9))
+    };
+    let errors = a9_compare(&model, image, &src, &p, &side_truth);
+    // The same with the strip pins only (round 8's relaxation), for the notes.
+    exact().0.with(|e| e.set(false));
+    let off = model.param(&src, &p).expect("a parameterization");
+    exact().0.with(|e| e.set(true));
+    let off_errors = a9_compare(&model, &model.bake(&off, &src, &p, BakeQuality::Full)[0], &src, &p, &side_truth);
+    println!("WA35 capped cylinder, strip pins only: side texels {off_errors:?} share {:.5}, cg {}", off_errors.share(), off.stats().cg_iters);
+    let (q, rs, ink, _, _) = r8_measure(samples::capped_cylinder(), SIDE, p);
+    println!(
+        "WA35 capped cylinder: side texels {errors:?} share {:.5}; exact wedges {pinned}, fell back {fell_back}; {}, seams {:?}, relaxed {}, rejected {}, cg {}",
+        errors.share(),
+        r8_line("capped", &q, &rs, ink),
+        rs.seams_by_rule,
+        rs.relaxed,
+        rs.rejected,
+        rs.cg_iters
+    );
+    check(s.relaxed && pinned > 0 && !fell_back, format!("capped cylinder: the exact region was not used: {s:?}"));
+    check(wa1(&errors), format!("capped cylinder side: {:.4} % within 2/255 (limit 99.9 %), max {} (limit 8)", 100.0 * errors.share(), errors.max));
+    check(s.seams == 0 && q.scatter <= 0.02, format!("capped cylinder: seams {}, scatter {}", s.seams, q.scatter));
+    check(s.rejected == 0.0, format!("WA25 (extended): the owner drops on the exact part: rejected {}", s.rejected));
+    // The picture on the side just below the dome (y 0.25..0.95): the seed is exact there (the early-out keeps it,
+    // with or without the exact region).
+    let (pos, n, along0) = cylinder_anchor(Some(20), 0.6);
+    let p = wrapped(pos, n, Vec3::Y, Vec2::new(0.3, 0.35));
+    let low_truth = |tri: u32, b: [f64; 3]| side_truth(tri, b).map(|(a, h)| (a, h + 0.9 - 0.6));
+    let _ = along0;
+    let mut low = Vec::new();
+    for on in [false, true] {
+        exact().0.with(|e| e.set(on));
+        let param = model.param(&src, &p).expect("a parameterization");
+        let (pinned, fell_back) = exact().1.with(|o| o.get());
+        let e = a9_compare(&model, &model.bake(&param, &src, &p, BakeQuality::Full)[0], &src, &p, &low_truth);
+        println!("WA35 capped cylinder, picture below the dome, exact region {on}: side texels {e:?} share {:.5}; exact wedges {pinned}, fell back {fell_back}, relaxed {}, cg {}", e.share(), param.stats().relaxed, param.stats().cg_iters);
+        low.push(e);
+    }
+    exact().0.with(|e| e.set(true));
+    check(wa1(&low[1]), format!("capped cylinder, picture below the dome: {:.4} % within 2/255 (limit 99.9 %), max {} (limit 8)", 100.0 * low[1].share(), low[1].max));
+    // The plate with a 45 degree bump inside the picture, off the centre line (its shadow lies beyond the picture).
+    let raw = a9_bump_plate(Vec2::new(0.1, 0.12), 0.04, 45.0);
+    let model = Model::new(raw.clone(), SIDE);
+    let p = wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, Vec2::new(0.4, 0.2));
+    let param = model.param(&src, &p).expect("a parameterization");
+    let (pinned, fell_back) = exact().1.with(|o| o.get());
+    let s = param.stats();
+    let image = &model.bake(&param, &src, &p, BakeQuality::Full)[0];
+    let errors = a9_compare(&model, image, &src, &p, &|tri, b| {
+        let pos = model.mesh.tri_positions(tri);
+        if pos.iter().any(|v| v.z != 0.0) {
+            return None;
+        }
+        Some(((0..3).map(|i| b[i] * pos[i].x as f64).sum(), (0..3).map(|i| b[i] * pos[i].y as f64).sum()))
+    });
+    let (q, rs, ink, _, _) = r8_measure(raw, SIDE, p);
+    println!(
+        "WA35 bump plate: flat texels {errors:?} share {:.5}; exact wedges {pinned}, fell back {fell_back}; {}, seams {:?}, relaxed {}, cg {}",
+        errors.share(),
+        r8_line("bump plate", &q, &rs, ink),
+        rs.seams_by_rule,
+        rs.relaxed,
+        rs.cg_iters
+    );
+    check(s.relaxed && pinned > 0 && !fell_back, format!("bump plate: the exact region was not used: {s:?}"));
+    check(wa1(&errors), format!("bump plate, flat part: {:.4} % within 2/255 (limit 99.9 %), max {} (limit 8)", 100.0 * errors.share(), errors.max));
+    check(s.seams == 0 && q.scatter <= 0.02, format!("bump plate: seams {}, scatter {}", s.seams, q.scatter));
+    // The 20 degree cone: the apex inside the picture, beside the centre line.
+    let (raw, h) = a9_flat_cone(20.0);
+    let model = Model::new(raw, SIDE);
+    let slope = h.atan2(1.0);
+    let at = Vec3::new(0.3, h * 0.7, 0.0);
+    let n = Vec3::new(slope.sin(), slope.cos(), 0.0);
+    let up = Vec3::new(-slope.cos(), slope.sin(), 0.0);
+    let p = wrapped(at, n, up, Vec2::new(0.45, 0.4));
+    let with = model.param(&src, &p).expect("a parameterization");
+    let (pinned, fell_back) = exact().1.with(|o| o.get());
+    exact().0.with(|e| e.set(false));
+    let without = model.param(&src, &p);
+    exact().0.with(|e| e.set(true));
+    let without = without.expect("a parameterization");
+    println!("WA35 20 degree cone: exact wedges {pinned}, fell back {fell_back}, {:?}", with.stats());
+    check(with.stats().relaxed && pinned > 0 && fell_back, format!("20 degree cone: the strain check did not trip: {:?}", with.stats()));
+    let bits = |l: Vec<testkit::Layer>| l.into_iter().map(|(t, c)| (t, c.iter().flatten().flatten().map(|v| v.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
+    check(bits(testkit::layers(&with)) == bits(testkit::layers(&without)), "20 degree cone: the fallback is not the strip-only result".into());
+    assert!(failed.is_empty(), "WA35 limits not met:
+{}", failed.join("
+"));
 }

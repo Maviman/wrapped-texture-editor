@@ -132,7 +132,9 @@ helix ends where its traces pass beside each other (`passed`, `ends_share`). An 
 net curvature within a radius exceeds 45 degrees (rivets, bevels, grooves no longer cut). The relaxation starts from
 the Fermi layout (spine foot and signed geodesic distance) and runs ARAP only (no LSCM). The reach has no texel term,
 so the layout does not depend on the texture's resolution. `WrapStats::lost_cut` reports picture lost inside the
-laid outline. Details 6.5a "Round 9". Not done: T5 (exact region, the cut order's first item), package B (speed).
+laid outline. check:A added T5: laid vertices whose seed triangles are all isometric, connected to the strip, are
+pinned at their seed positions (the exact region; a strain check falls back to the strip pins). Details 6.5a "Round
+9". Not done: package B (speed).
 
 ### 1.7 Round 7 (brush speed)
 
@@ -1329,7 +1331,8 @@ pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub 
 // Round 8 constants (pub): WRAP_STOP_SLACK 1.7 (plan 1.3, see 6.5a), ISO_TOL 2e-4, CONE_CUT_DEG 45, SEAM_NEAR 3,
 // OWNER_MAX_CELLS 1024, RELAX_CG_BUDGET 2500, PAR_MIN_UNKNOWNS 16384, PAR_CHUNK 8192; round 9: OWNER_SAME 3 (OWNER_TOL
 // removed), BURY_REACH 0.04 (= 4 GAP_JUMP, x diag), CONE_RADIUS 0.1 (x across reach), RELAX_ARAP_ITERS 12 (was 6);
-// check:A: ENDS_MEET 2, HOLE_FILL 8 (S1 on an open spine, S5's small holes; 6.5a), COT_MAX 1e3 (private).
+// check:A: ENDS_MEET 2, HOLE_FILL 8 (S1 on an open spine, S5's small holes; 6.5a), COT_MAX 1e3 (private); round 9
+// check:A: PASS_NEAR 2 (x across reach, T2), EXACT_STRAIN 0.25 (T5).
 // WrapParam::src_size(), texel_world(): the inputs it was made for.
 /// None when the projector is unusable (non-finite, zero size, empty source) or no triangle lies within reach.
 pub fn wrap_param(mesh: &MeshData, bvh: &Bvh, maps: &[Arc<TexelMap>], src_size: [u32; 2], p: &Projector) -> Option<WrapParam>;
@@ -3337,7 +3340,9 @@ nothing on coarse meshes (ROUND9_PLAN D1).
   maps); the candidate sphere is `along reach + stop` (+ `4 GAP_JUMP diag` with Jump). Reuse also compares the stop.
 - **Spine (T2).** Besides the shared-triangle rule, the turn-0 traces end where they **pass** beside each other:
   checked before every step while both run on turn 0, once `s+ + s- > across reach` and their oriented normals agree;
-  armed when the head distance falls below the across reach while decreasing; passed when, armed, the - head's offset
+  armed when the head distance falls below `PASS_NEAR (2) x across reach` (the picture's full height: the bands
+  overlap; check:A, a helix whose pitch lies between the half and the full height wound on) while decreasing; passed
+  when, armed and within that distance, the - head's offset
   along the + trace's direction `(q- - q+) . d+` turns from > 0 to <= 0; the ends are put where that offset is zero
   (the traces' arc lengths interpolated between the two checks). Ends meet: both stop; Overlap: both start their next
   turn. A passed spine is closed like a met one (period `end0+ + end0-`: S1, the early-out's closure tears, Overlap
@@ -3347,13 +3352,21 @@ nothing on coarse meshes (ROUND9_PLAN D1).
   characteristic meets the edge); the edge update the nearer end's; jump seeds the source's. The keys, positions,
   `foot` and `side` are unchanged.
 - **S4 (T3).** A vertex with `|deficit| > CONE_CUT_DEG` cuts only when the deficits of the laid interior vertices
-  reachable from it over laid edges within `CONE_RADIUS (0.1) x across reach` (3D distance) sum to more than 45
-  degrees in absolute value; of such vertices within one radius only the strongest (largest `|deficit|`, then lowest
-  position rank) cuts. A cube corner and a cone tip still cut; a rivet, a bevel, a groove do not.
+  reachable from it over laid edges within `CONE_RADIUS (0.1) x across reach` (3D distance; check:A: at least its
+  1-ring, its longest laid edge, so a coarse rivet's ring is seen) sum to more than 45 degrees in absolute value; of
+  such vertices within `CONE_RADIUS x across reach` only the strongest (largest `|deficit|`, then lowest position
+  rank) cuts. A cube corner and a cone tip still cut; a rivet, a bevel, a groove do not.
 - **Relaxation (T4).** A strip component starts from its Fermi layout: each free wedge at `e foot_c + rot90(e) side
   sqrt(g^2 - out^2)` (`out`: how far `foot_c` lies beyond the spine's along range); other components keep the seed
   start. No LSCM: up to `RELAX_ARAP_ITERS` (12) ARAP iterations, stop when the energy drops by less than 0.05 %, at most
   60 CG steps per global solve, `RELAX_CG_BUDGET` per component.
+- **Exact region (T5, check:A).** Before the solve, a laid vertex with one wedge whose laid triangles are all
+  isometric in the seed (not torn, edge ratios within `ISO_TOL`), connected to a pinned strip seed through such
+  vertices, is pinned at its seed position (bit-exact, as the seed path); only the rest is solved. When a free laid
+  triangle meeting the picture comes out flipped or the free triangles' 95th-percentile `|area ratio - 1|` exceeds
+  `EXACT_STRAIN` (0.25), the pins were inconsistent (a gentle cone) and the turn is solved again with the strip pins
+  only (round 8's result, bit for bit). The exact region is as good as the seed: next to a non-developable part the
+  front's seed is itself not isometric (WA35's capped cylinder), and those vertices are solved.
 - **Store (T1).** The owner grid stores per cell the **owner of its centre**: of the stored triangles covering the cell
   centre (barycentric inside test of the stored f32 corners, edges included) the one with the smallest `(buried, g,
   triangle)`, with its `g`, its 3D point (the barycentrics over the mesh's f32 positions) and its stretch `s =
@@ -3368,7 +3381,9 @@ nothing on coarse meshes (ROUND9_PLAN D1).
   threads. `rejected` = the share of the (cell centre inside the picture, **laid** triangle covering it) pairs whose
   triangle is not the owner's place. `lost_cut` = the share of the picture's cells without an owner that have owned
   cells on both sides in their row or in their column (inside the laid outline: cut wedges, opened seams, holes), as
-  against picture beyond a mesh edge or beyond the spine's ends.
+  against picture beyond a mesh edge or beyond the spine's ends; check:A: uncovered picture cells 4-connected
+  (through uncovered picture cells) to a cell a closure triangle covers (laid with an S1 / S2 cut edge, or torn in an
+  exact seed) lie beyond the line where the ends or the halves meet and are not counted.
 - **Place owner test** (`bake_wrapped`). A fragment is kept when its cell has no owner or its 3D point (its
   barycentrics over its triangle's 3D corners) lies within `OWNER_SAME (3) x cell diagonal x max(1, s, s_owner)` of the
   owner's point: each picture point lies at one surface place. A gutter fragment (outside its triangle in UV space) is
@@ -6309,8 +6324,9 @@ families draw a sample; `style_name` table (300 => "Light", 400 italic =>
   `wa33_rivets_do_not_cut_the_picture` (`samples::riveted_plate`; WA23's cube corner),
   `wa34_a_saddle_corner_lies_once` (`samples::step_corner`), `wa36_the_layout_does_not_depend_on_the_texture_resolution`
   (256^2 and 2,048^2 maps), `wa37_nothing_is_lost_without_a_reason`, `wa26_wa27_round9_cases_are_deterministic` (WA24,
-  WA31, WA32 cases). Round 8's tests keep their asserts; the measured values outside them are in
-  `docs/notes/round9/pkg_a.md`.
+  WA31, WA32, WA35 cases); check:A: `wa35_exact_parts_stay_exact` (`samples::capped_cylinder`, a plate with a 45
+  degree bump, a 20 degree cone), `check_a9_*` (the plan's break list). Round 8's tests keep their asserts; the
+  measured values outside them are in `docs/notes/round9/pkg_a.md` and `check_a.md`.
 
 - M1 (gate, between the waves): `tip_field::tests::a_part_cut_off_at_the_border_stays_inside_its_bound`; `tests/brush_tips.rs`: `a_baked_ball_dab_matches_the_ball` (C13 dab part), `unused_parts_do_not_change_the_printed_square` (F16 dab part, asserts the measured state and logs the miss).
 

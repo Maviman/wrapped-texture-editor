@@ -39,6 +39,18 @@ pub const ENDS_MEET: f64 = 2.0;
 /// S5 (check:A): a hole of the laid set whose boundary loop is at most this many times the longest edge at its
 /// vertices is filled for the tree-cotree rule (no cut leads to it).
 pub const HOLE_FILL: f64 = 8.0;
+/// Round 9 (T5): the exact region's check: when the free triangles' 95th-percentile `|area ratio - 1|` exceeds this
+/// (or one of them is flipped), the exact pins were inconsistent (a gentle cone) and the turn is relaxed again with the
+/// strip pinned only.
+pub const EXACT_STRAIN: f64 = 0.25;
+
+// Round 9 (T5), test builds: the exact region switched off (`false`) on this thread, and what the last relaxation on
+// this thread did with it: (exact wedges pinned, fell back to the strip pins).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static EXACT_REGION: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    pub(crate) static EXACT_OUTCOME: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
+}
 
 /// Union-find: the root of `x` (path halving).
 fn uf_find(uf: &mut [u32], mut x: u32) -> u32 {
@@ -380,6 +392,10 @@ impl<'a> Layout<'a> {
         for o in &order {
             strip_comp[o.2 as usize] = o.0 == 0;
         }
+        // The solve over the components (strip components first) from the pins `pin0` and positions `x0`.
+        let solve = |x0: &[DVec2], pin0: &[bool]| -> (Vec<DVec2>, Vec<bool>, u32) {
+        let mut x = x0.to_vec();
+        let mut pinned = pin0.to_vec();
         let mut done_comp = vec![false; comp_tris.len()];
         let mut cg_iters = 0u32;
         for &(_, _, c) in &order {
@@ -444,6 +460,43 @@ impl<'a> Layout<'a> {
             }
             done_comp[c as usize] = true;
         }
+        (x, pinned, cg_iters)
+        };
+        // Round 9 (T5): the exact region. A laid vertex is exact when it has one wedge, every laid triangle round it is
+        // isometric in the seed (edge ratios within `ISO_TOL`, not torn) and it is connected to a strip seed through
+        // such vertices: its wedge is pinned at its seed position (bit-exact, as the seed path); only the rest is
+        // solved. When the free triangles come out flipped or stretched beyond `EXACT_STRAIN` the pins were
+        // inconsistent: the turn is solved again with the strip pins only (round 8).
+        let exact = self.exact_region(seed, &laid, &wedges, &pinned);
+        let exact_count = exact.iter().filter(|&&e| e).count() as u32;
+        #[cfg(test)]
+        let use_exact = EXACT_REGION.with(|e| e.get());
+        #[cfg(not(test))]
+        let use_exact = true;
+        let mut fell_back = false;
+        let (x, _, cg_iters) = if use_exact && exact_count > 0 {
+            let mut x1 = x.clone();
+            let mut pin1 = pinned.clone();
+            for (w, &e) in exact.iter().enumerate() {
+                if e {
+                    pin1[w] = true;
+                    x1[w] = self.p2[wedges.vertex[w] as usize];
+                }
+            }
+            let (xs, ps, cg) = solve(&x1, &pin1);
+            if self.exact_holds(&laid, &wedges, &xs, &ps, &rest, rect) {
+                (xs, ps, cg)
+            } else {
+                fell_back = true;
+                let (xs, ps, cg2) = solve(&x, &pinned);
+                (xs, ps, cg + cg2)
+            }
+        } else {
+            solve(&x, &pinned)
+        };
+        #[cfg(test)]
+        EXACT_OUTCOME.with(|o| o.set((if use_exact { exact_count } else { 0 }, fell_back)));
+        let _ = fell_back;
         // The stored triangles: laid ones from their wedges, the others (halo, degenerate) from the relaxed corners.
         let rep = self.representatives(&laid, &wedges);
         // A missing corner gets one position for every halo triangle round it (the first placed): no wedge without
@@ -523,6 +576,114 @@ impl<'a> Layout<'a> {
             flipped,
             cg_iters,
         }
+    }
+
+    /// Round 9 (T5): the exact region, per wedge (strip pins excluded): wedges of laid vertices that have one wedge,
+    /// whose laid triangles are all isometric in the seed (not torn, edge ratios within `ISO_TOL`), connected to a
+    /// pinned strip seed through such vertices.
+    fn exact_region(&self, seed: &[(u32, [DVec2; 3], bool)], laid: &[bool], wedges: &Wedges, strip_pins: &[bool]) -> Vec<bool> {
+        let patch = self.patch;
+        let (ntri, nv, nw) = (patch.tv.len(), patch.pos.len(), wedges.vertex.len());
+        let mut iso = vec![false; ntri];
+        for (t, q, torn) in seed {
+            let t = *t as usize;
+            if !laid[t] || *torn || patch.degenerate(t as u32) || sliver(patch.corners(t as u32)) {
+                continue;
+            }
+            let p3 = patch.corners(t as u32);
+            iso[t] = (0..3).all(|i| {
+                let j = (i + 1) % 3;
+                let (l3, l2) = (p3[i].distance(p3[j]), q[i].distance(q[j]));
+                l3 > 0.0 && (l2 / l3 - 1.0).abs() <= ISO_TOL
+            });
+        }
+        let mut wcount = vec![0u32; nv];
+        let mut wedge_of = vec![NONE; nv];
+        for (w, &v) in wedges.vertex.iter().enumerate() {
+            wcount[v as usize] += 1;
+            wedge_of[v as usize] = w as u32;
+        }
+        let candidate: Vec<bool> = (0..nv as u32)
+            .map(|v| {
+                wcount[v as usize] == 1 && {
+                    let mut any = false;
+                    let all = patch.vtris(v).iter().filter(|&&t| laid[t as usize]).all(|&t| {
+                        any = true;
+                        iso[t as usize]
+                    });
+                    any && all
+                }
+            })
+            .collect();
+        // Flood from the pinned strip seeds over the edges of isometric triangles, through candidate vertices.
+        let mut reached = vec![false; nv];
+        let mut queue: Vec<u32> = (0..nv as u32).filter(|&v| candidate[v as usize] && strip_pins[wedge_of[v as usize] as usize]).collect();
+        for &v in &queue {
+            reached[v as usize] = true;
+        }
+        while let Some(v) = queue.pop() {
+            for &t in patch.vtris(v) {
+                if !iso[t as usize] {
+                    continue;
+                }
+                for &u in &patch.tv[t as usize] {
+                    if candidate[u as usize] && !reached[u as usize] {
+                        reached[u as usize] = true;
+                        queue.push(u);
+                    }
+                }
+            }
+        }
+        if knob("WTE_TEST_EXACT_DEBUG", false) {
+            let laid_n = laid.iter().filter(|&&l| l).count();
+            eprintln!(
+                "exact: laid {laid_n}, iso {}, candidates {}, reached {}, strip pins {}",
+                iso.iter().filter(|&&x| x).count(),
+                candidate.iter().filter(|&&x| x).count(),
+                reached.iter().filter(|&&x| x).count(),
+                strip_pins.iter().filter(|&&x| x).count()
+            );
+            for (t, q, torn) in seed {
+                let tu = *t as usize;
+                if laid[tu] && !iso[tu] {
+                    let p3 = patch.corners(*t);
+                    let r: Vec<f64> = (0..3).map(|i| q[i].distance(q[(i + 1) % 3]) / p3[i].distance(p3[(i + 1) % 3])).collect();
+                    eprintln!("exact:  not iso tri {} torn {torn} ratios {r:?} y {:?}", patch.tris[tu], p3.map(|p| (p.y * 1000.0).round() / 1000.0));
+                }
+            }
+        }
+        (0..nw).map(|w| reached[wedges.vertex[w] as usize] && !strip_pins[w]).collect()
+    }
+
+    /// Round 9 (T5): the exact pins held: no free laid triangle meeting `rect` (a corner not pinned) is flipped and
+    /// their 95th-percentile `|area ratio - 1|` is within `EXACT_STRAIN`.
+    fn exact_holds(&self, laid: &[bool], wedges: &Wedges, x: &[DVec2], pinned: &[bool], rest: &[Option<(f64, [DVec2; 3])>], rect: [f64; 2]) -> bool {
+        let patch = self.patch;
+        let mut ratios: Vec<f64> = Vec::new();
+        for t in 0..patch.tv.len() {
+            let Some((area3, _)) = rest[t] else { continue };
+            if !laid[t] {
+                continue;
+            }
+            let w: [u32; 3] = std::array::from_fn(|k| wedges.corner[t * 3 + k]);
+            if w.iter().all(|&w| pinned[w as usize]) {
+                continue;
+            }
+            let q = w.map(|w| x[w as usize]);
+            if !meets(&q, rect) {
+                continue;
+            }
+            let area = 0.5 * cross2(q[1] - q[0], q[2] - q[0]);
+            if !area.is_finite() || area * (self.orient[t] as f64) <= 0.0 {
+                return false;
+            }
+            ratios.push((area.abs() / area3 - 1.0).abs());
+        }
+        if ratios.is_empty() {
+            return true;
+        }
+        ratios.sort_by(f64::total_cmp);
+        ratios[((ratios.len() as f64 * 0.95) as usize).min(ratios.len() - 1)] <= EXACT_STRAIN
     }
 
     /// Round 9 (T4): the Fermi position of vertex `v`: its continuous spine foot along the spine and its geodesic

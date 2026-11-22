@@ -71,3 +71,37 @@ thin torus 0 % (was 0.34 %), all limits met — **green**.
 **(6) Wall-clock flake.** `check_a_own_bad_meshes_never_fail` and WA7 take, for a case over 200 ms, the best of that
 run and up to four more (`best_param_ms`); the limit stays 200 ms. Not a fix for the one-thread case: with
 `RAYON_NUM_THREADS=1` WA7's overlapping_cubes (Jump + Overlap) takes 308 ms every time (reported in section 1).
+
+## 5. A5 — exact region (T5), built by check:A
+
+Built (`wrap_relax.rs` `Layout::relax` / `exact_region` / `exact_holds`, `EXACT_STRAIN = 0.25`;
+`samples::capped_cylinder` (the WA1 cylinder's side in 16 rows plus a hemispherical dome); test
+`wa35_exact_parts_stay_exact`; WA26/27 round-9 case added; ARCHITECTURE 1.6c, 5.12, 6.5a, 9.1):
+- A laid vertex with **one wedge** whose laid triangles are all isometric in the seed (not torn, edge ratios within
+  `ISO_TOL`), connected to a pinned strip seed through such vertices, is pinned at its seed position `p2` (the seed
+  path's corners: bit-exact). The component loop is now a closure `solve(x0, pins)`, run with the exact pins; if a
+  free laid triangle meeting the picture is flipped or the free triangles' 95th-percentile `|area ratio - 1|` exceeds
+  `EXACT_STRAIN`, it runs again with the strip pins only (round 8). Deviation from T5's wording: "one wedge" (a vertex
+  on a seam is left free; the plan does not say what a seam vertex's pin would be). Test-only thread-locals
+  (`EXACT_REGION`, `EXACT_OUTCOME`) switch it off and report pins / fallback; `WTE_TEST_EXACT_DEBUG=true` prints the
+  counts.
+- No other test changed by it (wrap module: the same four red tests with the same numbers as before A5; WA4, WA20,
+  WA21, WA22 unchanged: their seeds have no isometric region connected to the strip, or the strain check falls back).
+
+| WA35 case | Plan limit | strip pins only (round 8) | exact region |
+|---|---|---|---|
+| capped cylinder, picture 0.7 on the side, 0.5 over the dome (face 20, y 0.3..1.5) | side texels 99.9 % within 2/255, max 8 | 82.02 %, max 255, cg 461 | **92.37 %, max 51** (49 exact wedges), cg 372 — **red** |
+| same: seams / scatter | 0 / <= 2 % | — | 0 / 0 % — green |
+| capped cylinder, picture just below the dome (y 0.25..0.95; added) | 99.9 % | seed exact (early-out): 100 %, max 1 | same |
+| plate with one 45 degree bump in the picture (off the centre line) | flat texels 99.9 %, max 8; seams 0, scatter <= 2 % | — | **100 %, max 1** (4,417 exact wedges), seams 0, scatter 0 — green |
+| 20 degree cone, apex in the picture | strain check trips, result = strip-only pins | — | fell back (769 exact wedges tried), layers bit-equal to the strip-only result — green |
+| WA25 extended: rejected on the capped cylinder | 0 | — | 0 — green |
+| WA26/27: capped cylinder 1 / 2 / 5 threads, reuse = fresh | byte-identical | — | green |
+
+**Why the capped cylinder's side is not exact:** the seed (the front's layout) is itself not isometric on the side
+next to the dome (`WTE_TEST_EXACT_DEBUG`): of 331 laid triangles 132 are isometric; side triangles at y 0.625..0.875
+within five columns of the spine have seed edge ratios up to 1.23 (the dome's unfolding reaches the side's upper rows
+through the front's candidates at the rim), and rows down to y 0.25 are just over `ISO_TOL` (1.0005). Only 57
+vertices are exact; the rest is solved, and ARAP spreads the dome's strain into the side. T5 as specified pins the
+**seed**; making the side exact here needs a better seed next to curved parts (the front's consensus at the rim), not
+in this round. The assert stays (red), measured value above.

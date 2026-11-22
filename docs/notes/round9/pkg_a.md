@@ -243,3 +243,74 @@ Built (wrap_param.rs `reach_of`, `stop_of`, `max_gutter`, `WrapParam::{gutter, s
   relaxation the two sides of the seam line no longer touch everywhere in the layout, and the picture cells in the gap
   are enclosed by covered cells on both sides, so `lost_cut` counts them. Not traced further (open for check:A: is it
   the seam opening under ARAP, or cells beyond the closure that the row/column rule calls "inside").
+
+## A5 exact region (T5) — not started
+
+Not built: A5 is the first item of the plan's cut order (section 10, item 6) and the account's usage was high; A6, A7,
+the tests and the verification were done first. WaterBottle's body line (plan 7.2) and T5's speed gain are therefore
+not met by this package; WA35 does not exist. The layout code is ready for it (seed, `laid`, pins per wedge).
+
+## A7 and the verification
+
+- `WrapStats::lost_cut` (built with A2, defined in the A6 section's WA37 table and ARCHITECTURE 6.5a "Round 9"),
+  logged in both `wrap:` lines (stamp_job.rs).
+- ARCHITECTURE.md: 1.6c (round-9 paragraph), 2 (wrap_tests row), 5.12 (constants, `WrapStats`, `serves`), 6.5a
+  ("Round 9" block; round 8's owner test marked as replaced), 9.1 (round-9 tests).
+- Release build of `7fcd2a1` (exe `target\round9\bin\wte_r9a.exe`, a copy of `target\release\wrapped_texture_editor.exe`).
+- **Identity with `wte_r67.exe`** (both run here, `target\round9\ident\`): `stamp`, `text_warp`, `export_run`,
+  `roundtrip` all ok, `shot.png` pixel-identical (0 differing pixels, no toast exception needed); export_run's 7
+  export files byte-identical to r67's; `check_exports.py` on them: `RESULT: PASS`.
+- `wrap_surface` on the built-in sample: ok, no errors.
+
+### Sweep: `wrap_surface` step 10 (Jump off / on), r8 = today's round-8 sweep (`sweep\r8\<model>\shot.log`)
+
+| Model | setting | ink / picture r8 -> r9a | dup r8 -> r9a | scatter r8 -> r9a | covered r8 -> r9a | seams [S1..S5] r8 -> r9a | other r9a |
+|---|---|---|---|---|---|---|---|
+| Avocado | off | 0.5288 -> 0.5302 | 0 -> 0 % | 0 -> 0 % | 0.532 -> 0.532 | 0 -> 0 | reached_edge; lost_cut 0 |
+| Avocado | on | 1.5295 -> **0.9985** | **52.6 -> 0.809 %** | 5.865 -> 0.525 % | 1.0 -> 1.0 | 0 -> 0 | rejected 34.6 %, lost_cut 0 |
+| torus_knot | off = on | 0.4051 -> 0.4545 | 0 -> 0 % | 0 -> 0 % | 0.404 -> 0.440 | [76,0,0,0,8] -> [48,0,0,0,0] | **passed, ends_share 0.430** (covered 1.02 x ends_share), lost_cut 0.92 % |
+| Lantern | off = on | 0.8273 -> 0.7704 | **26.9 -> 1.676 %** | 10.6 -> 1.854 % | 1.0 -> 0.885 | 28 [0,0,0,19,9] -> 30 [0,0,0,11,19] | stretch 220 -> 31.2 %, flipped 11 -> 1, rejected 16.2 %, **lost_cut 11.2 %** |
+| DamagedHelmet | off | 0.5065 -> 0.5094 | 0 -> 0 % | 0 -> 0 % | 0.655 -> 0.660 | 16 [0,0,5,4,7] -> 11 [0,0,5,0,6] | reached_edge; lost_cut 0.77 % |
+| DamagedHelmet | on | 1.0941 -> **0.8293** | 0 -> 0.036 % | 0 -> 0 % | 1.0 -> 1.0 | 140 [0,0,5,28,107] -> 56 [0,0,5,10,41] | rejected 18.2 %, lost_cut 3.0 %, flipped 3 |
+
+Against the gate's 7.2 lines (for check:A / the gate; package B and the gate re-run them): Avocado on: ink 0.9985
+(0.90-1.15 ok), dup 0.81 % (<= 3 % ok). torus_knot: passed, covered 0.440 >= 0.85 x 0.430, ink 0.4545 >= 0.85 x
+0.430 — ok. Lantern: dup 1.68 % (<= 3 % ok), scatter 1.85 % (<= 5 % ok), stretch 31 % (<= 60 % ok), **seams 30 (<= 6
+not met)**, **lost_cut 11.2 % (<= 10 % not met)**. DamagedHelmet off: lost_cut 0.77 % (<= 10 % ok); **on: ink 0.829
+(0.90-1.3 not met)**.
+
+### Shots (r8 left, r9a right; `target\round9\runs_r9a\sheet.png`, `zoom.png`, `zoom2.png`; each shot is the last
+state of the scenario, Jump small gaps on)
+- **Avocado**: r8 shows the cells on the seed and again on the cut face round it (the left columns appear twice). r9a:
+  one picture: the seed carries the middle cells, the flesh round it the rest, no repeated cell; a bare band of flesh
+  is left at the top left between the seed's outline and the picture's left edge (those cells went to the seed's back
+  side, hidden: the seed lies in a cavity, so its back is farther than `BURY_REACH` from the flesh and not `buried`).
+- **torus_knot**: r8 shows a short dark sliver of the picture round the tube (covered 0.40, the helix cut to one
+  pitch). r9a: a band of cells once round the tube over its whole height, ending where the ends meet (43 % of the
+  picture's length fits once round; the rest is cut, ends_share 0.43).
+- **Lantern** (the picture on the post's square base): r8: cells over the base's faces with smeared cells on the
+  plinth below (dup 26.9 %). r9a: the base's front and right faces carry continuous cells meeting cleanly at the box
+  edge; the plinth's top below them is mostly bare (lost_cut 11.2 %: picture cells inside the outline without an owner)
+  and the cap on top is grey; no smear.
+- **DamagedHelmet** (Jump on): the visor carries one continuous picture in both; at the right r8 shows a jumble of
+  cells over the shell pieces (several parts painted under each other), r9a shows fewer, cleaner pieces there and some
+  dark gaps at the lower right of the visor where cells were dropped to a hidden part (ink 0.83, rejected 18 %).
+
+### Final state (`cargo test --workspace --no-fail-fast`, clippy `--workspace --all-targets` 0 warnings)
+1,153 passed / 5 failed / 33 ignored (round8-wip: 1,147 / 4 / 33; +7 new tests). Failing, all with their asserts
+unchanged: `wa4_r8` (60 deg only: ink 1.1177 > 1.10, cells 0.769..1.432 > 1.30), `wa20` (ink 1.1890 > 1.15, cells
+0.665..2.886 outside 0.70-1.40; dup 0.976 %, scatter 0.564 %, seams 0, covered 1.0 pass), `wa17` and `wa24` (ink 0.915
+against 0.95: geometric maximum ~0.90 for a picture lying once, A1 deviation 3), `wa37` (lost_cut 5.67 % on WA22
+taller, 2.48 % on WA32's 64-row cylinder, limit 2 %). `check_a_own_bad_meshes_never_fail` (wall-clock 200 ms under the
+parallel test load) failed in two of the six full core runs of this round and passed in the others and alone.
+
+### Open items for check:A
+1. Jump on: the `(buried, g)` owner drops picture to hidden surface that is not `buried` (Avocado's seed back in its
+   cavity, the helmet's lower right: ink 0.83 against the gate's 0.90). A visibility rule beyond the ray (e.g. the
+   candidate facing the projector, or a longer `BURY_REACH` for closed parts) is the next thing to try.
+2. Parts welded to the floor at shared vertices are one part: no `buried` (A1 deviation 4).
+3. WA17 / WA24 ink limits vs the floor edge (A1 deviation 3): the user should decide whether WA17's placement or the
+   limit is meant.
+4. `lost_cut` at closures (WA37, Lantern 11.2 %): seam opening under ARAP or the row/column rule.
+5. A5 (exact region) not built.
+6. `rejected` counts laid triangles only (A1 deviation 2).

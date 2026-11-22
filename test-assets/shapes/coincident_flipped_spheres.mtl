@@ -1,0 +1,3 @@
+newmtl coincident_flipped_spheres_mat
+Kd 1 1 1
+map_Kd coincident_flipped_spheres.png

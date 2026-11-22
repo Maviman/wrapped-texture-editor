@@ -1,0 +1,79 @@
+
+    /// Gate stage 3 (round 4): the frame of `fuzz_path` seed 3 on ngons_tiling (action 151, 4.9 s in the app): a long
+    /// text gets a Circle path of 15.29 em. Times the document's part (Preview with deferred bakes, the flush that
+    /// bakes the Final picture, the Final) on ngons_tiling, then an image stamp with the same projector as the text on
+    /// its Circle, to show what the bake of that footprint costs without any text code. Run with
+    /// `cargo.cmd test -p wte_core --release --lib gate_fuzz_circle_text_on_ngons -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing probe on a local model file"]
+    fn gate_fuzz_circle_text_on_ngons() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/compat/harness/shapes/ngons_tiling.obj");
+        if !path.exists() {
+            eprintln!("SKIP: no {}", path.display());
+            return;
+        }
+        let model = crate::import::import_from_path(&path, &Default::default(), &crate::progress::NoProgress).unwrap();
+        let n = model.mesh.sets.len();
+        let mut doc =
+            Document::from_import(model, vec![crate::doc_build::TextureChoice::Detected; n], &crate::progress::NoProgress).unwrap();
+        doc.recomposite_all();
+        doc.set_defer_preview_bakes(true);
+        let (c, d, b) = (doc.mesh.bounds.center(), doc.mesh.diag(), doc.mesh.bounds);
+        let hit = doc
+            .raycast(&crate::math::Ray::new(Vec3::new(b.min.x + 0.5 * (b.max.x - b.min.x), b.min.y + 0.5 * (b.max.y - b.min.y), c.z + d), -Vec3::Z))
+            .expect("a hit in the middle");
+        let content = "A much longer text stamp line for wrapping";
+        let s = spec(&mut doc, content, TextAlign::Left);
+        let [w, h] = doc.stamp_source_size(&StampSource::Text(s.clone())).unwrap();
+        for width_frac in [0.4f32, 1.0] {
+            // The straight line spans `width_frac` of the model's diagonal.
+            let hx = 0.5 * width_frac * doc.mesh.bounds.diagonal();
+            let half = Vec2::new(hx, hx * h as f32 / w as f32);
+            let mut p = Projector::from_surface(hit.position, hit.normal, Vec3::Y, half, half.max_element());
+            p.backface_cull = hit.front_face;
+            let p = doc.fit_stamp_depth(&p);
+            let t = std::time::Instant::now();
+            let id = doc.add_stamp("T", StampSource::Text(s.clone()), Placement::Projected(p), TextureSetId(0)).unwrap();
+            let add = ms(t);
+            let mut circle = spec_of(&doc, id);
+            circle.fx.path = Some(TextPath {
+                shape: PathShape::Circle { diameter: 15.288544, center: [-0.957_658, -1.643_390_2] },
+                start: 0.0,
+                flip: false,
+            });
+            let t = std::time::Instant::now();
+            doc.set_stamp_source(id, StampSource::Text(circle.clone()), Commit::Preview).unwrap();
+            let preview = ms(t);
+            let t = std::time::Instant::now();
+            doc.flush_pending_edit();
+            let flush = ms(t);
+            let t = std::time::Instant::now();
+            doc.set_stamp_source(id, StampSource::Text(circle.clone()), Commit::Final).unwrap();
+            let fin = ms(t);
+            let t = std::time::Instant::now();
+            doc.recomposite_all();
+            let recomposite = ms(t);
+            let placed = match doc.stamp(id).unwrap().placement {
+                Placement::Projected(q) => q,
+                Placement::Uv(_) => unreachable!(),
+            };
+            eprintln!(
+                "line {width_frac} of the diagonal: add {add:.1} ms; Circle: Preview {preview:.1} ms, flush {flush:.1} ms, Final {fin:.1} ms, \
+                 recomposite {recomposite:.1} ms; size_px {}, half_size {:?} (straight {:?}), diagonal {:.3}",
+                spec_of(&doc, id).size_px,
+                placed.half_size,
+                half,
+                doc.mesh.bounds.diagonal()
+            );
+            // An image stamp with the projector of the text on its Circle (round-3 code path: image stamps).
+            let blob = doc.add_image_blob("stamp.png", png_bytes(&samples::sample_stamp_image(256))).unwrap();
+            let t = std::time::Instant::now();
+            let image = doc.add_stamp("I", StampSource::Image { blob }, Placement::Projected(placed), TextureSetId(0)).unwrap();
+            let image_add = ms(t);
+            let t = std::time::Instant::now();
+            doc.recomposite_all();
+            eprintln!("  image stamp with the same projector: add (Full bake) {image_add:.1} ms, recomposite {:.1} ms", ms(t));
+            doc.delete_stamp(image).unwrap();
+            doc.delete_stamp(id).unwrap();
+        }
+    }

@@ -1,0 +1,197 @@
+# Wrapped Texture Editor — handoff to the new machine
+
+This file is for the Claude Code session that continues the project on the new (faster, GPU) computer. It
+covers the state of the code, how it was built and tested, the user's binding decisions, the rules of the
+previous sessions, what is still open, and a checklist of **things to look over and confirm** first.
+
+Written 2026-11-22 by the previous session (on a 6-core, 7 GB laptop without a usable GPU, slow USB disk).
+
+---
+
+## 1. What this is
+
+A Rust desktop app (egui 0.37 + wgpu) for painting textures directly on 3D models: import OBJ / glTF / GLB / FBX,
+paint in 3D / 2D / Split views, layers, brushes (Circular, Sphere, Cube, Cylinder, model-file shapes), image stamps
+and text stamps (system fonts, warp, text on a path, styles, per-gap spacing), 3D (projected) and 2D (UV) stamps,
+and since round 6 **Wrap on surface** for 3D text and image stamps. Exports PNG / PSD / ORA and saves `.wtep`
+projects (format version 3).
+
+- `crates/wte_core` — document model, mesh/UV/texel maps, brush, stroke, stamps, text, wrap, project I/O, export.
+- `crates/wte_app` — the egui/wgpu app, tools, panels, jobs, and the **headless self-test runner** (`selftest/`).
+- `ARCHITECTURE.md` — the **binding design contract** (≈580 KB). Every round updates its own sections. Read
+  section 1 (history of rounds 1.4-1.7) and the sections a task touches before changing code.
+
+## 2. Repository layout
+
+| Path | What |
+|---|---|
+| `crates/`, `Cargo.toml`, `Cargo.lock`, `ARCHITECTURE.md` | the source (branch `main` = the landed build) |
+| `.cargo/config.toml` | linker setting for the `x86_64-pc-windows-gnu` target only (rust-lld, self-contained) |
+| `cargo.cmd` | **old-machine only**: wrapper that put a toolchain on `E:\claude_downloads\rust-toolchain` on PATH. On the new machine use a normal `rustup` install and plain `cargo` |
+| `dist/` | launcher scripts and `HOW_TO_TEST.txt` for the user's test build (the `.exe` is not committed) |
+| `docs/plans/` | feature briefs (`FEATURE_*.md`), round plans `ROUND3_PLAN.md` … `ROUND8_PLAN.md` |
+| `docs/reports/` | gate reports of rounds 3-8 (`ROUND<n>_GATE_REPORT.md`, `ROUND3_REPORT.md`) |
+| `docs/notes/round6..8/` | builder / check-and-fix / gate / skeptic notes of the last three rounds |
+| `tools/` | gate tooling: `round3/` (`check_exports.py` = validate PSD/ORA exports with Pillow, `shot_diff.py`, `uvhash_compare.py`, `fuzz_check.py`), `round3_audit/` (`sweep.ps1` runs scenario jobs files, `slow.py` finds slow frames), `round4_gate3/` (`frames.py`, `btp.py`, `wf_steps.py`, `perf_driver.ps1`, `core_benches.ps1`) |
+| `test-assets/shapes/` | awkward test meshes (torus_knot, mobius, klein_bottle, nonmanifold, many_islands, ngons_tiling, flat_annulus, tiny_cube, …) |
+| `test-assets/make_shapes.py` | generator of those shapes; `high_poly_sphere.obj` (55 MB, 1 M triangles) is **not committed** — regenerate with `python -I test-assets/make_shapes.py <out_dir>` (writes all shapes into `<out_dir>`) |
+
+**Path mapping.** The plans, reports and notes refer to the old machine's paths. Translate:
+`target\roundN_design\ROUNDN_PLAN.md` → `docs/plans/ROUNDN_PLAN.md`; `target\roundN\GATE_REPORT.md` →
+`docs/reports/ROUNDN_GATE_REPORT.md`; `target\roundN\notes\*.md` → `docs/notes/roundN/`;
+`target\compat\harness\shapes\` → `test-assets/shapes/`; `target\round3\*.py` → `tools/round3/`;
+`target\round3_audit\` → `tools/round3_audit/`; `target\round4\review\gate3\` → `tools/round4_gate3/`;
+`E:\claude_downloads\glb_samples\*.glb` → see 4.3. Run folders (`runs_*`), screenshots and work copies were not
+uploaded (too large).
+
+## 3. Building
+
+1. Install Rust stable with `rustup`. The old machine used the **`x86_64-pc-windows-gnu`** toolchain without Visual
+   Studio, linking with the bundled `rust-lld` (that is what `.cargo/config.toml` sets; it only affects the gnu
+   target). If the new machine has the Visual Studio Build Tools, the default MSVC target should work too — confirm.
+2. `cargo test --workspace` · `cargo clippy --workspace --all-targets` (must be 0 warnings) ·
+   `cargo build --release -p wte_app` → `target/release/wrapped_texture_editor.exe`.
+   (The old session always ran with `--offline` because of a slow network; a first online build fetches crates.)
+3. No new crates were allowed in rounds 4-8 (everything uses what `Cargo.lock` already has: egui/eframe 0.37,
+   wgpu, glam, rayon, ttf-parser, image, …). Keep that rule unless the user agrees otherwise.
+
+## 4. Testing
+
+### 4.1 Headless self-test runner (the only way the app was driven)
+
+```
+wrapped_texture_editor.exe [MODEL_OR_WTEP_PATH] --screenshot <out.png> --scenario <name> [--size 1280x800]
+```
+
+It plays a scripted scenario, writes `<out>.png` (plus named extra shots) and `<out>.json` with `"ok": true/false`,
+and a log `<out>.log`. Scenario names (`crates/wte_app/src/selftest/scenarios.rs`, `NAMES`):
+
+`empty smoke default paint3d paint2d stamp text clay preview export export_run multi roundtrip undo import
+import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_path stamp_edge_path pan2d
+brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
+text_preview_path brush_hover final_bake_async wrap_surface`
+
+`*_path` scenarios need a PATH argument (a model). `tools/round3_audit/sweep.ps1` runs a jobs file of
+`scenario[,path]` lines.
+
+### 4.2 Switches (environment variables)
+
+| Variable | Effect |
+|---|---|
+| `WTE_FRAME_LOG=1` | per-frame timing lines (used by `tools/round4_gate3/frames.py`) |
+| `WTE_STROKE_LOG=1` | brush phase probe: one line per slow sample and a `brush stroke probe:` line per stroke |
+| `WTE_SYNC_FINAL_BAKES=1` | old behaviour: Final stamp bakes on the UI thread (round 5 moved them to a worker) |
+| `WTE_STAMP_MODE=wrap` | new stamps start in Wrap (for like-for-like timing runs) |
+| `RAYON_NUM_THREADS=n` | pool size; brush and wrap results must be identical for any n |
+| `WGPU_BACKEND=dx12` / Vulkan | renderer choice (see `dist/*.cmd`) |
+
+### 4.3 Sample models (not in the repo)
+
+The gates used Khronos glTF sample models: **ABeautifulGame** (chess set, 1.5 M triangles, 15 texture sets — the
+heavy-model benchmark), DamagedHelmet, Avocado, WaterBottle, Lantern, BoxTextured, plus others. Get them from the
+Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<Name>.glb`). The "topology" models
+`tex_4096` / `tex_8192` used in brush timing were generated locally and are not included (optional).
+
+### 4.4 Test counts and identity checks
+
+- Landed build (rounds 6+7): `cargo test --workspace` **1,116 passed, 33 ignored, 0 failed**; clippy 0 warnings.
+- Every round checked that unrelated scenarios stay **pixel-identical** to the previous exe (`shot.png`, toast
+  area excepted) and that exports are byte-identical (`tools/round3/check_exports.py` must PASS).
+
+## 5. History and current state
+
+| Round | What | State | Exe SHA-256 (old machine) |
+|---|---|---|---|
+| 1-3 | core app, import, paint, layers, stamps, export, crash recorder | landed | round 3: 7D0E0B57… |
+| 4 | brush types / shapes (incl. model-file shapes), text effects (fonts, warp, path, styles, gaps), project format 2 | landed 2026-11-20 | 7695C240… |
+| 5 | smoothness: Final stamp/text bakes on a worker, brush pacing by dab, font picker first-open fix | landed 2026-11-21 | 5DA4E165… |
+| 6 | **Wrap on surface** (Project / Wrap toggle, Jump small gaps, Ends meet / Overlap), project format 3 | landed 2026-11-21 | 6CE65B55… |
+| 7 | brush speed on heavy models (lean pass 2, fused parallel band raster + commit), pixels unchanged | landed on top of 6 | **2787C1B9…2BF8** (= `main`) |
+| 8 | Wrap quality on bumpy surfaces + Wrap speed | **NOT landed** — branch `round8-wip` | — |
+
+Reports: `docs/reports/`. Plans: `docs/plans/`.
+
+### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
+
+Plan `docs/plans/ROUND8_PLAN.md` (user answers in its section 12), report `docs/reports/ROUND8_GATE_REPORT.md`,
+notes `docs/notes/round8/` (including two independent skeptic reviews `verify_quality.md`, `verify_regressions.md`,
+both "do not land"). The branch holds round 8's merged source (packages A + B).
+
+Gains: the bumpy ball (`high_poly_sphere`) now shows one whole picture bent over the bumps (round 6: scraps all
+over); the Klein bottle's visible side is one piece; wrapped drags on ABeautifulGame are smooth (max ~23 ms, Previews
+on a worker, last finished picture shown until the new one lands); Project / brush / exports / file format identical
+to the landed build.
+
+Failures: 4 core tests red (WA4 at 60° ink 1.136, a cell 1.6×; WA20 bumpy ball 10.7 % of the picture twice; WA22
+picture larger than a torus 2.3 % twice; WA24 Jump onto a cube 14.8 % twice — the owner test by geodesic depth needs
+a visibility tie-break); **regressions vs round 6**: on torus_knot 60 % of the picture disappears (covered 1.0 → 0.40),
+DamagedHelmet with Jump off loses a third, Avocado shows six cells twice, the WaterBottle label is no longer exact
+(relaxed; 28 % of texels change), un-relaxed layouts changed (flat_annulus, ngons_tiling, mobius; WA5 cuts 1 → 2);
+**slower** Finals on heavy models (step 6 "grow the patch from the anchor over a welded graph" was not built:
+ABeautifulGame Finals 1.7-10.8× Project, 20 % decal 340-1,070 ms, bumpy ball Final 11.5 s).
+Not wrap bugs (confirmed by the skeptic): DamagedHelmet's doubles come from mirrored UVs (77.8 % of its surface
+shares texels with its mirror half); ABeautifulGame's blobs on other pieces come from instanced meshes sharing texels.
+
+## 6. The user's binding decisions (keep them)
+
+- 3D (projected) and 2D (UV) stamps stay **separate kinds**, not cross-editable ("3D stamp" / "2D stamp" badges).
+- The colour picker stays visible in the side panel whatever tool is active.
+- No support for pre-round-2 projects or the legacy no-UV layout.
+- No image editor needed for PSD / ORA: validate exports with Pillow (`tools/round3/check_exports.py`).
+- Round 4 (`docs/plans/ROUND4_PLAN.md` section 7): no "connected surface" checkbox; opening an open shape file asks
+  how to close its openings; fonts from the Windows fonts folder; "segmented" text = per-gap character spacing.
+- Round 6 (`docs/plans/ROUND6_PLAN.md` section 11): new stamps start in **Project**; Wrap folds over every edge;
+  **Jump small gaps** and **Ends meet / Overlap** are per-stamp toggles for text and images.
+- Round 8 (`docs/plans/ROUND8_PLAN.md` section 12): larger than the object → edges meet in one cut at the back; keep
+  the text's centre line true (stretch to the edges); cut at corners/tips sharper than 45°; on heavy models drags stay
+  smooth and the picture catches up; round-6 wrapped stamps keep their saved pixels until edited.
+- Brush speed (after round 7): on the old CPU-only laptop the remaining lag (Size 50 trails 0.5-0.8 s, Size 512
+  keeps painting 2-4 s after release on ABeautifulGame) was accepted ("only so much you can do without a GPU").
+  **The new machine has a GPU — ask the user whether a GPU brush is now wanted** before planning one.
+
+## 7. How the previous sessions worked (the user's process rules)
+
+- **Plan first, then build.** The user prefers planning a round with Fable and building with Opus (rounds 6-8 were
+  planned with Opus by the user's choice because Fable's weekly limit was used up).
+- **Lean build**: per package one builder agent, then one check-and-fix agent; then a gate (merge, tests, clippy,
+  release build, scenarios, pixel identity, measurements, `GATE_REPORT.md`). Fewer packages, smaller rounds.
+  Check weekly plan usage before starting a round.
+- **Nothing is "landed" until the main session itself verified it**: read the report, rerun the tests, run key
+  scenarios and look at the screenshots, check the main tree did not change underneath; only then copy the merged
+  source into the main tree and the exe to `target/release` and `dist`.
+- Never use OS-level mouse/keyboard injection (the user may be using the PC); drive the app only via the headless
+  runner. Never kill a running copy of the app the user may have open (copy the exe if it is locked).
+- Don't change system or overlay settings. Don't run downloaded binaries.
+- Keep large outputs off a nearly full system drive (old machine: everything on E:). Delete a landed round's build
+  waste; keep toolchains and sample models.
+- Treat the user's name and email as private (this repo is public: commits use the GitHub noreply address).
+
+## 8. Open issues (beyond round 8)
+
+1. **Wrap quality / speed** — round 8's failures above; the natural round 9 continues from `round8-wip`.
+2. **Brush on very heavy models** — see section 6 (GPU question). Round 7's report lists the remaining pass-2 work
+   on island-border triangles as the next CPU step.
+3. **FBX texture-transform `IMPORTER_VERSION`** was never bumped (round 3 open point; the user never confirmed; no
+   sample is affected).
+4. Round 5 minor items: Preview stamp bakes during a drag on ngons_tiling are 148-198 ms (unchanged since round 4);
+   text-rotate Final 1.31-1.40× round 4; classic painter 1.03-1.05× round 3; "Layer is locked" wording.
+5. The 9 round-4 fuzz repro jobs were never rebuilt (round 5 report, "Stage-1 open points" 4).
+6. All timings in the reports were measured on the old laptop under memory pressure (often < 1 GB free); none of
+   them hold on the new machine.
+
+## 9. Things for the new session to look over and confirm
+
+1. **Clean build from this repo**: `git clone`, install the toolchain, `cargo test --workspace` → expect 1,116
+   passed / 33 ignored / 0 failed on `main`; clippy 0 warnings; release build. Note any difference (a different
+   toolchain or target may change warnings or test timing asserts such as WA19's wall-clock check).
+2. **GPU rendering**: start the app normally and with `dist/Start - DirectX 12.cmd`; the old machine never ran on a
+   real GPU — confirm the views, Split, 2D, stamps and text render correctly.
+3. **Scenario sweep on `main`**: run every scenario at 1280×800 on the built-in sample; all should report `"ok": true`.
+   Run `wrap_surface` with `test-assets/shapes/torus_knot.obj` and with WaterBottle / Avocado GLBs and look at the shots.
+4. **Re-baseline performance** with `WTE_FRAME_LOG=1` on ABeautifulGame (`workflow_path`, `brush_types_path`,
+   `text_warp`) — the old numbers do not apply.
+5. **Round 8 branch**: build `round8-wip`, run its tests (expect 4 failures: `wa4_r8`, `wa20`, `wa22`, `wa24`) and the
+   sweep; confirm the skeptics' findings (torus_knot coverage loss, Avocado doubles, WaterBottle no longer exact,
+   mirrored-UV / instancing explanations). Then plan round 9 with the user.
+6. Check that `.cargo/config.toml` (rust-lld for the gnu target) is still wanted on the new machine.
+7. Ask the user about the GPU brush (section 6) and the FBX `IMPORTER_VERSION` point before scheduling work.

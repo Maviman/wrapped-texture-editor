@@ -1,0 +1,3 @@
+newmtl mobius_mat
+Kd 1 1 1
+map_Kd mobius.png

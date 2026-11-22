@@ -1,0 +1,3 @@
+newmtl torus_knot_mat
+Kd 1 1 1
+map_Kd torus_knot.png

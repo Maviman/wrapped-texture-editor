@@ -1,0 +1,103 @@
+//! The `.wtep` project file (ARCHITECTURE.md 5.23, 7.1-7.3): shared types and re-exports. Saving, loading, version
+//! migration and atomic file replacement live in the sub-modules.
+
+use crate::document::Document;
+use crate::error::LoadWarning;
+use crate::image_io::PngLevel;
+
+pub mod atomic;
+pub mod load;
+pub mod manifest;
+pub mod migrate;
+pub mod save;
+
+pub use load::{extract_bundle, extract_sources, load, read_manifest};
+pub use manifest::*;
+pub use save::{required_reader, save};
+
+/// Version of the manifest schema written by this build. 2 (round 4): text entries may carry `fx`; a file whose
+/// texts use none of it is written with `min_reader_version` 1 (`save::required_reader`). 3 (round 6): a projected
+/// placement may carry `mode` ("wrap") and the Wrap options `wrap_gaps` / `wrap_overlap`; a file that uses none of
+/// them is written with the `min_reader_version` it had before.
+pub const FORMAT_VERSION: u32 = 3;
+/// File extension of a project file (without the dot).
+pub const PROJECT_EXTENSION: &str = "wtep";
+/// Content of the `mimetype` entry, the first entry of every project archive.
+pub const PROJECT_MIMETYPE: &str = "application/x-wtep";
+
+/// Parameters of `project::save`.
+#[derive(Clone, Debug)]
+pub struct SaveOptions {
+    /// PNG compression of the layer images (the app uses `PngLevel::Fast`).
+    pub png: PngLevel,
+    /// Also store the full-size composite of every set (the app uses `true`).
+    pub write_flattened: bool,
+    /// Rotate an existing file to `<path>.bak` instead of replacing it (the app uses `false`).
+    pub keep_backup: bool,
+    /// Save time in seconds since the Unix epoch; the core never reads the clock.
+    pub now_unix: u64,
+    pub app_version: String,
+}
+
+/// What `project::save` wrote.
+#[derive(Clone, Debug, Default)]
+pub struct SaveStats {
+    pub bytes_written: u64,
+    pub entries: u32,
+    /// The images of the written file that a later save may copy (see `PngReuse`).
+    pub reuse: Option<PngReuse>,
+}
+
+/// The layer and composite images of an existing project file that `save` copies instead of encoding them again,
+/// for every layer whose pixels did not change since (same id and `Layer::version`) and every set whose composite
+/// inputs did not change (same `composite_key`). Recorded by `load` and by every successful `save` for the file it
+/// read or wrote, kept by the document (`Document::set_png_reuse`, not persisted) and handed to the next save in its
+/// snapshot. Used only while that file still has the recorded size and modification time.
+#[derive(Clone, Debug, Default)]
+pub struct PngReuse {
+    pub path: std::path::PathBuf,
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+    /// Layer id -> (layer version, archive entry, rectangle `[x, y, w, h]`).
+    pub layers: std::collections::HashMap<crate::ids::LayerId, (u64, String, [i32; 4])>,
+    /// Set id -> (composite key, `flattened.png` entry).
+    pub flattened: std::collections::HashMap<crate::ids::TextureSetId, (u64, String)>,
+    /// (composite key of the first set, `thumbnail.png` entry).
+    pub thumbnail: Option<(u64, String)>,
+}
+
+impl PngReuse {
+    /// An empty record for the file at `path` with its current size and modification time; `None` when the file
+    /// cannot be inspected.
+    pub(crate) fn for_file(path: &std::path::Path) -> Option<PngReuse> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(PngReuse { path: path.to_path_buf(), len: meta.len(), modified: meta.modified().ok(), ..PngReuse::default() })
+    }
+
+    /// True while the file still has the recorded size and modification time.
+    pub(crate) fn file_unchanged(&self) -> bool {
+        std::fs::metadata(&self.path).is_ok_and(|m| m.len() == self.len && m.modified().ok() == self.modified)
+    }
+}
+
+/// Result of `project::load`.
+pub struct LoadReport {
+    pub document: Document,
+    pub warnings: Vec<LoadWarning>,
+    /// The file was written by a newer format version: plain Save must be refused so it is never overwritten.
+    pub force_save_as: bool,
+}
+
+/// The key of everything the composite of a set depends on: its size and, per layer bottom to top, the id, pixel
+/// version, visibility, opacity and blend mode. Equal keys mean an identical `flattened.png`.
+pub(crate) fn composite_key(set: &crate::document::SetSnapshot) -> u64 {
+    let mut h = crate::math::fnv1a64(0xcbf2_9ce4_8422_2325, &set.width.to_le_bytes());
+    h = crate::math::fnv1a64(h, &set.height.to_le_bytes());
+    for l in &set.layers {
+        h = crate::math::fnv1a64(h, &l.id.0.to_le_bytes());
+        h = crate::math::fnv1a64(h, &l.version().to_le_bytes());
+        h = crate::math::fnv1a64(h, &[l.visible as u8, l.blend as u8]);
+        h = crate::math::fnv1a64(h, &l.opacity.to_bits().to_le_bytes());
+    }
+    h
+}

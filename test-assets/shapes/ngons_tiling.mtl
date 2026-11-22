@@ -1,0 +1,11 @@
+newmtl tex_a
+map_Kd ngons_a.png
+
+newmtl tex_b
+map_Kd -s 2 2 1 ngons b.png
+
+newmtl missing_tex
+map_Kd does_not_exist.png
+
+newmtl no_map
+Kd 0.8 0.2 0.2

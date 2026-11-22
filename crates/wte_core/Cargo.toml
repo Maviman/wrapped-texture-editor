@@ -1,0 +1,27 @@
+[package]
+name = "wte_core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+log.workspace = true
+bitflags.workspace = true
+image.workspace = true
+png.workspace = true
+zip.workspace = true
+crc32fast.workspace = true
+tobj.workspace = true
+gltf.workspace = true
+# zlib inflate of compressed FBX arrays (already in the dependency tree through png).
+miniz_oxide = "0.8.9"
+fontdue.workspace = true
+fontdb.workspace = true
+epaint_default_fonts.workspace = true
+# Glyph outlines for the styled text painter (round 4, TEXT 5.1); the feature set fontdue enables.
+ttf-parser.workspace = true

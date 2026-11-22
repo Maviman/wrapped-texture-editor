@@ -1,0 +1,3 @@
+newmtl many_islands_mat
+Kd 1 1 1
+map_Kd many_islands.png

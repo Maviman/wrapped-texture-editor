@@ -1,0 +1,3 @@
+newmtl tiny_cube_mat
+Kd 1 1 1
+map_Kd tiny_cube.png

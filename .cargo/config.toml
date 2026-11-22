@@ -1,0 +1,6 @@
+# Link with the LLD linker bundled in the Rust toolchain. The bundled GNU ld mishandles the
+# import libraries rustc generates for Windows API calls here (crash before main), and LLD is
+# also much faster. No Visual Studio / MinGW install is required.
+[target.x86_64-pc-windows-gnu]
+linker = "rust-lld"
+rustflags = ["-Clinker-flavor=ld.lld", "-Clink-self-contained=yes"]

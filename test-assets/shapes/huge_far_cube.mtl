@@ -1,0 +1,3 @@
+newmtl huge_far_cube_mat
+Kd 1 1 1
+map_Kd huge_far_cube.png

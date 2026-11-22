@@ -1,0 +1,137 @@
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Round 4, gate stage 3: two measuring scenarios (FEATURE_TEXT 8.4 "twenty Preview edits", FEATURE_BRUSH P11). Their
+// numbers are read from the per-frame lines of `WTE_FRAME_LOG=1`, between the "gate:" log lines.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Needs a model path (FEATURE_TEXT 8.4: an 8192 texture; ABeautifulGame for the Preview frames of `text_warp`'s
+/// limit). Places "WTE 2026" on the model, warps it (Arc 50 %, one `Final`, timed), then sends twenty `Preview` edits
+/// of the bend, one per frame, and one `Final`. Asserts that the twenty Previews add no history entry and the Final
+/// adds one with the last bend.
+fn text_preview_path(has_path: bool) -> Vec<Step> {
+    let mut steps = vec![phase!("open / import")];
+    steps.extend(open_and_accept(has_path));
+    if !has_path {
+        return steps;
+    }
+    steps.extend(t7_place_3d(true));
+    steps.extend([
+        Step::Setup("time the Arc", |_, _| {
+            t7_timer_start("warp Arc".to_owned());
+            Ok(())
+        }),
+        Step::Dyn("warp the text: Arc 50 %", |s, _| t7_edit(s, |spec| spec.fx.warp = Some(gate_arc(0.5)))),
+        Step::WaitIdle,
+        Step::Setup("log the time; remember the history", |s, sc| {
+            t7_timer_stop();
+            remember_undo(s, sc)
+        }),
+        Step::Setup("gate: twenty preview edits start", |_, sc| {
+            sc.values.insert("tp_i", 0);
+            log::info!("gate: twenty preview edits start");
+            Ok(())
+        }),
+    ]);
+    for _ in 0..20 {
+        steps.push(Step::Dyn("one Preview edit of the bend", |s, sc| {
+            let (id, mut spec) = t7_selected_text(s)?;
+            let i = remembered(sc, "tp_i")?;
+            spec.fx.warp = Some(gate_arc(0.5 + 0.01 * (i as f32 + 1.0)));
+            Ok(vec![
+                Step::Setup("count the edit", |_, sc| {
+                    *sc.values.entry("tp_i").or_insert(0) += 1;
+                    Ok(())
+                }),
+                Step::Do(AppAction::UpdateStampSource(id, StampSource::Text(spec), Commit::Preview)),
+                Step::WaitFrames(1),
+            ])
+        }));
+    }
+    steps.extend([
+        Step::Setup("gate: twenty preview edits end", |_, _| {
+            log::info!("gate: twenty preview edits end");
+            Ok(())
+        }),
+        Step::Assert("the twenty Previews added no history entry", |s, sc| undo_since(s, sc, 0)),
+        Step::Setup("time the Final", |_, _| {
+            t7_timer_start("preview edits final".to_owned());
+            Ok(())
+        }),
+        Step::Dyn("the Final of the last bend", |s, _| t7_edit(s, |spec| spec.fx.warp = Some(gate_arc(0.7)))),
+        Step::WaitIdle,
+        Step::Setup("log the time of the Final", |_, _| {
+            t7_timer_stop();
+            Ok(())
+        }),
+        Step::Assert("the Final added one history entry with the last bend", |s, sc| {
+            undo_since(s, sc, 1)?;
+            let (_, spec) = t7_selected_text(s)?;
+            match spec.fx.warp {
+                Some(w) if (w.bend - 0.7).abs() < 1e-6 => Ok(()),
+                other => Err(format!("the warp is {other:?}")),
+            }
+        }),
+    ]);
+    steps
+}
+
+/// An Arc warp of `bend`.
+fn gate_arc(bend: f32) -> wte_core::Warp {
+    wte_core::Warp { bend, ..wte_core::Warp::new(wte_core::WarpStyle::Arc) }
+}
+
+/// Logs a "gate:" marker line (the measuring scenarios frame their frames with these).
+fn gate_mark(what: &'static str) -> Step {
+    Step::Dyn(what, |_, _| Ok(Vec::new()))
+}
+
+/// FEATURE_BRUSH P11: the sphere sample with the Brush tool and the Brush tab; 60 idle frames, then 60 hover frames
+/// across the model with Circular (no shape), then 60 with Sphere and the Cube (a shape cursor). The runner logs every
+/// step with its frame number, so the `gate: ...` steps mark the frames. Asserts that the Cube cursor was drawn.
+fn brush_hover() -> Vec<Step> {
+    let mut steps = vec![
+        Step::Do(AppAction::OpenSample(SampleKind::Sphere)),
+        Step::WaitIdle,
+        Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
+        Step::Do(AppAction::SetTool(ToolKind::Brush)),
+        Step::Setup("Circular, Size 64, the Brush tab", |s, _| {
+            s.tools.brush = BrushSettings { kind: BrushType::Circular, shape: ShapeChoice::Ball, size_px: 64.0, ..BrushSettings::default() };
+            s.side_tab = SideTab::Brush;
+            Ok(())
+        }),
+        Step::WaitIdle,
+        Step::WaitFrames(10),
+        Step::Assert("the Brush tab is shown", |s, _| tabs_shown(s, true, false)),
+        gate_mark("gate: idle brush tab start"),
+        Step::WaitFrames(60),
+        gate_mark("gate: idle brush tab end"),
+    ];
+    let hovers = || (0..60).map(|i| {
+        let t = i as f32 / 59.0;
+        Step::Hover { view: ViewId::Main3D, at: [0.42 + 0.16 * t, 0.45 + 0.1 * (t * 6.0).sin()] }
+    });
+    steps.push(gate_mark("gate: hover circular start"));
+    steps.extend(hovers());
+    steps.push(gate_mark("gate: hover circular end"));
+    steps.extend([
+        Step::Setup("Sphere with the Cube", |s, _| {
+            s.tools.brush = BrushSettings { kind: BrushType::Sphere, shape: ShapeChoice::Cube, size_px: 64.0, ..BrushSettings::default() };
+            Ok(())
+        }),
+        Step::Hover { view: ViewId::Main3D, at: [0.45, 0.5] },
+        Step::WaitIdle,
+        Step::WaitFrames(10),
+        gate_mark("gate: hover cube start"),
+    ]);
+    steps.extend(hovers());
+    steps.push(gate_mark("gate: hover cube end"));
+    steps.push(Step::Assert("the Cube cursor was drawn", |s, _| {
+        let p = &s.tool_probe;
+        log::info!("brush cursor after the hovers: {p:?}");
+        if p.cursor_footprint == 0 {
+            return Err(format!("no footprint was drawn: {p:?}"));
+        }
+        Ok(())
+    }));
+    steps
+}

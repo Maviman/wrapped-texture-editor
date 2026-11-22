@@ -1,0 +1,43 @@
+Wrapped Texture Editor - test build
+===================================
+
+This build writes a crash report when it crashes.
+
+Before you start: save your work and close any Wrapped Texture Editor that
+is still open (also older copies). Then try the three ways of starting it
+below, one after the other:
+
+  1. "Wrapped Texture Editor.exe"            (normal start, Vulkan)
+  2. "Start - DirectX 12.cmd"                (uses DirectX 12 instead of Vulkan)
+  3. "Start - Vulkan without overlays.cmd"   (Vulkan, but without the OBS /
+                                              Steam overlay hooks)
+
+In each one, do what used to crash:
+  - File > New from Model..., open an OBJ, glTF/GLB or FBX model, click Create
+    (models without UVs now open too: the app generates a texture layout)
+  - click "Split" (top of the view)
+  - paint on the model for a bit, switch between 3D / 2D / Split
+
+Note which of the three crash and which keep working.
+
+If it crashes
+-------------
+You should see a box "Wrapped Texture Editor crashed. A crash report was
+saved to ...". The report is in the "crash" folder next to the exe:
+
+  crash\crash-<numbers>.txt    (what happened, in plain text)
+  crash\crash-<numbers>.dmp    (a small memory snapshot for debugging)
+
+The log of the last run is here (paste this into Explorer's address bar):
+
+  %APPDATA%\WrappedTextureEditor\log.txt
+
+(If another copy of the app was open at the same time, the log is called
+log-<number>.txt in the same folder instead.)
+
+Please send the crash .txt file, the .dmp file next to it, and the log.
+The log is overwritten every time the app starts, so copy it before
+starting the app again.
+
+If nothing crashes, the log of that run is still useful: it lists which
+graphics backend was used and which overlay programs were hooked in.

@@ -1,0 +1,3 @@
+newmtl high_poly_sphere_mat
+Kd 1 1 1
+map_Kd high_poly_sphere.png

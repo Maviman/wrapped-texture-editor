@@ -1,0 +1,21 @@
+# Build output, test runs, round work copies (hundreds of GB on the original machine)
+/target/
+target/
+
+# Built executables and crash dumps
+*.exe
+*.pdb
+*.dmp
+crash/
+
+# Saved test projects and large generated meshes (regenerate with test-assets/shapes/make_shapes.py)
+*.wtep
+test-assets/shapes/high_poly_sphere.obj
+
+# Editor / OS clutter
+.vs/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+__pycache__/

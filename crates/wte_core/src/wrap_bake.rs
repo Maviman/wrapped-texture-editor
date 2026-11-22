@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 use rayon::prelude::*;
 
 use crate::blend::blend_row;
@@ -24,7 +24,7 @@ use crate::pixel_ops::PremulMips;
 use crate::stamp::{BakeQuality, Projector};
 use crate::stamp_bake::{BAND_ROWS, MIN_SIZE, SAMPLE_ALPHA_MAX, SCRATCH_BUDGET, crop_scratch, scratch_groups, shade, tint_factors};
 use crate::texel_map::{Fragment, TexelMap, raster_tri};
-use crate::wrap_param::{OwnerGrid, WrapLayer, WrapParam};
+use crate::wrap_param::{OwnerGrid, WrapLayer, WrapParam, owner_scale};
 
 /// Overlap: the along range of a turn's layer, `[lo, hi)` on coordinate `axis`, and its period (0 for an open turn).
 #[derive(Copy, Clone)]
@@ -51,9 +51,9 @@ struct WrapJob {
     clip: [f32; 4],
     lod: f32,
     corners: [Vec2; 3],
-    /// Round 8: the corners' depth `g` and the triangle's longest 3D edge (the owner test).
-    depth: [f32; 3],
-    edge: f32,
+    /// Round 9 (T1): the triangle's 3D corners and its stretch (`owner_scale`): the place owner test.
+    p3: [Vec3; 3],
+    s: f32,
 }
 
 /// Everything a fragment of a wrap bake needs.
@@ -89,14 +89,32 @@ impl WrapCtx<'_> {
         if !(l.x.abs() <= self.limit_x && l.y.abs() <= self.limit_y) {
             return None;
         }
-        // Round 8 (2.2-4): the owner test. The picture point goes to the surface place nearest the spine along the
-        // surface; a fragment deeper than the cell's owner by more than the tolerance is another place: dropped.
-        if let Some(grid) = owner
-            && let Some(k) = grid.index(l.x, l.y)
-        {
-            let d = &job.depth;
-            if !grid.keeps(k, d[0] * b[0] + d[1] * b[1] + d[2] * b[2], job.edge) {
-                return None;
+        // Round 9 (T1): the place owner test. Each picture point belongs to one surface place, its cell's owner; a
+        // fragment elsewhere on the surface is a second copy: dropped.
+        // A gutter fragment (outside its triangle in UV space) is tested at its triangle's nearest point (the
+        // barycentrics clamped): it pads the island with the picture exactly where its inside neighbours show it
+        // (its extrapolated 3D point leaves the surface at a fold and would be no place at all).
+        if let Some(grid) = owner {
+            let (bt, lt) = if b.iter().all(|&x| x >= 0.0) {
+                (b, l)
+            } else {
+                let c = b.map(|x| x.max(0.0));
+                let sum = c[0] + c[1] + c[2];
+                let c = if sum > 0.0 { c.map(|x| x / sum) } else { [1.0 / 3.0; 3] };
+                let mut lt = job.corners[0] * c[0] + job.corners[1] * c[1] + job.corners[2] * c[2];
+                if let Some(clip) = clip {
+                    let a = lt[clip.axis];
+                    if let Some(shift) = [0.0, clip.period, -clip.period].into_iter().find(|s| (a + s) >= clip.lo && (a + s) < clip.hi) {
+                        lt[clip.axis] += shift;
+                    }
+                }
+                (c, lt)
+            };
+            if let Some(k) = grid.index(lt.x, lt.y) {
+                let p = &job.p3;
+                if !grid.keeps(k, p[0] * bt[0] + p[1] * bt[1] + p[2] * bt[2], job.s) {
+                    return None;
+                }
             }
         }
         // A fragment that cannot beat the stored alpha needs no sample (`shade` rounds monotonically).
@@ -190,7 +208,7 @@ fn footprint_once(c: &[Vec2; 3], uv_px: &[Vec2; 3], lx: f32, ly: f32, clip: Opti
 fn layer_jobs(mesh: &MeshData, maps: &[Arc<TexelMap>], layer: &WrapLayer, ctx: &WrapCtx<'_>, src_px_per_world: f32) -> Vec<Vec<WrapJob>> {
     let mut jobs: Vec<Vec<WrapJob>> = maps.iter().map(|_| Vec::new()).collect();
     let clip = Clip::of(layer);
-    for (i, (&tri, corners)) in layer.tris.iter().zip(&layer.corners).enumerate() {
+    for (&tri, corners) in layer.tris.iter().zip(&layer.corners) {
         let Some(set) = mesh.tri_set(tri) else { continue };
         let Some(map) = maps.get(set.index()) else { continue };
         if map.width == 0 || map.height == 0 {
@@ -223,8 +241,8 @@ fn layer_jobs(mesh: &MeshData, maps: &[Arc<TexelMap>], layer: &WrapLayer, ctx: &
             clip: clip_box,
             lod: (src_px_per_world * texel_world * stretch).max(1.0).log2(),
             corners: c,
-            depth: layer.depth.get(i).copied().unwrap_or([0.0; 3]),
-            edge: layer.edge.get(i).copied().unwrap_or(0.0),
+            p3: pos,
+            s: owner_scale(pos, c),
         });
     }
     jobs

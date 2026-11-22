@@ -21,8 +21,9 @@ use std::time::Instant;
 
 use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 
-use crate::bvh::{Bvh, closest_point_on_triangle};
+use crate::bvh::{Bvh, Cull, closest_point_on_triangle};
 use crate::ids::TriId;
+use crate::math::Ray;
 use crate::mesh::MeshData;
 use crate::stamp::{Projector, WrapOptions};
 use crate::stamp_bake::MIN_SIZE;
@@ -59,13 +60,13 @@ pub const WRAP_STOP_SLACK: f64 = 1.7;
 // the layout state).
 #[path = "wrap_relax.rs"]
 mod relax;
-pub(crate) use relax::OwnerGrid;
+pub(crate) use relax::{OwnerGrid, owner_scale};
 /// check:A (round 8): the relaxation's parallel threshold, lowered by a test of the parallel path.
 #[cfg(test)]
 pub(crate) fn relax_par_min_for_tests() -> &'static std::sync::atomic::AtomicUsize {
     &relax::PAR_MIN_TEST
 }
-pub use relax::{CONE_CUT_DEG, ISO_TOL, OWNER_MAX_CELLS, OWNER_TOL, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
+pub use relax::{BURY_REACH, CONE_CUT_DEG, ISO_TOL, OWNER_MAX_CELLS, OWNER_SAME, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
 
 /// What a parameterization covers and how it went (for the panel, the log and the tests).
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -97,7 +98,8 @@ pub struct WrapStats {
     pub flipped: u32,
     /// Round 8: 95th percentile of |area ratio - 1| (layout over 3D) of the triangles inside the picture.
     pub stretch: f32,
-    /// Round 8: share of the laid picture area the owner test drops (estimated at the owner grid's cell centres).
+    /// Round 8: share of the laid picture area the owner test drops (estimated at the owner grid's cell centres:
+    /// round 9, the (cell centre, laid triangle) pairs inside the picture whose triangle is not the owner's place).
     pub rejected: f32,
     /// Round 8: conjugate-gradient iterations of the relaxation (all layers and components).
     pub cg_iters: u32,
@@ -129,10 +131,10 @@ pub(crate) struct WrapLayer {
     /// A closed turn: its period along `axis` (a fragment outside `clip` is moved by it).
     pub(crate) period: Option<f32>,
     pub(crate) axis: usize,
-    /// Round 8: per triangle the depth `g` (geodesic distance from the spine) of its corners and its longest 3D edge.
+    /// Round 8: per triangle the depth `g` (geodesic distance from the spine) of its corners.
     pub(crate) depth: Vec<[f32; 3]>,
-    pub(crate) edge: Vec<f32>,
-    /// Round 8: the owner grid of the owner test (`None` for a layer clipped to an Overlap turn's range).
+    /// Round 8: the owner grid of the owner test (`None` for a layer clipped to an Overlap turn's range); round 9: the
+    /// place owner (T1).
     pub(crate) owner: Option<OwnerGrid>,
     /// Uniform grid over the layer's coordinate box for `surface_of` (built on first use).
     grid: OnceLock<Grid>,
@@ -2077,7 +2079,9 @@ pub fn wrap_param(
             }
         }
         let along_clip = clip.map(|(_, lo, hi)| [lo as f32, hi as f32]);
-        let (layer, rej) = make_layer(&patch, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
+        let laid = layout.laid();
+        let owner_ctx = OwnerCtx { mesh, bvh, patch: &patch, orient: &layout.orient, entered: &layout.entered, laid: &laid };
+        let (layer, rej) = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
         rejected.0 += rej.0;
         rejected.1 += rej.1;
         layers.push((turn_id, layer));
@@ -2114,11 +2118,92 @@ pub fn wrap_param(
     })
 }
 
-/// The stored layer of one turn: ascending mesh triangle, f32 corners and corner depths, longest 3D edges, and (a
-/// layer not clipped to an Overlap turn's range) the owner grid over the reach rectangle `reach` (half extents).
-/// Also returns the owner test's cell centres inside `picture`: (rejected, all).
+/// What the owner grid of a layer needs besides its triangles (round 9, T1).
+struct OwnerCtx<'c> {
+    mesh: &'c MeshData,
+    bvh: &'c Bvh,
+    patch: &'c Patch,
+    /// The layout's triangle orientations and entered parts.
+    orient: &'c [i8],
+    entered: &'c [bool],
+    /// Laid local triangles (`Layout::laid`).
+    laid: &'c [bool],
+}
+
+impl OwnerCtx<'_> {
+    /// The local triangle of mesh triangle `tri` when it belongs to an entered part other than `own`.
+    fn other(&self, tri: TriId, own: u32) -> Option<u32> {
+        let patch = self.patch;
+        let l = patch.tris.binary_search(&tri).ok()? as u32;
+        let part = patch.part[patch.tv[l as usize][0] as usize];
+        (part != own && self.entered.get(part as usize).copied().unwrap_or(false)).then_some(l)
+    }
+
+    /// Round 9 (T1): false when no point of the triangle with corners `p3` (oriented normal `n`, part `own`) can be
+    /// buried: no triangle of another entered part meets the box of the prism its normal sweeps over `BURY_REACH x
+    /// diag` (grown by `1e-5 diag`).
+    fn may_bury(&self, p3: [Vec3; 3], n: DVec3, own: u32) -> bool {
+        if n == DVec3::ZERO || !n.is_finite() || !self.entered.iter().any(|&e| e) {
+            return false;
+        }
+        let diag = self.patch.diag;
+        let (eps, reach) = ((1e-5 * diag) as f32, (BURY_REACH * diag) as f32);
+        let d = Vec3::new(n.x as f32, n.y as f32, n.z as f32) * reach;
+        let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+        for c in p3 {
+            lo = lo.min(c).min(c + d);
+            hi = hi.max(c).max(c + d);
+        }
+        let (lo, hi) = (lo - Vec3::splat(eps), hi + Vec3::splat(eps));
+        if !(lo.is_finite() && hi.is_finite()) {
+            return false;
+        }
+        let mut near: Vec<(TriId, f32)> = Vec::new();
+        self.bvh.query_sphere_dist(self.mesh, (lo + hi) * 0.5, (hi - lo).length() * 0.5, &mut near);
+        near.iter().any(|&(tri, _)| {
+            self.other(tri, own).is_some() && {
+                let [a, b, c] = self.mesh.tri_positions(tri);
+                let (tlo, thi) = (a.min(b).min(c), a.max(b).max(c));
+                tlo.cmple(hi).all() && thi.cmpge(lo).all()
+            }
+        })
+    }
+
+    /// Round 9 (T1, answer (a)-1): true when the surface at `p` (oriented normal `n`, part `own`) lies under another
+    /// entered part: a face of such a part touches `p` parallel to it (within `1e-5 diag`: something lying on it), or
+    /// a ray from `p` along `n` hits such a part within `BURY_REACH x diag` (the floor under a cube, the board under a
+    /// piece's base).
+    fn buried_at(&self, p: DVec3, n: DVec3, own: u32) -> bool {
+        let patch = self.patch;
+        if n == DVec3::ZERO || !p.is_finite() || !n.is_finite() {
+            return false;
+        }
+        let eps = 1e-5 * patch.diag;
+        let o = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+        let mut near: Vec<(TriId, f32)> = Vec::new();
+        self.bvh.query_sphere_dist(self.mesh, o, eps as f32, &mut near);
+        if near.iter().any(|&(tri, _)| self.other(tri, own).is_some_and(|l| patch.geo[l as usize].dot(n).abs() > 0.99)) {
+            return true;
+        }
+        let ray = Ray::new(o, Vec3::new(n.x as f32, n.y as f32, n.z as f32));
+        let t_max = (BURY_REACH * patch.diag) as f32;
+        let mut t_min = eps as f32;
+        for _ in 0..16 {
+            let Some(hit) = self.bvh.raycast(self.mesh, &ray, t_min, t_max, Cull::None) else { return false };
+            if self.other(hit.tri, own).is_some() {
+                return true;
+            }
+            t_min = hit.t + (eps as f32).max(hit.t * 1e-6);
+        }
+        false
+    }
+}
+
+/// The stored layer of one turn: ascending mesh triangle, f32 corners and corner depths, and (a layer not clipped to
+/// an Overlap turn's range) the owner grid over the reach rectangle `reach` (half extents; round 9: the place owner).
+/// Also returns the owner test's (cell centre, triangle) pairs inside `picture`: (rejected, all).
 fn make_layer(
-    patch: &Patch,
+    ctx: &OwnerCtx<'_>,
     mut tris: Vec<(u32, [DVec2; 3], [f64; 3])>,
     clip: Option<[f32; 2]>,
     period: Option<f32>,
@@ -2126,22 +2211,31 @@ fn make_layer(
     reach: [f64; 2],
     picture: [f64; 2],
 ) -> (WrapLayer, (usize, usize)) {
+    let patch = ctx.patch;
     tris.sort_by_key(|e| patch.tris[e.0 as usize]);
-    let edge: Vec<f64> = tris
-        .iter()
-        .map(|e| {
-            let p = patch.corners(e.0);
-            p[0].distance(p[1]).max(p[1].distance(p[2])).max(p[2].distance(p[0]))
-        })
-        .collect();
-    // The corners as stored (f32) are what the bake interpolates: the grid is built from them.
-    let stored: Vec<([DVec2; 3], [f64; 3], f64)> = tris
-        .iter()
-        .zip(&edge)
-        .map(|(e, &l)| (e.1.map(|q| DVec2::new(q.x as f32 as f64, q.y as f32 as f64)), e.2.map(|g| g as f32 as f64), l as f32 as f64))
-        .collect();
     let (owner, rej) = if clip.is_none() {
-        let (grid, rej) = OwnerGrid::build(&stored, reach, 0.0, picture);
+        // The corners as stored (f32) are what the bake interpolates: the grid is built from them, with the mesh's
+        // f32 positions.
+        let stored: Vec<relax::OwnerTri> = tris
+            .iter()
+            .map(|e| {
+                let q32 = e.1.map(|q| Vec2::new(q.x as f32, q.y as f32));
+                let p3 = ctx.mesh.tri_positions(patch.tris[e.0 as usize]);
+                let o = if ctx.orient.get(e.0 as usize).copied().unwrap_or(1) < 0 { -1.0 } else { 1.0 };
+                relax::OwnerTri {
+                    q: q32.map(|q| DVec2::new(q.x as f64, q.y as f64)),
+                    g: e.2.map(|g| g as f32 as f64),
+                    p3,
+                    s: relax::owner_scale(p3, q32),
+                    part: patch.part[patch.tv[e.0 as usize][0] as usize],
+                    normal: patch.geo[e.0 as usize] * o,
+                    laid: ctx.laid.get(e.0 as usize).copied().unwrap_or(false),
+                }
+            })
+            .collect();
+        let may = |i: usize| ctx.may_bury(stored[i].p3, stored[i].normal, stored[i].part);
+        let at = |i: usize, p: DVec3| ctx.buried_at(p, stored[i].normal, stored[i].part);
+        let (grid, rej) = OwnerGrid::build(&stored, reach, 0.0, picture, &relax::Burial { may: &may, at: &at });
         (Some(grid), rej)
     } else {
         (None, (0, 0))
@@ -2153,7 +2247,6 @@ fn make_layer(
         period,
         axis,
         depth: tris.iter().map(|e| e.2.map(|g| g as f32)).collect(),
-        edge: edge.iter().map(|&l| l as f32).collect(),
         owner,
         grid: OnceLock::new(),
     };
@@ -2378,9 +2471,10 @@ impl WrapParam {
         }
         let layer = self.top();
         let grid = layer.grid();
-        // Round 8: of the triangles containing the point the one nearest the spine along the surface (lowest depth
-        // `g` there, then the first): the owner test's rule; else the one the point is least outside of, within a
-        // small tolerance.
+        // Round 9 (T1): of the triangles containing the point the owner's place (the one whose 3D point there lies
+        // nearest the cell owner's point), else (no owner) the one nearest the spine along the surface (lowest depth
+        // `g` there, then the first); else the one the point is least outside of, within a small tolerance.
+        let owner_point = layer.owner.as_ref().and_then(|o| o.index(local.x, local.y).and_then(|k| o.owner_at(k)));
         let mut best: Option<(f32, usize, [f32; 3])> = None;
         let mut owner: Option<(f32, usize, [f32; 3])> = None;
         for &i in grid.cell_items(local) {
@@ -2395,7 +2489,13 @@ impl WrapParam {
             let w2 = 1.0 - w0 - w1;
             let inside = w0.min(w1).min(w2);
             if inside >= 0.0 {
-                let g = layer.depth.get(i as usize).map_or(0.0, |z| z[0] * w0 + z[1] * w1 + z[2] * w2);
+                let g = match owner_point {
+                    Some(o) => {
+                        let p = mesh.tri_positions(layer.tris[i as usize]);
+                        (p[0] * w0 + p[1] * w1 + p[2] * w2).distance(o)
+                    }
+                    None => layer.depth.get(i as usize).map_or(0.0, |z| z[0] * w0 + z[1] * w1 + z[2] * w2),
+                };
                 if owner.is_none_or(|(o, _, _)| g < o) {
                     owner = Some((g, i as usize, [w0, w1, w2]));
                 }

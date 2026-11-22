@@ -919,15 +919,34 @@ pub fn cells_picture(width: u32, height: u32) -> PixelBuf {
 /// referencing texture 0. Islands: the cube's faces in `push_box` order (+X, -X, +Y, -Y, +Z, -Z) are the cells of a
 /// 2 x 3 grid in `u` 0..0.5; the floor is `u` 0.5..0.99, `v` 0.01..0.99.
 pub fn uv_cube_on_floor() -> RawMesh {
-    let mut triangles = Vec::with_capacity(14);
+    uv_cube_on_floor_n(1)
+}
+
+/// Round 9 (WA31): `uv_cube_on_floor` with the floor as `n` x `n` quads (`2 n^2` triangles; the island split to
+/// match, uniformly in UV). `n = 1` is `uv_cube_on_floor` exactly.
+pub fn uv_cube_on_floor_n(n: u32) -> RawMesh {
+    let n = n.max(1);
+    let mut triangles = Vec::with_capacity(12 + 2 * (n * n) as usize);
     let cell = |f: usize| {
         let (col, row) = ((f % 2) as f32, (f / 2) as f32);
         let (w, h) = (0.25, 1.0 / 3.0);
         [col * w + 0.01, (col + 1.0) * w - 0.01, row * h + 0.01, (row + 1.0) * h - 0.01]
     };
     push_box(&mut triangles, Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5), Some(std::array::from_fn(cell)), 0);
-    let floor = [Vec3::new(-2.0, 0.0, 2.0), Vec3::new(2.0, 0.0, 2.0), Vec3::new(2.0, 0.0, -2.0), Vec3::new(-2.0, 0.0, -2.0)];
-    push_island_quad(&mut triangles, floor, [0.5, 0.99, 0.01, 0.99], 0);
+    let (u0, u1, v0, v1) = (0.5f32, 0.99f32, 0.01f32, 0.99f32);
+    let (du, dv, step) = ((u1 - u0) / n as f32, (v1 - v0) / n as f32, 4.0 / n as f32);
+    // The interior grid lines are shifted by 0.37 of a step: no floor vertex coincides with a cube corner (a
+    // coincident one welds the floor and the cube into one part).
+    let line = |k: u32| if k == 0 { 0.0 } else if k == n { 4.0 } else { step * (k as f32 + 0.37) };
+    for j in 0..n {
+        for i in 0..n {
+            let (xa, xb) = (-2.0 + line(i), -2.0 + line(i + 1));
+            let (za, zb) = (2.0 - line(j), 2.0 - line(j + 1));
+            let floor = [Vec3::new(xa, 0.0, za), Vec3::new(xb, 0.0, za), Vec3::new(xb, 0.0, zb), Vec3::new(xa, 0.0, zb)];
+            let island = [u0 + du * i as f32, u0 + du * (i + 1) as f32, v1 - dv * (j + 1) as f32, v1 - dv * j as f32];
+            push_island_quad(&mut triangles, floor, if n == 1 { [u0, u1, v0, v1] } else { island }, 0);
+        }
+    }
     RawMesh { triangles, materials: vec![material("Floor", [0.8, 0.8, 0.8, 1.0], Some(0))] }
 }
 

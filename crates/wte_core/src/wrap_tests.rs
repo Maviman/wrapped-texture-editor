@@ -2476,3 +2476,24 @@ fn check_a8_undo_and_a_new_edit_while_a_preview_job_runs() {
     assert_eq!(doc.apply_wrap_preview(job.run()), WrapPreview::Stale, "a removed stamp's output");
     assert!(doc.stamp(id).is_none());
 }
+// ----- round 9 (plan R9 section 5) -----
+
+/// WA31 (round 9, T1): the place owner does not depend on the mesh density: WA17's picture from the floor up the
+/// cube's side, the floor as 2, 128 and 8,192 triangles, Jump small gaps on. The picture is moved 0.25 towards the
+/// cube so that all of it has surface under it (WA17's own placement hangs 0.2 of its 2.0 length over the floor's
+/// far edge: at most 0.90 of it can lie once).
+#[test]
+fn wa31_the_owner_does_not_depend_on_the_mesh_density() {
+    let p = with_options(wrapped(Vec3::new(0.0, 0.0, 0.95), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false);
+    let mut inks = Vec::new();
+    for n in [1u32, 8, 64] {
+        let (q, s, ink, doc, id) = r8_measure(samples::uv_cube_on_floor_n(n), SIDE, p);
+        let (cube, _) = ink_in(&doc, id, 0..12);
+        println!("WA31 floor {} triangles: {}, cube texels {cube}, jumps {}, rejected {:.4}", 2 * n * n, r8_line("cube on floor", &q, &s, ink), s.jumps, s.rejected);
+        assert!(cube > 1000, "floor {}: the cube's side receives nothing", 2 * n * n);
+        assert!((0.95..=1.10).contains(&ink) && q.dup <= 0.01, "floor {}: ink {ink}, {q:?}", 2 * n * n);
+        inks.push(ink);
+    }
+    let (lo, hi) = inks.iter().fold((f64::INFINITY, 0.0f64), |(a, b), &x| (a.min(x), b.max(x)));
+    assert!(hi <= lo * 1.02, "the inks differ by more than 2 %: {inks:?}");
+}

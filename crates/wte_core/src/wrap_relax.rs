@@ -16,7 +16,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use glam::{DVec2, DVec3};
+use glam::{DVec2, DVec3, Vec2, Vec3};
 use rayon::prelude::*;
 
 use super::{Frame, Layout, NONE, Patch, State, TEAR_RATIO, cross2, edge_of};
@@ -55,8 +55,6 @@ fn uf_join(uf: &mut [u32], a: u32, b: u32) {
 }
 /// The owner grid: at most this many cells on its long side.
 pub const OWNER_MAX_CELLS: usize = 1024;
-/// The owner test's tolerance, in (cell diagonal + longest 3D edge of the fragment's triangle + of the cell's owner).
-pub const OWNER_TOL: f32 = 2.0;
 /// ARAP local / global iterations after the LSCM start (fewer when the energy drops by less than `ARAP_STOP`).
 pub const RELAX_ARAP_ITERS: u32 = 6;
 /// Conjugate-gradient iterations per component and layer, all solves together.
@@ -1198,98 +1196,333 @@ fn relax_component(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[bool],
     iters
 }
 
-// ----- the owner grid (2.2-4) -----
+// ----- the owner grid (round 9, T1: the place owner) -----
 
-/// Per layer: over the reach rectangle, the smallest depth `g` of the stored triangles covering each cell and the
-/// longest 3D edge of that owner (the owner test of `bake_wrapped`).
+/// Round 9 (T1): a fragment is the same surface place as its cell's owner when its 3D point lies within this many
+/// cell diagonals (times the larger of the two stretches, `owner_scale`) of the owner's 3D point.
+pub const OWNER_SAME: f32 = 3.0;
+/// Round 9 (T1): the reach of the `buried` ray, times the model diagonal (`4 x GAP_JUMP`).
+pub const BURY_REACH: f64 = 4.0 * super::GAP_JUMP;
+
+/// One stored triangle as the owner grid sees it (round 9, T1).
+pub(crate) struct OwnerTri {
+    /// The stored (f32) layout corners.
+    pub(crate) q: [DVec2; 3],
+    /// Corner depths `g` (as stored).
+    pub(crate) g: [f64; 3],
+    /// The mesh triangle's corners (the f32 positions the bake interpolates).
+    pub(crate) p3: [Vec3; 3],
+    /// `owner_scale` of the triangle.
+    pub(crate) s: f32,
+    /// Part (`Patch::part`) and oriented unit normal (zero for a degenerate triangle): the `buried` test.
+    pub(crate) part: u32,
+    pub(crate) normal: DVec3,
+    /// Laid (all corners final), not a halo triangle: only these count for `WrapStats::rejected`.
+    pub(crate) laid: bool,
+}
+
+/// Round 9 (T1): the stretch of a stored triangle, `sqrt(3D area / layout area)` clamped to 1..4 (world units per
+/// layout unit; a layout area of 0 gives 4). The bake and the grid compute it from the same f32 inputs.
+pub(crate) fn owner_scale(p3: [Vec3; 3], q: [Vec2; 3]) -> f32 {
+    let a3 = (p3[1] - p3[0]).cross(p3[2] - p3[0]).length();
+    let a2 = (q[1] - q[0]).perp_dot(q[2] - q[0]).abs();
+    let s = (a3 / a2).sqrt();
+    if s.is_nan() { 4.0 } else { s.clamp(1.0, 4.0) }
+}
+
+/// The `buried` test (`wrap_param::buried_at`): `may(i)` is false when no point of stored triangle `i` can be buried
+/// (no other entered part near the prism its normal sweeps), `at(i, p)` the test at 3D point `p` of triangle `i`.
+pub(crate) struct Burial<'b> {
+    pub(crate) may: &'b (dyn Fn(usize) -> bool + Sync),
+    pub(crate) at: &'b (dyn Fn(usize, DVec3) -> bool + Sync),
+}
+
+/// Per layer, over the reach rectangle: per cell the **owner** of its centre, the stored triangle covering the centre
+/// with the smallest `(buried, g, triangle)`, as its depth `g`, its 3D point and its stretch (round 9, T1; the owner
+/// test of `bake_wrapped`). A cell whose centre no triangle covers has no owner (`g` infinite).
 pub(crate) struct OwnerGrid {
     pub(crate) lo: [f32; 2],
     pub(crate) cell: f32,
     pub(crate) dims: [usize; 2],
     pub(crate) g: Vec<f32>,
-    pub(crate) edge: Vec<f32>,
+    pub(crate) pos: Vec<[f32; 3]>,
+    pub(crate) scale: Vec<f32>,
+}
+
+/// The barycentric weights of `c` in the layout triangle `q` when it lies inside (edges included), else `None`.
+fn inside_weights(q: &[DVec2; 3], c: DVec2) -> Option<[f64; 3]> {
+    let area = cross2(q[1] - q[0], q[2] - q[0]);
+    if area == 0.0 || !area.is_finite() {
+        return None;
+    }
+    let w = [cross2(q[2] - q[1], c - q[1]) / area, cross2(q[0] - q[2], c - q[2]) / area, cross2(q[1] - q[0], c - q[0]) / area];
+    w.iter().all(|&x| x >= 0.0).then_some(w)
+}
+
+/// The owner build's rows per parallel chunk.
+const OWNER_CHUNK_ROWS: usize = 16;
+
+/// One cell during the owner build: the owner's depth, index and 3D point; the first candidate's part and point and
+/// the `mixed` bits (1 another part, 2 another place).
+#[derive(Clone, Copy)]
+struct CellState {
+    g: f64,
+    best: u32,
+    part0: u32,
+    p: [f32; 3],
+    first: [f32; 3],
+    seen: u8,
+}
+
+impl Default for CellState {
+    fn default() -> CellState {
+        CellState { g: f64::INFINITY, best: NONE, part0: NONE, p: [0.0; 3], first: [0.0; 3], seen: 0 }
+    }
+}
+
+impl OwnerTri {
+    /// Depth and 3D point at the weights `w`.
+    fn at(&self, w: [f64; 3]) -> (f64, DVec3) {
+        let g = self.g[0] * w[0] + self.g[1] * w[1] + self.g[2] * w[2];
+        let p = |i: usize| DVec3::new(self.p3[i].x as f64, self.p3[i].y as f64, self.p3[i].z as f64);
+        (g, p(0) * w[0] + p(1) * w[1] + p(2) * w[2])
+    }
 }
 
 impl OwnerGrid {
     /// The grid over `|x| <= half[0], |y| <= half[1]` with cells of at least `min_cell` (at most `OWNER_MAX_CELLS` on
-    /// the long side) from triangles (corners, corner depths, longest 3D edge). Also returns, of the cell centres
-    /// inside `picture` covered by a triangle (counted per triangle), those the owner test would drop and all.
-    pub(crate) fn build(tris: &[([DVec2; 3], [f64; 3], f64)], half: [f64; 2], min_cell: f64, picture: [f64; 2]) -> (OwnerGrid, (usize, usize)) {
+    /// the long side) from the stored triangles `tris` (ascending triangle id). `buried` is asked only in cells whose
+    /// candidates come from two or more parts. Also returns, of the (cell centre, covering triangle) pairs inside
+    /// `picture`, those the owner test drops and all.
+    pub(crate) fn build(tris: &[OwnerTri], half: [f64; 2], min_cell: f64, picture: [f64; 2], buried: &Burial<'_>) -> (OwnerGrid, (usize, usize)) {
         let long = 2.0 * half[0].max(half[1]);
         let cell = min_cell.max(long / OWNER_MAX_CELLS as f64).max(1e-30);
         let dims = [((2.0 * half[0] / cell).ceil() as usize).clamp(1, 4 * OWNER_MAX_CELLS), ((2.0 * half[1] / cell).ceil() as usize).clamp(1, 4 * OWNER_MAX_CELLS)];
         let lo = [-half[0], -half[1]];
-        let mut g = vec![f32::INFINITY; dims[0] * dims[1]];
-        let mut edge = vec![0.0f32; dims[0] * dims[1]];
-        let range = |a: f64, b: f64, axis: usize| -> Option<(usize, usize)> {
-            let i0 = ((a - lo[axis]) / cell).floor();
-            let i1 = ((b - lo[axis]) / cell).floor();
-            if !(i1 >= 0.0 && i0 < dims[axis] as f64) {
+        let n = dims[0] * dims[1];
+        let debug: bool = knob("WTE_TEST_OWNER_DEBUG", false);
+        let t0 = std::time::Instant::now();
+        let first = |a: f64, axis: usize| ((a - lo[axis]) / cell - 0.5).ceil().max(0.0);
+        let last = |b: f64, axis: usize| ((b - lo[axis]) / cell - 0.5).floor().min(dims[axis] as f64 - 1.0);
+        // The rows of cell centres a triangle may cover (`None` when none).
+        let rows_of = |q: &[DVec2; 3]| -> Option<(usize, usize)> {
+            if !q.iter().all(|p| p.is_finite()) {
                 return None;
             }
-            Some((i0.max(0.0) as usize, (i1 as usize).min(dims[axis] - 1)))
+            let (j0, j1) = (first(q[0].y.min(q[1].y).min(q[2].y), 1), last(q[0].y.max(q[1].y).max(q[2].y), 1));
+            (j0 <= j1).then_some((j0 as usize, j1 as usize))
         };
-        // The cells a triangle overlaps, row by row (the triangle clipped to the row's band gives its x span).
-        let visit = |q: &[DVec2; 3], f: &mut dyn FnMut(usize, DVec2, DVec2)| {
-            let (mn, mx) = (q[0].min(q[1]).min(q[2]), q[0].max(q[1]).max(q[2]));
-            let Some((y0, y1)) = range(mn.y, mx.y, 1) else { return };
-            for j in y0..=y1 {
-                let (b0, b1) = (lo[1] + j as f64 * cell, lo[1] + (j + 1) as f64 * cell);
-                let Some((sx0, sx1)) = row_span(q, b0, b1) else { continue };
-                let Some((x0, x1)) = range(sx0, sx1, 0) else { continue };
-                for i in x0..=x1 {
-                    let blo = DVec2::new(lo[0] + i as f64 * cell, b0);
-                    f(j * dims[0] + i, blo, blo + DVec2::splat(cell));
+        // The cell centres of rows `r0..r1` a triangle covers: f(cell, centre, weights).
+        let visit = |q: &[DVec2; 3], r0: usize, r1: usize, f: &mut dyn FnMut(usize, DVec2, [f64; 3])| {
+            let Some((j0, j1)) = rows_of(q) else { return };
+            for j in j0.max(r0)..=j1.min(r1.saturating_sub(1)) {
+                let y = lo[1] + (j as f64 + 0.5) * cell;
+                let Some((sx0, sx1)) = row_span(q, y, y) else { continue };
+                let (i0, i1) = (first(sx0, 0), last(sx1, 0));
+                if i0.partial_cmp(&i1).is_none_or(|o| o == Ordering::Greater) {
+                    continue;
+                }
+                for i in i0 as usize..=i1 as usize {
+                    let c = DVec2::new(lo[0] + (i as f64 + 0.5) * cell, y);
+                    if let Some(w) = inside_weights(q, c) {
+                        f(j * dims[0] + i, c, w);
+                    }
                 }
             }
         };
-        for (q, gs, e) in tris {
-            if !q.iter().all(|p| p.is_finite()) {
-                continue;
-            }
-            let (gmin, gmax) = (gs[0].min(gs[1]).min(gs[2]), gs[0].max(gs[1]).max(gs[2]));
-            let lin = linear(q, gs);
-            visit(q, &mut |k, blo, bhi| {
-                let at = |p: DVec2| lin.map_or(gmin, |l| (l.0 + l.1.dot(p)).clamp(gmin, gmax));
-                let v = at(blo).min(at(bhi)).min(at(DVec2::new(blo.x, bhi.y))).min(at(DVec2::new(bhi.x, blo.y))) as f32;
-                if v < g[k] {
-                    g[k] = v;
-                    edge[k] = *e as f32;
+        // Row chunks (processed in parallel, each cell by its own chunk only) and the triangles of each, ascending.
+        let chunk_rows = OWNER_CHUNK_ROWS;
+        let chunks = dims[1].div_ceil(chunk_rows);
+        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); chunks];
+        for (i, t) in tris.iter().enumerate() {
+            if let Some((j0, j1)) = rows_of(&t.q) {
+                for bin in &mut bins[j0 / chunk_rows..=j1 / chunk_rows] {
+                    bin.push(i as u32);
                 }
-            });
+            }
         }
-        let grid = OwnerGrid { lo: [lo[0] as f32, lo[1] as f32], cell: cell as f32, dims, g, edge };
-        // The rejected share at cell centres inside the picture.
-        let (mut total, mut rejected) = (0usize, 0usize);
-        for (q, gs, e) in tris {
-            if !q.iter().all(|p| p.is_finite()) {
-                continue;
+        let width = dims[0];
+        // Pass 1, per cell: the owner by (g, triangle); `mixed`: candidates of two or more parts and at two or more
+        // places (one farther than half the owner test's smallest tolerance from the first candidate's point:
+        // candidates all at one place need no choice, e.g. coplanar overlapping parts).
+        let half_tol = 0.5 * OWNER_SAME as f64 * cell * std::f64::consts::SQRT_2;
+        let mut cells: Vec<CellState> = vec![CellState::default(); n];
+        cells.par_chunks_mut(chunk_rows * width).enumerate().for_each(|(c, out)| {
+            let base = c * chunk_rows * width;
+            let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
+            for &i in &bins[c] {
+                let t = &tris[i as usize];
+                visit(&t.q, r0, r1, &mut |k, _, w| {
+                    let (g, p) = t.at(w);
+                    let p = [p.x as f32, p.y as f32, p.z as f32];
+                    let s = &mut out[k - base];
+                    if s.best == NONE {
+                        *s = CellState { g, best: i, part0: t.part, p, first: p, seen: 0 };
+                        return;
+                    }
+                    if s.seen != 3 {
+                        if s.part0 != t.part {
+                            s.seen |= 1;
+                        }
+                        let d = Vec3::from(s.first).distance(Vec3::from(p)) as f64;
+                        if d > half_tol {
+                            s.seen |= 2;
+                        }
+                    }
+                    if g < s.g {
+                        s.g = g;
+                        s.best = i;
+                        s.p = p;
+                    }
+                });
             }
-            let Some(l) = linear(q, gs) else { continue };
-            let area = cross2(q[1] - q[0], q[2] - q[0]);
-            visit(q, &mut |k, blo, bhi| {
-                let c = (blo + bhi) * 0.5;
-                if c.x.abs() > picture[0] || c.y.abs() > picture[1] {
+        });
+        let mixed = cells.iter().filter(|s| s.seen == 3).count();
+        if debug {
+            eprintln!("owner: {} x {} cells, {} triangles, pass 1 {:.1} ms, mixed {mixed}", dims[0], dims[1], tris.len(), t0.elapsed().as_secs_f64() * 1e3);
+        }
+        // Pass 2 (mixed cells only): the owner by (buried, g, triangle). The candidates in (g, triangle) order: the
+        // first is pass 1's owner and stands unless it may be buried (`Burial::may`, once per triangle) and is;
+        // then the next one not buried wins (else the first). `buried` is asked lazily in that order, chunks in
+        // parallel: the same owners with 1 or N threads.
+        if mixed > 0 {
+            let mut used: Vec<u32> = cells.iter().filter(|s| s.seen == 3).map(|s| s.best).collect();
+            used.sort_unstable();
+            used.dedup();
+            let flags: Vec<bool> = used.par_iter().map(|&i| (buried.may)(i as usize)).collect();
+            let mut may = vec![None::<bool>; tris.len()];
+            for (&i, &m) in used.iter().zip(&flags) {
+                may[i as usize] = Some(m);
+            }
+            // The other candidates' `may`, for the triangles of the chunks that hold a mixed cell.
+            let mut rest: Vec<u32> = Vec::new();
+            for (c, bin) in bins.iter().enumerate() {
+                let (a, b) = (c * chunk_rows * width, ((c + 1) * chunk_rows * width).min(n));
+                if cells[a..b].iter().any(|s| s.seen == 3 && may[s.best as usize] == Some(true)) {
+                    rest.extend(bin.iter().copied().filter(|&i| may[i as usize].is_none()));
+                }
+            }
+            rest.sort_unstable();
+            rest.dedup();
+            let flags: Vec<bool> = rest.par_iter().map(|&i| (buried.may)(i as usize)).collect();
+            for (&i, &m) in rest.iter().zip(&flags) {
+                may[i as usize] = Some(m);
+            }
+            let asked = std::sync::atomic::AtomicUsize::new(0);
+            cells.par_chunks_mut(chunk_rows * width).enumerate().for_each(|(c, out)| {
+                let base = c * chunk_rows * width;
+                if !out.iter().any(|s| s.seen == 3 && may[s.best as usize] == Some(true)) {
                     return;
                 }
-                let inside = (0..3).all(|i| cross2(q[(i + 1) % 3] - q[i], c - q[i]) * area >= 0.0);
-                if !inside {
+                let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
+                // Cells whose pass 1 owner is buried.
+                let mut needy = vec![false; out.len()];
+                let mut count = 0;
+                for (j, s) in out.iter().enumerate() {
+                    if s.seen == 3 && may[s.best as usize] == Some(true) {
+                        count += 1;
+                        let p = Vec3::from(s.p);
+                        needy[j] = (buried.at)(s.best as usize, DVec3::new(p.x as f64, p.y as f64, p.z as f64));
+                    }
+                }
+                asked.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                if !needy.iter().any(|&x| x) {
                     return;
                 }
-                total += 1;
-                if !grid.keeps(k, (l.0 + l.1.dot(c)) as f32, *e as f32) {
-                    rejected += 1;
+                let mut items: Vec<(usize, u32, f64, [f32; 3])> = Vec::new();
+                for &i in &bins[c] {
+                    let t = &tris[i as usize];
+                    visit(&t.q, r0, r1, &mut |k, _, w| {
+                        if needy[k - base] {
+                            let (g, p) = t.at(w);
+                            items.push((k - base, i, g, [p.x as f32, p.y as f32, p.z as f32]));
+                        }
+                    });
+                }
+                items.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.2.total_cmp(&b.2)).then(a.1.cmp(&b.1)));
+                let mut j = 0;
+                while j < items.len() {
+                    let mut e = j + 1;
+                    while e < items.len() && items[e].0 == items[j].0 {
+                        e += 1;
+                    }
+                    let pick = items[j + 1..e]
+                        .iter()
+                        .position(|&(_, i, _, p)| {
+                            let p = Vec3::from(p);
+                            !(may[i as usize] == Some(true) && (buried.at)(i as usize, DVec3::new(p.x as f64, p.y as f64, p.z as f64)))
+                        })
+                        .map_or(j, |x| j + 1 + x);
+                    let (k, i, g, p) = items[pick];
+                    let s = &mut out[k];
+                    s.best = i;
+                    s.g = g;
+                    s.p = p;
+                    j = e;
                 }
             });
+            if debug {
+                eprintln!("owner: pass 2 {:.1} ms, {} cells asked", t0.elapsed().as_secs_f64() * 1e3, asked.into_inner());
+            }
         }
-        (grid, (rejected, total))
+        let grid = OwnerGrid {
+            lo: [lo[0] as f32, lo[1] as f32],
+            cell: cell as f32,
+            dims,
+            g: cells.iter().map(|s| if s.best == NONE { f32::INFINITY } else { s.g as f32 }).collect(),
+            pos: cells.iter().map(|s| s.p).collect(),
+            scale: cells.iter().map(|s| if s.best == NONE { 1.0 } else { tris[s.best as usize].s }).collect(),
+        };
+        drop(cells);
+        // The rejected share at the cell centres inside the picture, of the laid triangles (`WrapStats::rejected`: the
+        // laid picture area; a halo triangle hinged over a fold, e.g. a block's side hanging into a gap, is dropped
+        // where another place owns its cells without counting). Per chunk, integer counts.
+        let counts: Vec<(usize, usize)> = (0..chunks)
+            .into_par_iter()
+            .map(|c| {
+                let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
+                let (mut total, mut rejected) = (0usize, 0usize);
+                for &i in &bins[c] {
+                    let t = &tris[i as usize];
+                    if !t.laid {
+                        continue;
+                    }
+                    visit(&t.q, r0, r1, &mut |k, c, w| {
+                        if c.x.abs() > picture[0] || c.y.abs() > picture[1] {
+                            return;
+                        }
+                        total += 1;
+                        let (_, p) = t.at(w);
+                        if !grid.keeps(k, Vec3::new(p.x as f32, p.y as f32, p.z as f32), t.s) {
+                            rejected += 1;
+                        }
+                    });
+                }
+                (rejected, total)
+            })
+            .collect();
+        let rej = counts.iter().fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        if debug {
+            eprintln!("owner: done {:.1} ms ({} x {} cells, {} triangles)", t0.elapsed().as_secs_f64() * 1e3, dims[0], dims[1], tris.len());
+        }
+        (grid, rej)
     }
 
-    /// The owner test at cell index `k`: a fragment of depth `g` from a triangle whose longest 3D edge is `edge` is
-    /// kept when `g <= g_min + OWNER_TOL x (cell diagonal + edge + the owner's edge)`.
-    pub(crate) fn keeps(&self, k: usize, g: f32, edge: f32) -> bool {
-        let gmin = self.g[k];
-        !(gmin.is_finite()) || g <= gmin + OWNER_TOL * (self.cell * std::f32::consts::SQRT_2 + edge + self.edge[k])
+    /// The owner test at cell index `k`: a fragment at 3D point `p` of a triangle with stretch `s` is kept when the
+    /// cell has no owner or `p` is the owner's place (within `OWNER_SAME x cell diagonal x max(1, s, owner's s)`).
+    #[inline]
+    pub(crate) fn keeps(&self, k: usize, p: Vec3, s: f32) -> bool {
+        if !self.g[k].is_finite() {
+            return true;
+        }
+        let o = self.pos[k];
+        let d = Vec3::new(p.x - o[0], p.y - o[1], p.z - o[2]).length();
+        d <= OWNER_SAME * self.cell * std::f32::consts::SQRT_2 * s.max(self.scale[k]).max(1.0)
+    }
+
+    /// The owner's 3D point at cell index `k` (`None` without an owner).
+    pub(crate) fn owner_at(&self, k: usize) -> Option<Vec3> {
+        self.g[k].is_finite().then(|| Vec3::from(self.pos[k]))
     }
 
     /// The cell index of picture point `l` (`None` outside the grid).
@@ -1301,21 +1534,8 @@ impl OwnerGrid {
             return None;
         }
         let (i, j) = (fx as usize, fy as usize);
-        (i < self.dims[0] && j < self.dims[1]).then_some(j * self.dims[0] + i)
+        (i < self.dims[0] && j < self.dims[1]).then(|| j * self.dims[0] + i)
     }
-}
-
-/// The linear function `g(p) = c + d . p` through the triangle's corner depths (`None` for a degenerate triangle).
-fn linear(q: &[DVec2; 3], gs: &[f64; 3]) -> Option<(f64, DVec2)> {
-    let (e1, e2) = (q[1] - q[0], q[2] - q[0]);
-    let det = cross2(e1, e2);
-    if det == 0.0 || !det.is_finite() {
-        return None;
-    }
-    let (d1, d2) = (gs[1] - gs[0], gs[2] - gs[0]);
-    // d . e1 = d1, d . e2 = d2.
-    let d = DVec2::new(d1 * e2.y - d2 * e1.y, d2 * e1.x - d1 * e2.x) / det;
-    Some((gs[0] - d.dot(q[0]), d))
 }
 
 /// The x span of the triangle `q` clipped to the band `y0 <= y <= y1` (`None` when it misses the band).

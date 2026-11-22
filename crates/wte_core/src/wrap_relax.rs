@@ -26,6 +26,10 @@ use super::{Frame, Layout, NONE, Patch, State, TEAR_RATIO, cross2, edge_of};
 pub const ISO_TOL: f64 = 2e-4;
 /// S4: an interior vertex whose angle deficit exceeds this (degrees, either sign) is a cone: one cut runs from it.
 pub const CONE_CUT_DEG: f64 = 45.0;
+/// Round 9 (T3): S4 also needs the net deficit of the laid interior vertices within this share of the bucketed across
+/// reach (3D distance, walked over laid edges) to exceed `CONE_CUT_DEG`: a rivet, a bevel, a groove (whose tip and
+/// ring cancel) is no cone.
+pub const CONE_RADIUS: f64 = 0.1;
 /// S2: both ends of an edge between the two halves must lie farther than this many times their longest incident edge
 /// from the spine.
 pub const SEAM_NEAR: f64 = 3.0;
@@ -293,11 +297,11 @@ impl<'a> Layout<'a> {
     /// Steps 5-6 (3.2): seams over the laid triangles, wedges, LSCM then ARAP per component, the halo from the relaxed
     /// corners. `seed` is the seed result (local triangle, corners, torn); `rect` the picture rectangle with its
     /// border; `period` the closed spine's period (S1); `anchor` the anchor's local triangle.
-    pub(super) fn relax(&mut self, seed: &[(u32, [DVec2; 3], bool)], rect: [f64; 2], period: Option<f64>, anchor: u32) -> Relaxed {
+    pub(super) fn relax(&mut self, seed: &[(u32, [DVec2; 3], bool)], rect: [f64; 2], period: Option<f64>, anchor: u32, cone_radius: f64) -> Relaxed {
         let patch = self.patch;
         let ntri = patch.tv.len();
         let laid = self.laid();
-        let seams = self.seams(&laid, period, anchor);
+        let seams = self.seams(&laid, period, anchor, cone_radius);
         let wedges = wedges(patch, &laid, &seams);
         let nw = wedges.vertex.len();
         // Initial positions: the seed positions of the wedges' vertices.
@@ -563,8 +567,35 @@ impl<'a> Layout<'a> {
         }
     }
 
+    /// Round 9 (T3): the vertices reachable from `v` over edges of laid triangles through vertices within `radius`
+    /// (3D distance) of `v`, `v` included, ascending. `stamp` marks visited vertices with `mark`.
+    fn laid_within(&self, v: u32, radius: f64, laid: &[bool], stamp: &mut [u32], mark: u32) -> Vec<u32> {
+        let patch = self.patch;
+        let origin = patch.pos[v as usize];
+        let mut out = vec![v];
+        stamp[v as usize] = mark;
+        let mut i = 0;
+        while i < out.len() {
+            let x = out[i];
+            i += 1;
+            for &t in patch.vtris(x) {
+                if !laid[t as usize] {
+                    continue;
+                }
+                for &y in &patch.tv[t as usize] {
+                    if stamp[y as usize] != mark && patch.pos[y as usize].distance(origin) <= radius {
+                        stamp[y as usize] = mark;
+                        out.push(y);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// S1-S5 over the laid triangles (`laid`).
-    fn seams(&self, laid: &[bool], period: Option<f64>, anchor: u32) -> Seams {
+    fn seams(&self, laid: &[bool], period: Option<f64>, anchor: u32, cone_radius: f64) -> Seams {
         let patch = self.patch;
         let ntri = patch.tv.len();
         let nv = patch.pos.len();
@@ -626,6 +657,7 @@ impl<'a> Layout<'a> {
         // S4: cones, each with one cut along the steepest ascent of g to the laid set's boundary (or a seam).
         let mut cone = vec![false; nv];
         let limit = CONE_CUT_DEG.to_radians();
+        let mut deficit = vec![0.0f64; nv];
         for v in 0..nv as u32 {
             if open[v as usize] || patch.vtris(v).len() < 3 {
                 continue;
@@ -638,8 +670,32 @@ impl<'a> Layout<'a> {
                 let (u, w) = (a - p, b - p);
                 sum += u.cross(w).length().atan2(u.dot(w));
             }
-            if (std::f64::consts::TAU - sum).abs() > limit {
-                cone[v as usize] = true;
+            deficit[v as usize] = std::f64::consts::TAU - sum;
+        }
+        // Round 9 (T3): a cone is a net curvature, not a vertex. A vertex whose |deficit| exceeds the limit cuts only
+        // when the deficits of the laid interior vertices within `cone_radius` of it (3D distance, walked over laid
+        // edges) also sum to more than the limit in absolute value, and only the strongest of such vertices within
+        // one radius cuts (largest |deficit|, then lowest position rank). A cube corner, a cone tip still cut
+        // (binding Q3); a rivet, a bevel, a groove do not.
+        let strong: Vec<u32> = (0..nv as u32).filter(|&v| deficit[v as usize].abs() > limit).collect();
+        if !strong.is_empty() {
+            let mut stamp = vec![u32::MAX; nv];
+            let mut near: Vec<Vec<u32>> = Vec::with_capacity(strong.len());
+            let mut net_ok = vec![false; nv];
+            for (round, &v) in strong.iter().enumerate() {
+                let found = self.laid_within(v, cone_radius, laid, &mut stamp, round as u32);
+                let net: f64 = found.iter().map(|&u| deficit[u as usize]).sum();
+                net_ok[v as usize] = net.abs() > limit;
+                near.push(found);
+            }
+            let beats = |u: u32, v: u32| {
+                let (du, dv) = (deficit[u as usize].abs(), deficit[v as usize].abs());
+                du > dv || (du == dv && patch.rank[u as usize] < patch.rank[v as usize])
+            };
+            for (k, &v) in strong.iter().enumerate() {
+                if net_ok[v as usize] && !near[k].iter().any(|&u| u != v && net_ok[u as usize] && beats(u, v)) {
+                    cone[v as usize] = true;
+                }
             }
         }
         for v in 0..nv as u32 {
@@ -1261,6 +1317,9 @@ fn inside_weights(q: &[DVec2; 3], c: DVec2) -> Option<[f64; 3]> {
 
 /// The owner build's rows per parallel chunk.
 const OWNER_CHUNK_ROWS: usize = 16;
+/// The owner build runs on the pool from this many triangles, its \`buried\` pass also from this many mixed cells.
+const OWNER_PAR_TRIS: usize = 2048;
+const OWNER_PAR_MIXED: usize = 20_000;
 
 /// One cell during the owner build: the owner's depth, index and 3D point; the first candidate's part and point and
 /// the `mixed` bits (1 another part, 2 another place).
@@ -1347,7 +1406,10 @@ impl OwnerGrid {
         // candidates all at one place need no choice, e.g. coplanar overlapping parts).
         let half_tol = 0.5 * OWNER_SAME as f64 * cell * std::f64::consts::SQRT_2;
         let mut cells: Vec<CellState> = vec![CellState::default(); n];
-        cells.par_chunks_mut(chunk_rows * width).enumerate().for_each(|(c, out)| {
+        // On the pool only for large inputs: a parameterization running on a busy pool (another bake, a test run)
+        // would wait for it (same bits either way: each chunk writes only its own cells).
+        let par = tris.len() >= OWNER_PAR_TRIS;
+        let pass1 = |(c, out): (usize, &mut [CellState])| {
             let base = c * chunk_rows * width;
             let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
             for &i in &bins[c] {
@@ -1376,7 +1438,12 @@ impl OwnerGrid {
                     }
                 });
             }
-        });
+        };
+        if par {
+            cells.par_chunks_mut(chunk_rows * width).enumerate().for_each(pass1);
+        } else {
+            cells.chunks_mut(chunk_rows * width).enumerate().for_each(pass1);
+        }
         let mixed = cells.iter().filter(|s| s.seen == 3).count();
         if debug {
             eprintln!("owner: {} x {} cells, {} triangles, pass 1 {:.1} ms, mixed {mixed}", dims[0], dims[1], tris.len(), t0.elapsed().as_secs_f64() * 1e3);
@@ -1409,7 +1476,7 @@ impl OwnerGrid {
                 may[i as usize] = Some(m);
             }
             let asked = std::sync::atomic::AtomicUsize::new(0);
-            cells.par_chunks_mut(chunk_rows * width).enumerate().for_each(|(c, out)| {
+            let pass2 = |(c, out): (usize, &mut [CellState])| {
                 let base = c * chunk_rows * width;
                 if !out.iter().any(|s| s.seen == 3 && may[s.best as usize] == Some(true)) {
                     return;
@@ -1460,7 +1527,12 @@ impl OwnerGrid {
                     s.p = p;
                     j = e;
                 }
-            });
+            };
+            if par || mixed >= OWNER_PAR_MIXED {
+                cells.par_chunks_mut(chunk_rows * width).enumerate().for_each(pass2);
+            } else {
+                cells.chunks_mut(chunk_rows * width).enumerate().for_each(pass2);
+            }
             if debug {
                 eprintln!("owner: pass 2 {:.1} ms, {} cells asked", t0.elapsed().as_secs_f64() * 1e3, asked.into_inner());
             }
@@ -1510,9 +1582,7 @@ impl OwnerGrid {
         // The rejected share at the cell centres inside the picture, of the laid triangles (`WrapStats::rejected`: the
         // laid picture area; a halo triangle hinged over a fold, e.g. a block's side hanging into a gap, is dropped
         // where another place owns its cells without counting). Per chunk, integer counts.
-        let counts: Vec<(usize, usize)> = (0..chunks)
-            .into_par_iter()
-            .map(|c| {
+        let count = |c: usize| {
                 let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
                 let (mut total, mut rejected) = (0usize, 0usize);
                 for &i in &bins[c] {
@@ -1532,8 +1602,8 @@ impl OwnerGrid {
                     });
                 }
                 (rejected, total)
-            })
-            .collect();
+        };
+        let counts: Vec<(usize, usize)> = if par { (0..chunks).into_par_iter().map(count).collect() } else { (0..chunks).map(count).collect() };
         let rej = counts.iter().fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
         if debug {
             eprintln!("owner: done {:.1} ms ({} x {} cells, {} triangles)", t0.elapsed().as_secs_f64() * 1e3, dims[0], dims[1], tris.len());

@@ -116,3 +116,45 @@ Deviations from T2 (with reasons):
 Other tests after A2: WA3, WA18, WA19, WA21, WA22 unchanged and green; the full core run has the same four red tests
 as after A1 (`wa4_r8`, `wa20`, `wa17`, `wa24`); one run of `check_a_own_bad_meshes_never_fail` hit 220 ms (book x0.05,
 Overlap) under the parallel test load; alone it is 51 ms (44 ms without A2): load, not the pass rule.
+
+## A3 cones (T3)
+
+Built (wrap_relax.rs `seams`, `laid_within`; `CONE_RADIUS = 0.1` pub; samples `riveted_plate(height)`,
+`step_corner()`; WA33, WA34; the owner build runs on the pool only from 2,048 triangles / 20,000 mixed cells):
+- S4 fires at an interior vertex `v` with `|deficit| > 45 deg` only when the deficits of the laid interior vertices
+  reachable from `v` over laid edges within `CONE_RADIUS x bucketed across reach` (3D distance from `v`) also sum to
+  more than 45 deg in absolute value; of such vertices within one radius only the strongest (largest `|deficit|`, then
+  lowest position rank) cuts. Test knob `WTE_TEST_CONE_RADIUS` (0 = round 8's rule) for the before / after numbers.
+- The owner build (A1) now runs its chunks serially below 2,048 triangles (pass 2 also below 20,000 mixed cells):
+  on a busy pool a small parameterization waited for it (`check_a_own_bad_meshes_never_fail`, a wall-clock limit of
+  200 ms, failed at 220-376 ms in full parallel runs; alone 51-59 ms). It still failed once more at 223 ms (cone fan
+  200, x0.05) in a full run after this change, alone it passes: the limit is wall-clock under the parallel test load
+  (my new tests add load). Open for check:A.
+
+**What the helmet's lost 0.345 is made of** (exe `wrap_surface` on DamagedHelmet.glb, step 10, Jump off; `lost_cut`
+= picture cells without an owner inside the laid set's outline):
+
+| DamagedHelmet, Jump off | round 8 (r8 sweep) | A1+A2 (before T3) | A3 (after T3) |
+|---|---|---|---|
+| covered | 0.6548 | 0.6548 | 0.6542 |
+| reached_edge | true | true | true |
+| lost_cut (cut wedges, holes) | — | 1.69 % | 1.39 % |
+| seams S1-S5 | 16 [0, 0, 5, 4, 7] | 16 [0, 0, 5, 4, 7] | 10 [0, 0, 5, 0, 5] |
+| ink / picture, dup, scatter | 0.5065, 0 %, 0 % | 0.5064, 0 %, 0 % | 0.5060, 0 %, 0 % |
+
+So of the 0.345 of the picture without surface under it, about 0.014-0.017 lies inside the laid outline (cut wedges
+and holes); the rest, ~0.33, is beyond the edge of the part the picture is on (the visor part ends; `reached_edge`;
+Jump off does not continue onto the next part). T3 removes the four S4 cuts but cannot give that third back: it is not
+a cut. With Jump on: S4 28 -> 13, seams 140 -> 60, lost_cut 9.48 % -> 6.75 %, ink 0.7565 -> 0.7850 (round 8: 1.0941,
+dup 0 %), rejected 24.4 % -> 21.4 %. **Open (check:A, gate 7.2 wants ink 0.90-1.3 with Jump on):** the place owner
+drops 21 % of the laid (cell, triangle) pairs on the helmet with Jump on; the shot shows the right-hand part of the
+picture (over the shell parts right of the visor) partly bare where round 8 painted it. Likely the `(buried, g)` order
+picks a hidden part with a lower `g` that the `buried` ray does not catch (gap beyond `BURY_REACH`, or a hidden face
+whose oriented normal points away from the covering part). Not traced further in this package.
+
+| Test | Plan limit | before T3 (radius 0) | after T3 |
+|---|---|---|---|
+| WA33 riveted plate (80 x 80, 25 rivets, tip deficit 94.1 deg, h = 2 % of the picture) | seams 0, covered >= 0.99, ink 0.95-1.10, dup 0 | seams 205 [0,0,0,25,180], covered 1.0, ink 0.9946, dup 0.359 %, lost_cut 2.49 %, rejected 4.6 % | **seams 0, covered 1.0, ink 1.0135, dup 0 %, lost_cut 0, rejected 0** — green |
+| WA33 cube corner (WA23's) | one S4 cut | S4 1 | S4 1 (dup 0.926 %, ink 0.9333) — green |
+| WA34 step corner (+90 / -90 deg, 0.3 apart) | dup <= 1 %, scatter <= 3 %, lost_cut reported | seams [0,0,0,1,3] | same (the two vertices lie farther apart than the radius, 0.04): dup 0.140 %, scatter 0.113 %, ink 1.0009, lost_cut 0 — green |
+| WA23 cone tip / cube corner | unchanged | — | unchanged, green |

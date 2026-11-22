@@ -66,7 +66,7 @@ pub(crate) use relax::{OwnerGrid, owner_scale};
 pub(crate) fn relax_par_min_for_tests() -> &'static std::sync::atomic::AtomicUsize {
     &relax::PAR_MIN_TEST
 }
-pub use relax::{BURY_REACH, CONE_CUT_DEG, ISO_TOL, OWNER_MAX_CELLS, OWNER_SAME, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
+pub use relax::{BURY_REACH, CONE_CUT_DEG, CONE_RADIUS, ISO_TOL, OWNER_MAX_CELLS, OWNER_SAME, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
 
 /// What a parameterization covers and how it went (for the panel, the log and the tests).
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -2101,7 +2101,7 @@ pub fn wrap_param(
             stats.cut_tris += cut;
             (seed.iter().map(|(t, q, _)| (*t, *q, layout.corner_g(*t))).collect::<Vec<_>>(), seed_area)
         } else {
-            let r = layout.relax(&seed, picture, closed, anchor_l);
+            let r = layout.relax(&seed, picture, closed, anchor_l, relax::knob("WTE_TEST_CONE_RADIUS", relax::CONE_RADIUS) * across_r);
             if relax::knob("WTE_TEST_RELAX_DEBUG", false) {
                 let laid = layout.laid();
                 let (mut inside_laid, mut inside_halo) = (0, 0);

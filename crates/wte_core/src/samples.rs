@@ -1330,6 +1330,65 @@ pub fn to_fbx_ascii(raw: &RawMesh, unit_scale_factor: f32, lcl_scaling: [f32; 3]
     text
 }
 
+// ----- round 9 (wrap quality) -----
+
+/// A grid face of `nu` x `nv` quads from `origin` along `eu`, `ev` (the face's normal is `eu x ev`), its UV island
+/// `[u0, u1, v0, v1]` split uniformly.
+fn push_grid_face(out: &mut Vec<RawTriangle>, origin: Vec3, eu: Vec3, ev: Vec3, nu: u32, nv: u32, island: [f32; 4]) {
+    let [u0, u1, v0, v1] = island;
+    let at = |i: u32, j: u32| origin + eu * (i as f32 / nu as f32) + ev * (j as f32 / nv as f32);
+    let uv = |i: u32, j: u32| Vec2::new(u0 + (u1 - u0) * i as f32 / nu as f32, v1 - (v1 - v0) * j as f32 / nv as f32);
+    for j in 0..nv {
+        for i in 0..nu {
+            push_quad(out, [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)], [uv(i, j), uv(i + 1, j), uv(i + 1, j + 1), uv(i, j + 1)], None, 0);
+        }
+    }
+}
+
+/// Round 9 (WA33, T3): a flat plate `x`, `y` in -0.5..0.5 facing +Z, 80 x 80 quads (cell 0.0125), with 5 x 5
+/// rivets: the grid vertices at `x`, `y` in {-0.2, -0.1, 0, 0.1, 0.2} raised by `height` (a pyramid of six faces
+/// whose tip deficit exceeds 45 degrees for `height` around the cell size; the ring round it carries the opposite
+/// deficit, so the rivet's net curvature is zero). One UV island `u = 0.02 + 0.96 (x + 0.5)`, `v = 0.02 + 0.96 (0.5 -
+/// y)`. One material "Rivets" referencing texture 0.
+pub fn riveted_plate(height: f32) -> RawMesh {
+    let n = 80u32;
+    let rivet = |i: u32| (24..=56).contains(&i) && (i - 24).is_multiple_of(8);
+    let at = |i: u32, j: u32| {
+        let z = if rivet(i) && rivet(j) { height } else { 0.0 };
+        Vec3::new(i as f32 / n as f32 - 0.5, j as f32 / n as f32 - 0.5, z)
+    };
+    let uv = |i: u32, j: u32| Vec2::new(0.02 + 0.96 * i as f32 / n as f32, 0.02 + 0.96 * (1.0 - j as f32 / n as f32));
+    let mut triangles = Vec::with_capacity((2 * n * n) as usize);
+    for j in 0..n {
+        for i in 0..n {
+            push_quad(&mut triangles, [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)], [uv(i, j), uv(i + 1, j), uv(i + 1, j + 1), uv(i, j + 1)], None, 0);
+        }
+    }
+    RawMesh { triangles, materials: vec![material("Rivets", [0.8, 0.8, 0.8, 1.0], Some(0))] }
+}
+
+/// Round 9 (WA34, T3): a box corner pushed into a floor, one connected surface: the floor `y = 0` over `x`, `z` in
+/// -1..1 without the quadrant `x, z > 0`, where a block of height 0.3 stands (its top `y = 0.3` and its two walls `x =
+/// 0`, `z = 0`; no other side). The block's top corner `(0, 0.3, 0)` has an angle deficit of +90 degrees, the floor's
+/// corner `(0, 0, 0)` -90 degrees. 16 quads per unit on every face, so the faces share their edge vertices. Six
+/// islands (3 x 2 atlas): three floor quadrants, the top, the wall `x = 0`, the wall `z = 0`. One material "Step"
+/// referencing texture 0.
+pub fn step_corner() -> RawMesh {
+    let h = 0.3f32;
+    let mut triangles = Vec::new();
+    let cell = |f: u32| atlas_cell(f, 3, 2);
+    // Floor quadrants (normal +Y: eu along +Z, ev along +X).
+    for (f, (x0, z0)) in [(-1.0f32, -1.0f32), (0.0, -1.0), (-1.0, 0.0)].into_iter().enumerate() {
+        push_grid_face(&mut triangles, Vec3::new(x0, 0.0, z0), Vec3::Z, Vec3::X, 16, 16, cell(f as u32));
+    }
+    // The top.
+    push_grid_face(&mut triangles, Vec3::new(0.0, h, 0.0), Vec3::Z, Vec3::X, 16, 16, cell(3));
+    // The wall x = 0 (normal -X: eu along +Z, ev along +Y) and the wall z = 0 (normal -Z: eu along +Y, ev along +X).
+    push_grid_face(&mut triangles, Vec3::ZERO, Vec3::Z, Vec3::Y * h, 16, 5, cell(4));
+    push_grid_face(&mut triangles, Vec3::ZERO, Vec3::Y * h, Vec3::X, 5, 16, cell(5));
+    RawMesh { triangles, materials: vec![material("Step", [0.8, 0.8, 0.8, 1.0], Some(0))] }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1906,3 +1965,4 @@ mod tests {
         assert_eq!(crate::import::base64_decode(&base64(&data)).unwrap(), data);
     }
 }
+

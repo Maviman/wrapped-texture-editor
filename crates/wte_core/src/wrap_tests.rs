@@ -2609,3 +2609,70 @@ fn wa32_a_helix_round_a_tube_has_its_ends_meet() {
         assert!(s.turns >= 2, "{what}: Overlap laid {} turns", s.turns);
     }
 }
+
+/// The angle deficit (degrees) of the vertex at `at` of `raw` (2 pi minus the corner angles of the triangles that have
+/// a corner there).
+fn deficit_at(raw: &RawMesh, at: Vec3) -> f64 {
+    let mut sum = 0.0f64;
+    for t in &raw.triangles {
+        for k in 0..3 {
+            if t.positions[k] == at {
+                let (a, b) = ((t.positions[(k + 1) % 3] - at).as_dvec3(), (t.positions[(k + 2) % 3] - at).as_dvec3());
+                sum += a.cross(b).length().atan2(a.dot(b));
+            }
+        }
+    }
+    (std::f64::consts::TAU - sum).to_degrees()
+}
+
+/// WA33 (round 9, T3): rivets (a tip sharper than 45 degrees, net curvature zero) do not cut the picture; a real cube
+/// corner still does (WA23's corner).
+#[test]
+fn wa33_rivets_do_not_cut_the_picture() {
+    let h = 0.012f32;
+    let raw = samples::riveted_plate(h);
+    let tip = deficit_at(&raw, Vec3::new(0.0, 0.0, h));
+    let ring = deficit_at(&raw, Vec3::new(41.0 / 80.0 - 0.5, 40.0 / 80.0 - 0.5, 0.0));
+    let p = wrapped(Vec3::new(0.03, 0.02, 0.0), Vec3::Z, Vec3::Y, Vec2::new(0.3, 0.3));
+    let (q, s, ink, _, _) = r8_measure(raw, SIDE, p);
+    println!(
+        "WA33 {}, rivet tip deficit {tip:.1} deg, a ring vertex {ring:.1} deg, seams {} {:?}, relaxed {}, lost_cut {:.4}, rejected {:.4}, flipped {}",
+        r8_line("riveted plate", &q, &s, ink),
+        s.seams,
+        s.seams_by_rule,
+        s.relaxed,
+        s.lost_cut,
+        s.rejected,
+        s.flipped
+    );
+    assert!(tip > 45.0, "the rivet's tip is not sharper than 45 degrees: {tip}");
+    assert!(s.seams == 0, "{s:?}");
+    assert!(s.covered >= 0.99, "{s:?}");
+    assert!((0.95..=1.10).contains(&ink), "ink {ink}");
+    assert!(q.dup == 0.0, "{q:?}");
+    // A real corner still cuts.
+    let p = wrapped(Vec3::new(0.55, 0.55, 0.75), Vec3::Z, Vec3::Y, Vec2::new(0.45, 0.45));
+    let (q, s, ink, _, _) = r8_measure(samples::seam_cube(1.5), SIDE, p);
+    println!("WA33 {}, seams {:?}, relaxed {}, lost_cut {:.4}", r8_line("cube corner", &q, &s, ink), s.seams_by_rule, s.relaxed, s.lost_cut);
+    assert!(s.seams_by_rule[3] >= 1 || (!s.relaxed && s.cut_tris >= 1), "no cut from the corner: {s:?}");
+}
+
+/// WA34 (round 9, T3): a box corner pushed into a floor (+90 and -90 degrees side by side) lies once.
+#[test]
+fn wa34_a_saddle_corner_lies_once() {
+    let raw = samples::step_corner();
+    let (top, bottom) = (deficit_at(&raw, Vec3::new(0.0, 0.3, 0.0)), deficit_at(&raw, Vec3::ZERO));
+    let p = wrapped(Vec3::new(-0.15, 0.0, -0.15), Vec3::Y, Vec3::NEG_Z, Vec2::new(0.5, 0.35));
+    let (q, s, ink, _, _) = r8_measure(raw, SIDE, p);
+    println!(
+        "WA34 {}, deficits top {top:.1} / floor {bottom:.1} deg, seams {} {:?}, relaxed {}, lost_cut {:.4}, rejected {:.4}, flipped {}",
+        r8_line("step corner", &q, &s, ink),
+        s.seams,
+        s.seams_by_rule,
+        s.relaxed,
+        s.lost_cut,
+        s.rejected,
+        s.flipped
+    );
+    assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{q:?}");
+}

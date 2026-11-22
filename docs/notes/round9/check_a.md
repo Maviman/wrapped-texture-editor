@@ -57,7 +57,7 @@ Fixes:
 ## 4. Open items (4) and (6)
 
 **(4) `lost_cut` at closures (WA37 red: WA22 taller 5.67 %, WA32 64 rows 2.48 %; Lantern 11.2 %).** Traced with a
-test-only dump of the owner grid (`WTE_TEST_OWNER_DUMP=<path>`, PGM per layer): every counted cell lay next to the
+test-only dump of the owner grid (a PGM per layer; the dump code was removed afterwards): every counted cell lay next to the
 closure line. Where the halves (S2) or the ends (S1) meet, the line is triangle-jagged: the teeth between one side's
 triangles are the other side's triangles, laid at the other end of the picture (the picture there shows its other
 edge, once). With a helix the band past the meeting line is uncovered too. The row / column rule counted these as
@@ -105,3 +105,65 @@ through the front's candidates at the rim), and rows down to y 0.25 are just ove
 vertices are exact; the rest is solved, and ARAP spreads the dome's strain into the side. T5 as specified pins the
 **seed**; making the side exact here needs a better seed next to curved parts (the front's consensus at the rim), not
 in this round. The assert stays (red), measured value above.
+
+## 6. Open item (1) — hidden surfaces winning the owner choice (Jump on): tried, not fixed
+
+Experiment: the `buried` ray's reach raised from `BURY_REACH x diag` to at least the bucketed across reach (the
+picture's half height), so a hidden face farther from the part over it than 0.04 diag (Avocado's seed back in its
+cavity) would count as buried. Release exe on Avocado / DamagedHelmet / Lantern: **no change** (Avocado on ink 0.9976
+-> 0.9977, dup 0.787 -> 0.568 %, rejected 34.79 % both; helmet on ink 0.8424 -> 0.8423, rejected 16.95 % both;
+Lantern identical). So the reach is not what decides these cells; the cause is elsewhere (likely the `(g)` order
+between candidates that are not in a "mixed" cell, or halo triangles). Reverted (not committed). Open.
+
+**Open item (2)** (a part welded to the floor at shared vertices is the same part, so `buried` never applies): not
+attempted; it needs a notion of "part" finer than weld connectivity (feature edges, materials), not a contained fix.
+
+**Lantern `lost_cut` 11.2 %** is not a closure (no S1 / S2 there: seams [0,0,0,11,19]): the closure rule of section 4
+does not change it. Open (cut wedges at the box corners' S4 / S5 cuts on a very coarse mesh; gate limit 10 %).
+
+## 7. Final state (HEAD after the last check:A commit)
+
+- `cargo test --workspace --no-fail-fast`: **1,161 passed / 6 failed / 33 ignored** in the run that had my exe
+  sweep running beside it; the extra failure was `check_a_own_bad_meshes_never_fail` (best of five runs 211.6 ms,
+  cone fan x3 Jump + Overlap) under that load. Re-run of the core library without other load: 756 passed / **5
+  failed** (alone the test's slowest case is 95-103 ms, with or without the exact region). Failing, asserts unchanged:
+  - `wa4_r8`: 60 deg only, ink 1.1177 (<= 1.10), cells 0.769..1.432 (<= 1.30).
+  - `wa20`: ink 1.1890 (<= 1.15), cells 0.665..2.886 (0.70-1.40); dup 0.976 %, scatter 0.564 %, seams 0 meet theirs.
+  - `wa17`, `wa24`: ink 0.915 / 0.9146 (>= 0.95): geometric maximum 0.90 (section 2, decision for the user).
+  - `wa35` (new, check:A): capped cylinder side 92.37 % within 2/255, max 51 (limit 99.9 %, max 8); the other WA35
+    lines are green (section 5).
+  - `wa37`: now green.
+- `cargo clippy --workspace --all-targets`: 0 warnings. `cargo build --release -p wte_app`: ok
+  (`target\round9\bin\wte_c9a_final.exe`).
+- Identity with `wte_r67.exe` (`target\round9\ident\c9a_final\`): `stamp`, `text_warp`, `export_run`, `roundtrip`
+  ok, `shot.png` 0 differing pixels each; export_run's 7 export files byte-identical; `check_exports.py`: PASS.
+- `wrap_surface` on the built-in sample: ok, no errors.
+
+### Exe sweep, step 10 (round 8 -> now; `target\round9\check_a\runs_2750d96\`, the exe of the A5 commit; the final
+exe differs only in test-only code)
+
+| Model | Jump | ink | dup % | covered | seams | other now |
+|---|---|---|---|---|---|---|
+| Avocado | off | 0.5288 -> 0.5415 | 0 -> 0 | 0.532 -> 0.545 | 0 -> 0 | reached_edge |
+| Avocado | on | 1.5295 -> 0.9976 | 52.6 -> 0.787 | 1.0 -> 1.0 | 0 -> 0 | rejected 34.8 %, scatter 0.50 % |
+| torus_knot | off = on | 0.4051 -> 0.4545 | 0 -> 0 | 0.404 -> 0.440 | 84 -> 48 (S1) | passed, ends 0.430, lost_cut 0 |
+| Lantern | off = on | 0.8273 -> 0.7704 | 26.9 -> 1.68 | 1.0 -> 0.885 | 28 -> 30 | stretch 220 -> 31 %, lost_cut 11.2 % |
+| DamagedHelmet | off | 0.5065 -> 0.5094 | 0 -> 0 | 0.655 -> 0.660 | 16 -> 11 | lost_cut 0.77 % |
+| DamagedHelmet | on | 1.0941 -> 0.8424 | 0 -> 0.036 | 1.0 -> 1.0 | 140 -> 69 | rejected 17.0 %, flipped 4 |
+| WaterBottle | off = on | 1.0017 -> 1.0033 | 0 -> 0 | 1.0 -> 1.0 | 0 -> 0 | stretch 2.1 -> 3.8 % |
+| klein_bottle | off = on | 1.105 -> 1.0132 | 4.13 -> 0 | 1.0 -> 1.0 | 0 -> 0 | stretch 46.8 -> 23.7 % |
+| high_poly_sphere | off = on | 1.0427 -> 1.0977 | 0 -> 0 | 1.0 -> 1.0 | 176 -> 0 | param 11.0 -> 6.2 s |
+
+Shots read (`target\round9\check_a\cmp_*.png`, `z_four.png`, `z_helmet.png`, round 8 left):
+- **Avocado**: one picture: the seed carries the middle cells, the cut face to its right the rest; no cell twice
+  (round 8 showed the left columns on the seed and again on the flesh). A bare strip of flesh is left at the top left
+  between the seed's outline and the picture's left edge (open item 1).
+- **torus_knot**: a band of cells once round the tube over its whole height, the ends meeting in one line (round 8: a
+  thin dark sliver).
+- **Lantern**: the base's front and side faces carry continuous cells meeting at the box edge; the plinth below and
+  the cap above are partly bare (lost_cut 11.2 %); no smear (round 8: smeared cells on the plinth).
+- **DamagedHelmet** (Jump on): the visor carries one continuous picture; to its right the shell pieces show fewer,
+  cleaner cell pieces than round 8's jumble, with some bare gaps at the lower right (ink 0.84).
+- **WaterBottle**: one whole 8 x 4 picture on the body, same as round 8.
+- Parameterization times are often longer than round 8 on small models (Avocado 9.6 -> 38 ms, helmet on 60 -> 145
+  ms; high_poly_sphere faster 11.0 -> 6.2 s): package B's subject.

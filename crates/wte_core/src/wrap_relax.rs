@@ -470,7 +470,7 @@ impl<'a> Layout<'a> {
         let exact = self.exact_region(seed, &laid, &wedges, &pinned);
         let exact_count = exact.iter().filter(|&&e| e).count() as u32;
         #[cfg(test)]
-        let use_exact = EXACT_REGION.with(|e| e.get());
+        let use_exact = EXACT_REGION.with(|e| e.get()) && knob("WTE_TEST_EXACT_REGION", true);
         #[cfg(not(test))]
         let use_exact = true;
         let mut fell_back = false;
@@ -1808,9 +1808,9 @@ impl OwnerGrid {
             let (i, j) = (k % width, k / width);
             [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < dims[1]).then(|| k + width)]
         };
-        for k in 0..n {
+        for (k, b) in beyond.iter_mut().enumerate() {
             if !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| cells[m].closure) {
-                beyond[k] = true;
+                *b = true;
                 queue.push(k);
             }
         }
@@ -1821,30 +1821,6 @@ impl OwnerGrid {
                     queue.push(m);
                 }
             }
-        }
-        let dump: String = knob("WTE_TEST_OWNER_DUMP", String::new());
-        if !dump.is_empty() {
-            // Test knob: the grid as a PGM (white covered in the picture, black lost_cut, dark grey beyond).
-            let mut out = format!("P5 {} {} 255
-", dims[0], dims[1]).into_bytes();
-            for j in (0..dims[1]).rev() {
-                for i in 0..dims[0] {
-                    let k = j * width + i;
-                    let (r, c) = (rspan[j], cspan[i]);
-                    let inpic = in_picture(i, j);
-                    out.push(if covered(k) {
-                        if inpic { 255 } else { 190 }
-                    } else if inpic && !beyond[k] && ((r.0 < i && i < r.1) || (c.0 < j && j < c.1)) {
-                        0
-                    } else if inpic {
-                        90
-                    } else {
-                        40
-                    });
-                }
-            }
-            static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let _ = std::fs::write(format!("{dump}_{:02}.pgm", DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)), out);
         }
         let (mut lost, mut pic_cells) = (0usize, 0usize);
         for (j, r) in rspan.iter().enumerate() {

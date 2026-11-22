@@ -164,9 +164,12 @@ pub struct WrapParam {
     reach: [f64; 2],
     /// Overlap with later turns: the exact half extent along the spine the turns were chosen for (bits).
     needed_along: Option<u64>,
-    /// The inputs the reach was computed from (for `serves`): source size and largest texel size.
+    /// The inputs the reach was computed from (for `serves`): source size and largest texel size; round 9: the
+    /// largest UV gutter and the front's stop (bits) they gave.
     src_size: [u32; 2],
     texel_world: f32,
+    gutter: u8,
+    stop_bits: u64,
     /// The picture's half extents `|half_size|` (bits) `stats.covered` was measured for; a projector that this
     /// parameterization serves with another size (a scale inside the reach bucket) gets its own `covered`
     /// (`stats_for`).
@@ -309,21 +312,38 @@ struct Reach {
     reach: [f64; 2],
     /// The picture's half extent along the spine plus one source texel (where its last later turn may start).
     needed_along: f64,
+    /// Round 9 (T6): the picture's half extent across the spine plus one source texel (not bucketed).
+    across: f64,
 }
 
 /// The reach of `p` (4.3 step 1); `None` for an unusable projector.
-fn reach_of(p: &Projector, src_size: [u32; 2], texel_world: f32, diag: f64) -> Option<Reach> {
+fn reach_of(p: &Projector, src_size: [u32; 2], diag: f64) -> Option<Reach> {
     let (hw, hh) = (p.half_size.x.abs(), p.half_size.y.abs());
     if !p.is_finite() || !(hw > MIN_SIZE && hh > MIN_SIZE) || src_size[0] == 0 || src_size[1] == 0 {
         return None;
     }
     let (hw, hh) = (hw as f64, hh as f64);
     let (bx, by) = (2.0 * hw / src_size[0] as f64, 2.0 * hh / src_size[1] as f64);
-    let tw = if texel_world.is_finite() && texel_world > 0.0 { texel_world as f64 } else { 0.0 };
     let spine_y = hh > hw;
     let (along, across) = if spine_y { (hh + by, hw + bx) } else { (hw + bx, hh + by) };
-    let reach = [bucket(along + 2.0 * tw, diag), bucket(across + 2.0 * tw, diag)];
-    (reach[0] > 0.0 && reach[1] > 0.0).then_some(Reach { hw, hh, spine_y, reach, needed_along: along })
+    // Round 9 (T6): no texel term before the bucketing (a coarse texture tipped the buckets: the layout depended on
+    // the texture's resolution); the texels reach the stop instead (`stop_of`).
+    let reach = [bucket(along, diag), bucket(across, diag)];
+    (reach[0] > 0.0 && reach[1] > 0.0).then_some(Reach { hw, hh, spine_y, reach, needed_along: along, across })
+}
+
+/// Round 9 (T6): the front's stop (geodesic distance from the spine): `WRAP_STOP_SLACK x` the bucketed across reach, or
+/// the picture's across extent plus `gutter + 2` texels when that is farther (on a very coarse texture the UV gutter
+/// texels still find their triangle).
+fn stop_of(r: &Reach, texel_world: f32, gutter: u8) -> f64 {
+    let tw = if texel_world.is_finite() && texel_world > 0.0 { texel_world as f64 } else { 0.0 };
+    let slack = relax::knob("WTE_TEST_STOP_SLACK", WRAP_STOP_SLACK);
+    (slack * r.reach[1]).max(r.across + (gutter as f64 + 2.0) * tw)
+}
+
+/// Largest UV gutter (texels) of the maps.
+fn max_gutter(maps: &[std::sync::Arc<TexelMap>]) -> u8 {
+    maps.iter().map(|m| m.gutter).max().unwrap_or(0)
 }
 
 /// Largest finite `texel_world` of the maps.
@@ -1939,12 +1959,14 @@ pub fn wrap_param(
     let started = Instant::now();
     let diag = mesh.diag() as f64;
     let texel_world = max_texel_world(maps);
-    let reach = reach_of(p, src_size, texel_world, diag)?;
+    let reach = reach_of(p, src_size, diag)?;
+    let gutter = max_gutter(maps);
     let opts = p.wrap;
     let [along_r, across_r] = reach.reach;
-    // Round 8: the front lays the surface within `WRAP_STOP_SLACK x across_r` of the spine (Euclidean <= geodesic).
-    let slack = relax::knob("WTE_TEST_STOP_SLACK", WRAP_STOP_SLACK);
-    let mut radius = along_r + slack * across_r;
+    // Round 8: the front lays the surface within `WRAP_STOP_SLACK x across_r` of the spine (Euclidean <= geodesic);
+    // round 9: `stop_of`.
+    let stop = stop_of(&reach, texel_world, gutter);
+    let mut radius = along_r + stop;
     if opts.jump_gaps {
         radius += 4.0 * GAP_JUMP * diag;
     }
@@ -2033,7 +2055,6 @@ pub fn wrap_param(
     let rect = [hw, hh];
     let footprint = if reach.spine_y { [across_r, along_r] } else { [along_r, across_r] };
     let picture = [hw + 2.0 * hw / src_size[0] as f64, hh + 2.0 * hh / src_size[1] as f64];
-    let stop = slack * across_r;
     let mut stretches: Vec<f64> = Vec::new();
     let mut rejected = (0usize, 0usize);
     let mut lost_cut = (0usize, 0usize);
@@ -2204,6 +2225,8 @@ pub fn wrap_param(
         needed_along: overlap_turns.then_some(reach.needed_along.to_bits()),
         src_size,
         texel_world,
+        gutter,
+        stop_bits: stop.to_bits(),
         half_bits: [p.half_size.x.abs().to_bits(), p.half_size.y.abs().to_bits()],
         layers: layers.into_iter().map(|l| l.1).collect(),
         stats,
@@ -2507,7 +2530,7 @@ impl WrapParam {
     /// bit-equal, the same spine axis and Wrap options, and the same bucketed reach (computed with the source size
     /// and texel size this parameterization was made for; `serves_inputs` takes the current ones).
     pub fn serves(&self, mesh: &std::sync::Arc<MeshData>, p: &Projector) -> bool {
-        self.serves_with(mesh, self.src_size, self.texel_world, p)
+        self.serves_with(mesh, self.src_size, self.texel_world, self.gutter, p)
     }
 
     /// `serves` with the current texel maps and source size.
@@ -2518,10 +2541,10 @@ impl WrapParam {
         src_size: [u32; 2],
         p: &Projector,
     ) -> bool {
-        self.serves_with(mesh, src_size, max_texel_world(maps), p)
+        self.serves_with(mesh, src_size, max_texel_world(maps), max_gutter(maps), p)
     }
 
-    fn serves_with(&self, mesh: &std::sync::Arc<MeshData>, src_size: [u32; 2], texel_world: f32, p: &Projector) -> bool {
+    fn serves_with(&self, mesh: &std::sync::Arc<MeshData>, src_size: [u32; 2], texel_world: f32, gutter: u8, p: &Projector) -> bool {
         if std::sync::Arc::as_ptr(mesh) as usize != self.mesh_addr || (mesh.tri_count(), mesh.uv_hash) != self.mesh_tag {
             return false;
         }
@@ -2531,10 +2554,11 @@ impl WrapParam {
         {
             return false;
         }
-        match reach_of(p, src_size, texel_world, mesh.diag() as f64) {
+        match reach_of(p, src_size, mesh.diag() as f64) {
             Some(r) => {
                 r.spine_y == self.spine_y
                     && r.reach.map(f64::to_bits) == self.reach.map(f64::to_bits)
+                    && stop_of(&r, texel_world, gutter).to_bits() == self.stop_bits
                     && self.needed_along.is_none_or(|bits| bits == r.needed_along.to_bits())
             }
             None => false,

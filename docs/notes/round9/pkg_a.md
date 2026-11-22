@@ -203,3 +203,43 @@ Remaining red (asserts unchanged): **WA4 60 deg** ink 1.1159 (<= 1.10), cells 0.
 dup 10.7 % (r8) -> 0.98 %) but does not bring the steep bumps inside round 8's area limits (D4b: with the centre line
 exact an as-rigid-as-possible sticker takes up more surface than its own area there). WA17 / WA24 (A1 deviation 3)
 are the other two red tests.
+
+## A6 resolution (T6) — done before A5 (A5 is first in the cut order; A6 is "never cut")
+
+Built (wrap_param.rs `reach_of`, `stop_of`, `max_gutter`, `WrapParam::{gutter, stop_bits}`, `serves_with`):
+- `reach = [bucket(along), bucket(across)]` with `along` / `across` = the picture's half extents plus one source
+  texel (no `2 x texel_world` before the bucketing). The front's stop is `max(1.7 x across reach, across + (gutter + 2)
+  x texel_world)`; the candidate sphere is `along reach + stop` (+ the Jump term).
+- `serves_with` keeps the texel key in the form that matters: it compares the bucketed reach and the stop computed
+  with the current maps' largest texel size and gutter (stored `stop_bits`), so a reused parameterization stays
+  bit-identical to a fresh one.
+- Test helpers changed with the definition (not their asserts): WA11, WA27 and `check_a_covered_follows_a_reused_scale`
+  build "a reach just above its bucket's start" as `diag 1.25^k 1.002 - 2 tw`; the `- 2 tw` is gone (else the size
+  lies just below the bucket and the 1.2 scale crossed it: "a scale of 1.2 recomputed").
+- WA36 (new): WA20's ball and the sphere sample with 256^2 and 2,048^2 maps: layers bit-equal, stats equal except
+  `micros` — green. (Ball: 2,803 verts, 5,786 tris, flipped 15, stretch 0.728, rejected 0.0015 at both sizes.)
+- The bucket change moves WA4 by a bucket on some angles: WA4 60 deg now ink 1.1177, cells 0.769..1.432 (A4: 1.1159,
+  0.745..1.481); 45 deg 1.0414, 0.898..1.279; 30 deg 1.0204, 0.951..1.119; WA4b 1.1149, 0.799..1.481. WA20 unchanged
+  (ink 1.1890).
+
+## WA37 and WA26 / WA27 extended (tests for A7 / the table)
+
+- `wa26_wa27_round9_cases_are_deterministic` (new; WA26 / WA27 themselves unchanged): WA24's cube on the floor,
+  WA31's 8,192-triangle floor, WA32's thin torus: 1 / 2 / 5 threads and two runs byte-identical (Preview and Full);
+  a scale x1.0001 reuses the cached parameterization (true in all three) and bakes like a fresh one — green.
+- WA37 (new, plan limits): `covered >= 0.95 x ends_share` holds on all cases; `lost_cut <= 2 %` fails on two:
+
+| WA37 case | covered | ends_share | lost_cut (<= 2 %) |
+|---|---|---|---|
+| WA4 30 / 45 / 60 deg, WA4b | 1.0 | 1.0 | 0 % |
+| WA20 bumpy ball | 1.0 | 1.0 | 0 % |
+| WA22 taller than the girth | 1.0 | 1.0 | **5.67 %** (red) |
+| WA32 cylinder sample | 0.6645 | 0.6183 | 0 % |
+| WA32 cylinder 64 rows | 0.8608 | 0.6187 | **2.48 %** (red) |
+| WA32 thin torus | 0.7195 | 0.5588 | 0.34 % |
+| WA33 riveted plate | 1.0 | 1.0 | 0 % |
+
+  Both red cases are closures (WA22: the halves meet behind the tube, S2; WA32: the ends meet, S1): after the
+  relaxation the two sides of the seam line no longer touch everywhere in the layout, and the picture cells in the gap
+  are enclosed by covered cells on both sides, so `lost_cut` counts them. Not traced further (open for check:A: is it
+  the seam opening under ARAP, or cells beyond the closure that the row/column rule calls "inside").

@@ -839,9 +839,9 @@ fn wa11_a_parameterization_is_reused_exactly_when_it_serves() {
     let src = cells();
     let model = Model::new(samples::cylinder(SEG, 1.0, 2.0), 512);
     let diag = model.mesh.diag() as f64;
-    let tw = model.maps.iter().map(|m| m.stats.texel_world).fold(0.0f32, f32::max) as f64;
     // Half sizes whose reach lies just above the start of its bucket, so a scale of 1.2 stays in it.
-    let half_for = |k: i32, pixels: u32| ((diag * 1.25f64.powi(k) * 1.002 - 2.0 * tw) / (1.0 + 2.0 / pixels as f64)) as f32;
+    // Round 9 (T6): the reach has no texel term any more (it was `- 2.0 * tw` here).
+    let half_for = |k: i32, pixels: u32| ((diag * 1.25f64.powi(k) * 1.002) / (1.0 + 2.0 / pixels as f64)) as f32;
     let half = Vec2::new(half_for(-3, PIC[0]), half_for(-9, PIC[1]));
     let (pos, n, _) = cylinder_anchor(Some(10), 0.0);
     let p = wrapped(pos, n, Vec3::Y, half);
@@ -1570,8 +1570,8 @@ fn check_a_a_stamp_at_a_mesh_boundary() {
 fn check_a_covered_follows_a_reused_scale() {
     let model = Model::new(samples::bumpy_plate(16, 0.0), 512);
     let diag = model.mesh.diag() as f64;
-    let tw = model.maps.iter().map(|m| m.stats.texel_world).fold(0.0f32, f32::max) as f64;
-    let half_for = |k: i32, pixels: u32| ((diag * 1.25f64.powi(k) * 1.002 - 2.0 * tw) / (1.0 + 2.0 / pixels as f64)) as f32;
+    // Round 9 (T6): the reach has no texel term any more (it was `- 2.0 * tw` here).
+    let half_for = |k: i32, pixels: u32| ((diag * 1.25f64.powi(k) * 1.002) / (1.0 + 2.0 / pixels as f64)) as f32;
     let half = Vec2::new(half_for(-5, PIC[0]), half_for(-9, PIC[1]));
     assert!(half.x < 0.5 && half.x * 1.2 > 0.5, "{half}");
     let p = wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, half);
@@ -2122,8 +2122,8 @@ fn wa27_a_relaxed_parameterization_is_reused_exactly() {
     let (raw, p0) = r8_bumpy_ball();
     let model = Model::new(raw.clone(), 512);
     let diag = model.mesh.diag() as f64;
-    let tw = model.maps.iter().map(|m| m.stats.texel_world).fold(0.0f32, f32::max) as f64;
-    let half_for = |k: i32, pixels: u32| ((diag * 1.25f64.powi(k) * 1.002 - 2.0 * tw) / (1.0 + 2.0 / pixels as f64)) as f32;
+    // Round 9 (T6): the reach has no texel term any more (it was `- 2.0 * tw` here).
+    let half_for = |k: i32, pixels: u32| ((diag * 1.25f64.powi(k) * 1.002) / (1.0 + 2.0 / pixels as f64)) as f32;
     let p = Projector { half_size: Vec2::new(half_for(-3, PIC[0]), half_for(-4, PIC[1])), ..p0 };
     let (mut doc, id) = doc_with_stamp(raw.clone(), 512, p);
     let (first, fresh0) = doc.wrap_cache_probe(id);
@@ -2675,4 +2675,91 @@ fn wa34_a_saddle_corner_lies_once() {
         s.flipped
     );
     assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{q:?}");
+}
+
+/// WA36 (round 9, T6): the layout does not depend on the texture's resolution: one mesh, texel maps of 256^2 and
+/// 2,048^2, the same placement: the same layers (triangles, corner bits) and the same stats (except the time).
+#[test]
+fn wa36_the_layout_does_not_depend_on_the_texture_resolution() {
+    let src = cells();
+    let (ball, ball_p) = r8_bumpy_ball();
+    let cases: Vec<(&str, RawMesh, Projector)> = vec![
+        ("WA20 bumpy ball", ball, ball_p),
+        ("sphere sample", samples::uv_sphere(64, 32, 1.0), wrapped(Vec3::new(0.0, 0.2, 0.98), Vec3::Z, Vec3::Y, Vec2::new(0.8, 0.3))),
+    ];
+    for (what, raw, p) in cases {
+        let (coarse, fine) = (Model::new(raw.clone(), 256), Model::new(raw, 2048));
+        let (a, b) = (coarse.param(&src, &p).expect("a parameterization"), fine.param(&src, &p).expect("a parameterization"));
+        let (sa, sb) = (a.stats(), b.stats());
+        println!("WA36 {what}: 256^2 {sa:?}\nWA36 {what}: 2048^2 {sb:?}");
+        let bits = |l: Vec<testkit::Layer>| l.into_iter().map(|(t, c)| (t, c.iter().flatten().flatten().map(|v| v.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
+        assert!(bits(testkit::layers(&a)) == bits(testkit::layers(&b)), "{what}: the layers differ");
+        assert_eq!(WrapStatsAlias { micros: 0, ..sa }, WrapStatsAlias { micros: 0, ..sb }, "{what}: the stats differ");
+    }
+}
+
+/// WA37 (round 9, A7): nothing is lost without a reason: on the round-9 cases `covered >= 0.95 x ends_share` and
+/// `lost_cut <= 2 %` (picture cells without an owner inside the laid set's outline).
+#[test]
+fn wa37_nothing_is_lost_without_a_reason() {
+    let src = cells();
+    let mut cases: Vec<(String, RawMesh, Projector)> = Vec::new();
+    for (periods, slope) in [(2.0f32, 30.0f32), (2.0, 45.0), (2.0, 60.0), (4.0, 60.0)] {
+        let amplitude = slope.to_radians().tan() / (std::f32::consts::TAU * periods);
+        cases.push((format!("WA4 {periods} periods {slope} deg"), samples::bumpy_plate_periods(64, amplitude, periods), wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, Vec2::new(0.3, 0.15))));
+    }
+    let (ball, ball_p) = r8_bumpy_ball();
+    cases.push(("WA20 bumpy ball".into(), ball, ball_p));
+    cases.push(("WA22 taller than the girth".into(), torus(64, 24), wrapped(Vec3::new(1.3, 0.0, 0.0), Vec3::X, Vec3::Y, Vec2::new(1.5, 1.2))));
+    for (what, raw, p, _) in wa32_cases() {
+        cases.push((format!("WA32 {what}"), raw, p));
+    }
+    cases.push(("WA33 riveted plate".into(), samples::riveted_plate(0.012), wrapped(Vec3::new(0.03, 0.02, 0.0), Vec3::Z, Vec3::Y, Vec2::new(0.3, 0.3))));
+    let mut failed = Vec::new();
+    for (what, raw, p) in cases {
+        let s = Model::new(raw, 512).param(&src, &p).expect("a parameterization").stats();
+        let line = format!("WA37 {what}: covered {:.4} (>= 0.95 x ends_share {:.4}), lost_cut {:.4} % (<= 2 %), passed {}, met_itself {}, reached_edge {}", s.covered, s.ends_share, 100.0 * s.lost_cut, s.passed, s.met_itself, s.reached_edge);
+        println!("{line}");
+        if !(s.covered as f64 >= 0.95 * s.ends_share as f64 && s.lost_cut <= 0.02) {
+            failed.push(line);
+        }
+    }
+    assert!(failed.is_empty(), "WA37 limits not met:\n{}", failed.join("\n"));
+}
+
+/// WA26 / WA27 extended (round 9): determinism (1, 2, 5 threads, two runs, Preview and Full) and reuse = fresh on
+/// the round-9 cases: WA24's cube on the floor, WA31's 8,192-triangle floor, WA32's thin torus.
+#[test]
+fn wa26_wa27_round9_cases_are_deterministic() {
+    let src = cells();
+    let floor_p = with_options(wrapped(Vec3::new(0.0, 0.0, 0.95), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false);
+    let torus = wa32_cases().pop().expect("the torus case");
+    let cases: Vec<(&str, RawMesh, Projector)> = vec![
+        ("WA24", samples::uv_cube_on_floor(), with_options(wrapped(Vec3::new(0.0, 0.0, 1.2), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false)),
+        ("WA31 8,192", samples::uv_cube_on_floor_n(64), floor_p),
+        ("WA32 torus", torus.1, torus.2),
+    ];
+    let pools: Vec<rayon::ThreadPool> = [1, 2, 5].iter().map(|&n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap()).collect();
+    for (what, raw, p) in cases {
+        let model = Model::new(raw.clone(), 512);
+        for quality in [BakeQuality::Preview, BakeQuality::Full] {
+            let a = snapshot(&model, &src, &p, quality);
+            for pool in &pools {
+                assert!(pool.install(|| snapshot(&model, &src, &p, quality)) == a, "{what} {quality:?}: depends on the thread count");
+            }
+            assert!(snapshot(&model, &src, &p, quality) == a, "{what} {quality:?}: depends on the run");
+        }
+        // Reuse = fresh: a scale inside the reach bucket reuses the parameterization and bakes like a fresh one.
+        let (mut doc, id) = doc_with_stamp(raw.clone(), 512, p);
+        let (first, _) = doc.wrap_cache_probe(id);
+        let first = first.expect("a cached parameterization");
+        let scaled = Projector { half_size: p.half_size * 1.0001, ..p };
+        doc.set_stamp_placement(id, Placement::Projected(scaled), Commit::Final).unwrap();
+        let (now, _) = doc.wrap_cache_probe(id);
+        let reused = now.is_some_and(|w| Arc::ptr_eq(&w, &first));
+        let reused_bake = doc_state(&mut doc);
+        let (mut fresh_doc, _) = doc_with_stamp(raw, 512, scaled);
+        assert_eq!(doc_state(&mut fresh_doc).sets, reused_bake.sets, "{what}: reused (reused: {reused}) and fresh bake differently");
+        println!("WA26/27 round 9 {what}: deterministic, reuse {reused} = fresh");
+    }
 }

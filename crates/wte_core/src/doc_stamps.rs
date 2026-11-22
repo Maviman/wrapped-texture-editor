@@ -31,7 +31,7 @@ use crate::stamp::{BakeQuality, Placement, Projector, StampObject, StampSource, 
 use crate::stamp_bake::{bake_projected, bake_uv, fit_projector_depth, projector_depth_is_auto};
 use crate::stamp_job::{FinalBake, JobPicture, OwnFace, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview, text_fonts_of, wrap_bake};
 use crate::texel_map::SurfacePoint;
-use crate::wrap_param::{WrapParam, WrapStats, wrap_param};
+use crate::wrap_param::{WrapMeshCell, WrapMeshWarmup, WrapParam, WrapStats, wrap_param_in};
 use crate::text::frame::{Keep, refit_placement};
 use crate::text::layout::raster_px;
 use crate::text::{
@@ -1134,7 +1134,8 @@ impl Document {
                 // Round 6 (4.6): the cached parameterization when it serves, else a fresh one (cached).
                 let maps = self.texel_maps();
                 let cached = self.bakes.wrap_params.get(id);
-                let (baked, used) = wrap_bake(id, &self.mesh, &self.bvh, &maps, &mips, tint, &p, cached, quality);
+                let graph = self.wrap_mesh_cell();
+                let (baked, used) = wrap_bake(id, &self.mesh, &self.bvh, &graph, &maps, &mips, tint, &p, cached, quality);
                 if let Some(used) = used {
                     self.store_wrap_param(id, used.param, used.fresh);
                 }
@@ -1393,6 +1394,7 @@ impl Document {
             wrap,
             kind: StampJobKind::Full,
             serial: self.bakes.edit_serial,
+            graph: self.wrap_mesh_cell(),
         })
     }
 
@@ -1432,6 +1434,68 @@ impl Document {
         self.bakes.wrap_params.insert(id, param, |s| stamps.iter().any(|o| o.id == s));
     }
 
+    /// Round 9 (package B, T7): the welded graph cell of the document's mesh, shared with the jobs (made on first use;
+    /// a new cell when the mesh is another `Arc`). Nothing is built here.
+    pub fn wrap_mesh_cell(&mut self) -> Arc<WrapMeshCell> {
+        match &self.bakes.wrap_mesh {
+            Some(cell) if cell.is_for(&self.mesh) => Arc::clone(cell),
+            _ => {
+                let cell = WrapMeshCell::new(&self.mesh);
+                self.bakes.wrap_mesh = Some(Arc::clone(&cell));
+                cell
+            }
+        }
+    }
+
+    /// Round 9 (package B, T8 / T9): the warm-up of the mesh's derived data when it is not built yet: the shared texels
+    /// (any 3D stamp) and, with `graph` (a wrapped stamp), the welded graph. Run it on a worker (a silent job) so that
+    /// the first wrapped Preview does not pay the build. `None` when there is nothing to build.
+    pub fn wrap_mesh_warmup(&mut self, graph: bool) -> Option<WrapMeshWarmup> {
+        let cell = self.wrap_mesh_cell();
+        let todo = cell.uv_built().is_none() || (graph && !cell.is_built());
+        todo.then(|| WrapMeshWarmup { cell, mesh: Arc::clone(&self.mesh), graph })
+    }
+
+    /// Round 9 (package B, T9): the share of 3D stamp `id`'s picture that lies on triangles sharing their texels with
+    /// other triangles (mirrored or repeated parts: the paint shows there too), sampled on a 16 x 16 grid of picture
+    /// points: where a wrapped stamp's parameterization puts them, where a projected stamp's rays hit. `None` while the
+    /// shared texels are not found yet (the warm-up job), for a wrapped stamp without a parameterization of its
+    /// placement, for a UV stamp and where no sample meets the surface. Cheap: no build on the calling thread.
+    pub fn stamp_shared_texels(&self, id: StampId) -> Option<f32> {
+        let Placement::Projected(p) = self.stamp(id)?.placement else { return None };
+        let cell = self.bakes.wrap_mesh.as_ref().filter(|c| c.is_for(&self.mesh))?;
+        let uv = cell.uv_built()?;
+        const N: usize = 16;
+        let (hw, hh) = (p.half_size.x.abs(), p.half_size.y.abs());
+        let local = |i: usize, j: usize| Vec2::new(hw * ((i as f32 + 0.5) / N as f32 * 2.0 - 1.0), hh * ((j as f32 + 0.5) / N as f32 * 2.0 - 1.0));
+        let (mut hit, mut shared) = (0usize, 0usize);
+        if p.mode == SurfaceMode::Wrap {
+            let w = self.serving_wrap_param(id)?;
+            for j in 0..N {
+                for i in 0..N {
+                    if let Some(sp) = w.surface_of(&self.mesh, local(i, j)) {
+                        hit += 1;
+                        shared += usize::from(uv.shares(sp.tri));
+                    }
+                }
+            }
+        } else {
+            let (right, up, out) = p.axes();
+            let depth = self.mesh.diag();
+            for j in 0..N {
+                for i in 0..N {
+                    let l = local(i, j);
+                    let o = p.origin + right * l.x + up * l.y + out * depth;
+                    if let Some(h) = self.raycast(&crate::math::Ray::new(o, -out)) {
+                        hit += 1;
+                        shared += usize::from(uv.shares(h.tri));
+                    }
+                }
+            }
+        }
+        (hit > 0).then(|| shared as f32 / hit as f32)
+    }
+
     /// The placement of stamp `id` when it is a wrapped 3D stamp.
     fn wrapped_projector(&self, id: StampId) -> Option<Projector> {
         match self.stamp(id)?.placement {
@@ -1460,7 +1524,8 @@ impl Document {
         {
             return Some(w.stats_for(&p));
         }
-        let param = Arc::new(wrap_param(&self.mesh, &self.bvh, &maps, mips.size(), &p)?);
+        let graph = self.wrap_mesh_cell();
+        let param = Arc::new(wrap_param_in(&self.mesh, &self.bvh, graph.get(&self.mesh), &maps, mips.size(), &p)?);
         let s = param.stats_for(&p);
         log::info!(
             "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh), covered {:.1} %, cut {} (ensure)",
@@ -1668,6 +1733,7 @@ impl Document {
             picture,
             kind,
             serial: self.bakes.edit_serial,
+            graph: self.wrap_mesh_cell(),
         })
     }
 

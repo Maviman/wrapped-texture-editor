@@ -77,6 +77,10 @@ type ExactKeys = (&'static std::thread::LocalKey<std::cell::Cell<bool>>, &'stati
 pub(crate) fn relax_exact_for_tests() -> ExactKeys {
     (&relax::EXACT_REGION, &relax::EXACT_OUTCOME)
 }
+// Round 9 (package B, T7): the welded mesh graph, once per mesh (a child module: it shares the weld's helpers).
+#[path = "wrap_mesh.rs"]
+pub mod wrap_mesh;
+pub use wrap_mesh::{WrapMesh, WrapMeshCell, WrapMeshWarmup};
 pub use relax::{BURY_REACH, CONE_CUT_DEG, CONE_RADIUS, EXACT_STRAIN, ISO_TOL, OWNER_MAX_CELLS, OWNER_SAME, PAR_CHUNK, PAR_MIN_UNKNOWNS, RELAX_ARAP_ITERS, RELAX_CG_BUDGET, SEAM_NEAR};
 
 /// What a parameterization covers and how it went (for the panel, the log and the tests).
@@ -418,8 +422,124 @@ impl Patch {
         self.tv[t as usize].map(|v| self.pos[v as usize])
     }
 
-    /// Builds the patch of `candidates` (mesh triangles, ascending).
-    fn build(mesh: &MeshData, candidates: Vec<TriId>) -> Patch {
+    /// Round 9 (package B, T7): the patch of `candidates` (mesh triangles, ascending) from the mesh's welded graph: no
+    /// hashing, no sorting. The same local order rules as round 8's `build` (ascending triangle id, vertices in order of
+    /// first use, position rank as the tie-break; half-edges of an edge ascending), so a patch of the same triangles
+    /// is the same patch wherever the graph's weld equals the per-patch weld (WA28).
+    fn from_graph(g: &WrapMesh, candidates: Vec<TriId>) -> Patch {
+        let diag = g.diag;
+        // Global -> local + 1 (0: not in the patch); zeroed allocations stay untouched where the patch is not.
+        let mut local_v = vec![0u32; g.pos.len()];
+        let mut local_t = vec![0u32; g.corners.len()];
+        let mut pos: Vec<DVec3> = Vec::new();
+        let mut rank: Vec<u32> = Vec::new();
+        let mut tris = Vec::with_capacity(candidates.len());
+        let mut tv: Vec<[u32; 3]> = Vec::with_capacity(candidates.len());
+        for t in candidates {
+            let c = g.corners[t as usize];
+            if c[0] == NONE {
+                continue;
+            }
+            let c = c.map(|v| {
+                let l = &mut local_v[v as usize];
+                if *l == 0 {
+                    pos.push(g.pos[v as usize]);
+                    rank.push(g.rank[v as usize]);
+                    *l = pos.len() as u32;
+                }
+                *l - 1
+            });
+            local_t[t as usize] = tris.len() as u32 + 1;
+            tris.push(t);
+            tv.push(c);
+        }
+        drop(local_v);
+        let n = pos.len();
+        let geo: Vec<DVec3> = tv.iter().map(|c| tri_geo(c.map(|v| pos[v as usize]))).collect();
+        // CSR vertex -> triangles.
+        let mut vt_start = vec![0u32; n + 1];
+        for c in &tv {
+            for &v in c {
+                vt_start[v as usize + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            vt_start[i + 1] += vt_start[i];
+        }
+        let mut fill = vt_start.clone();
+        let mut vt = vec![0u32; vt_start[n] as usize];
+        for (t, c) in tv.iter().enumerate() {
+            for &v in c {
+                vt[fill[v as usize] as usize] = t as u32;
+                fill[v as usize] += 1;
+            }
+        }
+        drop(fill);
+        // Edge groups from the global edge ids: a group is made when its lowest local half-edge comes up; its members
+        // are the edge's global half-edges in the patch, ascending (= ascending local half-edge).
+        let mut he_group = vec![(0u32, 0u32); tv.len() * 3];
+        let mut edge_tris: Vec<u32> = Vec::with_capacity(tv.len() * 3);
+        let mut on_boundary = vec![false; n];
+        let mut min_edge = vec![f64::INFINITY; n];
+        let mut max_edge = vec![0.0f64; n];
+        for t in 0..tv.len() {
+            for k in 0..3 {
+                let he = t * 3 + k;
+                if he_group[he].1 != 0 {
+                    continue;
+                }
+                let e = g.he_edge[tris[t] as usize * 3 + k];
+                let start = edge_tris.len();
+                for &gh in g.edge_hes(e) {
+                    let lt = local_t[(gh / 3) as usize];
+                    if lt != 0 {
+                        edge_tris.push((lt - 1) * 3 + gh % 3);
+                    }
+                }
+                let len = edge_tris.len() - start;
+                for &h in &edge_tris[start..] {
+                    he_group[h as usize] = (start as u32, len as u32);
+                }
+                let [a, b] = edge_of(tv[t], k);
+                if len == 1 {
+                    on_boundary[a as usize] = true;
+                    on_boundary[b as usize] = true;
+                }
+                let l3 = pos[a as usize].distance(pos[b as usize]);
+                if l3 > 0.0 {
+                    min_edge[a as usize] = min_edge[a as usize].min(l3);
+                    min_edge[b as usize] = min_edge[b as usize].min(l3);
+                    max_edge[a as usize] = max_edge[a as usize].max(l3);
+                    max_edge[b as usize] = max_edge[b as usize].max(l3);
+                }
+            }
+        }
+        drop(local_t);
+        let (part, part_count, part_box) = parts_of(&tv, &pos);
+        Patch {
+            tris,
+            tv,
+            pos,
+            geo,
+            vt_start,
+            vt,
+            he_group,
+            edge_tris,
+            part,
+            part_count,
+            part_box,
+            on_boundary,
+            min_edge,
+            max_edge,
+            rank,
+            diag,
+        }
+    }
+
+    /// Round 8's patch of `candidates` (mesh triangles, ascending), welded per patch: the sphere path, kept for the
+    /// comparison of WA28 (round 9, package B).
+    #[cfg(test)]
+    fn build_sphere(mesh: &MeshData, candidates: Vec<TriId>) -> Patch {
         let diag = mesh.diag() as f64;
         // Weld by bit-exact position.
         let mut map: PosMap<u128, u32> = PosMap::with_capacity_and_hasher(candidates.len() * 2, Default::default());
@@ -615,6 +735,58 @@ impl Patch {
     }
 }
 
+/// Unit winding normal of a triangle with corners `p` (zero when degenerate): the patch's `geo` (round 8's formula).
+fn tri_geo(p: [DVec3; 3]) -> DVec3 {
+    let [a, b, d] = p;
+    let g = (b - a).cross(d - a);
+    let len = g.length();
+    let scale = (b - a).length_squared().max((d - a).length_squared()).max((d - b).length_squared());
+    if len > 1e-12 * scale && len.is_finite() { g / len } else { DVec3::ZERO }
+}
+
+/// Parts (connected components over shared vertices) of the triangles `tv` over the vertices `pos`: per vertex its
+/// part numbered by first vertex, the count, per part the box of its vertices (round 8's `Patch::build` rule).
+fn parts_of(tv: &[[u32; 3]], pos: &[DVec3]) -> (Vec<u32>, u32, Vec<(DVec3, DVec3)>) {
+    let n = pos.len();
+    let mut uf: Vec<u32> = (0..n as u32).collect();
+    fn find(uf: &mut [u32], mut x: u32) -> u32 {
+        while uf[x as usize] != x {
+            uf[x as usize] = uf[uf[x as usize] as usize];
+            x = uf[x as usize];
+        }
+        x
+    }
+    for c in tv {
+        let r0 = find(&mut uf, c[0]);
+        for &v in &c[1..] {
+            let r = find(&mut uf, v);
+            if r != r0 {
+                let (lo, hi) = if r < r0 { (r, r0) } else { (r0, r) };
+                uf[hi as usize] = lo;
+            }
+        }
+    }
+    // Roots are the lowest vertex of their part (unions keep the lower root), so parts are numbered by first vertex
+    // without a map.
+    let mut part = vec![0u32; n];
+    let mut number = vec![NONE; n];
+    let mut part_box: Vec<(DVec3, DVec3)> = Vec::new();
+    for v in 0..n as u32 {
+        let r = find(&mut uf, v);
+        if number[r as usize] == NONE {
+            number[r as usize] = part_box.len() as u32;
+            part_box.push((pos[v as usize], pos[v as usize]));
+        }
+        let id = number[r as usize];
+        let b = &mut part_box[id as usize];
+        b.0 = b.0.min(pos[v as usize]);
+        b.1 = b.1.max(pos[v as usize]);
+        part[v as usize] = id;
+    }
+    let count = part_box.len() as u32;
+    (part, count, part_box)
+}
+
 /// The total order of positions (x, then y, then z) that breaks ties between vertices.
 fn position_order(a: DVec3, b: DVec3) -> Ordering {
     a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)).then(a.z.total_cmp(&b.z))
@@ -626,11 +798,13 @@ fn edge_of(c: [u32; 3], k: usize) -> [u32; 2] {
 }
 
 /// Half-edges grouped by their undirected welded edge.
+#[cfg(test)]
 struct EdgeGroups {
     sorted: Vec<u32>,
     he_group: Vec<(u32, u32)>,
 }
 
+#[cfg(test)]
 impl EdgeGroups {
     fn groups(&self) -> impl Iterator<Item = &[u32]> + '_ {
         let mut i = 0usize;
@@ -647,6 +821,7 @@ impl EdgeGroups {
     }
 }
 
+#[cfg(test)]
 fn edge_groups(tv: &[[u32; 3]]) -> EdgeGroups {
     let key = |he: u32| -> u64 {
         let [a, b] = edge_of(tv[(he / 3) as usize], (he % 3) as usize);
@@ -1733,8 +1908,6 @@ pub(crate) struct Jumper<'a> {
     mesh: &'a MeshData,
     bvh: &'a Bvh,
     patch: &'a Patch,
-    /// Local triangle of each mesh triangle of the patch.
-    local_of: PosMap<u32, u32>,
     gap: f64,
     /// Per part: true when another part lies within `gap` of its box.
     near_other: Vec<bool>,
@@ -1769,8 +1942,9 @@ impl<'a> Jumper<'a> {
                 }
             }
         }
-        let local_of = patch.tris.iter().enumerate().map(|(i, &t)| (t, i as u32)).collect();
-        Some(Jumper { mesh, bvh, patch, local_of, gap, near_other, neighbours, scratch: Vec::new() })
+        // Round 9 (package B): no map of the patch's triangles (a hash per triangle, twice per parameterization); a
+        // landing's local triangle is found by binary search in `patch.tris` (`nearest_other`).
+        Some(Jumper { mesh, bvh, patch, gap, near_other, neighbours, scratch: Vec::new() })
     }
 
     /// The landing of a jump from `p` (on part `own`, oriented normal `normal`): the nearest point within the gap on
@@ -1791,7 +1965,7 @@ impl<'a> Jumper<'a> {
         self.bvh.query_sphere_dist(self.mesh, center, self.gap as f32, &mut self.scratch);
         let mut found: Vec<(f64, u32, DVec3)> = Vec::new();
         for &(tri, _) in &self.scratch {
-            let Some(&t) = self.local_of.get(&tri) else { continue };
+            let Ok(t) = self.patch.tris.binary_search(&tri).map(|i| i as u32) else { continue };
             if self.patch.degenerate(t) {
                 continue;
             }
@@ -1962,7 +2136,8 @@ pub mod param_counter {
 // ----- the public entry -----
 
 /// The parameterization of the surface around the wrapped stamp `p` (4.3). `None` when the projector is unusable
-/// (non-finite, zero size, empty source) or no triangle lies within reach of `origin`.
+/// (non-finite, zero size, empty source) or no triangle lies within reach of `origin`. Round 9 (package B): builds the
+/// mesh's welded graph for this call; a document keeps one per mesh and calls `wrap_param_in`.
 pub fn wrap_param(
     mesh: &MeshData,
     bvh: &Bvh,
@@ -1970,7 +2145,84 @@ pub fn wrap_param(
     src_size: [u32; 2],
     p: &Projector,
 ) -> Option<WrapParam> {
+    let graph = WrapMesh::build(mesh);
+    wrap_param_in(mesh, bvh, &graph, maps, src_size, p)
+}
+
+/// Round 9 (package B, T7): `wrap_param` with the mesh's welded graph `graph` (`WrapMeshCell::get`).
+pub fn wrap_param_in(
+    mesh: &MeshData,
+    bvh: &Bvh,
+    graph: &WrapMesh,
+    maps: &[std::sync::Arc<TexelMap>],
+    src_size: [u32; 2],
+    p: &Projector,
+) -> Option<WrapParam> {
     param_counter::bump();
+    let out = wrap_param_from(mesh, bvh, Source::Graph(graph), maps, src_size, p);
+    #[cfg(test)]
+    sphere_check::compare(mesh, bvh, maps, src_size, p, out.as_ref());
+    out
+}
+
+/// Round 9 (package B): where the candidate triangles come from.
+#[derive(Copy, Clone)]
+enum Source<'g> {
+    /// Grown from the anchor over the mesh's welded graph (T7).
+    Graph(&'g WrapMesh),
+    /// Round 8: every triangle in the reach sphere, welded per patch (kept for WA28's comparison).
+    #[cfg(test)]
+    Sphere,
+}
+
+/// The patch of one parameterization, its anchor triangle (local) and whether `WRAP_MAX_TRIS` cut it.
+struct Collected {
+    patch: Patch,
+    anchor_l: u32,
+    limited: bool,
+}
+
+/// Round 9 (package B): per-thread phase times of the parameterizations (microseconds: collect, spine + front, relax
+/// (seams and solve), owner grids) and the candidate triangles handed to the patch, for the WA15 probe and WA28.
+pub mod phase_times {
+    use std::cell::Cell;
+
+    thread_local! {
+        static PHASES: Cell<[u64; 4]> = const { Cell::new([0; 4]) };
+        static CANDIDATES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn add(phase: usize, micros: u64) {
+        PHASES.with(|c| {
+            let mut a = c.get();
+            a[phase] += micros;
+            c.set(a);
+        });
+    }
+
+    pub(crate) fn set_candidates(n: usize) {
+        CANDIDATES.with(|c| c.set(n as u64));
+    }
+
+    /// The phase times of this thread so far, then reset.
+    pub fn take() -> [u64; 4] {
+        PHASES.with(|c| c.replace([0; 4]))
+    }
+
+    /// Candidate triangles of this thread's last parameterization (handed to the patch).
+    pub fn last_candidates() -> u64 {
+        CANDIDATES.with(Cell::get)
+    }
+}
+
+fn wrap_param_from(
+    mesh: &MeshData,
+    bvh: &Bvh,
+    source: Source<'_>,
+    maps: &[std::sync::Arc<TexelMap>],
+    src_size: [u32; 2],
+    p: &Projector,
+) -> Option<WrapParam> {
     let started = Instant::now();
     let diag = mesh.diag() as f64;
     let texel_world = max_texel_world(maps);
@@ -1985,56 +2237,16 @@ pub fn wrap_param(
     if opts.jump_gaps {
         radius += 4.0 * GAP_JUMP * diag;
     }
-    let mut found: Vec<(TriId, f32)> = Vec::new();
-    bvh.query_sphere_dist(mesh, p.origin, radius as f32, &mut found);
-    if found.is_empty() {
-        return None;
-    }
-    // The reach is measured from the anchor (the surface point nearest `origin`), not from `origin`: an origin off the
-    // surface (beside an open edge, an off-centre text anchor moved in the tangent plane of a curved surface) is
-    // `dmin` away from it, so the sphere grows by that much (check:A: a picture anchored beside a plate's edge lost
-    // the far triangles of its own half).
-    let off = found.iter().map(|e| e.1).fold(f32::INFINITY, f32::min).max(0.0).sqrt() as f64;
-    if off > 1e-6 * diag {
-        found.clear();
-        bvh.query_sphere_dist(mesh, p.origin, (radius + off) as f32, &mut found);
-    }
-    let mut limited = false;
-    if found.len() > WRAP_MAX_TRIS {
-        found.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-        found.truncate(WRAP_MAX_TRIS);
-        found.sort_unstable_by_key(|e| e.0);
-        limited = true;
-    }
-    // Anchor triangle: the nearest candidates, the one facing the projector most, then the lowest id.
+    let collect_started = Instant::now();
+    let Collected { patch, anchor_l, limited } = match source {
+        Source::Graph(g) => collect_grown(mesh, bvh, g, p, radius, opts.jump_gaps),
+        #[cfg(test)]
+        Source::Sphere => collect_sphere(mesh, bvh, p, radius),
+    }?;
+    phase_times::set_candidates(patch.tris.len());
+    phase_times::add(0, collect_started.elapsed().as_micros() as u64);
     let (right, _, out) = p.axes();
     let (right, out) = (dvec(right), dvec(out));
-    let dmin = found.iter().map(|e| e.1).fold(f32::INFINITY, f32::min).max(0.0).sqrt() as f64;
-    let tie = dmin + ANCHOR_TIE * diag;
-    let candidates: Vec<TriId> = found.iter().map(|e| e.0).collect();
-    let near: Vec<TriId> = found.iter().filter(|e| (e.1.max(0.0) as f64).sqrt() <= tie).map(|e| e.0).collect();
-    drop(found);
-    let patch = Patch::build(mesh, candidates);
-    if patch.tv.is_empty() {
-        return None;
-    }
-    let local: PosMap<u32, u32> = patch.tris.iter().enumerate().map(|(i, &t)| (t, i as u32)).collect();
-    let mut anchor_tri: Option<(f64, u32)> = None;
-    for &t in &near {
-        let Some(&l) = local.get(&t) else { continue };
-        if patch.degenerate(l) {
-            continue;
-        }
-        let facing = patch.geo[l as usize].dot(out);
-        if anchor_tri.is_none_or(|(f, b)| facing > f || (facing == f && l < b)) {
-            anchor_tri = Some((facing, l));
-        }
-    }
-    let anchor_l = match anchor_tri {
-        Some((_, l)) => l,
-        None => *near.iter().filter_map(|t| local.get(t)).min()?,
-    };
-    drop(local);
     let tri = patch.tris[anchor_l as usize];
     let [a, b, c] = mesh.tri_positions(tri);
     let point = closest_point_on_triangle(p.origin, a, b, c);
@@ -2064,8 +2276,10 @@ pub fn wrap_param(
     // its border and texel margin, rounded up), so a parameterization reused for another size in the same bucket stays
     // bit-identical to a fresh one (4.4): the spine's jumps (its trace stops at the reach anyway), the front's jumps,
     // the early-out region and the owner grid.
+    let front_started = Instant::now();
     let spine = trace_spine(&patch, &anchor, along_r, across_r, along_r, opts, &mut jumper);
     drop(jumper);
+    phase_times::add(1, front_started.elapsed().as_micros() as u64);
     let (hw, hh) = (reach.hw, reach.hh);
     let rect = [hw, hh];
     let footprint = if reach.spine_y { [across_r, along_r] } else { [along_r, across_r] };
@@ -2136,9 +2350,11 @@ pub fn wrap_param(
             // A part the spine reached (also across a gap) is laid from its strip, never again by a front jump.
             layout.enter(patch.part[patch.tv[st.tri as usize][0] as usize]);
         }
+        let front_started = Instant::now();
         let mut turn_jumper = if opts.jump_gaps { Jumper::new(mesh, bvh, &patch) } else { None };
         layout.footprint = footprint;
         layout.run(stop, rect, &mut turn_jumper);
+        phase_times::add(1, front_started.elapsed().as_micros() as u64);
         let clip = multi.then_some((axis, lo, hi));
         let closed = period.filter(|t| *t > 0.0);
         let period = if multi { closed } else { None };
@@ -2160,7 +2376,9 @@ pub fn wrap_param(
             }
             (seed.iter().map(|(t, q, _)| (*t, *q, layout.corner_g(*t))).collect::<Vec<_>>(), seed_area)
         } else {
+            let relax_started = Instant::now();
             let r = layout.relax(&seed, picture, closed, anchor_l, relax::knob("WTE_TEST_CONE_RADIUS", relax::CONE_RADIUS) * across_r);
+            phase_times::add(2, relax_started.elapsed().as_micros() as u64);
             if relax::knob("WTE_TEST_RELAX_DEBUG", false) {
                 let laid = layout.laid();
                 let (mut inside_laid, mut inside_halo) = (0, 0);
@@ -2208,7 +2426,9 @@ pub fn wrap_param(
         let along_clip = clip.map(|(_, lo, hi)| [lo as f32, hi as f32]);
         let laid = layout.laid();
         let owner_ctx = OwnerCtx { mesh, bvh, patch: &patch, orient: &layout.orient, entered: &layout.entered, laid: &laid, closure: &closure_tris };
+        let owner_started = Instant::now();
         let (layer, (rej, lost)) = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
+        phase_times::add(3, owner_started.elapsed().as_micros() as u64);
         rejected.0 += rej.0;
         rejected.1 += rej.1;
         lost_cut.0 += lost.0;
@@ -2253,6 +2473,311 @@ pub fn wrap_param(
         layers: layers.into_iter().map(|l| l.1).collect(),
         stats,
     })
+}
+
+/// Round 8's candidate collection (the sphere path, kept for WA28's comparison): every triangle within `radius` of
+/// `origin` (grown by the anchor's offset), welded per patch; the anchor among the nearest.
+#[cfg(test)]
+fn collect_sphere(mesh: &MeshData, bvh: &Bvh, p: &Projector, radius: f64) -> Option<Collected> {
+    let diag = mesh.diag() as f64;
+    let mut found: Vec<(TriId, f32)> = Vec::new();
+    bvh.query_sphere_dist(mesh, p.origin, radius as f32, &mut found);
+    if found.is_empty() {
+        return None;
+    }
+    // The reach is measured from the anchor (the surface point nearest `origin`), not from `origin`: an origin off the
+    // surface (beside an open edge, an off-centre text anchor moved in the tangent plane of a curved surface) is
+    // `dmin` away from it, so the sphere grows by that much (check:A: a picture anchored beside a plate's edge lost
+    // the far triangles of its own half).
+    let off = found.iter().map(|e| e.1).fold(f32::INFINITY, f32::min).max(0.0).sqrt() as f64;
+    if off > 1e-6 * diag {
+        found.clear();
+        bvh.query_sphere_dist(mesh, p.origin, (radius + off) as f32, &mut found);
+    }
+    let mut limited = false;
+    if found.len() > WRAP_MAX_TRIS {
+        found.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        found.truncate(WRAP_MAX_TRIS);
+        found.sort_unstable_by_key(|e| e.0);
+        limited = true;
+    }
+    // Anchor triangle: the nearest candidates, the one facing the projector most, then the lowest id.
+    let out = dvec(p.axes().2);
+    let dmin = found.iter().map(|e| e.1).fold(f32::INFINITY, f32::min).max(0.0).sqrt() as f64;
+    let tie = dmin + ANCHOR_TIE * diag;
+    let candidates: Vec<TriId> = found.iter().map(|e| e.0).collect();
+    let near: Vec<TriId> = found.iter().filter(|e| (e.1.max(0.0) as f64).sqrt() <= tie).map(|e| e.0).collect();
+    drop(found);
+    let patch = Patch::build_sphere(mesh, candidates);
+    if patch.tv.is_empty() {
+        return None;
+    }
+    let local: PosMap<u32, u32> = patch.tris.iter().enumerate().map(|(i, &t)| (t, i as u32)).collect();
+    let mut anchor_tri: Option<(f64, u32)> = None;
+    for &t in &near {
+        let Some(&l) = local.get(&t) else { continue };
+        if patch.degenerate(l) {
+            continue;
+        }
+        let facing = patch.geo[l as usize].dot(out);
+        if anchor_tri.is_none_or(|(f, b)| facing > f || (facing == f && l < b)) {
+            anchor_tri = Some((facing, l));
+        }
+    }
+    let anchor_l = match anchor_tri {
+        Some((_, l)) => l,
+        None => *near.iter().filter_map(|t| local.get(t)).min()?,
+    };
+    drop(local);
+    Some(Collected { patch, anchor_l, limited })
+}
+
+/// Round 9 (package B, T7): the candidate triangles grown from the anchor over the mesh's welded graph. The anchor as
+/// round 8's (the nearest triangles within `ANCHOR_TIE`, the one facing the projector most, then the lowest id), found
+/// with spheres of `1e-3 diag x 4^k` up to the reach radius; the candidates are the triangles reached from it over
+/// welded vertices that lie within the reach sphere (`radius`, grown by the anchor's offset: the same closest-point
+/// test as the sphere query). With Jump small gaps also the in-sphere triangles of the parts whose boxes lie within
+/// `GAP_JUMP x diag` of a part already taken, transitively (the box test of `Jumper::new`): no other part can be
+/// entered. So the candidates are the sphere path's except the parts a layout can never reach.
+fn collect_grown(mesh: &MeshData, bvh: &Bvh, g: &WrapMesh, p: &Projector, radius: f64, jump: bool) -> Option<Collected> {
+    let diag = mesh.diag() as f64;
+    let center = p.origin;
+    if !(radius.is_finite() && radius >= 0.0) {
+        return None;
+    }
+    let mut found: Vec<(TriId, f32)> = Vec::new();
+    let mut r = 1e-3 * diag;
+    loop {
+        let rq = if r < radius && r.is_finite() { r } else { radius };
+        bvh.query_sphere_dist(mesh, center, rq as f32, &mut found);
+        if !found.is_empty() || rq >= radius {
+            break;
+        }
+        r *= 4.0;
+    }
+    if found.is_empty() {
+        return None;
+    }
+    // As round 8: the sphere grows by the anchor's offset from `origin`.
+    let off = found.iter().map(|e| e.1).fold(f32::INFINITY, f32::min).max(0.0).sqrt() as f64;
+    let full_r = if off > 1e-6 * diag { (radius + off) as f32 } else { radius as f32 };
+    let r2 = full_r * full_r;
+    let tie = off + ANCHOR_TIE * diag;
+    found.clear();
+    bvh.query_sphere_dist(mesh, center, ((tie * 1.001) as f32).min(full_r), &mut found);
+    let near: Vec<TriId> = found.iter().filter(|e| e.1 <= r2 && (e.1.max(0.0) as f64).sqrt() <= tie).map(|e| e.0).collect();
+    let out = dvec(p.axes().2);
+    let mut anchor: Option<(f64, TriId)> = None;
+    for &t in &near {
+        if g.collapsed(t) {
+            continue;
+        }
+        let geo = tri_geo(g.corners[t as usize].map(|v| g.pos[v as usize]));
+        if geo == DVec3::ZERO {
+            continue;
+        }
+        let facing = geo.dot(out);
+        if anchor.is_none_or(|(f, b)| facing > f || (facing == f && t < b)) {
+            anchor = Some((facing, t));
+        }
+    }
+    let anchor_t = match anchor {
+        Some((_, t)) => t,
+        None => near.iter().copied().filter(|&t| !g.collapsed(t)).min()?,
+    };
+    let in_sphere = |t: TriId| -> Option<f32> {
+        let [a, b, c] = mesh.tri_positions(t);
+        let d2 = (closest_point_on_triangle(center, a, b, c) - center).length_squared();
+        (d2 <= r2).then_some(d2)
+    };
+    // Per mesh triangle: 0 not looked at, 1 a candidate, 2 outside the sphere (zeroed: untouched pages stay free).
+    let mut mark = vec![0u8; g.corners.len()];
+    let mut vseen = vec![false; g.pos.len()];
+    let mut cands: Vec<(TriId, f32)> = Vec::new();
+    if !jump {
+        let d2 = in_sphere(anchor_t)?;
+        mark[anchor_t as usize] = 1;
+        cands.push((anchor_t, d2));
+        let mut stack = vec![anchor_t];
+        while let Some(t) = stack.pop() {
+            for v in g.corners[t as usize] {
+                if std::mem::replace(&mut vseen[v as usize], true) {
+                    continue;
+                }
+                for &u in g.vtris(v) {
+                    if mark[u as usize] != 0 {
+                        continue;
+                    }
+                    match in_sphere(u) {
+                        Some(d2) => {
+                            mark[u as usize] = 1;
+                            cands.push((u, d2));
+                            stack.push(u);
+                        }
+                        None => mark[u as usize] = 2,
+                    }
+                }
+            }
+        }
+    } else {
+        // Every triangle in the sphere, its parts (over welded vertices) and their boxes; then the parts within the
+        // gap of a part taken, from the anchor's.
+        found.clear();
+        bvh.query_sphere_dist(mesh, center, full_r, &mut found);
+        for &(t, _) in &found {
+            if !g.collapsed(t) {
+                mark[t as usize] = 1;
+            }
+        }
+        let mut comp = vec![0u32; g.corners.len()];
+        let mut boxes: Vec<(DVec3, DVec3)> = Vec::new();
+        let mut stack: Vec<TriId> = Vec::new();
+        for &(t0, _) in &found {
+            if mark[t0 as usize] != 1 || comp[t0 as usize] != 0 {
+                continue;
+            }
+            let id = boxes.len() as u32 + 1;
+            let p0 = g.pos[g.corners[t0 as usize][0] as usize];
+            let mut bx = (p0, p0);
+            comp[t0 as usize] = id;
+            stack.push(t0);
+            while let Some(t) = stack.pop() {
+                for v in g.corners[t as usize] {
+                    if std::mem::replace(&mut vseen[v as usize], true) {
+                        continue;
+                    }
+                    let pv = g.pos[v as usize];
+                    bx = (bx.0.min(pv), bx.1.max(pv));
+                    for &u in g.vtris(v) {
+                        if mark[u as usize] == 1 && comp[u as usize] == 0 {
+                            comp[u as usize] = id;
+                            stack.push(u);
+                        }
+                    }
+                }
+            }
+            boxes.push(bx);
+        }
+        let gap = GAP_JUMP * diag;
+        let near_box = |a: (DVec3, DVec3), b: (DVec3, DVec3)| (b.0 - a.1).max(a.0 - b.1).max(DVec3::ZERO).length() <= gap;
+        let mut taken = vec![false; boxes.len()];
+        let first = comp[anchor_t as usize];
+        if first == 0 {
+            return None;
+        }
+        taken[first as usize - 1] = true;
+        let mut queue = vec![first as usize - 1];
+        while let Some(i) = queue.pop() {
+            for j in 0..boxes.len() {
+                if !taken[j] && near_box(boxes[i], boxes[j]) {
+                    taken[j] = true;
+                    queue.push(j);
+                }
+            }
+        }
+        cands = found.iter().copied().filter(|&(t, _)| mark[t as usize] == 1 && taken[comp[t as usize] as usize - 1]).collect();
+    }
+    drop((mark, vseen));
+    let mut limited = false;
+    if cands.len() > WRAP_MAX_TRIS {
+        cands.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        cands.truncate(WRAP_MAX_TRIS);
+        limited = true;
+    }
+    let mut tris: Vec<TriId> = cands.into_iter().map(|e| e.0).collect();
+    tris.sort_unstable();
+    let patch = Patch::from_graph(g, tris);
+    if patch.tv.is_empty() {
+        return None;
+    }
+    let anchor_l = patch.tris.binary_search(&anchor_t).ok()? as u32;
+    Some(Collected { patch, anchor_l, limited })
+}
+
+/// Round 9 (package B, WA28), test builds: while switched on for the calling thread, every `wrap_param_in` also runs
+/// round 8's sphere path and records where the two parameterizations differ (layers, owner grids, stats except
+/// `micros`, reuse keys).
+#[cfg(test)]
+pub(crate) mod sphere_check {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    thread_local! {
+        static ON: Cell<bool> = const { Cell::new(false) };
+        static RUNS: Cell<u64> = const { Cell::new(0) };
+        static DIFFS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn enable(on: bool) {
+        ON.with(|c| c.set(on));
+    }
+
+    /// Round 8's sphere path for the timing probe (WA15).
+    pub(crate) fn sphere_param(mesh: &MeshData, bvh: &Bvh, maps: &[std::sync::Arc<TexelMap>], src_size: [u32; 2], p: &Projector) -> Option<WrapParam> {
+        wrap_param_from(mesh, bvh, Source::Sphere, maps, src_size, p)
+    }
+
+    /// Comparisons made and differences found on this thread so far, then reset.
+    pub(crate) fn take() -> (u64, Vec<String>) {
+        (RUNS.with(|c| c.replace(0)), DIFFS.with(|d| std::mem::take(&mut *d.borrow_mut())))
+    }
+
+    pub(super) fn compare(mesh: &MeshData, bvh: &Bvh, maps: &[std::sync::Arc<TexelMap>], src_size: [u32; 2], p: &Projector, got: Option<&WrapParam>) {
+        if !ON.with(Cell::get) {
+            return;
+        }
+        let candidates = phase_times::last_candidates();
+        let want = wrap_param_from(mesh, bvh, Source::Sphere, maps, src_size, p);
+        phase_times::set_candidates(candidates as usize);
+        RUNS.with(|c| c.set(c.get() + 1));
+        let a = got.map(fingerprint);
+        let b = want.as_ref().map(fingerprint);
+        if a != b {
+            let what = match (&a, &b) {
+                (Some(a), Some(b)) => a
+                    .iter()
+                    .zip(b)
+                    .position(|(x, y)| x != y)
+                    .map_or_else(|| format!("{} vs {} parts", a.len(), b.len()), |i| format!("part {i}: graph {} / sphere {}", short(&a[i]), short(&b[i]))),
+                _ => format!("graph {} / sphere {}", a.is_some(), b.is_some()),
+            };
+            let stats = |w: Option<&WrapParam>| w.map(|w| format!("{:?}", WrapStats { micros: 0, ..w.stats }));
+            DIFFS.with(|d| d.borrow_mut().push(format!("{what}; graph {:?}; sphere {:?}", stats(got), stats(want.as_ref()))));
+        }
+    }
+
+    fn short(s: &str) -> &str {
+        &s[..s.len().min(300)]
+    }
+
+    /// Everything of a parameterization except its build time, as strings of bits.
+    fn fingerprint(w: &WrapParam) -> Vec<String> {
+        let mut out = vec![
+            format!("{:?}", WrapStats { micros: 0, ..w.stats }),
+            format!("{:?} {:?} {} {:?} {:?} {:?}", w.reach.map(f64::to_bits), w.needed_along, w.spine_y, w.src_size, w.stop_bits, w.half_bits),
+        ];
+        for l in &w.layers {
+            let bits = |v: &[[[f32; 2]; 3]]| v.iter().flat_map(|c| c.iter().flat_map(|q| q.map(f32::to_bits))).collect::<Vec<u32>>();
+            out.push(format!("tris {:?}", l.tris));
+            out.push(format!("corners {:?}", bits(&l.corners)));
+            out.push(format!("depth {:?}", l.depth.iter().flat_map(|d| d.map(f32::to_bits)).collect::<Vec<u32>>()));
+            out.push(format!("clip {:?} period {:?} axis {}", l.clip.map(|c| c.map(f32::to_bits)), l.period.map(f32::to_bits), l.axis));
+            out.push(match &l.owner {
+                Some(o) => format!(
+                    "owner {:?} {} {:?} {:?} {:?} {:?}",
+                    o.lo.map(f32::to_bits),
+                    o.cell.to_bits(),
+                    o.dims,
+                    o.g.iter().map(|x| x.to_bits()).collect::<Vec<u32>>(),
+                    o.pos.iter().flat_map(|q| q.map(f32::to_bits)).collect::<Vec<u32>>(),
+                    o.scale.iter().map(|x| x.to_bits()).collect::<Vec<u32>>()
+                ),
+                None => "owner none".to_owned(),
+            });
+        }
+        out
+    }
 }
 
 /// What the owner grid of a layer needs besides its triangles (round 9, T1).

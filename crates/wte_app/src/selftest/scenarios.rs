@@ -6478,6 +6478,9 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
         }),
         Step::WaitIdle,
         Step::Setup("(10) log the wrap (Jump small gaps off)", |s, sc| ws_log_path_stamp(s, sc, "off")),
+        // Round 9 (package B, plan 6 step 6): the picture with Jump small gaps off (`<out>_off.png`).
+        Step::WaitFrames(3),
+        Step::Shot("off"),
         Step::Dyn("(10) Jump small gaps on (Final)", |s, sc| {
             ws_edit(s, sc, |p| Projector { wrap: WrapOptions { jump_gaps: true, ..p.wrap }, ..p })
         }),
@@ -6502,8 +6505,50 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
             }
             if bad.is_empty() { Ok(()) } else { Err(bad.join("; ")) }
         }),
+        // Round 9 (package B, plan 7.2): the third log state (the panel's lines: shared texels, the part of a picture
+        // longer than the way round) and the new asserts.
+        Step::Setup("(10) log the panel lines (Jump small gaps on)", ws_log_panel_lines),
+        Step::Assert("(10) covered >= 0.85 x ends_share unless reached_edge, lost_cut <= 10 % with Jump small gaps off and on", |_, sc| {
+            let mut bad = Vec::new();
+            for (jump, keys) in [("off", WS_S_OFF), ("on", WS_S_ON)] {
+                let [covered, ends, edge, lost] = keys.map(|k| remembered(sc, k).map(|v| f32::from_bits(v as u32)));
+                let (covered, ends, edge, lost) = (covered?, ends?, edge? != 0.0, lost?);
+                if !edge && (covered.is_nan() || covered < 0.85 * ends) {
+                    bad.push(format!("Jump {jump}: covered {covered:.4} < 0.85 x ends_share {ends:.4}"));
+                }
+                if lost.is_nan() || lost > 0.10 {
+                    bad.push(format!("Jump {jump}: lost_cut {:.2} % > 10 %", lost * 100.0));
+                }
+            }
+            if bad.is_empty() { Ok(()) } else { Err(bad.join("; ")) }
+        }),
     ]);
     steps
+}
+
+/// Round 9 (package B): scratch keys of step 10's coverage measures (covered, ends_share, reached_edge as 0 / 1,
+/// lost_cut; `f32` bits) with Jump small gaps off and on.
+const WS_S_OFF: [&str; 4] = ["ws_cov_off", "ws_ends_off", "ws_edge_off", "ws_lost_off"];
+const WS_S_ON: [&str; 4] = ["ws_cov_on", "ws_ends_on", "ws_edge_on", "ws_lost_on"];
+
+/// Round 9 (package B, plan 7.2): logs what the panel says under stamp S besides the stats line: the share of its
+/// picture on shared texels (`Document::stamp_shared_texels`, the T9 line from 5 %) and the part of a picture longer
+/// than the way round (`ends_share`).
+fn ws_log_panel_lines(state: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
+    let (id, _) = ws_s(state, sc)?;
+    let doc = doc_of(state)?;
+    let share = doc.stamp_shared_texels(id);
+    let stats = doc.stamp_wrap_stats(id);
+    log::info!(
+        "wrap_surface (10) panel lines: shared texels {} ({}), ends_share {} ({}), passed {}, lost_cut {}",
+        share.map_or("-".to_owned(), |v| format!("{:.1} %", v * 100.0)),
+        if share.is_some_and(|v| v >= wte_core::uv_share::UV_SHARE_WARN) { "line shown" } else { "no line" },
+        stats.map_or("-".to_owned(), |s| format!("{:.1} %", s.ends_share * 100.0)),
+        if stats.is_some_and(|s| s.ends_share < 0.95) { "line shown" } else { "no line" },
+        stats.is_some_and(|s| s.passed),
+        stats.map_or("-".to_owned(), |s| format!("{:.2} %", s.lost_cut * 100.0)),
+    );
+    Ok(())
 }
 
 /// Scratch keys of step 10's measures (ink / picture, dup, scatter as `f32` bits) with Jump small gaps off and on.
@@ -6852,6 +6897,20 @@ fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Resu
     for (key, v) in keys.into_iter().zip([ratio, dup, scatter]) {
         sc.values.insert(key, u64::from(v.to_bits()));
     }
+    // Round 9 (package B): the coverage measures of plan 7.2.
+    let keys = if jump == "on" { WS_S_ON } else { WS_S_OFF };
+    let measures = stats.map_or([f32::NAN; 4], |s| [s.covered, s.ends_share, if s.reached_edge { 1.0 } else { 0.0 }, s.lost_cut]);
+    for (key, v) in keys.into_iter().zip(measures) {
+        sc.values.insert(key, u64::from(v.to_bits()));
+    }
+    log::info!(
+        "wrap_surface (10) Jump small gaps {jump} coverage: covered {:.4}, ends_share {:.4}, reached_edge {}, lost_cut {:.2} %, passed {}",
+        measures[0],
+        measures[1],
+        measures[2] != 0.0,
+        measures[3] * 100.0,
+        stats.is_some_and(|s| s.passed)
+    );
     if p.mode != SurfaceMode::Wrap {
         return Err("the stamp is not wrapped".to_owned());
     }

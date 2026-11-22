@@ -925,7 +925,24 @@ fn wrap_bench_models() {
         eprintln!("{name}: loaded in {:.0} ms, {} triangles", ms(t), doc.mesh.tri_count());
         docs.push((name.to_owned(), doc));
     }
+    let phases = |a: [u64; 4]| -> String {
+        let total = a.iter().sum::<u64>().max(1) as f64;
+        let names = ["collect", "front", "relax", "owner"];
+        (0..4).map(|i| format!("{} {:.1} ms ({:.0} %)", names[i], a[i] as f64 / 1e3, 100.0 * a[i] as f64 / total)).collect::<Vec<_>>().join(", ")
+    };
     for (name, doc) in &docs {
+        // Round 9 (package B): the mesh graph, built once (T-c), and the shared texels.
+        let t = Instant::now();
+        let graph = crate::wrap_param::WrapMesh::build(&doc.mesh);
+        let graph_ms = ms(t);
+        let uv = crate::uv_share::UvShare::build(&doc.mesh);
+        eprintln!(
+            "WA15 {name}: graph built in {graph_ms:.1} ms ({:.1} MB, {} edges); shared texels {:.1} ms, {:.1} % of the surface",
+            graph.heap_bytes() as f64 / 1e6,
+            graph.edges(),
+            uv.build_ms,
+            uv.mesh_share() * 100.0
+        );
         let (c, d) = (doc.mesh.bounds.center(), doc.mesh.diag());
         // Spot "centre" (package A's rule): the first surface met from +Z, +Y or +X towards the centre (on
         // ABeautifulGame the +Z ray passes between the pieces, so it is the board seen from above). Spot "off-centre"
@@ -959,12 +976,31 @@ fn wrap_bench_models() {
                 let proj_preview = ms(t);
                 for jump in [false, true] {
                     let w = Projector { mode: SurfaceMode::Wrap, wrap: WrapOptions { jump_gaps: jump, overlap: false }, ..projected };
+                    // Round 8's sphere path first (round 9's code otherwise: the collection's gain), then the graph path
+                    // twice (the second time is the one reported: warm caches).
+                    let _ = crate::wrap_param::phase_times::take();
                     let t = Instant::now();
-                    let Some(param) = wrap_param(&doc.mesh, &doc.bvh, &maps, src.size(), &w) else {
+                    let sphere = crate::wrap_param::sphere_check::sphere_param(&doc.mesh, &doc.bvh, &maps, src.size(), &w);
+                    let sphere_ms = ms(t);
+                    let sphere_phases = crate::wrap_param::phase_times::take();
+                    let sphere_cands = crate::wrap_param::phase_times::last_candidates();
+                    let _ = crate::wrap_param::wrap_param_in(&doc.mesh, &doc.bvh, &graph, &maps, src.size(), &w);
+                    let _ = crate::wrap_param::phase_times::take();
+                    let t = Instant::now();
+                    let Some(param) = crate::wrap_param::wrap_param_in(&doc.mesh, &doc.bvh, &graph, &maps, src.size(), &w) else {
                         eprintln!("{name} {frac}: no parameterization");
                         continue;
                     };
                     let fresh = ms(t);
+                    let graph_phases = crate::wrap_param::phase_times::take();
+                    eprintln!(
+                        "WA15 {name} {spot} {:.0} % jump {jump} phases: graph path {fresh:.1} ms [{}], {} candidates; sphere path {sphere_ms:.1} ms [{}], {sphere_cands} candidates; equal {}",
+                        frac * 100.0,
+                        phases(graph_phases),
+                        crate::wrap_param::phase_times::last_candidates(),
+                        phases(sphere_phases),
+                        sphere.as_ref().is_some_and(|q| testkit::layers(q) == testkit::layers(&param))
+                    );
                     let t = Instant::now();
                     assert!(param.serves_inputs(&doc.mesh, &maps, src.size(), &w));
                     let reused = ms(t);
@@ -988,6 +1024,15 @@ fn wrap_bench_models() {
                 }
             }
         }
+    }
+    // Round 9 (package B): the bumpy ball of WA20 (relaxed: the solve's share).
+    {
+        let (raw, p) = r8_bumpy_ball();
+        let model = Model::new(raw, SIDE);
+        let _ = crate::wrap_param::phase_times::take();
+        let t = Instant::now();
+        let param = model.param(&src, &p).unwrap();
+        eprintln!("WA15 bumpy ball: param {:.1} ms (graph built inside) [{}], {:?}", ms(t), phases(crate::wrap_param::phase_times::take()), param.stats());
     }
     // Overlap at 2.5 turns on a cylinder against Ends meet (G5f).
     let model = Model::new(samples::cylinder(SEG, 1.0, 2.0), SIDE);
@@ -3231,4 +3276,155 @@ fn wa35_exact_parts_stay_exact() {
     assert!(failed.is_empty(), "WA35 limits not met:
 {}", failed.join("
 "));
+}
+
+// ----- round 9, package B: the welded graph and the growth (WA28) -----
+
+/// WA28 (plan section 6): the growth hands the patch the triangles the layout can reach, not the whole reach sphere.
+#[test]
+fn wa28_growth_hands_the_patch_only_what_the_layout_reaches() {
+    use crate::wrap_param::phase_times;
+    let src = cells();
+    let model = Model::new(samples::cubes_on_floor(5), SIDE);
+    // The picture on the floor between four cubes, Jump off: the floor alone (the sphere holds cubes too).
+    let p = wrapped(Vec3::new(0.5, 0.0, 0.5), Vec3::Y, Vec3::NEG_Z, Vec2::new(0.8, 0.8));
+    let param = model.param(&src, &p).expect("a parameterization");
+    let handed = phase_times::last_candidates();
+    let s = param.stats();
+    let stored = s.tris as u64;
+    let mut in_sphere = Vec::new();
+    model.bvh.query_sphere_dist(&model.mesh, p.origin, 3.0, &mut in_sphere);
+    println!("WA28 cubes_on_floor(5), Jump off: {handed} triangles handed to the patch, {stored} laid + halo; {} triangles within 3 units", in_sphere.len());
+    assert!(handed as f64 <= 1.25 * stored as f64, "{handed} handed, {stored} laid + halo");
+    // A fine floor (the 8,192-triangle floor of WA31) with the cube: the floor's triangles beyond the front are left
+    // out too where the reach sphere is larger than the laid band.
+    let model = Model::new(samples::uv_cube_on_floor_n(64), SIDE);
+    let p = wrapped(Vec3::new(1.0, 0.0, -1.0), Vec3::Y, Vec3::NEG_X, Vec2::new(0.6, 0.15));
+    let param = model.param(&src, &p).expect("a parameterization");
+    println!("WA28 fine floor, Jump off: {} handed, {} laid + halo, {:?}", phase_times::last_candidates(), param.stats().tris, param.stats());
+}
+
+/// WA28 (plan section 6): the graph path equals round 8's sphere path byte for byte (layers, owner grids, stats except
+/// the build time, reuse keys) on the wrap tests WA1-WA5, WA16-WA27, WA31-WA35 and on extra placements (WA24's cube
+/// grid, which its red first half never reaches; Jump on and off). Every parameterization those tests make on this
+/// thread is built both ways (`sphere_check`); a test that is red for its own limits still compares every
+/// parameterization it makes before its failing assert.
+#[test]
+fn wa28_graph_path_equals_the_sphere_path() {
+    use crate::wrap_param::sphere_check;
+    sphere_check::enable(true);
+    let _ = sphere_check::take();
+    let tests: Vec<(&str, fn())> = vec![
+        ("wa1", wa1_a_cylinder_unrolls_exactly_away_from_and_on_the_seam),
+        ("wa2", wa2_the_cylinder_picture_keeps_its_area_and_every_cell_its_share),
+        ("wa3", wa3_a_picture_longer_than_the_way_round_has_its_ends_meet),
+        ("wa4", wa4_a_bumpy_plate_receives_the_whole_picture),
+        ("wa4_r8", wa4_r8_bumpy_plates_receive_the_picture_once_whole_and_smooth),
+        ("wa5", wa5_a_cube_edge_unfolds_exactly_and_a_corner_is_cut_cleanly),
+        ("wa16", wa16_jump_small_gaps_continues_across_a_gap_as_flat_ground),
+        ("wa17", wa17_jump_small_gaps_climbs_a_cube_standing_on_the_floor),
+        ("wa18", wa18_overlap_winds_on_like_tape),
+        ("wa19", wa19_overlap_limits_and_both_options_together),
+        ("wa19b", wa19_option_changes_are_edits_kept_through_project_and_back),
+        ("wa20", wa20_a_bumpy_ball_receives_the_picture_once_whole_and_smooth),
+        ("wa21", wa21_a_closed_piece_is_covered_once_with_cuts_where_the_edges_meet),
+        ("wa22", wa22_a_torus_is_covered_once),
+        ("wa23", wa23_a_cone_tip_and_a_cube_corner_are_cut_once),
+        ("wa24", wa24_jump_small_gaps_is_bounded_by_the_footprint),
+        ("wa25", wa25_the_owner_test_is_inert_where_the_layout_is_exact),
+        ("wa26", wa26_the_relaxed_wrap_is_deterministic),
+        ("wa27", wa27_a_relaxed_parameterization_is_reused_exactly),
+        ("wa31", wa31_the_owner_does_not_depend_on_the_mesh_density),
+        ("wa32", wa32_a_helix_round_a_tube_has_its_ends_meet),
+        ("wa33", wa33_rivets_do_not_cut_the_picture),
+        ("wa34", wa34_a_saddle_corner_lies_once),
+        ("wa35", wa35_exact_parts_stay_exact),
+        ("check_a_jump_across_three_parts", check_a_jump_across_three_parts),
+    ];
+    let mut failed = Vec::new();
+    let mut total = 0;
+    for (name, test) in tests {
+        let red = std::panic::catch_unwind(test).is_err();
+        let (runs, diffs) = sphere_check::take();
+        println!("WA28 {name}: {runs} parameterizations compared, {} differ{}", diffs.len(), if red { " (the test itself is red)" } else { "" });
+        total += runs;
+        failed.extend(diffs.into_iter().map(|d| format!("{name}: {d}")));
+    }
+    // Extra placements: WA24's cube grid, the cube on the floor, the three-part chain, Jump on and off.
+    let src = cells();
+    let extra: Vec<(&str, RawMesh, Projector)> = vec![
+        ("cubes_on_floor(5)", samples::cubes_on_floor(5), wrapped(Vec3::new(0.5, 0.0, 0.5), Vec3::Y, Vec3::NEG_Z, Vec2::new(0.8, 0.8))),
+        ("cubes_on_floor(5) wide", samples::cubes_on_floor(5), wrapped(Vec3::new(0.0, 0.0, 0.5), Vec3::Y, Vec3::NEG_Z, Vec2::new(2.0, 1.2))),
+        ("uv_cube_on_floor", samples::uv_cube_on_floor(), wrapped(Vec3::new(0.0, 0.0, 1.2), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25))),
+        ("uv_cube_on_floor_n(64)", samples::uv_cube_on_floor_n(64), wrapped(Vec3::new(0.0, 0.0, 0.95), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25))),
+        ("three plates", three_plates(0.008, 0.003), wrapped(Vec3::new(-0.608, 0.02, 0.0), Vec3::Z, Vec3::Y, Vec2::new(1.2, 0.15))),
+    ];
+    for (name, raw, p) in extra {
+        let model = Model::new(raw, SIDE);
+        for (jump, overlap) in [(false, false), (true, false), (true, true)] {
+            let p = with_options(p, jump, overlap);
+            model.param(&src, &p);
+        }
+        let (runs, diffs) = sphere_check::take();
+        println!("WA28 {name}: {runs} parameterizations compared, {} differ", diffs.len());
+        total += runs;
+        failed.extend(diffs.into_iter().map(|d| format!("{name}: {d}")));
+    }
+    sphere_check::enable(false);
+    assert!(total >= 100, "only {total} parameterizations compared");
+    assert!(failed.is_empty(), "graph path != sphere path:\n{}", failed.join("\n"));
+}
+
+/// WA38 (plan section 6): the welded graph is built once per mesh and shared by the document's Full, Preview and
+/// ParamOnly jobs (one `Arc`); a Project bake does not build it; a new mesh gets a new cell; the build uses no rayon
+/// inside its `OnceLock` init (eight concurrent first uses on a two-thread pool, each a nested parallel task, build it
+/// once and do not deadlock); the synchronous and the job path give the same bytes with the shared graph.
+#[test]
+fn wa38_the_graph_is_built_once_per_mesh_and_shared_by_the_jobs() {
+    use crate::stamp_job::StampJobKind;
+    let (raw, p) = r8_bumpy_ball();
+    let moved = |k: f32| Projector { origin: p.origin + Vec3::new(0.02 * k, 0.01 * k, 0.0), ..p };
+    let (mut doc, id) = doc_with_stamp(raw.clone(), 256, p);
+    let cell = doc.wrap_mesh_cell();
+    assert_eq!(cell.builds(), 1, "the stamp's first (synchronous) bake built the graph");
+    assert!(Arc::ptr_eq(&cell, &doc.wrap_mesh_cell()), "one cell per mesh");
+    doc.set_defer_wrap_previews(true);
+    doc.set_stamp_placement(id, Placement::Projected(moved(1.0)), Commit::Preview).unwrap();
+    let preview = doc.next_wrap_preview_job().expect("a Preview job");
+    assert_eq!(preview.kind(), StampJobKind::Preview);
+    assert!(Arc::ptr_eq(&preview.graph, &cell), "the Preview job shares the graph");
+    assert!(matches!(doc.apply_wrap_preview(preview.run()), crate::stamp_job::WrapPreview::Applied { .. }));
+    doc.set_stamp_placement(id, Placement::Projected(moved(2.0)), Commit::Final).unwrap();
+    doc.undo();
+    let param = doc.wrap_param_job(id).expect("a ParamOnly job");
+    assert!(Arc::ptr_eq(&param.graph, &cell), "the ParamOnly job shares the graph");
+    assert!(doc.apply_wrap_param(param.run()));
+    let full = doc.make_bake_job(id).unwrap();
+    assert!(Arc::ptr_eq(&full.graph, &cell), "the Full job shares the graph");
+    let _ = full.run();
+    assert_eq!(cell.builds(), 1, "built once for all jobs");
+    // A new mesh (another `Arc`): a new cell, nothing built until a wrap needs it; a Project bake never builds it.
+    let fresh_mesh = Arc::new((*doc.mesh).clone());
+    doc.mesh = fresh_mesh;
+    let new_cell = doc.wrap_mesh_cell();
+    assert!(!Arc::ptr_eq(&new_cell, &cell) && !new_cell.is_built(), "the cell follows the mesh");
+    let (mut proj, pid) = doc_with_stamp(raw.clone(), 256, Projector { mode: SurfaceMode::Project, ..p });
+    let _ = proj.make_bake_job(pid).unwrap().run();
+    assert!(!proj.wrap_mesh_cell().is_built(), "a Project bake built the graph");
+    // No rayon inside the init: concurrent first uses from nested parallel tasks.
+    let model = Model::new(raw, 256);
+    let cell = crate::wrap_param::WrapMeshCell::new(&model.mesh);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let edges: Vec<usize> = pool.install(|| {
+        use rayon::prelude::*;
+        (0..8).into_par_iter().map(|_| rayon::join(|| cell.get(&model.mesh).edges(), || cell.get(&model.mesh).edges()).0).collect()
+    });
+    assert!(edges.iter().all(|&e| e == edges[0] && e > 0));
+    assert_eq!(cell.builds(), 1);
+    // The shared graph gives the bytes of a graph built for the call.
+    let src = cells();
+    let shared = crate::wrap_param::wrap_param_in(&model.mesh, &model.bvh, cell.get(&model.mesh), &model.maps, src.size(), &p).unwrap();
+    let own = model.param(&src, &p).unwrap();
+    assert_eq!(testkit::layers(&shared), testkit::layers(&own));
+    assert_eq!(WrapStatsAlias { micros: 0, ..shared.stats() }, WrapStatsAlias { micros: 0, ..own.stats() });
 }

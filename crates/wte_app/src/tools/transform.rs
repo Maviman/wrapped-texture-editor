@@ -259,6 +259,9 @@ impl TransformTool {
     pub(crate) fn ensure_wrap_param(&mut self, state: &mut AppState) -> bool {
         let Some((id, placement)) = selected(state) else { return false };
         let Placement::Projected(p) = placement else { return false };
+        // Round 9 (package B, T8 / T9): a selected 3D stamp has the mesh's shared texels found, a wrapped one also the
+        // mesh graph built, off the UI thread.
+        state.wrap_jobs.request_warmup(p.mode == SurfaceMode::Wrap);
         if p.mode != SurfaceMode::Wrap
             || self.wrap_failed == Some((id, placement))
             || state.wrap_jobs.param_failed == Some((id, placement))

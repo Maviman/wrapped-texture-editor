@@ -109,6 +109,15 @@ fn wrap_stats_lines(ui: &mut egui::Ui, stats: Option<WrapStats>, opts: WrapOptio
     }
 }
 
+/// Round 9 (package B, T9): the panel line of a 3D stamp whose picture lies on shared texels on at least
+/// `UV_SHARE_WARN` of its area (`Document::stamp_shared_texels`); `None` below that or while unknown.
+const SHARED_TEXELS_LINE: &str =
+    "This model uses the same texture area in several places (mirrored or repeated parts): the picture also shows there.";
+
+fn shared_texels_text(share: Option<f32>) -> Option<&'static str> {
+    share.filter(|s| *s >= wte_core::uv_share::UV_SHARE_WARN).map(|_| SHARED_TEXELS_LINE)
+}
+
 /// Least `WrapStats::stretch` (95th percentile of |area ratio - 1|) for which a relaxed wrap says how much it stretched.
 const STRETCH_LINE_MIN: f32 = 0.05;
 
@@ -137,6 +146,12 @@ fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
     }
     if s.met_itself && !opts.overlap {
         out.push(WrapLine::Warn("The ends meet at the back".to_owned()));
+    }
+    // Round 9 (package B, plan section 6): a picture longer than the way round (also a helix, `passed`) says how much
+    // of it is shown.
+    if s.ends_share < 0.95 {
+        let pct = (s.ends_share * 100.0).round();
+        out.push(WrapLine::Warn(format!("Longer than the way round: {pct:.0} % shown")));
     }
     if s.turns > 1 {
         out.push(WrapLine::Warn(format!("Wound {} times", s.turns)));
@@ -537,6 +552,10 @@ fn placement_fields(
         if wrapped {
             wrap_stats_lines(ui, doc.and_then(|d| d.stamp_wrap_stats(id)), pr.wrap);
         }
+        // Round 9 (package B, T9): the model itself reuses texture area under the picture.
+        if let Some(text) = shared_texels_text(doc.and_then(|d| d.stamp_shared_texels(id))) {
+            ui.add(egui::Label::new(egui::RichText::new(text).color(ui.visuals().warn_fg_color)).wrap());
+        }
     }
     // Fix round 2, item 2: a new size or rotation of a projected stamp whose depth range is automatic re-fits it to the
     // surface under the new footprint, like the Transform tool does; a hand-set depth is kept. Only evaluated when the
@@ -720,6 +739,59 @@ mod tests {
                 WrapLine::Warn("Continued onto 2 separate parts".to_owned())
             ]
         );
+    }
+
+    /// Round 9 (package B, plan section 6): a picture longer than the way round says how much of it is shown.
+    #[test]
+    fn a_picture_longer_than_the_way_round_says_how_much_is_shown() {
+        let base = wte_core::WrapStats {
+            verts: 100,
+            tris: 180,
+            cut_tris: 0,
+            covered: 1.0,
+            met_itself: false,
+            reached_edge: false,
+            limited: false,
+            jumps: 0,
+            turns: 1,
+            micros: 1000,
+            relaxed: false,
+            seams: 0,
+            seams_by_rule: [0; 5],
+            flipped: 0,
+            stretch: 0.0,
+            rejected: 0.0,
+            cg_iters: 0,
+            passed: true,
+            ends_share: 0.43,
+            lost_cut: 0.0,
+        };
+        let opts = WrapOptions::default();
+        assert_eq!(wrap_stats_texts(&base, opts), vec![WrapLine::Warn("Longer than the way round: 43 % shown".to_owned())]);
+        assert!(wrap_stats_texts(&wte_core::WrapStats { ends_share: 0.95, ..base }, opts).is_empty());
+    }
+
+    /// Round 9 (package B, T9): the shared-texel line shows for a stamp on mirrored halves (once the warm-up found the
+    /// shared texels), not on the sphere; nothing is built on the calling thread before.
+    #[test]
+    fn the_shared_texel_line_shows_where_the_model_reuses_its_texture() {
+        let img = wte_core::samples::sample_stamp_image(32);
+        let png = wte_core::encode_png(img.width, img.height, &img.data, wte_core::PngLevel::Fast).unwrap();
+        let line = |mut doc: Document, at: Vec3| {
+            let blob = doc.add_image_blob("s.png", std::sync::Arc::from(png.clone())).unwrap();
+            let p = Projector::from_surface(at, Vec3::Z, Vec3::Y, Vec2::new(0.3, 0.2), 0.3);
+            let id = doc.add_stamp("s", wte_core::StampSource::Image { blob }, Placement::Projected(p), TextureSetId(0)).unwrap();
+            assert!(doc.stamp_shared_texels(id).is_none(), "nothing is known before the warm-up");
+            doc.wrap_mesh_warmup(false).expect("a warm-up to run").run();
+            assert!(doc.wrap_mesh_warmup(false).is_none(), "built once");
+            let share = doc.stamp_shared_texels(id);
+            (share, shared_texels_text(share))
+        };
+        let (share, text) = line(wte_core::testutil::doc_from_raw(wte_core::samples::mirrored_quads(), 256), Vec3::new(-0.2, 0.0, 0.0));
+        assert!(share.is_some_and(|s| s > 0.9) && text == Some(SHARED_TEXELS_LINE), "mirrored halves: {share:?}");
+        let (share, text) = line(Document::sample(SampleKind::Sphere), Vec3::new(0.0, 0.0, 1.0));
+        assert!(share == Some(0.0) && text.is_none(), "sphere: {share:?}");
+        assert!(shared_texels_text(Some(0.049)).is_none() && shared_texels_text(Some(0.05)).is_some() && shared_texels_text(None).is_none());
     }
 
     #[test]

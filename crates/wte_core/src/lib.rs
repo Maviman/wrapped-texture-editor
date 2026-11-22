@@ -50,6 +50,7 @@ pub mod text;
 pub mod tip_bake;
 pub mod tip_field;
 pub mod wrap_bake;
+pub mod uv_share;
 pub mod wrap_param;
 #[cfg(test)]
 mod wrap_tests;

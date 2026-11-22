@@ -10,6 +10,11 @@
 // (`due_again`). The selected wrapped stamp without a cached parameterization (after an open, an undo) gets it from a
 // param-only job. A Final of a stamp whose wrap job is in flight starts after that job lands. `settle` never waits for
 // wrap jobs (their outputs are stale after the flush).
+//
+// Round 9 (package B, T8): a Final waits for its stamp's wrap job only when that job was made for the Final's placement
+// (it brings the parameterization the Final reuses); a job made for an earlier placement of the drag does not hold the
+// Final back (its output lands stale). A selected wrapped stamp warms up the document's welded mesh graph in a silent
+// job (`WrapJobs::request_warmup`), so the first wrap job does not pay its build.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -27,6 +32,7 @@ const TITLE_TEXT: &str = "Finishing text";
 /// Titles (thread names) of the silent wrap jobs; the status bar does not show them.
 const TITLE_WRAP_PREVIEW: &str = "Wrap preview";
 const TITLE_WRAP_PARAM: &str = "Wrap fit";
+const TITLE_WRAP_WARM: &str = "Wrap warm-up";
 
 /// Round 8 (R8-2): the wrap Preview or param-only job in flight, a Preview output held while a stroke is open, the
 /// param-only request of the selected stamp and counters. Lives in `AppState::wrap_jobs`.
@@ -42,6 +48,10 @@ pub struct WrapJobs {
     pub(crate) param_failed: Option<(StampId, Placement)>,
     /// What the jobs did (tests, the scenario and the log).
     pub counters: WrapJobCounters,
+    /// Round 9 (package B, T8 / T9): a selected 3D stamp asked for the warm-up of the mesh's derived data (taken by
+    /// `after_tools`; `Some(true)`: a wrapped stamp, also the graph), and a warm-up job runs.
+    want_warm: Option<bool>,
+    warm_in_flight: bool,
 }
 
 /// Counts of `WrapJobs` since the start.
@@ -57,6 +67,8 @@ pub struct WrapJobCounters {
     pub params_applied: u64,
     /// Parameterizations made on the UI thread by `TransformTool::ensure_wrap_param` (synchronous mode only).
     pub ui_params: u64,
+    /// Round 9 (package B): warm-up jobs of the mesh graph started.
+    pub warmups_started: u64,
 }
 
 /// The one wrap job running on a worker.
@@ -74,6 +86,12 @@ impl WrapJobs {
     /// The Transform tool asks for the parameterization of the selected wrapped stamp (async mode).
     pub(crate) fn request_param(&mut self, id: StampId) {
         self.want_param = Some(id);
+    }
+
+    /// Round 9 (package B, T8 / T9): a selected 3D stamp wants the document's shared texels found and, when `graph` (a
+    /// wrapped stamp), the mesh graph built (off the UI thread).
+    pub(crate) fn request_warmup(&mut self, graph: bool) {
+        self.want_warm = Some(self.want_warm.unwrap_or(false) || graph);
     }
 
     /// The stamp and kind of the wrap job in flight.
@@ -215,11 +233,15 @@ fn pump_wrap(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) {
     state.wrap_jobs.in_flight = Some(WrapFlight { id, kind, generation, started: Instant::now(), placement });
 }
 
-/// True while the wrap job in flight belongs to a stamp of the open document that waits for its Final bake: the Final
-/// starts after that job lands (plan 4.1; with its parameterization when the job's serves).
+/// True while the wrap job in flight belongs to a stamp of the open document that waits for its Final bake and was made
+/// for the stamp's placement now: the Final starts after that job lands and reuses its parameterization (plan 4.1).
+/// Round 9 (package B, T8): a job made for another placement (an earlier frame of the drag) does not hold the Final
+/// back: the Final starts at once and the job's output lands stale.
 fn final_waits_for_wrap_job(state: &AppState) -> bool {
     let (Some(flight), Some(session)) = (state.wrap_jobs.in_flight.as_ref(), state.session.as_ref()) else { return false };
-    flight.generation == session.scene_generation && session.doc.stamp_is_unbaked(flight.id)
+    flight.generation == session.scene_generation
+        && session.doc.stamp_is_unbaked(flight.id)
+        && session.doc.stamp(flight.id).map(|s| s.placement) == Some(flight.placement)
 }
 
 /// Called from `io_flows::on_job_output` with the output of a wrap Preview or param-only job.
@@ -293,7 +315,34 @@ pub(crate) fn after_tools(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Con
     if state.wrap_jobs.want_param.is_some() && state.wrap_jobs.in_flight.is_none() {
         pump_wrap(state, jobs, ctx);
     }
+    warm_up(state, jobs, ctx);
     update_pending(state);
+}
+
+/// Round 9 (package B, T8): starts the warm-up job of the open document's mesh graph when a selected wrapped stamp asked
+/// for it, the graph is not built and no warm-up runs. Without a worker thread nothing is started (the first wrap job
+/// builds the graph).
+fn warm_up(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) {
+    let Some(graph) = state.wrap_jobs.want_warm.take() else { return };
+    if state.wrap_jobs.warm_in_flight {
+        return;
+    }
+    let Some(session) = state.session.as_mut() else { return };
+    let Some(warm) = session.doc.wrap_mesh_warmup(graph) else { return };
+    let generation = session.scene_generation;
+    if jobs.spawn_silent(ctx, TITLE_WRAP_WARM, move |_| JobOutput::WrapWarm { generation, ms: warm.run() }) {
+        state.wrap_jobs.warm_in_flight = true;
+        state.wrap_jobs.counters.warmups_started += 1;
+        log::info!("wrap mesh: warm-up job started");
+    }
+}
+
+/// Round 9 (package B, T8): called from `io_flows::on_job_output` when the warm-up job ends (the graph lives in the
+/// document's cell that the job filled).
+pub(crate) fn on_warm_output(state: &mut AppState, generation: u64, ms: f64) {
+    state.wrap_jobs.warm_in_flight = false;
+    let current = state.session.as_ref().is_some_and(|s| s.scene_generation == generation);
+    log::info!("wrap mesh: warm-up job ended after {ms:.0} ms{}", if current { "" } else { " (other document)" });
 }
 
 /// Called from `App::ui` after the frame's actions were dispatched (a Final of a gizmo release or of a tool gesture
@@ -461,6 +510,7 @@ pub(crate) fn reset_for_new_document(state: &mut AppState) {
     state.wrap_jobs.held = None;
     state.wrap_jobs.want_param = None;
     state.wrap_jobs.param_failed = None;
+    state.wrap_jobs.want_warm = None;
 }
 
 #[cfg(test)]
@@ -869,6 +919,11 @@ mod tests {
                         on_wrap_output_with(state, generation, output);
                         Delivered::Wrap(kind)
                     }
+                    // Round 9: a warm-up job of the mesh graph is no bake: handed over and skipped.
+                    JobOutput::WrapWarm { generation, ms } => {
+                        on_warm_output(state, generation, ms);
+                        continue;
+                    }
                     _ => panic!("another job's output"),
                 };
             }
@@ -1074,6 +1129,59 @@ mod tests {
         assert_eq!(state.doc().unwrap().stamp_wrap_stats(id), Some(from_job), "the Final built the parameterization again");
         let sync_at = turned(&sync, sync_id, 0.25);
         sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_at, Commit::Final).unwrap();
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+    }
+
+    /// Round 9 (package B, T8): a Final released while the Preview job runs that was made for an earlier placement of
+    /// the drag starts at once (the same pump); that job's output lands stale and the Final equals the synchronous one.
+    #[test]
+    fn a_final_does_not_wait_for_a_wrap_preview_job_of_another_placement() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        let sync_id = place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.25);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Preview).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.in_flight(), Some((id, StampJobKind::Preview)));
+        // The drag goes on, then the release: the job in flight was made for the earlier placement.
+        let at2 = turned(&state, id, 0.25);
+        state.doc_mut().unwrap().set_stamp_placement(id, at2, Commit::Preview).unwrap();
+        state.doc_mut().unwrap().flush_pending_edit();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.final_bakes.in_flight(), "the Final starts in the frame of the release");
+        assert_eq!(jobs.running_count(), 2, "beside the Preview job");
+        // Both land, in either order (both may finish between two polls).
+        let (mut finals, mut previews) = (0, 0);
+        let start = Instant::now();
+        while finals + previews < 2 {
+            for done in jobs.poll() {
+                match done.output {
+                    JobOutput::StampBake { generation, output } => {
+                        on_output_with(&mut state, generation, output);
+                        finals += 1;
+                    }
+                    JobOutput::WrapPreview { generation, output } => {
+                        on_wrap_output_with(&mut state, generation, output);
+                        previews += 1;
+                    }
+                    JobOutput::WrapWarm { generation, ms } => on_warm_output(&mut state, generation, ms),
+                    _ => panic!("another job's output"),
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(120), "the jobs delivered nothing");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!((finals, previews), (1, 1));
+        assert_eq!(state.wrap_jobs.counters.previews_stale, 1, "the Preview of the earlier placement is stale");
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(!jobs.any_running() && !state.final_bakes_pending && !state.wrap_jobs_pending);
+        for _ in 0..2 {
+            let sync_at = turned(&sync, sync_id, 0.25);
+            sync.doc_mut().unwrap().set_stamp_placement(sync_id, sync_at, Commit::Final).unwrap();
+        }
         assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
     }
 

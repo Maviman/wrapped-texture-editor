@@ -18,7 +18,7 @@ use crate::stamp_bake::{bake_projected, bake_uv};
 use crate::texel_map::TexelMap;
 use crate::text::{FaceFonts, RasterQuality, TextFonts, TextFrame, TextSpec, default_font_bytes, render_text};
 use crate::wrap_bake::bake_wrapped;
-use crate::wrap_param::{WrapParam, wrap_param};
+use crate::wrap_param::{WrapMeshCell, WrapParam, wrap_param_in};
 
 /// The text's own face as owned parts: parsed font, file bytes, face index.
 pub(crate) type OwnFace = (Arc<fontdue::Font>, Arc<[u8]>, u32);
@@ -67,6 +67,9 @@ pub struct StampBakeJob {
     /// Round 8: what the job does, and the document's pending-edit serial it was made in (Preview jobs).
     pub(crate) kind: StampJobKind,
     pub(crate) serial: u64,
+    /// Round 9 (package B, T7): the document's welded mesh graph (built by the first job that needs a fresh
+    /// parameterization, or by the warm-up job; a Project bake never builds it).
+    pub(crate) graph: Arc<WrapMeshCell>,
 }
 
 /// The parameterization a wrapped bake used and whether it was built for it (`true`) or reused.
@@ -166,7 +169,7 @@ impl StampBakeJob {
     /// Bakes on the calling thread's rayon pool (the synchronous path). Never creates a pool.
     pub fn run(self) -> StampBakeOutput {
         let started = Instant::now();
-        let StampBakeJob { id, object, mesh, bvh, maps, picture, wrap, kind, serial } = self;
+        let StampBakeJob { id, object, mesh, bvh, maps, picture, wrap, kind, serial, graph } = self;
         let quality = if kind == StampJobKind::Preview { BakeQuality::Preview } else { BakeQuality::Full };
         let mut drawn = None;
         let mut used = None;
@@ -184,11 +187,11 @@ impl StampBakeJob {
             };
             Ok(match object.placement {
                 Placement::Projected(p) if p.mode == SurfaceMode::Wrap && kind == StampJobKind::ParamOnly => {
-                    used = wrap_param_only(id, &mesh, &bvh, &maps, mips.size(), &p, wrap);
+                    used = wrap_param_only(id, &mesh, &bvh, &graph, &maps, mips.size(), &p, wrap);
                     Vec::new()
                 }
                 Placement::Projected(p) if p.mode == SurfaceMode::Wrap => {
-                    let (baked, w) = wrap_bake(id, &mesh, &bvh, &maps, &mips, object.tint, &p, wrap, quality);
+                    let (baked, w) = wrap_bake(id, &mesh, &bvh, &graph, &maps, &mips, object.tint, &p, wrap, quality);
                     used = w;
                     baked
                 }
@@ -215,13 +218,14 @@ impl StampBakeJob {
 }
 
 /// The wrap bake of stamp `id` (round 6, 4.6): the cached parameterization `cached` when it serves `p`, else a fresh
-/// one; then `bake_wrapped`. Logs `wrap: stamp N param ...` (info for Full bakes, debug for Preview). Returns the
+/// one (round 9: from the mesh graph `graph`, built here on first use); then `bake_wrapped`. Logs `wrap: stamp N param ...` (info for Full bakes, debug for Preview). Returns the
 /// bake and the parameterization it used (`None` when the projector or the surface gives none: nothing is baked).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn wrap_bake(
     id: StampId,
     mesh: &Arc<MeshData>,
     bvh: &Bvh,
+    graph: &WrapMeshCell,
     maps: &[Arc<TexelMap>],
     mips: &PremulMips,
     tint: [u8; 4],
@@ -234,7 +238,7 @@ pub(crate) fn wrap_bake(
     let fresh = reused.is_none();
     let param = match reused {
         Some(w) => Some(w),
-        None => wrap_param(mesh, bvh, maps, mips.size(), p).map(Arc::new),
+        None => wrap_param_in(mesh, bvh, graph.get(mesh), maps, mips.size(), p).map(Arc::new),
     };
     let Some(param) = param else {
         log::debug!("wrap: stamp {} has no surface under it", id.0);
@@ -279,6 +283,7 @@ pub(crate) fn wrap_param_only(
     id: StampId,
     mesh: &Arc<MeshData>,
     bvh: &Bvh,
+    graph: &WrapMeshCell,
     maps: &[Arc<TexelMap>],
     src_size: [u32; 2],
     p: &Projector,
@@ -287,7 +292,7 @@ pub(crate) fn wrap_param_only(
     if let Some(w) = cached.filter(|w| w.serves_inputs(mesh, maps, src_size, p)) {
         return Some(UsedWrap { param: w, fresh: false });
     }
-    let param = Arc::new(wrap_param(mesh, bvh, maps, src_size, p)?);
+    let param = Arc::new(wrap_param_in(mesh, bvh, graph.get(mesh), maps, src_size, p)?);
     let s = param.stats_for(p);
     log::info!(
         "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh, param only), covered {:.1} %, cut {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}, passed {}, ends {:.1} %, lost_cut {:.2} %",

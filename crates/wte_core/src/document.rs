@@ -148,6 +148,9 @@ pub(crate) struct BakeSets {
     /// Round 8: the serial of the open pending edit (bumped when the first stamp joins `preview_baked`); a wrap Preview
     /// job's output applies only within the edit it was made in.
     pub(crate) edit_serial: u64,
+    /// Round 9 (package B, T7): the welded graph of the mesh for wrapped stamps, built lazily (by the first wrap job or
+    /// the warm-up job) and shared by `Arc` with the jobs; a new mesh gets a new cell (`Document::wrap_mesh_cell`).
+    pub(crate) wrap_mesh: Option<Arc<crate::wrap_param::WrapMeshCell>>,
 }
 
 // Compile-time thread-safety checks (section 4.6).

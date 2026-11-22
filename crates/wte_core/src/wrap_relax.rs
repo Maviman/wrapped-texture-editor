@@ -720,10 +720,22 @@ impl<'a> Layout<'a> {
             let mut near: Vec<Vec<u32>> = Vec::with_capacity(strong.len());
             let mut net_ok = vec![false; nv];
             for (round, &v) in strong.iter().enumerate() {
-                let found = self.laid_within(v, cone_radius, laid, &mut stamp, round as u32);
+                // check:A (round 9): the net sums over at least the vertex's 1-ring (its longest laid edge): on a
+                // coarse mesh a rivet's ring lies farther than the radius from its tip, and the tip alone cut the
+                // picture as in round 8 (check_a9: a rivet next to a box corner, two S4 cuts, a cell 98 % lost). The
+                // strongest-only rule keeps the radius (a coarse cube's corners each cut).
+                let ring = patch
+                    .vtris(v)
+                    .iter()
+                    .filter(|&&t| laid[t as usize])
+                    .flat_map(|&t| patch.tv[t as usize])
+                    .map(|u| patch.pos[u as usize].distance(patch.pos[v as usize]))
+                    .fold(0.0f64, f64::max);
+                let found = self.laid_within(v, cone_radius.max(ring * (1.0 + 1e-9)), laid, &mut stamp, round as u32);
                 let net: f64 = found.iter().map(|&u| deficit[u as usize]).sum();
                 net_ok[v as usize] = net.abs() > limit;
-                near.push(found);
+                let origin = patch.pos[v as usize];
+                near.push(found.into_iter().filter(|&u| patch.pos[u as usize].distance(origin) <= cone_radius).collect());
             }
             let beats = |u: u32, v: u32| {
                 let (du, dv) = (deficit[u as usize].abs(), deficit[v as usize].abs());

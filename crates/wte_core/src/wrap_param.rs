@@ -48,6 +48,9 @@ pub const SPINE_NUDGE: f64 = 1e-6;
 pub const GAP_JUMP: f64 = 0.01;
 /// Overlap: the most turns laid.
 pub const WRAP_MAX_TURNS: u32 = 8;
+/// check:A (round 9, T2): the turn-0 traces have passed each other when their heads pass within this many bucketed
+/// across reaches (the picture's full height: its bands overlap).
+pub const PASS_NEAR: f64 = 2.0;
 /// Anchor: candidate triangles within this distance (times the diagonal) of the nearest one compete for the anchor.
 const ANCHOR_TIE: f64 = 1e-4;
 /// Round 8: the front stops at this many times the bucketed across reach (geodesic distance from the spine), so a
@@ -1540,11 +1543,15 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, across: f64, footprin
             let u = traces[1].q - traces[0].q;
             let (d, ahead) = (u.length(), u.dot(traces[0].d));
             let now = [traces[0].s, traces[1].s];
+            // check:A (round 9): the bands overlap when the heads pass within the picture's full height (two across
+            // reaches), not its half: a helix whose pitch lies between the two wound on to the triangle rule
+            // (check_a9's cone: 1.5 turns, a band of overlap cut out by S1 / S2, a cell 94 % lost).
+            let near = PASS_NEAR * across;
             if let Some((d0, a0, s0)) = pass_prev {
-                if d < across && d < d0 {
+                if d < near && d < d0 {
                     pass_armed = true;
                 }
-                if pass_armed && a0 > 0.0 && ahead <= 0.0 && d < across {
+                if pass_armed && a0 > 0.0 && ahead <= 0.0 && d < near {
                     let f = (a0 / (a0 - ahead)).clamp(0.0, 1.0);
                     let at = [s0[0] + f * (now[0] - s0[0]), s0[1] + f * (now[1] - s0[1])];
                     spine.passed = true;

@@ -2763,3 +2763,262 @@ fn wa26_wa27_round9_cases_are_deterministic() {
         println!("WA26/27 round 9 {what}: deterministic, reuse {reused} = fresh");
     }
 }
+
+// ----- check:A (round 9): attempts to break package A -----
+
+/// The atlas island `index` of a `cols x rows` grid, inset by 1/64 of a cell.
+fn a9_island(index: u32, cols: u32, rows: u32) -> [f32; 4] {
+    let (col, row) = ((index % cols) as f32, (index / cols) as f32);
+    let (w, h) = (1.0 / cols as f32, 1.0 / rows as f32);
+    let m = w.min(h) / 64.0;
+    [col * w + m, (col + 1.0) * w - m, row * h + m, (row + 1.0) * h - m]
+}
+
+/// The sub-rectangle `(i, j)` of an `n x m` split of island `isl` (`j` counted from the island's top).
+fn a9_sub(isl: [f32; 4], i: u32, j: u32, n: u32, m: u32) -> [f32; 4] {
+    let (du, dv) = ((isl[1] - isl[0]) / n as f32, (isl[3] - isl[2]) / m as f32);
+    [isl[0] + du * i as f32, isl[0] + du * (i + 1) as f32, isl[3] - dv * (j + 1) as f32, isl[3] - dv * j as f32]
+}
+
+/// The faces of the box `min..max` whose bit is set in `mask` (bit f: +X, -X, +Y, -Y, +Z, -Z as `samples::push_box`),
+/// face f on atlas island `first + f` of a `cols x rows` grid. Outward winding.
+fn a9_box(out: &mut Vec<RawTriangle>, min: Vec3, max: Vec3, mask: u8, first: u32, grid: [u32; 2]) {
+    let (c, e) = ((min + max) * 0.5, (max - min) * 0.5);
+    let faces: [(Vec3, Vec3, Vec3); 6] = [
+        (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+    ];
+    for (f, (n, r, u)) in faces.into_iter().enumerate() {
+        if mask & (1 << f) == 0 {
+            continue;
+        }
+        let corner = |sx: f32, sy: f32| c + (n + r * sx + u * sy) * e;
+        let p = [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)];
+        raw_quad(out, p, a9_island(first + f as u32, grid[0], grid[1]));
+    }
+}
+
+/// A floor `x`, `z` in -2..2 at `y = 0` (facing +Y) on atlas island `index`.
+fn a9_floor(out: &mut Vec<RawTriangle>, index: u32, grid: [u32; 2]) {
+    let p = [Vec3::new(-2.0, 0.0, 2.0), Vec3::new(2.0, 0.0, 2.0), Vec3::new(2.0, 0.0, -2.0), Vec3::new(-2.0, 0.0, -2.0)];
+    raw_quad(out, p, a9_island(index, grid[0], grid[1]));
+}
+
+/// A grid surface `at(i, j)` of `n x m` quads on island `isl` (`wrap_i`: the `i` direction closes, `at(n, j) = at(0,
+/// j)` is taken as given).
+fn a9_grid(out: &mut Vec<RawTriangle>, n: u32, m: u32, isl: [f32; 4], at: &dyn Fn(u32, u32) -> Vec3) {
+    for j in 0..m {
+        for i in 0..n {
+            raw_quad(out, [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)], a9_sub(isl, i, m - 1 - j, n, m));
+        }
+    }
+}
+
+/// The open-bottom cube (or the closed one) of the break list on the 4 x 4 floor, and WA31's placement.
+fn a9_cube_on_floor(closed: bool) -> (RawMesh, Projector) {
+    let grid = [4, 4];
+    let mut t = Vec::new();
+    a9_box(&mut t, Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5), if closed { 0b11_1111 } else { 0b11_0111 }, 0, grid);
+    a9_floor(&mut t, 6, grid);
+    (textured("CubeOnFloor", t), with_options(wrapped(Vec3::new(0.0, 0.0, 0.95), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false))
+}
+
+/// Two stacked boxes on the floor; the picture on the lower box's top runs onto the upper box's side (Jump on).
+fn a9_stacked() -> (RawMesh, Projector) {
+    let grid = [4, 4];
+    let mut t = Vec::new();
+    a9_box(&mut t, Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5), 0b11_1111, 0, grid);
+    a9_box(&mut t, Vec3::new(-0.25, 1.0, -0.25), Vec3::new(0.25, 1.5, 0.25), 0b11_1111, 7, grid);
+    a9_floor(&mut t, 6, grid);
+    (textured("Stacked", t), with_options(wrapped(Vec3::new(0.0, 1.0, 0.4), Vec3::Y, Vec3::NEG_X, Vec2::new(0.4, 0.15)), true, false))
+}
+
+/// A mug (open cylinder r 0.5, h 1, 48 x 16) with a handle: a half torus (R 0.25, r 0.05) on +X whose ends sink into
+/// the wall; the picture round the body across the handle, Jump on.
+fn a9_mug() -> (RawMesh, Projector) {
+    let mut t = Vec::new();
+    let wall = |i: u32, j: u32| {
+        let a = std::f32::consts::TAU * (i % 48) as f32 / 48.0;
+        Vec3::new(0.5 * a.cos(), j as f32 / 16.0, -0.5 * a.sin())
+    };
+    a9_grid(&mut t, 48, 16, a9_island(0, 2, 1), &wall);
+    let handle = |i: u32, j: u32| {
+        let a = std::f32::consts::PI * (i as f32 / 24.0 - 0.5);
+        let b = std::f32::consts::TAU * (j % 12) as f32 / 12.0;
+        let r = 0.25 + 0.05 * b.cos();
+        Vec3::new(0.47 + r * a.cos(), 0.5 + r * a.sin(), 0.05 * b.sin())
+    };
+    a9_grid(&mut t, 24, 12, a9_island(1, 2, 1), &handle);
+    let a = 0.3f32;
+    let n = Vec3::new(a.cos(), 0.0, -a.sin());
+    (textured("Mug", t), with_options(wrapped(n * 0.5 + Vec3::Y * 0.5, n, Vec3::Y, Vec2::new(0.9, 0.3)), true, false))
+}
+
+/// A helix on a cone: a frustum (r 0.6 at y -1 to 0.3 at y 1, 64 x 64), the picture turned 15 degrees, 1.5 x the way
+/// round at its height.
+fn a9_cone_helix() -> (RawMesh, Projector) {
+    let mut t = Vec::new();
+    let at = |i: u32, j: u32| {
+        let a = std::f32::consts::TAU * (i % 64) as f32 / 64.0;
+        let y = 2.0 * j as f32 / 64.0 - 1.0;
+        let r = 0.45 - 0.15 * y;
+        Vec3::new(r * a.cos(), y, -r * a.sin())
+    };
+    a9_grid(&mut t, 64, 64, [0.02, 0.98, 0.02, 0.98], &at);
+    let (tilt, a) = (15f32.to_radians(), 0.2f32);
+    let slope = (0.15f32 / 2.0).atan();
+    let n = Vec3::new(a.cos() * slope.cos(), slope.sin(), -a.sin() * slope.cos());
+    let tangent = Vec3::new(-a.sin(), 0.0, -a.cos());
+    let axis = n.cross(tangent).normalize();
+    let up = axis * tilt.cos() + tangent * tilt.sin();
+    let hw = 0.75 * std::f32::consts::TAU * 0.45 / tilt.cos();
+    (textured("Cone", t), wrapped(Vec3::new(0.45 * a.cos(), 0.0, -0.45 * a.sin()), n, up, Vec2::new(hw, 0.4)))
+}
+
+/// A rivet on a box corner: a cube (1.5, centred), every face a 12 x 12 grid, one vertex of the +Z face next to the
+/// (+X, +Y, +Z) corner raised by `height` (a pyramid tip); the picture over that corner.
+fn a9_rivet_corner(height: f32) -> (RawMesh, Projector) {
+    let faces: [(Vec3, Vec3, Vec3); 6] = [
+        (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+    ];
+    let mut t = Vec::new();
+    for (f, (n, r, u)) in faces.into_iter().enumerate() {
+        let at = |i: u32, j: u32| {
+            let (sx, sy) = (-1.0 + 2.0 * i as f32 / 12.0, -1.0 + 2.0 * j as f32 / 12.0);
+            let lift = if f == 4 && (i, j) == (10, 10) { height } else { 0.0 };
+            (n + r * sx + u * sy) * 0.75 + n * lift
+        };
+        a9_grid(&mut t, 12, 12, a9_island(f as u32, 3, 2), &at);
+    }
+    (textured("RivetCorner", t), wrapped(Vec3::new(0.45, 0.45, 0.75), Vec3::Z, Vec3::Y, Vec2::new(0.45, 0.45)))
+}
+
+/// The 32 cells' ink over their share (min, max).
+fn a9_cells(doc: &Document, id: StampId, p: &Projector) -> (f64, f64) {
+    let share = 4.0 * p.half_size.x.abs() as f64 * p.half_size.y.abs() as f64 / 32.0;
+    cell_areas(doc, id).iter().fold((f64::INFINITY, 0.0f64), |(a, b), &c| (a.min(c / share), b.max(c / share)))
+}
+
+/// One measuring line of the break list.
+fn a9_line(what: &str, q: &WrapQuality, s: &WrapStatsAlias, ink: f64, cells: (f64, f64)) -> String {
+    format!(
+        "A9 {}, cells {:.3}..{:.3}, jumps {}, seams {:?}, relaxed {}, flipped {}, stretch {:.3}, rejected {:.4}, lost_cut {:.4}, passed {}, met {}, ends {:.4}, edge {}",
+        r8_line(what, q, s, ink),
+        cells.0,
+        cells.1,
+        s.jumps,
+        s.seams_by_rule,
+        s.relaxed,
+        s.flipped,
+        s.stretch,
+        s.rejected,
+        s.lost_cut,
+        s.passed,
+        s.met_itself,
+        s.ends_share,
+        s.reached_edge
+    )
+}
+
+/// check:A (round 9, answer (a)-1): a piece standing on the floor takes its share whether or not it has a bottom face
+/// (the floor under an open-bottom cube has nothing touching it and nothing within the `buried` ray's reach above
+/// it), and of two stacked boxes the upper one takes its share of a picture on the lower one's top.
+#[test]
+fn check_a9_a_piece_takes_its_share() {
+    let cases = [("open-bottom cube", a9_cube_on_floor(false), 0..10), ("closed cube", a9_cube_on_floor(true), 0..12), ("stacked boxes", a9_stacked(), 12..24)];
+    for (what, (raw, p), piece) in cases {
+        let (q, s, ink, doc, id) = r8_measure(raw, SIDE, p);
+        let (texels, _) = ink_in(&doc, id, piece);
+        println!("{}, piece texels {texels}", a9_line(what, &q, &s, ink, a9_cells(&doc, id, &p)));
+        assert!(texels > 1000, "{what}: the piece receives nothing");
+        assert!((0.95..=1.10).contains(&ink) && q.dup <= 0.01 && q.scatter <= 0.03, "{what}: ink {ink}, {q:?}");
+    }
+}
+
+/// check:A (round 9): a mug's handle (a half torus whose ends sink into the wall) with Jump small gaps: once, whole.
+#[test]
+fn check_a9_a_mug_handle_with_jump() {
+    let (raw, p) = a9_mug();
+    let (q, s, ink, doc, id) = r8_measure(raw, SIDE, p);
+    println!("{}", a9_line("mug handle", &q, &s, ink, a9_cells(&doc, id, &p)));
+    assert!(s.jumps >= 1, "{s:?}");
+    assert!(s.covered >= 0.99 && (0.95..=1.10).contains(&ink), "ink {ink}, {s:?}");
+    assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{q:?}");
+}
+
+/// check:A (round 9, T2): a picture longer than the way round a cone, turned 15 degrees (a helix whose pitch lies
+/// between the picture's half and full height): the traces pass, the ends meet, nothing lies twice and nothing is cut
+/// out inside the outline.
+#[test]
+fn check_a9_a_helix_on_a_cone() {
+    let (raw, p) = a9_cone_helix();
+    let (q, s, ink, doc, id) = r8_measure(raw, SIDE, p);
+    println!("{}", a9_line("helix on a cone", &q, &s, ink, a9_cells(&doc, id, &p)));
+    assert!(s.passed || s.met_itself, "{s:?}");
+    assert!(s.ends_share < 0.75, "the ends did not meet within the first turn: {s:?}");
+    assert!(s.covered as f64 >= 0.85 * s.ends_share as f64 && s.lost_cut <= 0.02, "{s:?}");
+    assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{q:?}");
+}
+
+/// check:A (round 9, T3): a coarse rivet (its ring one 0.125 edge from its tip, farther than `CONE_RADIUS`) next to a
+/// box corner: the corner cuts, the rivet does not.
+#[test]
+fn check_a9_a_rivet_on_a_box_corner() {
+    let (raw, p) = a9_rivet_corner(0.0);
+    let (q0, s0, ink0, doc, id) = r8_measure(raw, SIDE, p);
+    println!("{}", a9_line("box corner", &q0, &s0, ink0, a9_cells(&doc, id, &p)));
+    let (raw, p) = a9_rivet_corner(0.1);
+    let (q, s, ink, doc, id) = r8_measure(raw, SIDE, p);
+    println!("{}", a9_line("rivet on the box corner", &q, &s, ink, a9_cells(&doc, id, &p)));
+    assert!(s.seams_by_rule[3] <= 1, "the rivet cut: {s:?}");
+    assert!(s.covered >= 0.95 * s0.covered && s.lost_cut <= 0.06, "{s:?}");
+    assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{q:?}");
+}
+
+/// check:A (round 9): a picture smaller than one triangle lies exactly (the seed, no cut, no relaxation).
+#[test]
+fn check_a9_a_picture_smaller_than_one_triangle() {
+    let cases = [
+        ("floor", samples::uv_cube_on_floor(), wrapped(Vec3::new(1.0, 0.0, 1.3), Vec3::Y, Vec3::NEG_X, Vec2::new(0.06, 0.03))),
+        ("cube face", samples::seam_cube(1.5), wrapped(Vec3::new(0.1, 0.2, 0.75), Vec3::Z, Vec3::Y, Vec2::new(0.02, 0.01))),
+    ];
+    for (what, raw, p) in cases {
+        for p in [p, with_options(p, true, true)] {
+            let (q, s, ink, doc, id) = r8_measure(raw.clone(), SIDE, p);
+            println!("{}", a9_line(what, &q, &s, ink, a9_cells(&doc, id, &p)));
+            assert!(s.covered >= 0.999 && s.seams == 0 && s.cut_tris == 0 && !s.relaxed, "{what}: {s:?}");
+            assert!(q.dup == 0.0 && q.scatter == 0.0, "{what}: {q:?}");
+        }
+    }
+}
+
+/// check:A (round 9): the break-list cases with 1 and 12 threads (Preview and Full, byte for byte) and with texel maps
+/// of 256^2 and 2,048^2 (the same layers and stats).
+#[test]
+fn check_a9_threads_and_texture_sizes() {
+    let src = cells();
+    let pools: Vec<rayon::ThreadPool> = [1, 12].iter().map(|&n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap()).collect();
+    let cases = [("open-bottom cube", a9_cube_on_floor(false)), ("mug", a9_mug()), ("cone helix", a9_cone_helix()), ("rivet corner", a9_rivet_corner(0.1))];
+    for (what, (raw, p)) in cases {
+        let model = Model::new(raw.clone(), 512);
+        for quality in [BakeQuality::Preview, BakeQuality::Full] {
+            let a = pools[0].install(|| snapshot(&model, &src, &p, quality));
+            assert!(pools[1].install(|| snapshot(&model, &src, &p, quality)) == a, "{what} {quality:?}: 1 and 12 threads differ");
+        }
+        let (coarse, fine) = (Model::new(raw.clone(), 256), Model::new(raw, 2048));
+        let (a, b) = (coarse.param(&src, &p).expect("a parameterization"), fine.param(&src, &p).expect("a parameterization"));
+        let bits = |l: Vec<testkit::Layer>| l.into_iter().map(|(t, c)| (t, c.iter().flatten().flatten().map(|v| v.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
+        assert!(bits(testkit::layers(&a)) == bits(testkit::layers(&b)), "{what}: the layers differ between 256^2 and 2,048^2");
+        assert_eq!(WrapStatsAlias { micros: 0, ..a.stats() }, WrapStatsAlias { micros: 0, ..b.stats() }, "{what}: the stats differ");
+        println!("A9 {what}: 1 = 12 threads, 256^2 = 2,048^2");
+    }
+}

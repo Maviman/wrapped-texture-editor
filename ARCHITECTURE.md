@@ -122,6 +122,18 @@ as jobs (`StampJobKind`, `next_wrap_preview_job`, `apply_wrap_preview`, `wrap_pa
 package B. `Document::stamp_wrap_quality` measures how once and how whole a picture lies (dup / scatter). Details
 6.5a "Round 8". Not done in package A: the per-mesh welded graph and growth from the anchor (plan 2.5 items 1-2, step 6).
 
+### 1.6c Round 9, package A (wrap: once, nothing lost)
+
+ROUND9_PLAN section 5 (T1-T6). The owner test gives every picture point to **one surface place**: per owner cell the
+triangle covering the cell centre with the smallest `(buried, g, triangle)` owns it, and a fragment is kept only at
+that 3D place (no triangle size in the rule, so coarse meshes behave like fine ones); with Jump small gaps a surface
+lying under another entered part (the floor under a cube) is `buried` and loses. A spine that winds round a tube as a
+helix ends where its traces pass beside each other (`passed`, `ends_share`). An angle deficit cuts (S4) only where the
+net curvature within a radius exceeds 45 degrees (rivets, bevels, grooves no longer cut). The relaxation starts from
+the Fermi layout (spine foot and signed geodesic distance) and runs ARAP only (no LSCM). The reach has no texel term,
+so the layout does not depend on the texture's resolution. `WrapStats::lost_cut` reports picture lost inside the
+laid outline. Details 6.5a "Round 9". Not done: T5 (exact region, the cut order's first item), package B (speed).
+
 ### 1.7 Round 7 (brush speed)
 
 Round 7 (`target\round7_design\ROUND7_PLAN.md`) makes 3D dabs on very heavy models cheaper and properly parallel,
@@ -192,7 +204,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a |
 | `wrap_bake.rs` | round 6 A | `bake_wrapped` (6.5a "Bake"; round 8: the owner test) |
 | `wrap_relax.rs` | round 8 A | child module `wrap_param::relax`: seams S1-S5, wedges, LSCM / ARAP with the matrix-free CG, the owner grid (6.5a "Round 8") |
-| `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan and (round 8) WA4 / WA4b, WA20-WA27, WA29 and `r8_quality_survey` (test-only module) |
+| `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan and (round 8) WA4 / WA4b, WA20-WA27, WA29 (round 9) WA31-WA34, WA36, WA37 and `r8_quality_survey` (test-only module) |
 | `doc_stamps.rs` | C4; round 6 A | stamp/text commands on `Document`, source mip cache, `stamp_at`; round 6: the wrap dispatch of `bake_and_apply`, `ensure_wrap_param`, `stamp_wrap_*`, `stamp_ink_area` |
 | `text/mod.rs` | S | `TextSpec` (with `fx: TextFx`), `FontRef`, `TextAlign`, `Outline`, `TextLayout`, `PlacedGlyph`; round 4: `TextFx`, `Gap`, `Warp`, `WarpStyle`, `TextPath`, `PathShape`, `TextFrame`, `RasterQuality`, `TextRaster`, the limits (`GAP_MIN_EM` ... `MAX_STYLED_PIXELS`), `TextSpec::new`/`sanitize_fx`/`floats`/`floats_mut`/`differs_only_in_spacing` (complete + tests) |
 | `text/font_catalog.rs` | C4; round 4 T3 | `FontCatalog` (fontdb; the Windows font folders, file sizes read once, faces shared per file), `FontCache` (fontdue), bundled fonts, `FaceTraits`, `face_traits`, `FontCatalog::sample` (picker samples drawn with the styled painter's outline and coverage code) |
@@ -1306,12 +1318,17 @@ pub struct WrapStats { pub verts: u32, pub tris: u32, pub cut_tris: u32, pub cov
     // S1..S5), relaxed triangles flipped inside the picture, the 95th percentile of |area ratio - 1| inside the picture,
     // the share of the laid picture area the owner test drops (cell-centre estimate), CG iterations.
     pub relaxed: bool, pub seams: u32, pub seams_by_rule: [u32; 5], pub flipped: u32, pub stretch: f32,
-    pub rejected: f32, pub cg_iters: u32 }
+    pub rejected: f32, pub cg_iters: u32,
+    // Round 9: the spine's traces passed beside each other (T2); the share of the picture's length laid when the ends
+    // meet (1 for an open spine and for Overlap turns); the share of the picture's cells without an owner inside the
+    // laid outline (A7).
+    pub passed: bool, pub ends_share: f32, pub lost_cut: f32 }
 /// Round 8 (`Document::stamp_wrap_quality`): ink area, the share of picture bins found in two places (`dup`, > 6 bins
 /// apart), the share of neighbouring bin pairs lying apart (`scatter`), the inked bins.
 pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub bins: u32 }
 // Round 8 constants (pub): WRAP_STOP_SLACK 1.7 (plan 1.3, see 6.5a), ISO_TOL 2e-4, CONE_CUT_DEG 45, SEAM_NEAR 3,
-// OWNER_MAX_CELLS 1024, OWNER_TOL 2, RELAX_ARAP_ITERS 6, RELAX_CG_BUDGET 2500, PAR_MIN_UNKNOWNS 16384, PAR_CHUNK 8192;
+// OWNER_MAX_CELLS 1024, RELAX_CG_BUDGET 2500, PAR_MIN_UNKNOWNS 16384, PAR_CHUNK 8192; round 9: OWNER_SAME 3 (OWNER_TOL
+// removed), BURY_REACH 0.04 (= 4 GAP_JUMP, x diag), CONE_RADIUS 0.1 (x across reach), RELAX_ARAP_ITERS 12 (was 6);
 // check:A: ENDS_MEET 2, HOLE_FILL 8 (S1 on an open spine, S5's small holes; 6.5a), COT_MAX 1e3 (private).
 // WrapParam::src_size(), texel_world(): the inputs it was made for.
 /// None when the projector is unusable (non-finite, zero size, empty source) or no triangle lies within reach.
@@ -1322,7 +1339,8 @@ impl WrapParam {
     /// the parameterization, so the stored `covered` is that of the size it was built for). Used by the Document
     /// queries and the `wrap:` log line.
     pub fn stats_for(&self, p: &Projector) -> WrapStats;
-    /// Same mesh Arc, origin and rotation bit-equal, same spine axis and options, same bucketed reach (6.5a "Reuse").
+    /// Same mesh Arc, origin and rotation bit-equal, same spine axis and options, same bucketed reach and (round 9)
+    /// the same front stop (6.5a "Reuse").
     pub fn serves(&self, mesh: &Arc<MeshData>, p: &Projector) -> bool;
     pub fn local_of(&self, tri: TriId, bary: [f32; 3]) -> Option<Vec2>;          // surface -> stamp-local (top turn)
     pub fn surface_of(&self, mesh: &MeshData, local: Vec2) -> Option<SurfacePoint>; // stamp-local -> surface (top turn)
@@ -3306,11 +3324,58 @@ Steps 4-7 above are changed as follows (the rest stands).
    percentile of |2D area / 3D area - 1| of the stored triangles meeting the picture (slivers and triangles below
    `1e-12 diag^2` left out).
 
-**Owner test** (`bake_wrapped`). A fragment at picture point `l` with interpolated depth `g_f` is kept only when
-`g_f <= g_min(cell) + OWNER_TOL (2) x (cell diagonal + its triangle's longest edge + the owner's longest edge)`: each
-picture point goes to the surface place nearest the spine along the surface, never to a second place farther than the
-tolerance (the sticker rule); on an injective layout it rejects nothing (WA25). `surface_of` (the outline, text-path
-handles) picks, of the triangles containing the point, the one of lowest `g` there.
+**Owner test** (`bake_wrapped`; round 8's depth test, replaced in round 9 by the place owner below). A fragment at
+picture point `l` with interpolated depth `g_f` was kept only when `g_f <= g_min(cell) + OWNER_TOL (2) x (cell diagonal
++ its triangle's longest edge + the owner's longest edge)`; the tolerance grew with the triangle size and rejected
+nothing on coarse meshes (ROUND9_PLAN D1).
+
+**Round 9 (ROUND9_PLAN section 3, package A): once, nothing lost.** Changes to the steps above:
+
+- **Reach (T6).** `reach = [bucket(along), bucket(across)]` with `along` / `across` the picture's half extents plus
+  one source texel: no texel term before the bucketing (a coarse texture tipped the buckets). The front's stop is
+  `max(WRAP_STOP_SLACK x across reach, across + (gutter + 2) x texel_world)` (largest gutter and texel size of the
+  maps); the candidate sphere is `along reach + stop` (+ `4 GAP_JUMP diag` with Jump). Reuse also compares the stop.
+- **Spine (T2).** Besides the shared-triangle rule, the turn-0 traces end where they **pass** beside each other:
+  checked before every step while both run on turn 0, once `s+ + s- > across reach` and their oriented normals agree;
+  armed when the head distance falls below the across reach while decreasing; passed when, armed, the - head's offset
+  along the + trace's direction `(q- - q+) . d+` turns from > 0 to <= 0; the ends are put where that offset is zero
+  (the traces' arc lengths interpolated between the two checks). Ends meet: both stop; Overlap: both start their next
+  turn. A passed spine is closed like a met one (period `end0+ + end0-`: S1, the early-out's closure tears, Overlap
+  turns). `ends_share = (end0+ + end0-) / (2 x needed along)` clamped to 1 (one layer and met or passed), else 1.
+- **Front (T4 labels).** Each vertex also carries a continuous spine foot `foot_c`: seeds their along coordinate; the
+  fast-marching update `foot_c(v) + tau (foot_c(a) - foot_c(v))` with `tau = -alpha / beta` (where the wave's
+  characteristic meets the edge); the edge update the nearer end's; jump seeds the source's. The keys, positions,
+  `foot` and `side` are unchanged.
+- **S4 (T3).** A vertex with `|deficit| > CONE_CUT_DEG` cuts only when the deficits of the laid interior vertices
+  reachable from it over laid edges within `CONE_RADIUS (0.1) x across reach` (3D distance) sum to more than 45
+  degrees in absolute value; of such vertices within one radius only the strongest (largest `|deficit|`, then lowest
+  position rank) cuts. A cube corner and a cone tip still cut; a rivet, a bevel, a groove do not.
+- **Relaxation (T4).** A strip component starts from its Fermi layout: each free wedge at `e foot_c + rot90(e) side
+  sqrt(g^2 - out^2)` (`out`: how far `foot_c` lies beyond the spine's along range); other components keep the seed
+  start. No LSCM: up to `RELAX_ARAP_ITERS` (12) ARAP iterations, stop when the energy drops by less than 0.05 %, at most
+  60 CG steps per global solve, `RELAX_CG_BUDGET` per component.
+- **Store (T1).** The owner grid stores per cell the **owner of its centre**: of the stored triangles covering the cell
+  centre (barycentric inside test of the stored f32 corners, edges included) the one with the smallest `(buried, g,
+  triangle)`, with its `g`, its 3D point (the barycentrics over the mesh's f32 positions) and its stretch `s =
+  sqrt(3D area / layout area)` clamped to 1..4 (`owner_scale`). `buried` is evaluated only in **mixed** cells
+  (candidates of two or more parts at two or more places, i.e. Jump small gaps): true when a triangle of another
+  entered part touches the point parallel to it (within `1e-5 diag`) or the ray from the point along its oriented
+  normal hits one within `[1e-5, BURY_REACH (0.04)] x diag` (`Bvh::raycast`, hits of the own or not-entered parts
+  skipped). Cost: `may_bury` once per triangle (another entered part's triangle meets the box of the prism its normal
+  sweeps); pass 1's owner (lowest `(g, triangle)`) stands unless it may be buried and is; only then the cell's
+  candidates are sorted by `(g, triangle)` and asked lazily. The build runs in 16-row chunks (each cell written by its
+  own chunk, triangles ascending; on the pool from 2,048 triangles or 20,000 mixed cells): the same owners with 1 or N
+  threads. `rejected` = the share of the (cell centre inside the picture, **laid** triangle covering it) pairs whose
+  triangle is not the owner's place. `lost_cut` = the share of the picture's cells without an owner that have owned
+  cells on both sides in their row or in their column (inside the laid outline: cut wedges, opened seams, holes), as
+  against picture beyond a mesh edge or beyond the spine's ends.
+- **Place owner test** (`bake_wrapped`). A fragment is kept when its cell has no owner or its 3D point (its
+  barycentrics over its triangle's 3D corners) lies within `OWNER_SAME (3) x cell diagonal x max(1, s, s_owner)` of the
+  owner's point: each picture point lies at one surface place. A gutter fragment (outside its triangle in UV space) is
+  tested at its triangle's nearest point (barycentrics clamped to >= 0 and renormalised: picture point, cell and 3D
+  point from those), so the islands' padding continues the picture where its inside neighbours show it.
+  `surface_of` picks, of the triangles containing the point, the one whose 3D point there lies nearest the cell owner's
+  point (no owner: the lowest `g`).
 
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 
@@ -6238,6 +6303,14 @@ families draw a sample; `style_name` table (300 => "Light", 400 italic =>
   `check_a8_undo_and_a_new_edit_while_a_preview_job_runs`; in `wrap_relax.rs`: the CG budget and caps, huge gradients
   and a NaN start, the parallel kernels against the serial ones on a 170 x 170 grid, the fast-marching update and the
   sliver rule.
+- Round 9 (package A, `wrap_tests.rs`; ROUND9_PLAN section 5): `wa31_the_owner_does_not_depend_on_the_mesh_density`
+  (`samples::uv_cube_on_floor_n`, floor 2 / 128 / 8,192 triangles), `wa32_a_helix_round_a_tube_has_its_ends_meet`
+  (cylinder sample and a 64-row copy, the picture turned 15 degrees; a thin torus, 20 degrees; Overlap),
+  `wa33_rivets_do_not_cut_the_picture` (`samples::riveted_plate`; WA23's cube corner),
+  `wa34_a_saddle_corner_lies_once` (`samples::step_corner`), `wa36_the_layout_does_not_depend_on_the_texture_resolution`
+  (256^2 and 2,048^2 maps), `wa37_nothing_is_lost_without_a_reason`, `wa26_wa27_round9_cases_are_deterministic` (WA24,
+  WA31, WA32 cases). Round 8's tests keep their asserts; the measured values outside them are in
+  `docs/notes/round9/pkg_a.md`.
 
 - M1 (gate, between the waves): `tip_field::tests::a_part_cut_off_at_the_border_stays_inside_its_bound`; `tests/brush_tips.rs`: `a_baked_ball_dab_matches_the_ball` (C13 dab part), `unused_parts_do_not_change_the_printed_square` (F16 dab part, asserts the measured state and logs the miss).
 

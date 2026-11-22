@@ -59,18 +59,20 @@ fn uf_join(uf: &mut [u32], a: u32, b: u32) {
 }
 /// The owner grid: at most this many cells on its long side.
 pub const OWNER_MAX_CELLS: usize = 1024;
-/// ARAP local / global iterations after the LSCM start (fewer when the energy drops by less than `ARAP_STOP`).
-pub const RELAX_ARAP_ITERS: u32 = 6;
+/// ARAP local / global iterations from the start (round 9, T4: the Fermi start, no LSCM; fewer when the energy drops by
+/// less than `ARAP_STOP`).
+pub const RELAX_ARAP_ITERS: u32 = 12;
 /// Conjugate-gradient iterations per component and layer, all solves together.
 pub const RELAX_CG_BUDGET: u32 = 2_500;
 /// From this many unknowns the kernels run in parallel (fixed chunks of `PAR_CHUNK`).
 pub const PAR_MIN_UNKNOWNS: usize = 16_384;
 pub const PAR_CHUNK: usize = 8_192;
-const ARAP_STOP: f64 = 0.005;
+const ARAP_STOP: f64 = 0.0005;
 const LSCM_TOL: f64 = 1e-6;
 const LSCM_ITERS: u32 = 600;
 const ARAP_TOL: f64 = 1e-5;
-const ARAP_ITERS: u32 = 200;
+/// Round 9 (T4): CG steps per ARAP global solve (round 8: 200).
+const ARAP_ITERS: u32 = 60;
 /// Plan 3.1: cotangents are clamped to `|cot| <= COT_MAX`. In this gradient-basis form a triangle with an angle whose
 /// cotangent exceeds it (a sliver: an angle below ~0.06 degrees or above ~179.94) is left out of the energies like a
 /// zero-area one (its wedges keep the seed position when they have no other triangle).
@@ -120,7 +122,14 @@ pub(super) fn side_of(across: f64, diag: f64) -> i8 {
 /// Geodesic distance at `w` from the distances `gv`, `ga` at `v`, `a` by the fast-marching triangle update (a plane
 /// wave with unit gradient through the triangle); `None` when the wave does not reach `w` through the edge `(v, a)`
 /// (non-causal) or the triangle is degenerate.
+#[cfg(test)]
 pub(super) fn fmm_update(v: DVec3, a: DVec3, w: DVec3, gv: f64, ga: f64) -> Option<f64> {
+    fmm_update_tau(v, a, w, gv, ga).map(|(g, _)| g)
+}
+
+/// Round 9 (T4): `fmm_update` and where the wave's characteristic through `w` meets the edge `(v, a)`: `tau = -alpha /
+/// beta` in 0..1 (0 at `v`, 1 at `a`).
+pub(super) fn fmm_update_tau(v: DVec3, a: DVec3, w: DVec3, gv: f64, ga: f64) -> Option<(f64, f64)> {
     let (ea, eb) = (a - v, w - v);
     let (aa, ab, bb) = (ea.dot(ea), ea.dot(eb), eb.dot(eb));
     let det = aa * bb - ab * ab;
@@ -134,7 +143,7 @@ pub(super) fn fmm_update(v: DVec3, a: DVec3, w: DVec3, gv: f64, ga: f64) -> Opti
     let t = (ab * da + (det * (aa - da * da)).sqrt()) / aa;
     let alpha = (bb * da - ab * t) / det;
     let beta = (aa * t - ab * da) / det;
-    (beta > 0.0 && alpha <= 0.0 && alpha >= -beta && t.is_finite()).then_some(gv + t)
+    (beta > 0.0 && alpha <= 0.0 && alpha >= -beta && t.is_finite()).then_some((gv + t, (-alpha / beta).clamp(0.0, 1.0)))
 }
 
 /// The seams of one turn's laid triangles.
@@ -364,6 +373,10 @@ impl<'a> Layout<'a> {
             });
         }
         order.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let mut strip_comp = vec![false; comp_tris.len()];
+        for o in &order {
+            strip_comp[o.2 as usize] = o.0 == 0;
+        }
         let mut done_comp = vec![false; comp_tris.len()];
         let mut cg_iters = 0u32;
         for &(_, _, c) in &order {
@@ -394,6 +407,19 @@ impl<'a> Layout<'a> {
                     x[w as usize] = self.p2[patch.tv[t as usize][k] as usize];
                 }
             }
+            // Round 9 (T4): a strip component starts from its Fermi layout (each free wedge at its vertex's spine
+            // foot and signed geodesic distance), not from the seed (LSCM from the seed was folded next to the pinned
+            // strip, D4a). Other components (jumped parts, parts without a strip) keep the seed start.
+            if strip_comp[c as usize] && !knob("WTE_TEST_SEED_START", false) {
+                for &w in &wedge_list {
+                    if !pinned[w as usize] {
+                        let f = self.fermi(wedges.vertex[w as usize]);
+                        if f.is_finite() {
+                            x[w as usize] = f;
+                        }
+                    }
+                }
+            }
             // The component's system over its own wedges.
             let local: std::collections::HashMap<u32, u32> = wedge_list.iter().enumerate().map(|(i, &w)| (w, i as u32)).collect();
             let mut sys_tris = Vec::new();
@@ -407,7 +433,7 @@ impl<'a> Layout<'a> {
             let mut xs: Vec<DVec2> = wedge_list.iter().map(|&w| x[w as usize]).collect();
             let pins: Vec<bool> = wedge_list.iter().map(|&w| pinned[w as usize]).collect();
             let mut budget = RELAX_CG_BUDGET;
-            cg_iters += relax_component(&sys_tris, &sys_rest, &pins, &mut xs, &mut budget);
+            cg_iters += relax_component_from(&sys_tris, &sys_rest, &pins, &mut xs, &mut budget, false);
             for (i, &w) in wedge_list.iter().enumerate() {
                 if xs[i].is_finite() {
                     x[w as usize] = xs[i];
@@ -492,6 +518,17 @@ impl<'a> Layout<'a> {
             flipped,
             cg_iters,
         }
+    }
+
+    /// Round 9 (T4): the Fermi position of vertex `v`: its continuous spine foot along the spine and its geodesic
+    /// distance across it on its side, `e foot_c + rot90(e) side sqrt(g^2 - out^2)` (`out`: how far the foot lies
+    /// beyond the spine's along range; a vertex beyond an end keeps its distance from that end).
+    fn fermi(&self, v: u32) -> DVec2 {
+        let v = v as usize;
+        let (e, f) = (self.spine.e, self.foot_c[v]);
+        let out = (self.spine.lo - f).max(f - self.spine.hi).max(0.0);
+        let across = (self.key[v] * self.key[v] - out * out).max(0.0).sqrt();
+        e * f + DVec2::new(-e.y, e.x) * (self.side[v] as f64 * across)
     }
 
     /// Position and turn (unit complex number) of vertex `v` after the relaxation: its representative wedge's
@@ -1191,9 +1228,17 @@ pub(super) fn knob<T>(_: &str, default: T) -> T {
     default
 }
 
-/// Relaxes one component: LSCM from the warm start `x`, then ARAP iterations (3.1). `tris` index into `x`; `pins`
-/// marks fixed unknowns. Returns the CG iterations spent.
+/// Relaxes one component: LSCM from the warm start `x`, then ARAP iterations (round 8's solver; the solver tests of
+/// check:A run it from a crumpled start).
+#[cfg(test)]
 fn relax_component(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[bool], x: &mut [DVec2], budget: &mut u32) -> u32 {
+    relax_component_from(tris, rest, pins, x, budget, true)
+}
+
+/// Relaxes one component: with `lscm` LSCM from the warm start `x` first, then ARAP iterations (3.1; round 9, T4: the
+/// layout passes its Fermi start and no LSCM). `tris` index into `x`; `pins` marks fixed unknowns. Returns the CG
+/// iterations spent.
+fn relax_component_from(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[bool], x: &mut [DVec2], budget: &mut u32, lscm: bool) -> u32 {
     let arap_iters: u32 = knob("WTE_TEST_ARAP_ITERS", RELAX_ARAP_ITERS);
     let arap_stop: f64 = knob("WTE_TEST_ARAP_STOP", ARAP_STOP);
     let debug: bool = knob("WTE_TEST_RELAX_DEBUG", false);
@@ -1205,10 +1250,13 @@ fn relax_component(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[bool],
     if sys.pinned.iter().all(|&p| p) {
         return 0;
     }
+    // Round 9 (T4): no LSCM: the start is the Fermi layout (`Layout::relax`); round 8's LSCM start stays behind a
+    // test knob (`WTE_TEST_LSCM=true`).
+    let lscm: bool = knob("WTE_TEST_LSCM", lscm);
     let lscm_iters: u32 = knob("WTE_TEST_LSCM_ITERS", LSCM_ITERS);
     let arap_cg: u32 = knob("WTE_TEST_ARAP_CG", ARAP_ITERS);
     let zero = vec![DVec2::ZERO; x.len()];
-    let mut iters = sys.cg(true, &zero, x, LSCM_TOL, lscm_iters, budget);
+    let mut iters = if lscm { sys.cg(true, &zero, x, LSCM_TOL, lscm_iters, budget) } else { 0 };
     if debug {
         eprintln!("relax: {} unknowns, {} triangles, {} pinned, LSCM {iters} iterations", x.len(), tris.len(), sys.pinned.iter().filter(|&&p| p).count());
     }

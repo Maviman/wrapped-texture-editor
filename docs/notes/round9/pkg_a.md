@@ -158,3 +158,48 @@ whose oriented normal points away from the covering part). Not traced further in
 | WA33 cube corner (WA23's) | one S4 cut | S4 1 | S4 1 (dup 0.926 %, ink 0.9333) — green |
 | WA34 step corner (+90 / -90 deg, 0.3 apart) | dup <= 1 %, scatter <= 3 %, lost_cut reported | seams [0,0,0,1,3] | same (the two vertices lie farther apart than the radius, 0.04): dup 0.140 %, scatter 0.113 %, ink 1.0009, lost_cut 0 — green |
 | WA23 cone tip / cube corner | unchanged | — | unchanged, green |
+
+## A4 Fermi start (T4)
+
+Built (wrap_param.rs `Layout::foot_c`, `add_cand(.., foot_c)`; wrap_relax.rs `fmm_update_tau`, `Layout::fermi`,
+`relax_component_from`):
+- `foot_c` per vertex: seeds their (unclamped) along coordinate; the triangle update interpolates `foot_c(v) + tau
+  (foot_c(a) - foot_c(v))` with `tau = -alpha / beta` of the fast-marching update, the edge update takes the nearer
+  end's; the candidate that sets the key sets it (keys, positions, `foot` / `side` and so the seams stay bit-identical
+  to round 8). Jump seeds inherit it from the source.
+- Strip components start their free wedges at `e foot_c + rot90(e) side sqrt(g^2 - out^2)` (`out` = how far the
+  foot lies beyond the spine's along range; deviation from the plan's `side x g`, which would put a vertex beyond an
+  end of the spine sideways instead of beyond the end). Jumped parts and components without a strip keep the seed
+  start (their pins are the landing triangle re-placed from the relaxed source / their lowest-g triangle's seed
+  corners: a Fermi start from the strip's frame would not match those pins). Knob `WTE_TEST_SEED_START`.
+- No LSCM: ARAP only. `RELAX_ARAP_ITERS` 12 (measured table below), stop when the energy drops < 0.05 %
+  (`ARAP_STOP` 0.0005), <= 60 CG steps per solve (`ARAP_ITERS`), budget 2,500. LSCM stays behind `WTE_TEST_LSCM=true`
+  and in `relax_component` (test-only now), which check:A's solver tests run from a crumpled start (from a crumpled
+  start ARAP alone does not untangle a 25 x 25 grid pinned at two corners: worst area ratio 0.63 against its 0.2).
+
+T4 table (debug build, `cells` = the 32 picture cells' ink over their share; `cg` = CG steps; plan's experiment:
+ARAP 6 WA4 60 deg 1.116 / 0.760-1.445, WA20 ink 1.26 dup 0.99 % flipped 19 cells 0.637-3.149; ARAP 30 WA20 ink
+1.19, WA4 60 deg 1.119 / 0.742-1.506):
+
+| case (limit) | round 8 (LSCM + ARAP 6) | ARAP 6 | **ARAP 12 (chosen)** | ARAP 30 | ARAP 12, CG 200 | ARAP 30, CG 200 |
+|---|---|---|---|---|---|---|
+| WA4 30 deg (ink 0.90-1.10, cells 0.75-1.30) | 1.0281, 0.957..1.117, cg 1046 | 1.0241, 0.951..1.132, cg 360 | 1.0213, 0.948..1.116, cg 720 | 1.0269, 0.955..1.109, cg 1799 | 1.0209, 0.949..1.117 | 1.0261, 0.954..1.110 |
+| WA4 45 deg (same) | 1.0742, 0.906..1.283, cg 1219 | 1.0654, 0.918..**1.309** | 1.0571, 0.899..1.258 | 1.0620, 0.897..1.247 | 1.0566, 0.899..1.258 | 1.0571, 0.895..1.242 |
+| WA4 60 deg (ink <= 1.10, cells 0.75-1.30) | 1.1360, 0.785..1.599 | 1.1171, 0.759..1.449 | **1.1159, 0.745..1.481** | 1.1193, 0.742..1.507 | 1.1157, 0.745..1.479 | 1.1192, 0.742..1.507 |
+| WA4b 4 periods 60 deg (0.85-1.15, 0.65-1.50) | 1.1230, 0.788..1.439 | 1.1242, 0.811..1.464 | 1.1111, 0.796..1.466 | 1.1100, 0.797..1.470 | 1.1113, 0.796..1.466 | 1.1101, 0.797..1.470 |
+| WA20 (ink 0.85-1.15, cells 0.70-1.40, dup <= 1 %) | 1.4669 (A1), dup 1.897 %, 0.752..2.714, flipped 45, cg 1517 | 1.2441, dup 0.884 %, 0.647..2.767, flipped 18, cg 360 | **1.1890, dup 0.976 %, scatter 0.564 %, 0.665..2.886, flipped 15, cg 720** | 1.1725, dup **1.034 %**, 0.681..2.841, flipped 17, cg 1560 | 1.1885, dup 0.991 %, 0.656..2.879 | 1.1765, dup 1.041 %, 0.673..2.870 |
+| WA21 (flipped <= 1 %, dup <= 1 %) | flipped 0, dup 0 % | flipped **1.746 %**, dup 0.819 % | flipped 0.044 %, dup 0.315 % | flipped 0.015 %, dup 0.014 % | 0.073 %, 0.477 % | 0.029 %, 0.388 % |
+| WA22 taller / larger (dup <= 1 %) | 0.013 / 0.000 % | 0.013 / 0.026 % | 0.006 / 0.026 % | 0.038 / 0.026 % | — | — |
+
+ARAP 6 fails WA4 45 deg (cells 1.309) and WA21 (flipped 1.75 %); ARAP 12 is the cheapest setting that meets WA4 30 /
+45, WA4b, WA21, WA22, and it is the best on WA4 60 deg (ink 1.1159, top cell 1.481) and the only one of 12 / 30 that
+keeps WA20's dup under 1 %; ARAP 30 has WA20's lower ink (1.1725) but dup 1.034 %. More CG steps per solve change
+nothing that matters (the solves stop at the cap of 60, but the next iteration continues from there). Chosen:
+**ARAP 12, CG 60 per solve**.
+
+Remaining red (asserts unchanged): **WA4 60 deg** ink 1.1159 (<= 1.10), cells 0.745..1.481 (0.75-1.30); **WA20** ink
+1.1890 (<= 1.15), cells 0.665..2.886 (0.70-1.40) — dup 0.976 % (<= 1 %), scatter 0.564 % (<= 2 %), seams 0, covered
+1.0 meet their limits. As the planner measured: the start removes the fold next to the strip (WA20 flipped 45 -> 15,
+dup 10.7 % (r8) -> 0.98 %) but does not bring the steep bumps inside round 8's area limits (D4b: with the centre line
+exact an as-rigid-as-possible sticker takes up more surface than its own area there). WA17 / WA24 (A1 deviation 3)
+are the other two red tests.

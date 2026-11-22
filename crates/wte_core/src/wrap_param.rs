@@ -736,6 +736,10 @@ struct Layout<'a> {
     /// the producer (seams S1 / S2).
     foot: Vec<f64>,
     side: Vec<i8>,
+    /// Round 9 (T4): the continuous spine foot (seeds: their along coordinate; the triangle update interpolates it
+    /// where the wave's characteristic meets the producing edge, the edge update takes the nearer end's): with `g` and
+    /// `side` the Fermi start of the relaxation.
+    foot_c: Vec<f64>,
     /// Round 8: the strip triangle of each strip seed (`NONE` for others) and the front jumps (source vertex, landing
     /// triangle) in order.
     seed_tri: Vec<u32>,
@@ -774,6 +778,7 @@ impl<'a> Layout<'a> {
             p2: vec![DVec2::ZERO; n],
             key: vec![f64::INFINITY; n],
             foot: vec![0.0; n],
+            foot_c: vec![0.0; n],
             side: vec![0; n],
             seed_tri: vec![NONE; n],
             jump_log: Vec::new(),
@@ -816,6 +821,7 @@ impl<'a> Layout<'a> {
         self.normal[v] = s.normal;
         self.key[v] = self.spine.dist(s.p);
         self.foot[v] = s.p.dot(self.spine.e).clamp(self.spine.lo, self.spine.hi.max(self.spine.lo));
+        self.foot_c[v] = s.p.dot(self.spine.e);
         self.side[v] = relax::side_of(s.p.dot(rot90(self.spine.e)), self.patch.diag);
         self.seed_tri[v] = s.tri;
         self.heap.push(Entry { key: self.key[v], rank: self.patch.rank[v], v: s.v });
@@ -890,10 +896,14 @@ impl<'a> Layout<'a> {
 
     /// Adds a candidate for `w` and updates its tentative position (consensus rule); `g` is the candidate's geodesic
     /// distance (the tentative key is the smallest).
-    fn add_cand(&mut self, w: u32, cand: Cand, g: f64) {
+    fn add_cand(&mut self, w: u32, cand: Cand, g: f64, foot_c: f64) {
         let wi = w as usize;
         if self.seed[wi] || self.state[wi] == State::Final {
             return;
+        }
+        // Round 9 (T4): the continuous foot of the candidate that sets the key.
+        if g.is_finite() && g < self.key[wi] {
+            self.foot_c[wi] = foot_c;
         }
         let mut c = cand;
         c.next = self.head[wi];
@@ -1117,9 +1127,14 @@ impl<'a> Layout<'a> {
                         let ka = self.key[a as usize];
                         // Round 8: the geodesic distance of `w` (triangle update, else along the edges).
                         let (qv, qa, qw) = (patch.pos[vi], patch.pos[a as usize], patch.pos[w as usize]);
-                        let edge = (kv + qv.distance(qw)).min(ka + qa.distance(qw));
-                        let g = relax::fmm_update(qv, qa, qw, kv, ka).map_or(edge, |f| f.min(edge));
-                        self.add_cand(w, Cand { p, k0: kv.max(ka), k1: kv.min(ka), tri: t, from: v, other: a, next: NONE }, g);
+                        let (ev, ea) = (kv + qv.distance(qw), ka + qa.distance(qw));
+                        let (fv, fa) = (self.foot_c[vi], self.foot_c[a as usize]);
+                        let (edge, edge_foot) = if ea < ev { (ea, fa) } else { (ev, fv) };
+                        let (g, fc) = match relax::fmm_update_tau(qv, qa, qw, kv, ka) {
+                            Some((f, tau)) if f < edge => (f, fv + tau * (fa - fv)),
+                            _ => (edge, edge_foot),
+                        };
+                        self.add_cand(w, Cand { p, k0: kv.max(ka), k1: kv.min(ka), tri: t, from: v, other: a, next: NONE }, g, fc);
                     }
                 }
                 (false, false) => {
@@ -1129,7 +1144,8 @@ impl<'a> Layout<'a> {
                         let p = pv + frame.apply(patch.pos[x as usize] - qv);
                         if p.is_finite() {
                             let g = kv + qv.distance(patch.pos[x as usize]);
-                            self.add_cand(x, Cand { p, k0: kv, k1: kv, tri: t, from: v, other: NONE, next: NONE }, g);
+                            let fc = self.foot_c[vi];
+                            self.add_cand(x, Cand { p, k0: kv, k1: kv, tri: t, from: v, other: NONE, next: NONE }, g, fc);
                         }
                     }
                 }
@@ -1858,6 +1874,7 @@ impl<'a> Jumper<'a> {
             // plus the corner's distance from the landing point), and its labels.
             layout.key[xi] = key + self.patch.pos[xi].distance(q);
             layout.foot[xi] = layout.foot[vi];
+            layout.foot_c[xi] = layout.foot_c[vi];
             layout.side[xi] = layout.side[vi];
             layout.heap.push(Entry { key: layout.key[xi], rank: self.patch.rank[xi], v: x });
         }

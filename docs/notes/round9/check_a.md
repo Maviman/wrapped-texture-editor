@@ -52,3 +52,22 @@ Fixes:
 2. **T3, 1-ring** (`wrap_relax.rs` `seams`): the net deficit sums over at least the vertex's 1-ring (its longest laid
    edge) when that is farther than `CONE_RADIUS x across`; the strongest-only rule keeps `CONE_RADIUS` (a coarse cube's
    corners still each cut). WA33's plate (cells finer than the radius) is unchanged.
+3. **T3 knob**: `WTE_TEST_CONE_RADIUS=0` still gives round 8's rule (the 1-ring is not added to a radius of 0).
+
+## 4. Open items (4) and (6)
+
+**(4) `lost_cut` at closures (WA37 red: WA22 taller 5.67 %, WA32 64 rows 2.48 %; Lantern 11.2 %).** Traced with a
+test-only dump of the owner grid (`WTE_TEST_OWNER_DUMP=<path>`, PGM per layer): every counted cell lay next to the
+closure line. Where the halves (S2) or the ends (S1) meet, the line is triangle-jagged: the teeth between one side's
+triangles are the other side's triangles, laid at the other end of the picture (the picture there shows its other
+edge, once). With a helix the band past the meeting line is uncovered too. The row / column rule counted these as
+"inside the outline" because the halo on the far side of the row closes the span. It is a measuring error, not a
+seam opening under ARAP. Fix (`wrap_relax.rs` `OwnerGrid::build`, plumbing in `wrap_param.rs`): triangles next to a
+closure (relaxed: an S1 / S2 cut edge; exact seed: torn) are flagged; uncovered picture cells 4-connected through
+uncovered picture cells to a cell such a triangle covers are "beyond the meeting line", not `lost_cut`. Cut wedges
+still count (rivet next to a corner 5.49 %, unchanged; box corner 1.88 %). WA37 now: WA22 taller 0 %, WA32 64 rows 0 %,
+thin torus 0 % (was 0.34 %), all limits met — **green**.
+
+**(6) Wall-clock flake.** `check_a_own_bad_meshes_never_fail` and WA7 take, for a case over 200 ms, the best of that
+run and up to four more (`best_param_ms`); the limit stays 200 ms. Not a fix for the one-thread case: with
+`RAYON_NUM_THREADS=1` WA7's overlapping_cubes (Jump + Overlap) takes 308 ms every time (reported in section 1).

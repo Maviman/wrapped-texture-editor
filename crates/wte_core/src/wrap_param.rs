@@ -2142,8 +2142,14 @@ pub fn wrap_param(
         // Round 8 (3.2 steps 4-6): the seed is kept where it is exact (developable surfaces, closures); else the layout
         // is cut by the seam rules and relaxed. Overlap turns of a several-turn stack keep the seed (round 6): their
         // ends are not closures the seam rules know (a turn's range is shorter than the band), and WA18 needs them exact.
+        // check:A (round 9): the triangles next to a closure (`lost_cut`): torn in an exact seed, cut by S1 / S2 when
+        // relaxed.
+        let mut closure_tris = vec![false; patch.tv.len()];
         let (tris, area) = if multi || layout.seed_is_exact(&seed, footprint, closed) {
             stats.cut_tris += cut;
+            for (t, _, torn) in &seed {
+                closure_tris[*t as usize] = *torn;
+            }
             (seed.iter().map(|(t, q, _)| (*t, *q, layout.corner_g(*t))).collect::<Vec<_>>(), seed_area)
         } else {
             let r = layout.relax(&seed, picture, closed, anchor_l, relax::knob("WTE_TEST_CONE_RADIUS", relax::CONE_RADIUS) * across_r);
@@ -2174,6 +2180,7 @@ pub fn wrap_param(
             stats.flipped += r.flipped;
             stats.cg_iters += r.cg_iters;
             let area = r.tris.iter().map(|(_, q, _)| layer_area(*q, hw, hh, clip, period)).sum::<f64>();
+            closure_tris = r.closure;
             (r.tris, area)
         };
         covered += area;
@@ -2192,7 +2199,7 @@ pub fn wrap_param(
         }
         let along_clip = clip.map(|(_, lo, hi)| [lo as f32, hi as f32]);
         let laid = layout.laid();
-        let owner_ctx = OwnerCtx { mesh, bvh, patch: &patch, orient: &layout.orient, entered: &layout.entered, laid: &laid };
+        let owner_ctx = OwnerCtx { mesh, bvh, patch: &patch, orient: &layout.orient, entered: &layout.entered, laid: &laid, closure: &closure_tris };
         let (layer, (rej, lost)) = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
         rejected.0 += rej.0;
         rejected.1 += rej.1;
@@ -2250,6 +2257,8 @@ struct OwnerCtx<'c> {
     entered: &'c [bool],
     /// Laid local triangles (`Layout::laid`).
     laid: &'c [bool],
+    /// check:A (round 9): local triangles next to a closure (`relax::OwnerTri::closure`).
+    closure: &'c [bool],
 }
 
 impl OwnerCtx<'_> {
@@ -2356,6 +2365,7 @@ fn make_layer(
                     part: patch.part[patch.tv[e.0 as usize][0] as usize],
                     normal: patch.geo[e.0 as usize] * o,
                     laid: ctx.laid.get(e.0 as usize).copied().unwrap_or(false),
+                    closure: ctx.closure.get(e.0 as usize).copied().unwrap_or(false),
                 }
             })
             .collect();

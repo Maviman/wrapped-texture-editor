@@ -174,6 +174,9 @@ pub(super) struct Relaxed {
     pub(super) cut_tris: u32,
     pub(super) flipped: u32,
     pub(super) cg_iters: u32,
+    /// check:A (round 9): per local triangle, laid with an edge cut by a closure (S1 / S2): where the ends or the
+    /// halves meet (`lost_cut` does not count the picture beyond that line).
+    pub(super) closure: Vec<bool>,
 }
 
 /// True when the 2D box of `q` meets `|x| <= rect[0], |y| <= rect[1]`.
@@ -510,7 +513,9 @@ impl<'a> Layout<'a> {
                 }
             }
         }
+        let closure: Vec<bool> = (0..ntri).map(|t| laid[t] && (0..3).any(|k| seams.cut[t * 3 + k] & (S1 | S2) != 0)).collect();
         Relaxed {
+            closure,
             tris,
             seams: seam_count,
             seams_by_rule,
@@ -731,7 +736,9 @@ impl<'a> Layout<'a> {
                     .flat_map(|&t| patch.tv[t as usize])
                     .map(|u| patch.pos[u as usize].distance(patch.pos[v as usize]))
                     .fold(0.0f64, f64::max);
-                let found = self.laid_within(v, cone_radius.max(ring * (1.0 + 1e-9)), laid, &mut stamp, round as u32);
+                // (A radius of 0, the test knob for round 8's rule, stays 0.)
+                let radius = if cone_radius > 0.0 { cone_radius.max(ring * (1.0 + 1e-9)) } else { 0.0 };
+                let found = self.laid_within(v, radius, laid, &mut stamp, round as u32);
                 let net: f64 = found.iter().map(|&u| deficit[u as usize]).sum();
                 net_ok[v as usize] = net.abs() > limit;
                 let origin = patch.pos[v as usize];
@@ -1335,6 +1342,9 @@ pub(crate) struct OwnerTri {
     pub(crate) normal: DVec3,
     /// Laid (all corners final), not a halo triangle: only these count for `WrapStats::rejected`.
     pub(crate) laid: bool,
+    /// check:A (round 9): laid next to a closure (S1 / S2, or a seed torn by one): `lost_cut` leaves out the picture
+    /// beyond the line where the ends or the halves meet.
+    pub(crate) closure: bool,
 }
 
 /// Round 9 (T1): the stretch of a stored triangle, `sqrt(3D area / layout area)` clamped to 1..4 (world units per
@@ -1391,11 +1401,13 @@ struct CellState {
     p: [f32; 3],
     first: [f32; 3],
     seen: u8,
+    /// A closure triangle covers the centre (check:A, `lost_cut`).
+    closure: bool,
 }
 
 impl Default for CellState {
     fn default() -> CellState {
-        CellState { g: f64::INFINITY, best: NONE, part0: NONE, p: [0.0; 3], first: [0.0; 3], seen: 0 }
+        CellState { g: f64::INFINITY, best: NONE, part0: NONE, p: [0.0; 3], first: [0.0; 3], seen: 0, closure: false }
     }
 }
 
@@ -1479,9 +1491,10 @@ impl OwnerGrid {
                     let p = [p.x as f32, p.y as f32, p.z as f32];
                     let s = &mut out[k - base];
                     if s.best == NONE {
-                        *s = CellState { g, best: i, part0: t.part, p, first: p, seen: 0 };
+                        *s = CellState { g, best: i, part0: t.part, p, first: p, seen: 0, closure: t.closure };
                         return;
                     }
+                    s.closure |= t.closure;
                     if s.seen != 3 {
                         if s.part0 != t.part {
                             s.seen |= 1;
@@ -1621,6 +1634,57 @@ impl OwnerGrid {
                 }
             }
         }
+        // check:A (round 9): the picture beyond a closure (where the ends or the halves meet: a triangle-sized
+        // tooth line, and with a helix the band past the meeting line) is not lost to a cut. Uncovered picture
+        // cells 4-connected through uncovered picture cells to a cell a closure triangle covers are left out.
+        let in_picture = |i: usize, j: usize| {
+            let (x, y) = (lo[0] + (i as f64 + 0.5) * cell, lo[1] + (j as f64 + 0.5) * cell);
+            x.abs() <= picture[0] && y.abs() <= picture[1]
+        };
+        let mut beyond = vec![false; n];
+        let mut queue: Vec<usize> = Vec::new();
+        let neighbours = |k: usize| {
+            let (i, j) = (k % width, k / width);
+            [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < dims[1]).then(|| k + width)]
+        };
+        for k in 0..n {
+            if !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| cells[m].closure) {
+                beyond[k] = true;
+                queue.push(k);
+            }
+        }
+        while let Some(k) = queue.pop() {
+            for m in neighbours(k).into_iter().flatten() {
+                if !beyond[m] && !covered(m) && in_picture(m % width, m / width) {
+                    beyond[m] = true;
+                    queue.push(m);
+                }
+            }
+        }
+        let dump: String = knob("WTE_TEST_OWNER_DUMP", String::new());
+        if !dump.is_empty() {
+            // Test knob: the grid as a PGM (white covered in the picture, black lost_cut, dark grey beyond).
+            let mut out = format!("P5 {} {} 255
+", dims[0], dims[1]).into_bytes();
+            for j in (0..dims[1]).rev() {
+                for i in 0..dims[0] {
+                    let k = j * width + i;
+                    let (r, c) = (rspan[j], cspan[i]);
+                    let inpic = in_picture(i, j);
+                    out.push(if covered(k) {
+                        if inpic { 255 } else { 190 }
+                    } else if inpic && !beyond[k] && ((r.0 < i && i < r.1) || (c.0 < j && j < c.1)) {
+                        0
+                    } else if inpic {
+                        90
+                    } else {
+                        40
+                    });
+                }
+            }
+            static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let _ = std::fs::write(format!("{dump}_{:02}.pgm", DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)), out);
+        }
         let (mut lost, mut pic_cells) = (0usize, 0usize);
         for (j, r) in rspan.iter().enumerate() {
             let y = lo[1] + (j as f64 + 0.5) * cell;
@@ -1633,7 +1697,7 @@ impl OwnerGrid {
                     continue;
                 }
                 pic_cells += 1;
-                if !covered(j * width + i) && ((r.0 < i && i < r.1) || (c.0 < j && j < c.1)) {
+                if !covered(j * width + i) && !beyond[j * width + i] && ((r.0 < i && i < r.1) || (c.0 < j && j < c.1)) {
                     lost += 1;
                 }
             }

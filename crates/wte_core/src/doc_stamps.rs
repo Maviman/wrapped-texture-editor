@@ -1448,7 +1448,7 @@ impl Document {
     }
 
     /// Round 9 (package B, T8 / T9): the warm-up of the mesh's derived data when it is not built yet: the shared texels
-    /// (any 3D stamp) and, with `graph` (a wrapped stamp), the welded graph. Run it on a worker (a silent job) so that
+    /// (any 3D stamp) and, with `graph` (a wrapped stamp), the welded graph. Run it off the UI thread so that
     /// the first wrapped Preview does not pay the build. `None` when there is nothing to build.
     pub fn wrap_mesh_warmup(&mut self, graph: bool) -> Option<WrapMeshWarmup> {
         let cell = self.wrap_mesh_cell();

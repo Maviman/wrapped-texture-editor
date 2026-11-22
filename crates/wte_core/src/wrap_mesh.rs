@@ -270,12 +270,10 @@ impl WrapMeshCell {
     }
 
     /// The graph of `mesh` (the cell's mesh), built on the calling thread on first use (serially: no rayon inside the
-    /// `OnceLock` init), together with the shared texels (`uv_share`).
+    /// `OnceLock` init).
     pub fn get(&self, mesh: &MeshData) -> &WrapMesh {
         assert!(self.is_for(mesh), "a wrap mesh graph used with another mesh");
         self.cell.get_or_init(|| {
-            // The shared texels come with the graph (a wrap job that builds the graph leaves the warm-up nothing to do).
-            self.uv_share(mesh);
             let g = WrapMesh::build(mesh);
             self.builds.fetch_add(1, AtomicOrdering::Relaxed);
             CELL_BUILDS.fetch_add(1, AtomicOrdering::Relaxed);
@@ -321,7 +319,7 @@ impl WrapMeshCell {
 }
 
 /// Round 9 (package B, T8): the warm-up job's input (`Document::wrap_mesh_warmup`): owned and `Send`, so the app runs it
-/// as a silent job when a wrapped stamp is selected and the graph is not built yet.
+/// on a background thread when a 3D stamp is selected and something is not built yet.
 pub struct WrapMeshWarmup {
     pub(crate) cell: Arc<WrapMeshCell>,
     pub(crate) mesh: Arc<MeshData>,
@@ -334,10 +332,10 @@ impl WrapMeshWarmup {
     /// the milliseconds this call took.
     pub fn run(self) -> f64 {
         let started = Instant::now();
-        self.cell.uv_share(&self.mesh);
         if self.graph {
             self.cell.get(&self.mesh);
         }
+        self.cell.uv_share(&self.mesh);
         started.elapsed().as_secs_f64() * 1e3
     }
 

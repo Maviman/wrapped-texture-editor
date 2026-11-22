@@ -18,7 +18,7 @@ use crate::stamp_bake::{bake_projected, bake_uv};
 use crate::texel_map::TexelMap;
 use crate::text::{FaceFonts, RasterQuality, TextFonts, TextFrame, TextSpec, default_font_bytes, render_text};
 use crate::wrap_bake::bake_wrapped;
-use crate::wrap_param::{WrapMeshCell, WrapParam, wrap_param_in};
+use crate::wrap_param::{WrapMeshCell, WrapParam, phase_times, wrap_param_in};
 
 /// The text's own face as owned parts: parsed font, file bytes, face index.
 pub(crate) type OwnFace = (Arc<fontdue::Font>, Arc<[u8]>, u32);
@@ -238,7 +238,7 @@ pub(crate) fn wrap_bake(
     let fresh = reused.is_none();
     let param = match reused {
         Some(w) => Some(w),
-        None => wrap_param_in(mesh, bvh, graph.get(mesh), maps, mips.size(), p).map(Arc::new),
+        None => fresh_param(id, mesh, bvh, graph, maps, mips.size(), p),
     };
     let Some(param) = param else {
         log::debug!("wrap: stamp {} has no surface under it", id.0);
@@ -292,7 +292,7 @@ pub(crate) fn wrap_param_only(
     if let Some(w) = cached.filter(|w| w.serves_inputs(mesh, maps, src_size, p)) {
         return Some(UsedWrap { param: w, fresh: false });
     }
-    let param = Arc::new(wrap_param_in(mesh, bvh, graph.get(mesh), maps, src_size, p)?);
+    let param = fresh_param(id, mesh, bvh, graph, maps, src_size, p)?;
     let s = param.stats_for(p);
     log::info!(
         "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh, param only), covered {:.1} %, cut {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}, passed {}, ends {:.1} %, lost_cut {:.2} %",
@@ -312,6 +312,32 @@ pub(crate) fn wrap_param_only(
         s.lost_cut * 100.0
     );
     Some(UsedWrap { param, fresh: true })
+}
+
+/// Round 9 (package B): a fresh parameterization from the shared mesh graph (built here on first use), with a
+/// `wrap phases:` debug line (graph wait, collect, spine + front, relax, owner grids; candidates handed to the patch).
+#[allow(clippy::too_many_arguments)]
+fn fresh_param(
+    id: StampId,
+    mesh: &Arc<MeshData>,
+    bvh: &Bvh,
+    graph: &WrapMeshCell,
+    maps: &[Arc<TexelMap>],
+    src_size: [u32; 2],
+    p: &Projector,
+) -> Option<Arc<WrapParam>> {
+    let started = Instant::now();
+    let g = graph.get(mesh);
+    let graph_ms = started.elapsed().as_secs_f64() * 1e3;
+    let _ = phase_times::take();
+    let param = wrap_param_in(mesh, bvh, g, maps, src_size, p).map(Arc::new);
+    let [collect, front, relax, owner] = phase_times::take().map(|us| us as f64 / 1e3);
+    log::info!(
+        "wrap phases: stamp {} graph {graph_ms:.1} ms, collect {collect:.1} ms ({} candidates), front {front:.1} ms, relax {relax:.1} ms, owner {owner:.1} ms",
+        id.0,
+        phase_times::last_candidates()
+    );
+    param
 }
 
 impl std::fmt::Debug for StampBakeOutput {

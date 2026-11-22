@@ -13,8 +13,9 @@
 //
 // Round 9 (package B, T8): a Final waits for its stamp's wrap job only when that job was made for the Final's placement
 // (it brings the parameterization the Final reuses); a job made for an earlier placement of the drag does not hold the
-// Final back (its output lands stale). A selected wrapped stamp warms up the document's welded mesh graph in a silent
-// job (`WrapJobs::request_warmup`), so the first wrap job does not pay its build.
+// Final back (its output lands stale). A selected 3D stamp warms up the document's mesh data (the shared texels; for a
+// wrapped stamp also the welded mesh graph) on a background thread outside `Jobs` (`WrapJobs::request_warmup`), so the
+// first wrap job does not pay the graph's build and the panel can name shared texels.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -32,7 +33,6 @@ const TITLE_TEXT: &str = "Finishing text";
 /// Titles (thread names) of the silent wrap jobs; the status bar does not show them.
 const TITLE_WRAP_PREVIEW: &str = "Wrap preview";
 const TITLE_WRAP_PARAM: &str = "Wrap fit";
-const TITLE_WRAP_WARM: &str = "Wrap warm-up";
 
 /// Round 8 (R8-2): the wrap Preview or param-only job in flight, a Preview output held while a stroke is open, the
 /// param-only request of the selected stamp and counters. Lives in `AppState::wrap_jobs`.
@@ -51,7 +51,7 @@ pub struct WrapJobs {
     /// Round 9 (package B, T8 / T9): a selected 3D stamp asked for the warm-up of the mesh's derived data (taken by
     /// `after_tools`; `Some(true)`: a wrapped stamp, also the graph), and a warm-up job runs.
     want_warm: Option<bool>,
-    warm_in_flight: bool,
+    warm_thread: Option<std::thread::JoinHandle<f64>>,
 }
 
 /// Counts of `WrapJobs` since the start.
@@ -315,34 +315,36 @@ pub(crate) fn after_tools(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Con
     if state.wrap_jobs.want_param.is_some() && state.wrap_jobs.in_flight.is_none() {
         pump_wrap(state, jobs, ctx);
     }
-    warm_up(state, jobs, ctx);
+    warm_up(state);
     update_pending(state);
 }
 
-/// Round 9 (package B, T8): starts the warm-up job of the open document's mesh graph when a selected wrapped stamp asked
-/// for it, the graph is not built and no warm-up runs. Without a worker thread nothing is started (the first wrap job
-/// builds the graph).
-fn warm_up(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) {
-    let Some(graph) = state.wrap_jobs.want_warm.take() else { return };
-    if state.wrap_jobs.warm_in_flight {
+/// Round 9 (package B, T8 / T9): starts the warm-up of the open document's mesh data when a selected 3D stamp asked
+/// for it, something is not built yet and no warm-up runs: a background thread outside `Jobs` (it changes no pixels
+/// and has no output: it fills the document's `WrapMeshCell`, which the wrap jobs share; a wrap job that needs the
+/// graph meanwhile waits for it in the cell). A thread that cannot start leaves the build to the first wrap job.
+fn warm_up(state: &mut AppState) {
+    let jobs = &mut state.wrap_jobs;
+    if let Some(handle) = jobs.warm_thread.take_if(|h| h.is_finished()) {
+        match handle.join() {
+            Ok(ms) => log::info!("wrap mesh: warm-up ended after {ms:.0} ms"),
+            Err(_) => log::warn!("wrap mesh: the warm-up thread failed"),
+        }
+    }
+    let Some(graph) = jobs.want_warm.take() else { return };
+    if jobs.warm_thread.is_some() {
         return;
     }
     let Some(session) = state.session.as_mut() else { return };
     let Some(warm) = session.doc.wrap_mesh_warmup(graph) else { return };
-    let generation = session.scene_generation;
-    if jobs.spawn_silent(ctx, TITLE_WRAP_WARM, move |_| JobOutput::WrapWarm { generation, ms: warm.run() }) {
-        state.wrap_jobs.warm_in_flight = true;
-        state.wrap_jobs.counters.warmups_started += 1;
-        log::info!("wrap mesh: warm-up job started");
+    match std::thread::Builder::new().name("wrap-warm-up".to_owned()).spawn(move || warm.run()) {
+        Ok(handle) => {
+            state.wrap_jobs.warm_thread = Some(handle);
+            state.wrap_jobs.counters.warmups_started += 1;
+            log::info!("wrap mesh: warm-up started (graph: {graph})");
+        }
+        Err(e) => log::warn!("wrap mesh: the warm-up thread cannot start ({e}); the first wrap job builds the graph"),
     }
-}
-
-/// Round 9 (package B, T8): called from `io_flows::on_job_output` when the warm-up job ends (the graph lives in the
-/// document's cell that the job filled).
-pub(crate) fn on_warm_output(state: &mut AppState, generation: u64, ms: f64) {
-    state.wrap_jobs.warm_in_flight = false;
-    let current = state.session.as_ref().is_some_and(|s| s.scene_generation == generation);
-    log::info!("wrap mesh: warm-up job ended after {ms:.0} ms{}", if current { "" } else { " (other document)" });
 }
 
 /// Called from `App::ui` after the frame's actions were dispatched (a Final of a gizmo release or of a tool gesture
@@ -919,11 +921,6 @@ mod tests {
                         on_wrap_output_with(state, generation, output);
                         Delivered::Wrap(kind)
                     }
-                    // Round 9: a warm-up job of the mesh graph is no bake: handed over and skipped.
-                    JobOutput::WrapWarm { generation, ms } => {
-                        on_warm_output(state, generation, ms);
-                        continue;
-                    }
                     _ => panic!("another job's output"),
                 };
             }
@@ -1167,7 +1164,6 @@ mod tests {
                         on_wrap_output_with(&mut state, generation, output);
                         previews += 1;
                     }
-                    JobOutput::WrapWarm { generation, ms } => on_warm_output(&mut state, generation, ms),
                     _ => panic!("another job's output"),
                 }
             }

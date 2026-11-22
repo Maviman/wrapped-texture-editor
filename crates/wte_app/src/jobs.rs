@@ -94,8 +94,6 @@ pub enum JobOutput {
     WrapPreview { generation: u64, output: Box<StampBakeOutput> },
     /// Round 8 (R8-2): the parameterization of a wrapped stamp only (after an open or an undo; a silent job).
     WrapParam { generation: u64, output: Box<StampBakeOutput> },
-    /// Round 9 (package B, T8): the warm-up of the document's welded mesh graph (a silent job); `ms` = its time.
-    WrapWarm { generation: u64, ms: f64 },
 }
 
 /// The sample of one font family: "Abc 123" in its own face as a coverage bitmap (`FontCatalog::sample`).

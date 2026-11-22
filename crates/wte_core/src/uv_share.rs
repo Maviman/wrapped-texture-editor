@@ -14,6 +14,9 @@ use crate::mesh::MeshData;
 
 /// Side of the count raster per texture set (texels).
 pub const UV_SHARE_RES: u32 = 1024;
+/// Most pixel-centre tests per texture set: a set whose footprints would take more (large or tiled UVs) is counted on
+/// a coarser raster (half the side per step, at least 128).
+pub const UV_SHARE_WORK: f64 = 32e6;
 /// Least share of a selected stamp's area on triangles that share texels for which the panel warns.
 pub const UV_SHARE_WARN: f32 = 0.05;
 
@@ -40,8 +43,9 @@ fn raster(uv: [Vec2; 3], res: u32, f: &mut impl FnMut(usize)) -> usize {
     let s = area.signum();
     let (x0, x1) = (p.iter().map(|q| q[0]).fold(f64::INFINITY, f64::min), p.iter().map(|q| q[0]).fold(f64::NEG_INFINITY, f64::max));
     let (y0, y1) = (p.iter().map(|q| q[1]).fold(f64::INFINITY, f64::min), p.iter().map(|q| q[1]).fold(f64::NEG_INFINITY, f64::max));
-    // A footprint over more than four whole rasters (broken UVs) is not counted.
-    if (x1 - x0) * (y1 - y0) > 4.0 * r * r {
+    // A footprint over more than one whole raster (a tiled triangle reuses texels by itself) is not rasterized: the
+    // caller counts it everywhere.
+    if (x1 - x0) * (y1 - y0) > r * r {
         return 0;
     }
     let edge = |a: [f64; 2], b: [f64; 2], x: f64, y: f64| s * ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]));
@@ -91,25 +95,51 @@ impl UvShare {
                 list.push(t);
             }
         }
-        let mut count = vec![0u8; res as usize * res as usize];
+        // The UV bounding-box area of a triangle, in texture units.
+        let box_area = |t: TriId| {
+            let uv = mesh.tri_uvs(t);
+            let (lo, hi) = (uv[0].min(uv[1]).min(uv[2]), uv[0].max(uv[1]).max(uv[2]));
+            let a = ((hi.x - lo.x) * (hi.y - lo.y)) as f64;
+            if a.is_finite() { a } else { 0.0 }
+        };
+        let mut count: Vec<u8> = Vec::new();
         for tris in by_set.iter().filter(|l| !l.is_empty()) {
-            count.fill(0);
-            // Pass 1: every footprint counted (a triangle that covers no pixel centre counts its centroid's pixel).
-            for &t in tris {
+            // The raster of this set: as fine as `res` unless the footprints would take more than `UV_SHARE_WORK`
+            // tests (a footprint of a whole texture or more is not rasterized: `huge`).
+            let mut r = res;
+            let work = |r: u32| tris.iter().map(|&t| box_area(t).min(1.0)).sum::<f64>() * (r as f64) * (r as f64);
+            while r > 128 && work(r) > UV_SHARE_WORK {
+                r /= 2;
+            }
+            let huge: Vec<bool> = tris.iter().map(|&t| box_area(t) > 1.0).collect();
+            let everywhere = huge.iter().filter(|&&h| h).count().min(255) as u8;
+            count.clear();
+            count.resize(r as usize * r as usize, 0);
+            // Pass 1: every footprint counted (a triangle that covers no pixel centre counts its centroid's pixel; a
+            // huge one counts everywhere).
+            for (&t, &h) in tris.iter().zip(&huge) {
+                if h {
+                    continue;
+                }
                 let uv = mesh.tri_uvs(t);
-                let n = raster(uv, res, &mut |i| count[i] = count[i].saturating_add(1));
+                let n = raster(uv, r, &mut |i| count[i] = count[i].saturating_add(1));
                 if n == 0
-                    && let Some(i) = centroid_pixel(uv, res)
+                    && let Some(i) = centroid_pixel(uv, r)
                 {
                     count[i] = count[i].saturating_add(1);
                 }
             }
-            // Pass 2: a triangle shares texels when more than half of its footprint is counted twice or more.
-            for &t in tris {
+            // Pass 2: a triangle shares texels when more than half of its footprint is counted twice or more (a huge
+            // footprint covers some texels twice by itself).
+            for (&t, &h) in tris.iter().zip(&huge) {
+                if h {
+                    shares[t as usize] = true;
+                    continue;
+                }
                 let uv = mesh.tri_uvs(t);
                 let mut twice = 0usize;
-                let n = raster(uv, res, &mut |i| twice += usize::from(count[i] >= 2));
-                shares[t as usize] = if n == 0 { centroid_pixel(uv, res).is_some_and(|i| count[i] >= 2) } else { 2 * twice > n };
+                let n = raster(uv, r, &mut |i| twice += usize::from(count[i].saturating_add(everywhere) >= 2));
+                shares[t as usize] = if n == 0 { centroid_pixel(uv, r).is_some_and(|i| count[i].saturating_add(everywhere) >= 2) } else { 2 * twice > n };
             }
         }
         let (mut all, mut shared) = (0.0f64, 0.0f64);

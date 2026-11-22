@@ -247,7 +247,6 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
         JobOutput::WrapPreview { generation, output } | JobOutput::WrapParam { generation, output } => {
             crate::stamp_bakes::on_wrap_output(app, generation, output)
         }
-        JobOutput::WrapWarm { generation, ms } => crate::stamp_bakes::on_warm_output(&mut app.state, generation, ms),
     }
 }
 

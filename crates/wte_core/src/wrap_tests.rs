@@ -2497,3 +2497,115 @@ fn wa31_the_owner_does_not_depend_on_the_mesh_density() {
     let (lo, hi) = inks.iter().fold((f64::INFINITY, 0.0f64), |(a, b), &x| (a.min(x), b.max(x)));
     assert!(hi <= lo * 1.02, "the inks differ by more than 2 %: {inks:?}");
 }
+
+/// A torus of major radius `big` and minor radius `small`, `n` x `m` quads (`torus` with free radii).
+fn torus_r(n: u32, m: u32, big: f32, small: f32) -> RawMesh {
+    let at = |i: u32, j: u32| {
+        let a = std::f32::consts::TAU * (i % n) as f32 / n as f32;
+        let b = std::f32::consts::TAU * (j % m) as f32 / m as f32;
+        let r = big + small * b.cos();
+        Vec3::new(r * a.cos(), small * b.sin(), -r * a.sin())
+    };
+    let mut out = Vec::new();
+    for i in 0..n {
+        for j in 0..m {
+            let (u0, u1) = (0.02 + 0.96 * i as f32 / n as f32, 0.02 + 0.96 * (i + 1) as f32 / n as f32);
+            let (v0, v1) = (0.02 + 0.96 * j as f32 / m as f32, 0.02 + 0.96 * (j + 1) as f32 / m as f32);
+            raw_quad(&mut out, [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)], [u0, u1, v0, v1]);
+        }
+    }
+    textured("Torus", out)
+}
+
+/// `samples::cylinder` (radius `r`, height `h`) with `rows` rows of quads (one UV island).
+fn rowed_cylinder(seg: u32, rows: u32, r: f32, h: f32) -> RawMesh {
+    let point = |i: u32, j: u32| {
+        let a = std::f32::consts::TAU * (i % seg) as f32 / seg as f32;
+        Vec3::new(r * a.cos(), h * (j as f32 / rows as f32 - 0.5), -r * a.sin())
+    };
+    let mut out = Vec::new();
+    for j in 0..rows {
+        for i in 0..seg {
+            let (u0, u1) = (0.02 + 0.96 * i as f32 / seg as f32, 0.02 + 0.96 * (i + 1) as f32 / seg as f32);
+            let (v0, v1) = (0.02 + 0.96 * (rows - j - 1) as f32 / rows as f32, 0.02 + 0.96 * (rows - j) as f32 / rows as f32);
+            raw_quad(&mut out, [point(i, j), point(i + 1, j), point(i + 1, j + 1), point(i, j + 1)], [u0, u1, v0, v1]);
+        }
+    }
+    textured("Cylinder", out)
+}
+
+/// The cases of WA32: (what, mesh, projector, analytic `ends_share`).
+fn wa32_cases() -> Vec<(&'static str, RawMesh, Projector, f64)> {
+    let mut cases = Vec::new();
+    // The cylinder sample (r 0.5, h 4), the picture's long axis turned 15 degrees off the way round: a helix. The
+    // way round along it is the perimeter over cos 15; the picture is 1.5 times that long. Unrolled, the surface
+    // repeats with the shift (perimeter, 0), which is `P cos 15` along the picture and `P sin 15` across it: a picture
+    // taller than `P sin 15` lies once for a length of `P cos 15` (the ends meet where the traces' offset along the
+    // picture is zero), so the analytic share is `P cos 15 / (2 x needed along)`.
+    let (r, tilt) = (0.5f32, 15f32.to_radians());
+    let a = std::f32::consts::TAU * 20.5 / SEG as f32;
+    let n = Vec3::new(a.cos(), 0.0, -a.sin());
+    let pos = n * r * (std::f32::consts::PI / SEG as f32).cos();
+    let t = Vec3::Y.cross(n);
+    let up = Vec3::Y * tilt.cos() + t * tilt.sin();
+    let perimeter = SEG as f64 * 2.0 * r as f64 * (std::f64::consts::PI / SEG as f64).sin();
+    let turn = perimeter / (tilt as f64).cos();
+    let once = perimeter * (tilt as f64).cos();
+    let hw = (0.75 * turn) as f32;
+    let p = wrapped(pos, n, up, Vec2::new(hw, 0.9));
+    let needed = hw as f64 * (1.0 + 2.0 / PIC[0] as f64);
+    // The sample itself (one row of 4-unit triangles: the traces enter each other's triangles, `met_itself`) and the
+    // same cylinder with 64 rows (the traces pass beside each other).
+    cases.push(("cylinder sample helix 15 deg", samples::cylinder(SEG, r, 4.0), p, once / (2.0 * needed)));
+    cases.push(("cylinder 64 rows helix 15 deg", rowed_cylinder(SEG, 64, r, 4.0), p, once / (2.0 * needed)));
+    // A thin torus (R 1, r 0.15), the picture across the tube turned 20 degrees: the spine is a geodesic round the
+    // tube (Clairaut: rho sin psi constant, psi 20 degrees outside, 27.6 inside). Analytic share as the cylinder's
+    // with the tube's girth and the starting angle, `G cos 20 / (2 x needed along)` (the picture's length is 1.5 x
+    // the geodesic's way round).
+    let (big, small, tilt, m) = (1.0f64, 0.15f64, 20f64.to_radians(), 32u32);
+    let c = (big + small) * tilt.sin();
+    // Half a turn round the tube along the geodesic (Simpson over the tube angle); the tube's polygon of m sides.
+    let poly = (std::f64::consts::PI / m as f64).sin() / (std::f64::consts::PI / m as f64);
+    let steps = 2000;
+    let f = |b: f64| {
+        let rho = big + small * b.cos();
+        let s = (c / rho).min(0.999);
+        small * poly / (1.0 - s * s).sqrt()
+    };
+    let h = std::f64::consts::PI / steps as f64;
+    let half: f64 = (0..=steps).map(|k| f(k as f64 * h) * if k == 0 || k == steps { 1.0 } else if k % 2 == 1 { 4.0 } else { 2.0 }).sum::<f64>() * h / 3.0;
+    let hw = (0.75 * 2.0 * half) as f32;
+    let up = Vec3::new(0.0, (tilt as f32).sin(), (tilt as f32).cos());
+    let p = wrapped(Vec3::new((big + small) as f32, 0.0, 0.0), Vec3::X, up, Vec2::new(hw, 0.45));
+    let needed = hw as f64 * (1.0 + 2.0 / PIC[0] as f64);
+    let girth = 2.0 * std::f64::consts::PI * small * poly;
+    cases.push(("thin torus 20 deg", torus_r(128, m, big as f32, small as f32), p, girth * tilt.cos() / (2.0 * needed)));
+    cases
+}
+
+/// WA32 (round 9, T2): a picture longer than the way round a tube, laid along a helix: the traces pass beside each
+/// other, the ends meet there, and the share of the picture laid is the way round.
+#[test]
+fn wa32_a_helix_round_a_tube_has_its_ends_meet() {
+    for (what, raw, p, want) in wa32_cases() {
+        let (q, s, ink, _, _) = r8_measure(raw.clone(), SIDE, p);
+        println!(
+            "WA32 {}, passed {}, met_itself {}, ends_share {:.4} (analytic {want:.4}), seams {:?}, relaxed {}",
+            r8_line(what, &q, &s, ink),
+            s.passed,
+            s.met_itself,
+            s.ends_share,
+            s.seams_by_rule,
+            s.relaxed
+        );
+        // The one-row sample closes by the triangle rule first (its triangles span the helix's pitch).
+        assert!(s.passed || (what.starts_with("cylinder sample") && s.met_itself), "{what}: the traces did not pass: {s:?}");
+        assert!((s.ends_share as f64 - want).abs() <= 0.05 * want, "{what}: ends_share {} (analytic {want})", s.ends_share);
+        assert!(s.covered as f64 >= 0.9 * s.ends_share as f64, "{what}: covered {} of ends_share {}", s.covered, s.ends_share);
+        assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{what}: {q:?}");
+        // Overlap: the traces start their next turns.
+        let (q, s, ink, _, _) = r8_measure(raw, SIDE, with_options(p, false, true));
+        println!("WA32 {} (Overlap), turns {}, passed {}", r8_line(what, &q, &s, ink), s.turns, s.passed);
+        assert!(s.turns >= 2, "{what}: Overlap laid {} turns", s.turns);
+    }
+}

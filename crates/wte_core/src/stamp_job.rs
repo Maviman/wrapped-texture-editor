@@ -244,7 +244,7 @@ pub(crate) fn wrap_bake(
     let baked = bake_wrapped(mesh, maps, &param, mips, tint, p, quality);
     let s = param.stats_for(p);
     let line = format!(
-        "wrap: stamp {} param {} verts {} tris in {:.1} ms ({}), covered {:.1} %, cut {}, turns {}, jumps {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}; bake {:.1} ms ({:?})",
+        "wrap: stamp {} param {} verts {} tris in {:.1} ms ({}), covered {:.1} %, cut {}, turns {}, jumps {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}, passed {}, ends {:.1} %, lost_cut {:.2} %; bake {:.1} ms ({:?})",
         id.0,
         s.verts,
         s.tris,
@@ -259,6 +259,9 @@ pub(crate) fn wrap_bake(
         s.stretch * 100.0,
         s.rejected * 100.0,
         s.cg_iters,
+        s.passed,
+        s.ends_share * 100.0,
+        s.lost_cut * 100.0,
         started.elapsed().as_secs_f64() * 1e3 - param_ms,
         quality,
     );
@@ -287,7 +290,7 @@ pub(crate) fn wrap_param_only(
     let param = Arc::new(wrap_param(mesh, bvh, maps, src_size, p)?);
     let s = param.stats_for(p);
     log::info!(
-        "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh, param only), covered {:.1} %, cut {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}",
+        "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh, param only), covered {:.1} %, cut {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}, passed {}, ends {:.1} %, lost_cut {:.2} %",
         id.0,
         s.verts,
         s.tris,
@@ -298,7 +301,10 @@ pub(crate) fn wrap_param_only(
         s.seams,
         s.stretch * 100.0,
         s.rejected * 100.0,
-        s.cg_iters
+        s.cg_iters,
+        s.passed,
+        s.ends_share * 100.0,
+        s.lost_cut * 100.0
     );
     Some(UsedWrap { param, fresh: true })
 }

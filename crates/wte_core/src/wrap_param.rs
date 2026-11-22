@@ -103,6 +103,17 @@ pub struct WrapStats {
     pub rejected: f32,
     /// Round 8: conjugate-gradient iterations of the relaxation (all layers and components).
     pub cg_iters: u32,
+    /// Round 9 (T2): the spine's two traces passed beside each other (a helix round a tube) and stopped there (Ends
+    /// meet) or started their next turns (Overlap), without sharing a triangle (`met_itself`).
+    pub passed: bool,
+    /// Round 9 (T2): the share of the picture's length the spine lays when its ends meet (`met_itself` or `passed`
+    /// without Overlap turns): `(end0+ + end0-) / (2 x needed along)` clamped to 1; 1 for an open spine and for
+    /// Overlap turns (the rest lies on the next turn).
+    pub ends_share: f32,
+    /// Round 9 (A7): the share of the picture's cells without an owner that lie inside the laid set's outline in the
+    /// layout (cut wedges, shrink, holes: an uncovered cell with covered cells on both sides in its row or column), as
+    /// against picture beyond a mesh edge or beyond `ends_share` (the top layer's owner grid; 0 without one).
+    pub lost_cut: f32,
 }
 
 /// Round 8 (plan 3.3): how once and how whole the picture of a wrapped stamp lies on the model, measured from its
@@ -1353,6 +1364,8 @@ struct Spine {
     end0_plus: f64,
     end0_minus: f64,
     met_itself: bool,
+    /// Round 9 (T2): the turn-0 traces passed beside each other (ends meet by passing).
+    passed: bool,
     reached_edge: bool,
     limited: bool,
     jumps: u32,
@@ -1432,7 +1445,7 @@ fn enter_turn(spine: &mut Spine, tr: &mut Trace, pick: usize, mask: u16, end0: &
 /// Traces the spine from the anchor both ways (4.3 step 3; Overlap 4.3b; the spine's jump 4.3a). The two traces
 /// advance alternately (the one with the smaller arc length first, + on ties), so a picture longer than the way round
 /// has its ends meet opposite the anchor.
-fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, footprint: f64, opts: WrapOptions, jumper: &mut Option<Jumper<'_>>) -> Spine {
+fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, across: f64, footprint: f64, opts: WrapOptions, jumper: &mut Option<Jumper<'_>>) -> Spine {
     let ntri = patch.tv.len();
     // The turns that crossed each triangle (`turn_bit`).
     let mut crossed: Vec<u16> = vec![0; ntri];
@@ -1441,6 +1454,7 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, footprint: f64, opts:
         end0_plus: 0.0,
         end0_minus: 0.0,
         met_itself: false,
+        passed: false,
         reached_edge: false,
         limited: false,
         jumps: 0,
@@ -1468,7 +1482,54 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, footprint: f64, opts:
     // Parts the spine reached (a spine jump enters a part once).
     let mut spine_parts = vec![false; patch.part_count as usize];
     spine_parts[patch.part[patch.tv[anchor.tri as usize][0] as usize] as usize] = true;
+    // Round 9 (T2): at the last check, the turn-0 heads' distance, the - head's offset ahead of the + head along the
+    // + trace's direction, and the traces' arc lengths; whether the heads approach each other within the across reach.
+    let mut pass_prev: Option<(f64, f64, [f64; 2])> = None;
+    let mut pass_armed = false;
     loop {
+        // Round 9 (T2): ends meet by passing. A spine that is not exactly round a tube is a helix: its traces pass
+        // beside each other without sharing a triangle. Once they have gone the across reach together, with their oriented
+        // normals agreeing, heads that approach each other (their distance falling, below the across reach: armed) and
+        // whose offset along the + trace's direction then changes sign have passed: the ends meet where the offset is
+        // zero (interpolated between the two checks). Both traces stop (Ends meet) or start their next turn (Overlap,
+        // as `enter_turn` does for a crossing).
+        if !spine.passed
+            && traces[0].active
+            && traces[1].active
+            && traces[0].turn == 0
+            && traces[1].turn == 0
+            && traces[0].s + traces[1].s > across
+            && traces[0].nu.dot(traces[1].nu) > 0.0
+        {
+            let u = traces[1].q - traces[0].q;
+            let (d, ahead) = (u.length(), u.dot(traces[0].d));
+            let now = [traces[0].s, traces[1].s];
+            if let Some((d0, a0, s0)) = pass_prev {
+                if d < across && d < d0 {
+                    pass_armed = true;
+                }
+                if pass_armed && a0 > 0.0 && ahead <= 0.0 && d < across {
+                    let f = (a0 / (a0 - ahead)).clamp(0.0, 1.0);
+                    let at = [s0[0] + f * (now[0] - s0[0]), s0[1] + f * (now[1] - s0[1])];
+                    spine.passed = true;
+                    end0 = [Some(at[0]), Some(at[1])];
+                    for (k, tr) in traces.iter_mut().enumerate() {
+                        if !opts.overlap {
+                            tr.active = false;
+                        } else if total_turns >= WRAP_MAX_TURNS {
+                            spine.limited = true;
+                            tr.active = false;
+                        } else {
+                            total_turns += 1;
+                            tr.turn += tr.sign as i32;
+                            spine.turns.push(TurnSpan { turn: tr.turn, start: at[k], end: tr.s, closed: false });
+                        }
+                    }
+                    continue;
+                }
+            }
+            pass_prev = Some((d, ahead, now));
+        }
         let pick = match (traces[0].active, traces[1].active) {
             (true, true) => usize::from(traces[1].s < traces[0].s),
             (true, false) => 0,
@@ -1949,7 +2010,7 @@ pub fn wrap_param(
     // its border and texel margin, rounded up), so a parameterization reused for another size in the same bucket stays
     // bit-identical to a fresh one (4.4): the spine's jumps (its trace stops at the reach anyway), the front's jumps,
     // the early-out region and the owner grid.
-    let spine = trace_spine(&patch, &anchor, along_r, along_r, opts, &mut jumper);
+    let spine = trace_spine(&patch, &anchor, along_r, across_r, along_r, opts, &mut jumper);
     drop(jumper);
     let (hw, hh) = (reach.hw, reach.hh);
     let rect = [hw, hh];
@@ -1958,6 +2019,7 @@ pub fn wrap_param(
     let stop = slack * across_r;
     let mut stretches: Vec<f64> = Vec::new();
     let mut rejected = (0usize, 0usize);
+    let mut lost_cut = (0usize, 0usize);
     let mut stats = WrapStats {
         verts: 0,
         tris: 0,
@@ -1976,14 +2038,19 @@ pub fn wrap_param(
         stretch: 0.0,
         rejected: 0.0,
         cg_iters: 0,
+        passed: spine.passed,
+        ends_share: 1.0,
+        lost_cut: 0.0,
     };
     // The turns to lay: turn 0 (the Ends-meet spine), then with Overlap every later turn that starts inside the
     // picture, each with its along range (4.3b).
     // A closed turn (turn 0 when the spine met itself, a later turn that re-entered itself) covers its band once: its
     // along range is one period, and a fragment outside the range is that period away from its place in the turn.
-    let period0 = spine.met_itself.then_some(spine.end0_plus + spine.end0_minus);
+    // Round 9 (T2): a spine whose traces passed beside each other is closed too (a helix: its feet differ by the
+    // period across the line where the ends meet, S1).
+    let period0 = (spine.met_itself || spine.passed).then_some(spine.end0_plus + spine.end0_minus);
     let mut turns: Vec<(i32, f64, f64, Option<f64>)> = vec![(0, -spine.end0_minus, spine.end0_plus, period0)];
-    let overlap_turns = opts.overlap && spine.met_itself;
+    let overlap_turns = opts.overlap && (spine.met_itself || spine.passed);
     if overlap_turns {
         for span in &spine.turns {
             if span.start < reach.needed_along {
@@ -2081,9 +2148,11 @@ pub fn wrap_param(
         let along_clip = clip.map(|(_, lo, hi)| [lo as f32, hi as f32]);
         let laid = layout.laid();
         let owner_ctx = OwnerCtx { mesh, bvh, patch: &patch, orient: &layout.orient, entered: &layout.entered, laid: &laid };
-        let (layer, rej) = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
+        let (layer, (rej, lost)) = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
         rejected.0 += rej.0;
         rejected.1 += rej.1;
+        lost_cut.0 += lost.0;
+        lost_cut.1 += lost.1;
         layers.push((turn_id, layer));
     }
     if layers.is_empty() {
@@ -2095,11 +2164,17 @@ pub fn wrap_param(
     let order = |turn: i32| if flip { -turn } else { turn };
     layers.sort_by_key(|l| order(l.0));
     stats.turns = layers.len() as u32;
+    // Round 9 (T2): the share of the picture's length the spine lays (Ends meet).
+    if (spine.met_itself || spine.passed) && stats.turns == 1 {
+        let share = (spine.end0_plus + spine.end0_minus) / (2.0 * reach.needed_along);
+        stats.ends_share = if share.is_finite() { share.clamp(0.0, 1.0) as f32 } else { 1.0 };
+    }
     stats.tris = layers.iter().map(|l| l.1.tris.len() as u32).sum();
     stats.covered = (covered / (4.0 * hw * hh)).clamp(0.0, 1.0) as f32;
     stretches.sort_by(f64::total_cmp);
     stats.stretch = stretches.get(((stretches.len() as f64 * 0.95) as usize).min(stretches.len().saturating_sub(1))).copied().unwrap_or(0.0) as f32;
     stats.rejected = if rejected.1 == 0 { 0.0 } else { (rejected.0 as f64 / rejected.1 as f64) as f32 };
+    stats.lost_cut = if lost_cut.1 == 0 { 0.0 } else { (lost_cut.0 as f64 / lost_cut.1 as f64) as f32 };
     stats.micros = started.elapsed().as_micros() as u64;
     Some(WrapParam {
         mesh_addr: mesh as *const MeshData as usize,
@@ -2199,6 +2274,10 @@ impl OwnerCtx<'_> {
     }
 }
 
+/// The owner grid's counts of a layer: (rejected, all) (cell centre, laid triangle) pairs and (lost_cut, all) picture
+/// cells.
+type OwnerCounts = ((usize, usize), (usize, usize));
+
 /// The stored layer of one turn: ascending mesh triangle, f32 corners and corner depths, and (a layer not clipped to
 /// an Overlap turn's range) the owner grid over the reach rectangle `reach` (half extents; round 9: the place owner).
 /// Also returns the owner test's (cell centre, triangle) pairs inside `picture`: (rejected, all).
@@ -2210,7 +2289,7 @@ fn make_layer(
     axis: usize,
     reach: [f64; 2],
     picture: [f64; 2],
-) -> (WrapLayer, (usize, usize)) {
+) -> (WrapLayer, OwnerCounts) {
     let patch = ctx.patch;
     tris.sort_by_key(|e| patch.tris[e.0 as usize]);
     let (owner, rej) = if clip.is_none() {
@@ -2235,10 +2314,10 @@ fn make_layer(
             .collect();
         let may = |i: usize| ctx.may_bury(stored[i].p3, stored[i].normal, stored[i].part);
         let at = |i: usize, p: DVec3| ctx.buried_at(p, stored[i].normal, stored[i].part);
-        let (grid, rej) = OwnerGrid::build(&stored, reach, 0.0, picture, &relax::Burial { may: &may, at: &at });
-        (Some(grid), rej)
+        let (grid, rej, lost) = OwnerGrid::build(&stored, reach, 0.0, picture, &relax::Burial { may: &may, at: &at });
+        (Some(grid), (rej, lost))
     } else {
-        (None, (0, 0))
+        (None, ((0, 0), (0, 0)))
     };
     let layer = WrapLayer {
         tris: tris.iter().map(|e| patch.tris[e.0 as usize]).collect(),

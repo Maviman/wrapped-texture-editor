@@ -689,6 +689,9 @@ mod tests {
             stretch: 0.0,
             rejected: 0.0,
             cg_iters: 0,
+            passed: false,
+            ends_share: 1.0,
+            lost_cut: 0.0,
         };
         let opts = WrapOptions::default();
         assert!(wrap_stats_texts(&base, opts).is_empty(), "an exact (seed) wrap adds no line");

@@ -71,3 +71,48 @@ Deviations / findings:
 | WA20 | ink 0.85-1.15, cells 0.70-1.40, dup <= 1 % | ink 1.4669, dup 1.897 %, scatter 1.401 %, cells 0.752..2.714 — red (A4) |
 | WA4 60 deg | ink <= 1.10, cells <= 1.30 | 1.1360, 0.785..1.599 (unchanged: injective, rejected 0) — red (A4) |
 | WA7 slowest parameterization | 200 ms (debug) | 82 ms alone (overlapping_cubes x1, Jump + Overlap); 564 ms before the chunked / lazy build |
+
+## A2 spine passing (T2)
+
+Built (wrap_param.rs `trace_spine`, `wrap_param`; stamp_job.rs log lines; app `tool_options.rs` test literal: the
+minimal fix for the new `WrapStats` fields):
+- `Spine::passed`, `WrapStats::passed`, `WrapStats::ends_share` (`(end0+ + end0-) / (2 x needed along)` clamped to 1
+  when the spine met itself or passed and one turn is laid; 1 for an open spine and for Overlap turns), and (measuring
+  aid for A3, A7's field) `WrapStats::lost_cut`. The `wrap:` log lines (stamp_job.rs) end with `passed {}, ends {:.1}
+  %, lost_cut {:.2} %`.
+- The pass check runs at the top of every spine step while both traces are active on turn 0: gate `s+ + s- > across`
+  and oriented normals agreeing (`nu+ . nu- > 0`); **armed** once the head distance `d` falls (below the previous
+  check) under the bucketed across reach; **passed** when, armed and `d < across`, the - head's offset along the +
+  trace's direction (`(q- - q+) . d+`) changes sign from > 0 to <= 0. The ends are set where that offset is zero
+  (linear interpolation of the two traces' arc lengths between the two checks). Ends meet: both traces stop; Overlap:
+  both start their next turn (`TurnSpan` from that arc length; the turn limit as `enter_turn`).
+- A passed spine is **closed** like a met one: `period0 = end0+ + end0-` (S1 by the feet across the meeting line, the
+  early-out's closure tears) and with Overlap the later turns are laid (`overlap_turns = overlap && (met || passed)`).
+
+Deviations from T2 (with reasons):
+1. **The gate is `s+ + s- > 1 x across`, not `4 x`.** WA32's own cylinder (turn 3.25, across reach 1.11) passes at
+   `s+ + s- = 3.03 < 4 x 1.11`; the thin torus at 0.88 with across 0.55. The start is guarded instead by "armed only
+   while the distance falls" (at the start it rises).
+2. **Passing = the along offset changes sign, not "d rises after its minimum".** With the heads offset across the
+   picture (the helix's pitch) the 3D head distance is smallest before the heads are level along the picture
+   (`d^2 = chord^2 + dy^2`, `dy` grows while the chord shrinks): ends_share 0.6205 with the minimum rule against
+   0.6183 measured / 0.6196 analytic with the sign rule on the cylinder sample. The ends meet where neither end lies
+   ahead of the other.
+3. **The analytic share is `P cos(tilt)`, not `P / cos(tilt)`.** Unrolled, the cylinder repeats with the shift
+   (perimeter P, 0), i.e. `P cos t` along the picture and `P sin t` across it. A picture taller than `P sin t`
+   (WA32: 1.8 against 0.81) lies once for a length of `P cos t`: longer and its ends overlap. The test uses that.
+4. WA32 has a 64-row copy of the cylinder sample besides the sample itself: on the sample (one row of 4-unit
+   triangles) round 8's triangle rule closes the spine first (`met_itself`) when the pass check is off; with it on the
+   pass check fires first there too (both cases report `passed`). The torus value is the cylinder formula with the
+   tube's girth and the starting angle (Clairaut moves the angle from 20 to 27.6 degrees on the inside): measured
+   0.5588 against 0.5715 (2.2 % off).
+
+| WA32 case | ends_share (analytic) | covered (>= 0.9 x ends) | ink | dup / scatter | Overlap turns |
+|---|---|---|---|---|---|
+| cylinder sample, 15 deg | 0.6183 (0.6196) | 0.6645 | 0.6651 | 0 / 0 % | 3 (ink 0.794, dup 0) |
+| cylinder 64 rows, 15 deg | 0.6187 (0.6196) | 0.7920 | 0.7934 | 0 / 0 % | 3 (ink 0.853, dup 0.029 %) |
+| thin torus R 1 r 0.15, 20 deg | 0.5588 (0.5715) | 0.7390 | 0.7364 | 0 / 0 % | 3 (ink 1.209, dup 25.1 %, not asserted) |
+
+Other tests after A2: WA3, WA18, WA19, WA21, WA22 unchanged and green; the full core run has the same four red tests
+as after A1 (`wa4_r8`, `wa20`, `wa17`, `wa24`); one run of `check_a_own_bad_meshes_never_fail` hit 220 ms (book x0.05,
+Overlap) under the parallel test load; alone it is 51 ms (44 ms without A2): load, not the pass rule.

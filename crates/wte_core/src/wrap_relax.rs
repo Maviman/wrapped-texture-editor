@@ -1294,7 +1294,7 @@ impl OwnerGrid {
     /// the long side) from the stored triangles `tris` (ascending triangle id). `buried` is asked only in cells whose
     /// candidates come from two or more parts. Also returns, of the (cell centre, covering triangle) pairs inside
     /// `picture`, those the owner test drops and all.
-    pub(crate) fn build(tris: &[OwnerTri], half: [f64; 2], min_cell: f64, picture: [f64; 2], buried: &Burial<'_>) -> (OwnerGrid, (usize, usize)) {
+    pub(crate) fn build(tris: &[OwnerTri], half: [f64; 2], min_cell: f64, picture: [f64; 2], buried: &Burial<'_>) -> (OwnerGrid, (usize, usize), (usize, usize)) {
         let long = 2.0 * half[0].max(half[1]);
         let cell = min_cell.max(long / OWNER_MAX_CELLS as f64).max(1e-30);
         let dims = [((2.0 * half[0] / cell).ceil() as usize).clamp(1, 4 * OWNER_MAX_CELLS), ((2.0 * half[1] / cell).ceil() as usize).clamp(1, 4 * OWNER_MAX_CELLS)];
@@ -1473,6 +1473,39 @@ impl OwnerGrid {
             pos: cells.iter().map(|s| s.p).collect(),
             scale: cells.iter().map(|s| if s.best == NONE { 1.0 } else { tris[s.best as usize].s }).collect(),
         };
+        // Round 9 (A7): `lost_cut`, the picture's cells without an owner inside the laid set's outline: an uncovered
+        // cell with covered cells on both sides in its row or in its column (a cut wedge, a shrunk seam, a hole), as
+        // against picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways).
+        let covered = |k: usize| cells[k].best != NONE;
+        let mut rspan = vec![(usize::MAX, 0usize); dims[1]];
+        let mut cspan = vec![(usize::MAX, 0usize); dims[0]];
+        for (j, r) in rspan.iter_mut().enumerate() {
+            for (i, c) in cspan.iter_mut().enumerate() {
+                if covered(j * width + i) {
+                    r.0 = r.0.min(i);
+                    r.1 = r.1.max(i);
+                    c.0 = c.0.min(j);
+                    c.1 = c.1.max(j);
+                }
+            }
+        }
+        let (mut lost, mut pic_cells) = (0usize, 0usize);
+        for (j, r) in rspan.iter().enumerate() {
+            let y = lo[1] + (j as f64 + 0.5) * cell;
+            if y.abs() > picture[1] {
+                continue;
+            }
+            for (i, c) in cspan.iter().enumerate() {
+                let x = lo[0] + (i as f64 + 0.5) * cell;
+                if x.abs() > picture[0] {
+                    continue;
+                }
+                pic_cells += 1;
+                if !covered(j * width + i) && ((r.0 < i && i < r.1) || (c.0 < j && j < c.1)) {
+                    lost += 1;
+                }
+            }
+        }
         drop(cells);
         // The rejected share at the cell centres inside the picture, of the laid triangles (`WrapStats::rejected`: the
         // laid picture area; a halo triangle hinged over a fold, e.g. a block's side hanging into a gap, is dropped
@@ -1505,7 +1538,7 @@ impl OwnerGrid {
         if debug {
             eprintln!("owner: done {:.1} ms ({} x {} cells, {} triangles)", t0.elapsed().as_secs_f64() * 1e3, dims[0], dims[1], tris.len());
         }
-        (grid, rej)
+        (grid, rej, (lost, pic_cells))
     }
 
     /// The owner test at cell index `k`: a fragment at 3D point `p` of a triangle with stretch `s` is kept when the

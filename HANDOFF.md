@@ -27,7 +27,9 @@ projects (format version 3).
 |---|---|
 | `crates/`, `Cargo.toml`, `Cargo.lock`, `ARCHITECTURE.md` | the source (branch `main` = the landed build) |
 | `.cargo/config.toml` | linker setting for the `x86_64-pc-windows-gnu` target only (rust-lld, self-contained) |
-| `cargo.cmd` | **old-machine only**: wrapper that put a toolchain on `E:\claude_downloads\rust-toolchain` on PATH. On the new machine use a normal `rustup` install and plain `cargo` |
+| `cargo.cmd` | **old-machine only**: wrapper that put a toolchain on `E:\claude_downloads\rust-toolchain` on PATH |
+| `cargo-gnu.cmd`, `rust-toolchain.toml`, `tools/setup-toolchain.ps1`, `TOOLCHAIN.md` | the portable toolchain setup for any machine (section 3) |
+| `tools/fetch-samples.ps1` | downloads the Khronos sample models used by the gates into `samples/` (git-ignored) |
 | `dist/` | launcher scripts and `HOW_TO_TEST.txt` for the user's test build (the `.exe` is not committed) |
 | `docs/plans/` | feature briefs (`FEATURE_*.md`), round plans `ROUND3_PLAN.md` … `ROUND8_PLAN.md` |
 | `docs/reports/` | gate reports of rounds 3-8 (`ROUND<n>_GATE_REPORT.md`, `ROUND3_REPORT.md`) |
@@ -46,11 +48,19 @@ uploaded (too large).
 
 ## 3. Building
 
-1. Install Rust stable with `rustup`. The old machine used the **`x86_64-pc-windows-gnu`** toolchain without Visual
-   Studio, linking with the bundled `rust-lld` (that is what `.cargo/config.toml` sets; it only affects the gnu
-   target). If the new machine has the Visual Studio Build Tools, the default MSVC target should work too — confirm.
-2. `cargo test --workspace` · `cargo clippy --workspace --all-targets` (must be 0 warnings) ·
-   `cargo build --release -p wte_app` → `target/release/wrapped_texture_editor.exe`.
+**Full details: [`TOOLCHAIN.md`](TOOLCHAIN.md).** The compiler is not in the repo (its files are 205-341 MB, over
+GitHub's 100 MB limit), but it is pinned and reproducible:
+
+1. `powershell -ExecutionPolicy Bypass -File tools\setup-toolchain.ps1 -InstallRustup` installs rustup (if missing),
+   the exact toolchain **rustc 1.99.1 `x86_64-pc-windows-gnu`** with clippy / rustfmt / llvm-tools, and rebuilds the
+   **dlltool shim** in `.toolchain\dlltool-shim` (the toolchain's `llvm-ar.exe` under the names `dlltool.exe` and
+   `llvm-dlltool.exe`, plus two MinGW DLLs). No Visual Studio needed; linking uses the bundled `rust-lld`
+   (`.cargo/config.toml`). `rust-toolchain.toml` pins the version.
+2. `.\cargo-gnu.cmd test --workspace` · `.\cargo-gnu.cmd clippy --workspace --all-targets` (must be 0 warnings) ·
+   `.\cargo-gnu.cmd build --release -p wte_app` → `target/release/wrapped_texture_editor.exe`.
+   (`cargo-gnu.cmd` is the portable wrapper; `cargo.cmd` only works on the original laptop.)
+   `tools\fetch-samples.ps1` downloads the Khronos sample models into `samples\`; the gate tools need Python 3 with
+   Pillow and numpy.
    (The old session always ran with `--offline` because of a slow network; a first online build fetches crates.)
 3. No new crates were allowed in rounds 4-8 (everything uses what `Cargo.lock` already has: egui/eframe 0.37,
    wgpu, glam, rayon, ttf-parser, image, …). Keep that rule unless the user agrees otherwise.
@@ -181,7 +191,8 @@ shares texels with its mirror half); ABeautifulGame's blobs on other pieces come
 
 ## 9. Things for the new session to look over and confirm
 
-1. **Clean build from this repo**: `git clone`, install the toolchain, `cargo test --workspace` → expect 1,116
+1. **Clean build from this repo**: `git clone`, run `tools\setup-toolchain.ps1 -InstallRustup`,
+   `.\cargo-gnu.cmd test --workspace` → expect 1,116
    passed / 33 ignored / 0 failed on `main`; clippy 0 warnings; release build. Note any difference (a different
    toolchain or target may change warnings or test timing asserts such as WA19's wall-clock check).
 2. **GPU rendering**: start the app normally and with `dist/Start - DirectX 12.cmd`; the old machine never ran on a
@@ -193,5 +204,7 @@ shares texels with its mirror half); ABeautifulGame's blobs on other pieces come
 5. **Round 8 branch**: build `round8-wip`, run its tests (expect 4 failures: `wa4_r8`, `wa20`, `wa22`, `wa24`) and the
    sweep; confirm the skeptics' findings (torus_knot coverage loss, Avocado doubles, WaterBottle no longer exact,
    mirrored-UV / instancing explanations). Then plan round 9 with the user.
-6. Check that `.cargo/config.toml` (rust-lld for the gnu target) is still wanted on the new machine.
+6. Check that the GNU toolchain setup works there (`TOOLCHAIN.md`); `tools\setup-toolchain.ps1` and `cargo-gnu.cmd`
+   were tested on the old laptop against its installed 1.99.1 only (shim rebuilt byte-identical, a test exe linked),
+   not on a fresh machine.
 7. Ask the user about the GPU brush (section 6) and the FBX `IMPORTER_VERSION` point before scheduling work.

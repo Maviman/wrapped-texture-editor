@@ -1,0 +1,8 @@
+# The exact toolchain every round was built and tested with (rustc 1.99.1, 2026-10-13; install it with the GNU host, no
+# Visual Studio needed). rustup installs it automatically on the first cargo command inside this repo.
+# The linker setting for this target is in .cargo/config.toml; the dlltool shim is made by
+# tools/setup-toolchain.ps1. See TOOLCHAIN.md.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt", "llvm-tools-preview"]

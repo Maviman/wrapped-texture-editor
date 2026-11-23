@@ -20,6 +20,16 @@ In each one, do what used to crash:
 
 Note which of the three crash and which keep working.
 
+Exporting layers (new in this build)
+------------------------------------
+  - Layers panel: Ctrl-click adds or removes a layer from the selection,
+    Shift-click selects a range; a plain click selects just that layer.
+  - Right-click a layer > "Export this layer..." (or "Export selected
+    layers... (N)" with several selected): the Export dialog opens with
+    Layers = "Selected (N)" and writes only those layers.
+  - In File > Export..., tick "Pack into one .zip file" to get everything
+    as one <name>.zip instead of loose files.
+
 If it crashes
 -------------
 You should see a box "Wrapped Texture Editor crashed. A crash report was

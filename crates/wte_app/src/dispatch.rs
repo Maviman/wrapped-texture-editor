@@ -1117,6 +1117,31 @@ mod tests {
         assert!(st.options.flat.is_some());
     }
 
+    /// check_exp_1 D4: "Export this layer..." on two sets' layers with the same index and name writes two different
+    /// files, each named like the full export names that layer (with the set name), so one does not replace the other.
+    #[test]
+    fn export_for_layers_on_two_sets_keeps_the_set_names_apart() {
+        let mut state = crate::tools::test_support::state_with(wte_core::SampleKind::TwoMaterial);
+        let doc = state.doc_mut().unwrap();
+        assert!(doc.sets.len() >= 2);
+        let a = doc.add_raster_layer(TextureSetId(0), Some("Logo")).unwrap();
+        let b = doc.add_raster_layer(TextureSetId(1), Some("Logo")).unwrap();
+        assert_eq!(doc.find_layer(a).unwrap().1, doc.find_layer(b).unwrap().1, "the same stack index");
+        let snapshot = state.doc().unwrap().snapshot();
+        let names = |layer: LayerId| -> Vec<String> {
+            let st = export_for_layers(&state, export_defaults(&state).unwrap(), &[layer]);
+            wte_core::export::plan_contents(&snapshot, &st.options).into_iter().map(|f| f.name).collect()
+        };
+        let (na, nb) = (names(a), names(b));
+        assert_eq!(na.len(), 1);
+        assert_eq!(nb.len(), 1);
+        assert_ne!(na, nb, "two sets' Logo layers never share a file name");
+        let mut full = export_defaults(&state).unwrap().options;
+        full.include_hidden = true;
+        let full: Vec<String> = wte_core::export::plan_contents(&snapshot, &full).into_iter().map(|f| f.name).collect();
+        assert!(full.contains(&na[0]) && full.contains(&nb[0]), "{na:?} {nb:?} not in the full export {full:?}");
+    }
+
     #[test]
     fn save_and_export_finish_a_held_interaction_everything_else_cancels_it() {
         for a in [AppAction::Save, AppAction::SaveAs(None), AppAction::ShowExport, AppAction::SaveThen(crate::state::Pending::Quit)] {

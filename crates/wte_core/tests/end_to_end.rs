@@ -513,14 +513,15 @@ fn two_material_pipeline() {
         .iter()
         .map(|&i| {
             let layer = &body_set.layers[i];
-            export::layer_name("robot", &body_set.name, false, i, layer.kind_name(), &layer.name)
+            export::layer_name("robot", &body_set.name, true, i, layer.kind_name(), &layer.name)
         })
         .collect();
     wanted.sort();
-    assert_eq!(listing, wanted, "exactly the selected layers, named without the set (one set)");
+    assert_eq!(listing, wanted, "exactly the selected layers, named with their set (the model has two sets)");
     for &i in &picked {
         let layer = &body_set.layers[i];
-        let name = export::layer_name("robot", &body_set.name, false, i, layer.kind_name(), &layer.name);
+        let name = export::layer_name("robot", &body_set.name, true, i, layer.kind_name(), &layer.name);
+        assert!(planned.iter().any(|p| p.file_name().unwrap().to_str() == Some(name.as_str())), "{name}: the full export's name");
         let file = std::fs::read(sel_dir.join(&name)).unwrap();
         assert!(decode(&file, &name) == dense(layer, body_set.width, body_set.height), "{name}");
     }

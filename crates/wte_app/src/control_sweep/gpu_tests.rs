@@ -278,8 +278,11 @@ fn export_dialog_controls_and_export() {
     let o = &a.export_state().options;
     assert!(o.ora && o.psd && o.include_hidden && o.layers.is_none());
     assert!(a.h.get("Selected (1)").toggled != Some(true), "one layer selected, not chosen");
+    // Per-layer PNGs: off, then on again (the export below checks every per-layer PNG against its layer).
     a.click("Per-layer PNGs (stamps and text as separate files)");
     assert!(!a.export_state().options.per_layer_png);
+    a.click("Per-layer PNGs (stamps and text as separate files)");
+    assert!(a.export_state().options.per_layer_png);
     // Seam padding: drag.
     let pad = a.h.in_row("Seam padding", Role::SpinButton, 0);
     let c = pad.rect.center();
@@ -356,7 +359,7 @@ fn export_dialog_controls_and_export() {
 }
 
 /// The zip package and the layer selection through the dialog (EXPORT_SELECT_PLAN 6.2): "Pack into one .zip file"
-/// + Export writes one zip whose entries are the listed files; Export again lists the zip in the confirm step; the
+/// plus Export writes one zip whose entries are the listed files; Export again lists the zip in the confirm step; the
 /// dialog opened for two layers chooses "Selected (2)", lists two files and exports exactly those.
 #[test]
 #[ignore = "needs a GPU"]

@@ -2561,7 +2561,7 @@ pub fn run(snapshot: &DocumentSnapshot, opts: &ExportOptions, progress: &dyn Pro
 
 // export/naming.rs
 pub fn sanitize_file_stem(s: &str) -> String;
-/// File names for one set; `multi` = more than one set is exported. See section 7.5.
+/// File names for one set; `multi` = the set name goes into the names (section 7.4, `selected_sets`). See section 7.5.
 pub fn flat_name(base: &str, set_name: &str, multi: bool, ext: &str) -> String;
 pub fn layer_name(base: &str, set_name: &str, multi: bool, index: usize, kind: &str, layer_name: &str) -> String;
 pub fn layered_name(base: &str, set_name: &str, multi: bool, ext: &str) -> String;
@@ -3938,7 +3938,7 @@ manifest like any malformed field.
 
 ### 7.4 Export [C6]
 
-`export::run` per selected set (`multi` = more than one set selected):
+`export::run` per selected set (`multi` = more than one set selected; under a layer selection: the model has more than one set):
 1. `flat = flatten_layers(layers, w, h, false)`; if `dilate_px > 0`, `dilate_islands(&mut flat, &texel_map, dilate_px)`.
 2. `opts.flat`: `encode_flat(&flat, fmt)` -> `flat_name(..)`.
 3. `per_layer_png`: every layer (visible ones, or all with `include_hidden`) as a **full-canvas** RGBA PNG (`Balanced`), so the files
@@ -3983,7 +3983,12 @@ Layer scope (1.8; `ExportOptions::layers`):
   `Some(ids)` => `ids.contains(id)` (hidden ones too). The index in a per-layer name stays the position in the full stack, so
   a selected layer's file has the same name as in a full export.
 - `selected_sets` drops, under a selection, the sets in which no layer is selected; `multi` (the `_<set>` name part) counts
-  the sets that remain.
+  the sets that remain **without** a selection (unchanged) and, **under** a selection, the sets of the model
+  (`snapshot.sets.len() > 1`), whatever `opts.sets` (the dialog opened from a layer row sets it to that layer's set) and the
+  selection narrow it to (fix_exp_1, check_exp_1 D4). So on a multi-set model a selected layer keeps its set name and the
+  name a full export gives it, and two sets' layers with the same index and name (ABeautifulGame's `Knight_Black` /
+  `Pawn_Body_Black` `L02_stamp_Logo`) never share a file name. A set filter of one set without a layer selection still
+  drops the set name, as before.
 - Flattened texture under a selection = `flatten_layers(<clones of the selected layers>, w, h, false)`: the selected
   **visible** layers bottom to top with their own opacity and blend (a selected hidden layer is in the per-layer files and in
   ORA / PSD flagged hidden, not in the flattened picture). A blend mode with nothing below composites over transparent, as
@@ -4028,7 +4033,8 @@ ExtendedColorType::Rgba8, ImageFormat::Tga | Bmp | Tiff | WebP)` (`REG\image-0.2
 
 ### 7.5 Export file naming [C6]
 
-- Flattened: `<base>.<ext>` (single set) or `<base>_<set>.<ext>`.
+- Flattened: `<base>.<ext>` (single set) or `<base>_<set>.<ext>`. "Single set" = one set exported; under a layer selection
+  = the model has one set (7.4).
 - Per layer: `<base>[_<set>]_L<index:02>_<kind>_<layer-name>.png`; index 00 = bottom; kind = `paint` | `stamp` | `text`.
 - Layered: `<base>[_<set>].ora`, `<base>[_<set>].psd`.
 - Package (`ExportPackage::Zip`): `<base>.zip`; its entries carry exactly the loose names above (flat list, no folders).

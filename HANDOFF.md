@@ -79,9 +79,13 @@ and a log `<out>.log`. Scenario names (`crates/wte_app/src/selftest/scenarios.rs
 `empty smoke default paint3d paint2d stamp text clay preview export export_run multi roundtrip undo import
 import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_path stamp_edge_path pan2d
 brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
-text_preview_path brush_hover final_bake_async wrap_surface`
+text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow`
 
-`*_path` scenarios need a PATH argument (a model). `tools/round3_audit/sweep.ps1` runs a jobs file of
+`*_path` scenarios need a PATH argument (a model). `export_flow` takes an optional PATH (a model or a saved `.wtep`):
+without one it writes a cube as OBJ+MTL+PNG, glTF, GLB and ASCII FBX and runs the whole flow on each (paint, stamp,
+text, wrapped stamp, then export one layer, a selection and everything as one zip, checked file by file);
+`export_selected` drives Ctrl / Shift / plain / right clicks in the Layers panel and the dialog's "Selected (N)";
+`export_zip` checks the zip against the loose files and the replace step. `tools/round3_audit/sweep.ps1` runs a jobs file of
 `scenario[,path]` lines.
 
 ### 4.2 Switches (environment variables)

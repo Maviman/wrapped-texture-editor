@@ -1020,18 +1020,19 @@ fn run_dialog_export(state: &AppState, _sc: &Scratch) -> Result<Vec<Step>, Strin
     Ok(vec![Step::Do(AppAction::RunExport(st.options.clone()))])
 }
 
-/// The per-layer file name of a layer when only its set is exported.
-fn single_set_layer_name(doc: &Document, layer: LayerId) -> Result<String, String> {
+/// The per-layer file name of a layer exported under a layer selection (no set filter): with the set name when the
+/// model has more than one texture set, the same name the full export gives it.
+fn selection_layer_name(doc: &Document, layer: LayerId) -> Result<String, String> {
     let (set, index) = doc.find_layer(layer).ok_or("no such layer")?;
     let set = doc.set(set).ok_or("no such set")?;
     let l = &set.layers[index];
-    Ok(wte_core::export::layer_name(&doc.name, &set.name, false, index, l.kind_name(), &l.name))
+    Ok(wte_core::export::layer_name(&doc.name, &set.name, doc.sets.len() > 1, index, l.kind_name(), &l.name))
 }
 
 /// The folder holds exactly the per-layer PNGs of these layers, each with its layer's pixels; returns the images.
 fn expect_layer_files(state: &AppState, dir: &Path, layers: &[LayerId]) -> Result<Vec<PixelBuf>, String> {
     let doc = doc_of(state)?;
-    let mut want: Vec<String> = layers.iter().map(|l| single_set_layer_name(doc, *l)).collect::<Result<_, _>>()?;
+    let mut want: Vec<String> = layers.iter().map(|l| selection_layer_name(doc, *l)).collect::<Result<_, _>>()?;
     want.sort();
     let listing = dir_names(dir)?;
     if listing != want {
@@ -1039,7 +1040,7 @@ fn expect_layer_files(state: &AppState, dir: &Path, layers: &[LayerId]) -> Resul
     }
     let mut images = Vec::new();
     for id in layers {
-        let name = single_set_layer_name(doc, *id)?;
+        let name = selection_layer_name(doc, *id)?;
         let image = decode_named(&name, &std::fs::read(dir.join(&name)).map_err(|e| format!("{name}: {e}"))?)?;
         let (set, _) = doc.find_layer(*id).ok_or("no such layer")?;
         let set = doc.set(set).ok_or("no such set")?;
@@ -1230,7 +1231,7 @@ fn export_zip() -> Vec<Step> {
             let folder = folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
             let want = format!("Exported {zip} ({n} files) to {folder}");
             let labels = s.toasts.visible_labels();
-            if !labels.iter().any(|l| *l == want) {
+            if !labels.contains(&want) {
                 return Err(format!("no toast {want:?} in {labels:?}"));
             }
             Ok(())
@@ -1450,6 +1451,25 @@ fn flow_open() -> Vec<Step> {
     ]
 }
 
+/// Gives every set whose active layer is not a paint layer (a stamp or text layer, or none, as a saved project may
+/// leave it) a new paint layer, as the brush's own steps (3) and (4) would on the first press (toast "Created paint
+/// layer"), so the stroke that follows is exactly one history entry on a fresh import and on a saved `.wtep` alike
+/// (check_exp_1 D6). A fresh import already has "Paint 1" active in every set: nothing changes there.
+fn flow_paint_layers(state: &mut AppState, _sc: &mut Scratch) -> Result<(), String> {
+    let doc = &mut state.session.as_mut().ok_or("no document")?.doc;
+    for set in doc.set_ids() {
+        match doc.paint_target(set) {
+            wte_core::PaintTarget::Ready(_) => {}
+            wte_core::PaintTarget::NotRaster(_) | wte_core::PaintTarget::NoActiveLayer => {
+                let layer = doc.add_raster_layer(set, None).map_err(|e| format!("set {set:?}: {e:?}"))?;
+                log::info!("export_flow: set {set:?} gets the paint layer {layer:?} before the stroke");
+            }
+            other => return Err(format!("set {set:?}: the active layer cannot be painted ({other:?})")),
+        }
+    }
+    Ok(())
+}
+
 /// The flow on the open document (EXPORT_SELECT_PLAN 7): paint, stamp, text and a wrapped stamp, then export one
 /// layer, a selection and everything as one zip, each checked file by file against the document, which the exports
 /// must leave unchanged.
@@ -1460,6 +1480,7 @@ fn flow_steps() -> Vec<Step> {
         Step::WaitIdle,
         Step::Do(AppAction::FrameModel),
         Step::WaitIdle,
+        Step::Setup("every set's active layer is a paint layer (a saved project may end on a stamp layer)", flow_paint_layers),
         Step::Setup("remember the history and the composite", |s, sc| {
             remember_undo(s, sc)?;
             remember_composite(s, sc, "flow_before")

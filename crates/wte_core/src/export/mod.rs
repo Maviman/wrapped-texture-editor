@@ -117,7 +117,13 @@ struct PlanItem {
 
 /// Indices of the sets to export: all, or the requested ones that exist, ascending and without duplicates. With a
 /// layer selection (`opts.layers`), the sets that hold none of the selected layers are left out.
-fn selected_sets(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<usize> {
+///
+/// The second value says whether file names carry the set name. Without a layer selection: the sets to export are
+/// more than one (unchanged rule). Under a layer selection: the model has more than one set, whatever `opts.sets` and
+/// the selection narrow it to. So a layer selected on a multi-set model keeps its set name (`<base>_<set>_L02_...`),
+/// the same name the full export gives that layer, and two sets' layers with the same index and name never share a
+/// file name (check_exp_1 D4).
+fn selected_sets(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> (Vec<usize>, bool) {
     let mut indices: Vec<usize> = match &opts.sets {
         None => (0..snapshot.sets.len()).collect(),
         Some(ids) => {
@@ -127,10 +133,11 @@ fn selected_sets(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<usize
             indices
         }
     };
+    let multi = if opts.layers.is_some() { snapshot.sets.len() > 1 } else { indices.len() > 1 };
     if opts.layers.is_some() {
         indices.retain(|&i| exported_layers(&snapshot.sets[i], opts).next().is_some());
     }
-    indices
+    (indices, multi)
 }
 
 /// The layers that go into per-layer and layered output, with their index in the stack: those `include_hidden` lets
@@ -145,8 +152,7 @@ fn exported_layers<'a>(set: &'a SetSnapshot, opts: &'a ExportOptions) -> impl It
 /// The ordered list of output files: per set the flattened texture, the per-layer PNGs bottom to top, ORA, PSD.
 /// Colliding names get `_2`, `_3`, ... (section 7.5).
 fn build_plan(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<PlanItem> {
-    let sets = selected_sets(snapshot, opts);
-    let multi = sets.len() > 1;
+    let (sets, multi) = selected_sets(snapshot, opts);
     let base = opts.base_name.as_str();
     let mut names = naming::NameDeduper::default();
     let mut items = Vec::new();
@@ -1510,17 +1516,57 @@ mod tests {
         let snapshot = doc.snapshot();
         let glaze = snapshot.sets[0].layers[2].id;
         let opts = ExportOptions { layers: Some(vec![glaze]), ..every_format(Path::new("out")) };
-        // Only the first set is left, so its files carry no `_<set>` part.
-        assert_eq!(file_names(&plan(&snapshot, &opts)), ["model.png", "model_L02_paint_Glaze.png", "model.ora", "model.psd"]);
+        let (body, head) = (&snapshot.sets[0].name, &snapshot.sets[1].name);
+        // Only the first set is left; the model has two sets, so its files keep the `_<set>` part (the names the full
+        // export gives them).
+        assert_eq!(
+            file_names(&plan(&snapshot, &opts)),
+            [
+                format!("model_{body}.png"),
+                format!("model_{body}_L02_paint_Glaze.png"),
+                format!("model_{body}.ora"),
+                format!("model_{body}.psd")
+            ]
+        );
         assert!(plan_contents(&snapshot, &opts).iter().all(|f| f.set == TextureSetId(0)));
         // One layer of each set: both sets, with the set names.
         let head_paint = snapshot.sets[1].layers[1].id;
         let both = ExportOptions { layers: Some(vec![glaze, head_paint]), per_layer_png: true, ..options(Path::new("out")) };
-        let (body, head) = (&snapshot.sets[0].name, &snapshot.sets[1].name);
         assert_eq!(
             file_names(&plan(&snapshot, &both)),
             [format!("model_{body}_L02_paint_Glaze.png"), format!("model_{head}_L01_paint_Paint 1.png")]
         );
+    }
+
+    /// check_exp_1 D4: two sets' layers with the same index and name, each exported alone (with or without the set
+    /// filter the dialog opened from a layer row sets), get different file names (each the name the full export gives
+    /// that layer), so the second export does not replace the first. A set filter of one set without a layer
+    /// selection still drops the set name, as before.
+    #[test]
+    fn a_selection_on_a_multi_set_model_keeps_the_set_name() {
+        let doc = painted_two_set_doc();
+        let snapshot = doc.snapshot();
+        let (body_paint, head_paint) = (snapshot.sets[0].layers[1].id, snapshot.sets[1].layers[1].id);
+        assert_eq!(snapshot.sets[0].layers[1].name, snapshot.sets[1].layers[1].name, "the same layer name in both sets");
+        let one = |id| ExportOptions { layers: Some(vec![id]), per_layer_png: true, ..options(Path::new("out")) };
+        let (a, b) = (file_names(&plan(&snapshot, &one(body_paint))), file_names(&plan(&snapshot, &one(head_paint))));
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_ne!(a, b, "two sets' layers never share a file name");
+        let full = ExportOptions { per_layer_png: true, include_hidden: true, ..options(Path::new("out")) };
+        let full = file_names(&plan(&snapshot, &full));
+        assert!(full.contains(&a[0]) && full.contains(&b[0]), "{a:?} {b:?} are the full export's names: {full:?}");
+        // The Export dialog opened from a layer row also sets the set filter to that layer's set: same names.
+        let filtered = ExportOptions { sets: Some(vec![TextureSetId(1)]), ..one(head_paint) };
+        assert_eq!(file_names(&plan(&snapshot, &filtered)), b);
+        // The zip of a selection: entries named like the loose files of the full export too.
+        let zip = ExportOptions { package: ExportPackage::Zip, ..one(head_paint) };
+        assert_eq!(plan_contents(&snapshot, &zip).into_iter().map(|f| f.name).collect::<Vec<_>>(), b);
+        // A set filter of one set (no layer selection): no set name, unchanged.
+        let only_head = ExportOptions { sets: Some(vec![TextureSetId(1)]), per_layer_png: true, ..options(Path::new("out")) };
+        let names = file_names(&plan(&snapshot, &only_head));
+        let head = format!("_{}", snapshot.sets[1].name);
+        assert!(!names.is_empty() && names.iter().all(|n| !n.contains(&head)), "set filter: no set name: {names:?}");
     }
 
     /// The entries of a zip file.
@@ -1539,8 +1585,8 @@ mod tests {
         let zip_opts = ExportOptions { dir: packed.clone(), package: ExportPackage::Zip, ..tga.clone() };
         let report = run(&snapshot, &zip_opts, &NoProgress).unwrap();
         let zip_path = packed.join("model.zip");
-        assert_eq!(report.files, [zip_path.clone()]);
-        assert_eq!(plan(&snapshot, &zip_opts), [zip_path.clone()]);
+        assert_eq!(report.files, std::slice::from_ref(&zip_path));
+        assert_eq!(plan(&snapshot, &zip_opts), std::slice::from_ref(&zip_path));
         assert_eq!(dir_listing(&packed), ["model.zip"], "no stage folder, no temp file");
         assert_eq!(report.bytes_written, std::fs::metadata(&zip_path).unwrap().len());
         let entries = zip_entries(&zip_path);

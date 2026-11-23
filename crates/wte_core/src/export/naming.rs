@@ -96,6 +96,11 @@ pub fn layered_name(base: &str, set_name: &str, multi: bool, ext: &str) -> Strin
     format!("{}.{ext}", stem_for(base, set_name, multi))
 }
 
+/// File name of a single-package export (`ExportPackage::Zip`): `<base>.zip`, the base sanitized. See section 7.5.
+pub fn package_name(base: &str) -> String {
+    format!("{}.zip", sanitize_file_stem(base))
+}
+
 /// Splits a file name at its last dot into (stem, extension without the dot). A name without a dot, or with only a
 /// leading one (".hidden"), has no extension.
 pub(crate) fn split_extension(name: &str) -> (&str, &str) {
@@ -188,6 +193,16 @@ mod tests {
         assert_eq!(layer_name("", "", true, 3, "stamp", ""), "untitled_untitled_L03_stamp_untitled.png");
         assert_eq!(flat_name("nul", "x", false, "png"), "_nul.png");
         assert_eq!(layer_name("a", "b", false, 100, "paint", "c"), "a_L100_paint_c.png");
+    }
+
+    #[test]
+    fn package_names() {
+        assert_eq!(package_name("robot"), "robot.zip");
+        assert_eq!(package_name("my: robot?"), "my_ robot_.zip");
+        assert_eq!(package_name("con"), "_con.zip");
+        assert_eq!(package_name("lpt1"), "_lpt1.zip");
+        assert_eq!(package_name(""), "untitled.zip");
+        assert_eq!(package_name("trailing. "), "trailing.zip");
     }
 
     #[test]

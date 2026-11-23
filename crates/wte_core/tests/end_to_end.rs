@@ -422,6 +422,8 @@ fn two_material_pipeline() {
         psd: true,
         include_hidden: true,
         dilate_px: 0,
+        layers: None,
+        package: wte_core::ExportPackage::Files,
     };
     let planned = export::plan(&snapshot, &opts);
     let written = export::run(&snapshot, &opts, &NoProgress).unwrap();
@@ -474,6 +476,53 @@ fn two_material_pipeline() {
             assert_visible_equal(&p.pixels.to_dense(w, h), &dense(layer, w, h), &format!("PSD layer {}", layer.name));
         }
         assert!(parsed.merged == *composite, "PSD merged image (the composite is opaque)");
+    }
+
+    // The same export as one zip package: its entries are the files just checked, in plan order, byte for byte.
+    let zip_opts = ExportOptions { dir: dir.join("package"), package: wte_core::ExportPackage::Zip, ..opts.clone() };
+    let packed = export::run(&snapshot, &zip_opts, &NoProgress).unwrap();
+    assert_eq!(packed.files, [dir.join("package").join("robot.zip")]);
+    let zip_entries = export::read_package(&std::fs::read(&packed.files[0]).unwrap()).unwrap();
+    assert_eq!(packed.packaged, zip_entries.len());
+    assert_eq!(zip_entries.len(), planned.len());
+    for ((name, bytes), path) in zip_entries.iter().zip(&planned) {
+        assert_eq!(name.as_str(), path.file_name().unwrap().to_str().unwrap());
+        assert!(*bytes == std::fs::read(path).unwrap(), "zip entry {name} differs from the loose file");
+    }
+
+    // A layer selection: the stamp and text layers of the body set.
+    let body_set = snapshot.sets.iter().find(|s| s.id == body).unwrap();
+    let picked: Vec<usize> = body_set.layers.iter().enumerate().filter(|(_, l)| !l.is_raster()).map(|(i, _)| i).collect();
+    assert!(picked.len() >= 2, "the body set holds a stamp and a text layer");
+    let ids: Vec<_> = picked.iter().map(|&i| body_set.layers[i].id).collect();
+    let sel_dir = dir.join("selection");
+    let sel_opts = ExportOptions {
+        dir: sel_dir.clone(),
+        flat: None,
+        ora: false,
+        psd: false,
+        layers: Some(ids.clone()),
+        ..opts.clone()
+    };
+    let sel = export::run(&snapshot, &sel_opts, &NoProgress).unwrap();
+    assert_eq!(sel.files.len(), ids.len());
+    let mut listing: Vec<String> =
+        std::fs::read_dir(&sel_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    listing.sort();
+    let mut wanted: Vec<String> = picked
+        .iter()
+        .map(|&i| {
+            let layer = &body_set.layers[i];
+            export::layer_name("robot", &body_set.name, false, i, layer.kind_name(), &layer.name)
+        })
+        .collect();
+    wanted.sort();
+    assert_eq!(listing, wanted, "exactly the selected layers, named without the set (one set)");
+    for &i in &picked {
+        let layer = &body_set.layers[i];
+        let name = export::layer_name("robot", &body_set.name, false, i, layer.kind_name(), &layer.name);
+        let file = std::fs::read(sel_dir.join(&name)).unwrap();
+        assert!(decode(&file, &name) == dense(layer, body_set.width, body_set.height), "{name}");
     }
 
     // Every flat format.
@@ -1282,6 +1331,8 @@ fn persist_and_export(doc: &mut Document, seed: u64) {
         psd: true,
         include_hidden: seed.is_multiple_of(2),
         dilate_px: 0,
+        layers: None,
+        package: wte_core::ExportPackage::Files,
     };
     let report = export::run(&snapshot, &opts, &NoProgress).unwrap();
     assert_eq!(report.files, export::plan(&snapshot, &opts));
@@ -1394,6 +1445,8 @@ fn error_cases_change_nothing() {
         psd: false,
         include_hidden: false,
         dilate_px: 0,
+        layers: None,
+        package: wte_core::ExportPackage::Files,
     };
     assert!(export::plan(&doc.snapshot(), &opts).is_empty());
     assert!(matches!(export::run(&doc.snapshot(), &opts, &NoProgress), Err(ExportError::NothingToExport)));

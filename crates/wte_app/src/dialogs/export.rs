@@ -593,6 +593,8 @@ mod tests {
             psd: false,
             include_hidden: false,
             dilate_px: 0,
+            layers: None,
+            package: wte_core::ExportPackage::Files,
         }
     }
 

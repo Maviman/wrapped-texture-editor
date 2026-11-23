@@ -1497,6 +1497,8 @@ fn export_pngs(doc: &Document, dir: &Path) -> BTreeMap<String, Vec<u8>> {
         psd: false,
         include_hidden: true,
         dilate_px: 0,
+        layers: None,
+        package: wte_core::ExportPackage::Files,
     };
     let report = export::run(&doc.snapshot(), &opts, &NoProgress).unwrap();
     report

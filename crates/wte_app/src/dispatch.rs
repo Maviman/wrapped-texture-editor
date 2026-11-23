@@ -334,6 +334,8 @@ fn export_defaults(state: &AppState) -> Option<ExportDialogState> {
             psd: false,
             include_hidden: false,
             dilate_px: 0,
+            layers: None,
+            package: wte_core::ExportPackage::Files,
         },
         format_index: 0,
         jpeg_quality: DEFAULT_JPEG_QUALITY,

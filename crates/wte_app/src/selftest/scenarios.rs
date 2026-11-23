@@ -2062,6 +2062,8 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
         psd: true,
         include_hidden: false,
         dilate_px: 0,
+        layers: None,
+        package: wte_core::ExportPackage::Files,
     })
 }
 

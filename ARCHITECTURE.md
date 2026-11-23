@@ -203,8 +203,10 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `stroke.rs` | C3 | `StrokeSession`, `Document::stroke_*`, `sample_color` |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
-| `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a |
+| `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
 | `wrap_bake.rs` | round 6 A | `bake_wrapped` (6.5a "Bake"; round 8: the owner test) |
+| `wrap_mesh.rs` | round 9 B | child module `wrap_param::wrap_mesh`: `WrapMesh` (the welded graph of a whole mesh: weld + boundary snap, CSR vertex -> triangles, global edge ids), `WrapMeshCell` (lazy, shared by `Arc`: graph and shared texels), `WrapMeshWarmup` (6.5a step 1, round 9 B) |
+| `uv_share.rs` | round 9 B | `UvShare`: per texture set a count raster of the UV footprints; per triangle "shares texels", the mesh's shared share; `UV_SHARE_WARN` (5.20 `stamp_shared_texels`) |
 | `wrap_relax.rs` | round 8 A | child module `wrap_param::relax`: seams S1-S5, wedges, LSCM / ARAP with the matrix-free CG, the owner grid (6.5a "Round 8") |
 | `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan and (round 8) WA4 / WA4b, WA20-WA27, WA29 (round 9) WA31-WA34, WA36, WA37 and `r8_quality_survey` (test-only module) |
 | `doc_stamps.rs` | C4; round 6 A | stamp/text commands on `Document`, source mip cache, `stamp_at`; round 6: the wrap dispatch of `bake_and_apply`, `ensure_wrap_param`, `stamp_wrap_*`, `stamp_ink_area` |
@@ -1699,6 +1701,12 @@ and a frame is only returned for its own spec. `add_stamp`'s failure path and `r
 (`forget_text_picture`).
 No topology field (round-4 user answer, plan section 7 item 1: no "Stay on connected surface").
 
+**Round 9 (package B, T7).** `BakeSets::wrap_mesh: Option<Arc<WrapMeshCell>>`: the welded mesh graph and the shared
+texels of the document's mesh, built lazily (by the first wrap job that needs a fresh parameterization, by the
+synchronous wrap path, or by the app's warm-up thread) and shared with every job by `Arc`. Derived data like
+`wrap_params`: not in snapshots, not saved. A cell is tied to its mesh by a `Weak` (`WrapMeshCell::is_for`);
+`Document::wrap_mesh_cell` makes a new cell when the document's mesh is another `Arc`.
+
 ### 5.15 `doc_build.rs` [C2]
 
 ```rust
@@ -2287,6 +2295,19 @@ impl Document {
     pub fn stamp_ink_area(&self, id: StampId) -> f32;
 }
 ```
+
+**Round 9 (package B).**
+- `wrap_mesh_cell(&mut self) -> Arc<WrapMeshCell>` (5.14). Every `StampBakeJob` carries it (`graph`); `wrap_bake` /
+  `wrap_param_only` build a fresh parameterization with `wrap_param_in(.., cell.get(mesh), ..)` (a reused one needs no
+  graph; a Project bake never builds it). The synchronous wrap path and `ensure_wrap_param` use the same cell, so the job
+  path and the synchronous path give the same bytes (WA28's sphere comparison, WA38). A fresh build logs `wrap phases:
+  stamp N graph .. ms, collect .. ms (K candidates), front .. ms, relax .. ms, owner .. ms`.
+- `wrap_mesh_warmup(graph) -> Option<WrapMeshWarmup>`: what the warm-up must build (the shared texels; with `graph`
+  also the welded graph), `None` when everything is built. `WrapMeshWarmup::run` builds them on any thread (graph first).
+- `stamp_shared_texels(&self, id) -> Option<f32>` (T9): the share of a 3D stamp's picture on triangles whose texels other
+  triangles use too, from 16 x 16 picture points (Wrap: `WrapParam::surface_of` of the cached parameterization; Project:
+  rays along `-out`). `None` until the shared texels are built, for a wrapped stamp without a serving
+  parameterization, for UV stamps. Never builds anything (UI thread).
 
 ### 5.21 `import/` [C5]
 
@@ -3331,6 +3352,24 @@ Steps 4-7 above are changed as follows (the rest stands).
 picture point `l` with interpolated depth `g_f` was kept only when `g_f <= g_min(cell) + OWNER_TOL (2) x (cell diagonal
 + its triangle's longest edge + the owner's longest edge)`; the tolerance grew with the triangle size and rejected
 nothing on coarse meshes (ROUND9_PLAN D1).
+
+**Round 9 (ROUND9_PLAN T7, package B): step 1-2 from the mesh graph.** The weld of step 2 is done once per mesh
+(`WrapMesh::build`, `wrap_mesh.rs`: the same bit-exact weld in order of first use over ascending triangles, the same
+boundary snap, collapsed triangles dropped; CSR vertex -> triangles; a global edge id per half-edge and the half-edges per
+edge). Candidates (`collect_grown`): the anchor is found with spheres of `1e-3 diag x 4^k` up to the reach radius (the
+same anchor rule: the triangles within `ANCHOR_TIE` of the nearest, facing `out` most, lowest id); the reach sphere grows
+by the anchor's offset as before; the candidates are the triangles reached from the anchor triangle over welded vertices
+whose closest point lies within that sphere (the BVH query's own test). With Jump small gaps: every in-sphere triangle,
+its parts over welded vertices and their boxes, and the parts whose boxes lie within `GAP_JUMP x diag` of a part
+already taken, transitively from the anchor's (no other part can be entered: the front's and the spine's jumps land within
+the gap). `Patch::from_graph` maps the global ids to local ones (first use, ascending triangle) with zeroed scratch arrays
+(no hash) and groups half-edges by global edge id (no sort); the position rank is the graph's (same order). So a patch of
+the same triangles equals round 8's per-patch weld wherever the graph's weld equals the patch's, which differs only where
+the reach sphere cut an edge within `WELD_SNAP` of another vertex. Round 8's sphere path stays under `#[cfg(test)]`
+(`Source::Sphere`, `sphere_check`): WA28 builds every parameterization of WA1-WA5, WA16-WA27, WA31-WA35 and extra Jump
+placements both ways and compares layers, owner grids and stats (135 parameterizations, all equal). `WRAP_MAX_TRIS`
+keeps the nearest grown candidates (round 8: the nearest in the sphere). `Jumper::new` no longer builds a hash map of
+the patch's triangles (a landing's local triangle: binary search in `patch.tris`).
 
 **Round 9 (ROUND9_PLAN section 3, package A): once, nothing lost.** Changes to the steps above:
 
@@ -5340,6 +5379,11 @@ The rows are 20 pt with 2 pt between them; the label column is 72 pt. The talles
 area (S2) holds it without scrolling. `PanelState.brush: BrushTabState { content, preview }` keeps the last frame's
 content and preview rects for the tests.
 
+**Round 9 (package B).** Under a selected 3D stamp (any mode) the tool options show, in the warning colour, "This
+model uses the same texture area in several places (mirrored or repeated parts): the picture also shows there." when
+`Document::stamp_shared_texels` is at least `UV_SHARE_WARN` (5 %); nothing while unknown. Under a wrapped stamp's stats
+line: "Longer than the way round: P % shown" when `WrapStats::ends_share < 0.95` (a closed or helical spine).
+
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
 ```rust
@@ -5688,6 +5732,17 @@ px (4 x 51 = 204 per atlas; white with the coverage as alpha, so the picker tint
 `font_samples_<n>` and records each family's cell (`FontSampleState::cells`, `atlases`); a family without a sample
 has no cell. Measured on this machine (T7, release test build): 78 families, all drawn, 15.5 ms with a warm file cache (limit 0.5 s).
 
+**Round 9 (package B, T8).**
+- A Final waits for the wrap job in flight of its stamp only when that job was made for the stamp's current placement
+  (`final_waits_for_wrap_job` compares `WrapFlight::placement`): then it reuses the job's parameterization; a job made for
+  an earlier frame of the drag does not hold the Final back (the Final starts in the same pump, the job's output lands
+  stale).
+- Warm-up: the Transform tool's `ensure_wrap_param` asks for it whenever a 3D stamp is selected
+  (`WrapJobs::request_warmup(wrapped)`); `after_tools` starts `Document::wrap_mesh_warmup(..).run()` on a named
+  background thread (`wrap-warm-up`) outside `Jobs` when something is unbuilt and no warm-up runs (no `JobOutput`: it
+  fills the document's `WrapMeshCell`, which the jobs share; a wrap job that needs the graph meanwhile waits in the
+  cell's `OnceLock`). Logged as `wrap mesh: ...` (no `wrap:` line, Q5).
+
 ### 8.10 Shortcuts (`shortcuts.rs`) [A1]
 
 ```rust
@@ -5929,6 +5984,12 @@ the A12 pixel budget (300 pt, slider rows inside the tool area, tab without scro
 inside the lower area (gate 1).
 \* action-only smoke scenarios: already contained in the scaffold's stub of `scenarios.rs`, so `app-shell` and `app-gpu` can be
 verified before the views exist (section 10).
+
+**Round 9 (package B).** `wrap_surface` step 10 (PATH): after the Jump-off Final a capture `<out>_off.png`; per
+setting a `coverage:` line (covered, ends_share, reached_edge, lost_cut, passed); after the Jump-on screenshot frames a
+third log state, `panel lines:` (the shared-texel share and whether the T9 line shows, ends_share and whether its line
+shows); and the asserts of ROUND9_PLAN 7.2: `covered >= 0.85 x ends_share` unless `reached_edge`, `lost_cut <= 10 %`,
+both settings.
 
 ### 8.12 Theme and icon (`theme.rs`) [A1]
 
@@ -6439,6 +6500,16 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
 `a_wrap_preview_landing_after_a_turn_to_project_in_the_same_edit_is_dropped`.
 
 ---
+
+- Round 9 (package B): `stamp_bakes::a_final_does_not_wait_for_a_wrap_preview_job_of_another_placement` (T8: the Final
+  starts in the pump of the release beside the Preview job of the earlier placement, which lands stale; pixels equal the
+  synchronous Final); `tool_options::the_shared_texel_line_shows_where_the_model_reuses_its_texture` (T9: shown on
+  mirrored halves after the warm-up, not on the sphere, nothing known before);
+  `tool_options::a_picture_longer_than_the_way_round_says_how_much_is_shown`. Core (`wrap_tests.rs`, `uv_share.rs`):
+  WA28 (growth: candidates <= 1.25 x laid + halo on `cubes_on_floor(5)`; graph path = sphere path), WA38 (one graph per
+  mesh shared by Full / Preview / ParamOnly jobs, a new cell for a new mesh, no rayon inside the init), WA39 (shared
+  texels: mirrored sample 0.5, sphere and cube on floor 0); the WA15 probe reports the graph build, the shared texels and
+  per parameterization the phases of the graph path next to round 8's sphere path.
 
 ## 10. Work packages
 

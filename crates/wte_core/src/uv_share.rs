@@ -12,11 +12,14 @@ use glam::Vec2;
 use crate::ids::TriId;
 use crate::mesh::MeshData;
 
-/// Side of the count raster per texture set (texels).
+/// Side of the count raster per texture set (texels); a set with many small footprints gets a finer raster (up to
+/// `UV_SHARE_MAX_RES`) so that a footprint covers about `UV_SHARE_PX` pixel centres on average.
 pub const UV_SHARE_RES: u32 = 1024;
+pub const UV_SHARE_MAX_RES: u32 = 4096;
+pub const UV_SHARE_PX: f64 = 8.0;
 /// Most pixel-centre tests per texture set: a set whose footprints would take more (large or tiled UVs) is counted on
 /// a coarser raster (half the side per step, at least 128).
-pub const UV_SHARE_WORK: f64 = 32e6;
+pub const UV_SHARE_WORK: f64 = 64e6;
 /// Least share of a selected stamp's area on triangles that share texels for which the panel warns.
 pub const UV_SHARE_WARN: f32 = 0.05;
 
@@ -104,9 +107,17 @@ impl UvShare {
         };
         let mut count: Vec<u8> = Vec::new();
         for tris in by_set.iter().filter(|l| !l.is_empty()) {
-            // The raster of this set: as fine as `res` unless the footprints would take more than `UV_SHARE_WORK`
-            // tests (a footprint of a whole texture or more is not rasterized: `huge`).
+            // The raster of this set: `res`, finer where the footprints are small (`UV_SHARE_PX` centres each on
+            // average), coarser where they would take more than `UV_SHARE_WORK` tests (a footprint of a whole texture or
+            // more is not rasterized: `huge`).
+            let uv_area: f64 = tris.iter().map(|&t| {
+                let uv = mesh.tri_uvs(t);
+                (0.5 * (uv[1] - uv[0]).perp_dot(uv[2] - uv[0]).abs() as f64).min(1.0)
+            }).filter(|a| a.is_finite()).sum();
             let mut r = res;
+            while r < UV_SHARE_MAX_RES && uv_area * (r as f64) * (r as f64) < UV_SHARE_PX * tris.len() as f64 {
+                r *= 2;
+            }
             let work = |r: u32| tris.iter().map(|&t| box_area(t).min(1.0)).sum::<f64>() * (r as f64) * (r as f64);
             while r > 128 && work(r) > UV_SHARE_WORK {
                 r /= 2;
@@ -115,22 +126,16 @@ impl UvShare {
             let everywhere = huge.iter().filter(|&&h| h).count().min(255) as u8;
             count.clear();
             count.resize(r as usize * r as usize, 0);
-            // Pass 1: every footprint counted (a triangle that covers no pixel centre counts its centroid's pixel; a
-            // huge one counts everywhere).
+            // Pass 1: every footprint counted (a huge one counts everywhere; one that covers no pixel centre is not
+            // counted: it would make its neighbour's pixel look shared).
             for (&t, &h) in tris.iter().zip(&huge) {
-                if h {
-                    continue;
-                }
-                let uv = mesh.tri_uvs(t);
-                let n = raster(uv, r, &mut |i| count[i] = count[i].saturating_add(1));
-                if n == 0
-                    && let Some(i) = centroid_pixel(uv, r)
-                {
-                    count[i] = count[i].saturating_add(1);
+                if !h {
+                    raster(mesh.tri_uvs(t), r, &mut |i| count[i] = count[i].saturating_add(1));
                 }
             }
             // Pass 2: a triangle shares texels when more than half of its footprint is counted twice or more (a huge
-            // footprint covers some texels twice by itself).
+            // footprint covers some texels twice by itself; one without a pixel centre when two other footprints cover
+            // its centroid).
             for (&t, &h) in tris.iter().zip(&huge) {
                 if h {
                     shares[t as usize] = true;

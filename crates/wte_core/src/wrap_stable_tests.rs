@@ -256,3 +256,32 @@ fn w1_reuse_equals_fresh_within_the_bucket() {
         assert!(reused_sizes >= 2, "{what}: only {reused_sizes} sizes stay in the bucket");
     }
 }
+
+/// `n x n` separate square tiles of side `side` one unit apart in the XY plane (facing +Z), each its own part and UV
+/// cell (the code skeptic's tiles300, smaller).
+pub(super) fn tiles(n: u32, side: f32) -> RawMesh {
+    let mut t = Vec::new();
+    let half = n as f32 * 0.5;
+    for j in 0..n {
+        for i in 0..n {
+            let o = Vec3::new(i as f32 - half, j as f32 - half, 0.0);
+            let p = [o, o + Vec3::new(side, 0.0, 0.0), o + Vec3::new(side, side, 0.0), o + Vec3::new(0.0, side, 0.0)];
+            let isl = a9_island(j * n + i, n, n);
+            raw_quad(&mut t, [p[3], p[2], p[1], p[0]].map(|q| q), [isl[0], isl[1], isl[2], isl[3]]);
+        }
+    }
+    textured("Tiles", t)
+}
+
+/// Stable (w1), item 4: `lost_cut` counts picture lost to cuts, not the gaps between jumped parts. A tiled floor of
+/// 40 x 40 separate tiles (gaps of 0.1, Jump small gaps on, no cut): lost_cut stays near 0 (round 9: the gap share,
+/// about 1 - 0.9^2 = 19 %; tiles300 16.85 %). One part with a cut keeps counting (WA37 and the sweep's Lantern).
+#[test]
+fn w1_lost_cut_does_not_count_the_gaps_between_parts() {
+    let p = with_options(wrapped(Vec3::new(0.45, 0.45, 0.0), Vec3::Z, Vec3::Y, Vec2::new(8.0, 4.0)), true, false);
+    let model = Model::new(tiles(40, 0.9), 256);
+    let s = model.param(&cells(), &p).expect("a parameterization").stats();
+    println!("W1 tiles 40 x 40, Jump on: {s:?}");
+    assert!(s.jumps > 100 && s.seams == 0, "{s:?}");
+    assert!(s.lost_cut <= 0.01, "lost_cut {:.4} counts the gaps between the tiles: {s:?}", s.lost_cut);
+}

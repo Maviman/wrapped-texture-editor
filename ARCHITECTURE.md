@@ -3483,6 +3483,11 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   `seams` / `seams_by_rule` / `cut_tris` (the relaxed layout's laid seam half-edges with their f64 ends, plus a seed
   layout's torn triangles), `rejected` / `lost_cut` (per owner cell the mark and the (laid triangle, centre) pair counts,
   `OwnerGrid::rejected_pairs` / `lost_cells`). The last size asked is memoised. Round 9 refreshed `covered` only.
+- **`lost_cut` is picture lost to cuts (item 4).** An uncovered picture cell counts only when the nearest covered
+  cells on both sides in its row (or in its column) are owned by the **same part** (the owner grid keeps each cell's
+  owner part): a gap between two parts (Jump small gaps: tiles, kit-bashed pieces) is not surface lost to a cut. For
+  one part this is round 9's span rule, cell for cell (the sweep's Lantern: 11.23 % either way); a 40 x 40 tiled floor
+  with Jump on: 17.06 % -> 0.
 
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 

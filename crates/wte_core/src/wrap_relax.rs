@@ -1612,9 +1612,6 @@ struct CompRun {
 /// positions and pins, its run.
 type CompOut = (Vec<u32>, Vec<DVec2>, Vec<bool>, CompRun);
 
-/// check:B (round 9): (first, last) covered cell per row or column of the owner grid.
-type Spans = Vec<(usize, usize)>;
-
 /// check:B (round 9): one row chunk of the owner grid's outputs (g, pos, scale) and of its per-cell marks.
 type GridOut<'a> = (((&'a mut [f32], &'a mut [[f32; 3]]), &'a mut [f32]), &'a mut [u8]);
 
@@ -1680,6 +1677,8 @@ pub(crate) struct OwnerGrid {
     cell64: f64,
     mark: Vec<u8>,
     pairs: Vec<[u16; 2]>,
+    /// Stable (w1, item 4): per cell the owner's part (`NONE` without an owner).
+    part: Vec<u32>,
 }
 
 /// The barycentric weights of `c` in the layout triangle `q` when it lies inside (edges included), else `None`.
@@ -1948,8 +1947,10 @@ impl OwnerGrid {
         } else {
             g.chunks_mut(rows).zip(pos.chunks_mut(rows)).zip(scale.chunks_mut(rows)).zip(mark.chunks_mut(rows)).enumerate().for_each(out);
         }
+        let part: Vec<u32> = cells.iter().map(|s| if s.best == NONE { NONE } else { tris[s.best as usize].part }).collect();
         drop(cells);
-        let mut grid = OwnerGrid { lo: [lo[0] as f32, lo[1] as f32], cell: cell as f32, dims, g, pos, scale, lo64: lo, cell64: cell, mark: Vec::new(), pairs: Vec::new() };
+        let mut grid =
+            OwnerGrid { lo: [lo[0] as f32, lo[1] as f32], cell: cell as f32, dims, g, pos, scale, lo64: lo, cell64: cell, mark: Vec::new(), pairs: Vec::new(), part };
         if debug {
             eprintln!("owner: grid out {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
@@ -2016,54 +2017,17 @@ impl OwnerGrid {
 
     /// Round 9 (A7): `lost_cut`, the picture's cells without an owner inside the laid set's outline: an uncovered cell
     /// with covered cells on both sides in its row or in its column (a cut wedge, a shrunk seam, a hole), as against
-    /// picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways). Returns (lost,
-    /// picture cells). Stable (w1, item 3): from the stored marks, for any picture.
+    /// picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways). Stable (w1, item 4):
+    /// the nearest covered cells on both sides must be owned by the same part: a gap between two parts (Jump small
+    /// gaps: tiles, kit-bashed pieces) is no surface lost to a cut (round 9 counted it: tiles300 16.85 % with no cut).
+    /// For one part the same cells as round 9's row and column spans. Returns (lost, picture cells). Stable (w1, item
+    /// 3): from the stored marks, for any picture.
     pub(crate) fn lost_cells(&self, picture: [f64; 2]) -> (usize, usize) {
         let dims = self.dims;
         let width = dims[0];
         let n = dims[0] * dims[1];
-        let chunk_rows = OWNER_CHUNK_ROWS;
-        let chunks = dims[1].div_ceil(chunk_rows);
-        let par = n >= OWNER_PAR_CELLS;
         let mark = &self.mark;
         let covered = |k: usize| mark[k] & 1 != 0;
-        // Row spans per row; column spans per chunk of rows, merged by min / max (check:B: on the pool for a large
-        // grid; the same spans).
-        let row_span = |j: usize| {
-            let mut r = (usize::MAX, 0usize);
-            for i in 0..width {
-                if covered(j * width + i) {
-                    r.0 = r.0.min(i);
-                    r.1 = r.1.max(i);
-                }
-            }
-            r
-        };
-        let col_spans = |c: usize| {
-            let mut spans = vec![(usize::MAX, 0usize); width];
-            for j in c * chunk_rows..((c + 1) * chunk_rows).min(dims[1]) {
-                for (i, s) in spans.iter_mut().enumerate() {
-                    if covered(j * width + i) {
-                        s.0 = s.0.min(j);
-                        s.1 = s.1.max(j);
-                    }
-                }
-            }
-            spans
-        };
-        let (rspan, parts): (Spans, Vec<Spans>) = if par {
-            ((0..dims[1]).into_par_iter().map(row_span).collect(), (0..chunks).into_par_iter().map(col_spans).collect())
-        } else {
-            ((0..dims[1]).map(row_span).collect(), (0..chunks).map(col_spans).collect())
-        };
-        let mut cspan = vec![(usize::MAX, 0usize); dims[0]];
-        for part in &parts {
-            for (c, p) in cspan.iter_mut().zip(part) {
-                c.0 = c.0.min(p.0);
-                c.1 = c.1.max(p.1);
-            }
-        }
-        drop(parts);
         // check:A (round 9): the picture beyond a closure (where the ends or the halves meet: a triangle-sized
         // tooth line, and with a helix the band past the meeting line) is not lost to a cut. Uncovered picture
         // cells 4-connected through uncovered picture cells to a cell a closure triangle covers are left out.
@@ -2076,19 +2040,7 @@ impl OwnerGrid {
             [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < dims[1]).then(|| k + width)]
         };
         let seed = |k: usize| !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| mark[m] & 2 != 0);
-        let mut beyond = vec![false; n];
-        // check:B: the seeds on the pool for a large grid (the flood below reaches the same set from them in any order).
-        if par {
-            beyond.par_chunks_mut(chunk_rows * width).enumerate().for_each(|(c, out)| {
-                for (i, b) in out.iter_mut().enumerate() {
-                    *b = seed(c * chunk_rows * width + i);
-                }
-            });
-        } else {
-            for (k, b) in beyond.iter_mut().enumerate() {
-                *b = seed(k);
-            }
-        }
+        let mut beyond: Vec<bool> = (0..n).map(seed).collect();
         let mut queue: Vec<usize> = beyond.iter().enumerate().filter_map(|(k, &b)| b.then_some(k)).collect();
         while let Some(k) = queue.pop() {
             for m in neighbours(k).into_iter().flatten() {
@@ -2098,26 +2050,63 @@ impl OwnerGrid {
                 }
             }
         }
-        // Per row (lost, picture cells), integer sums (check:B: on the pool for a large grid).
-        let row_lost = |j: usize| {
-            let r = rspan[j];
-            let (mut lost, mut pic_cells) = (0usize, 0usize);
-            if self.centre(0, j).1.abs() > picture[1] {
-                return (0, 0);
+        // Per cell the part of the nearest covered cell above it in its column (`NONE`: none), then upwards from the
+        // bottom the part of the nearest covered cell below; per row the same left and right.
+        let part = &self.part;
+        let mut above = vec![NONE; n];
+        let mut last = vec![NONE; width];
+        for j in 0..dims[1] {
+            for (i, l) in last.iter_mut().enumerate() {
+                let k = j * width + i;
+                above[k] = *l;
+                if covered(k) {
+                    *l = part[k];
+                }
             }
-            for (i, c) in cspan.iter().enumerate() {
+        }
+        let mut enclosed = vec![false; n];
+        last.fill(NONE);
+        for j in (0..dims[1]).rev() {
+            for (i, l) in last.iter_mut().enumerate() {
+                let k = j * width + i;
+                enclosed[k] = above[k] != NONE && above[k] == *l;
+                if covered(k) {
+                    *l = part[k];
+                }
+            }
+        }
+        drop(above);
+        let (mut lost, mut pic_cells) = (0usize, 0usize);
+        let mut left = vec![NONE; width];
+        for j in 0..dims[1] {
+            if self.centre(0, j).1.abs() > picture[1] {
+                continue;
+            }
+            let row = j * width;
+            let mut l = NONE;
+            for (i, slot) in left.iter_mut().enumerate() {
+                *slot = l;
+                if covered(row + i) {
+                    l = part[row + i];
+                }
+            }
+            let mut r = NONE;
+            for i in (0..width).rev() {
+                let k = row + i;
+                let in_row = left[i] != NONE && left[i] == r;
+                if covered(k) {
+                    r = part[k];
+                }
                 if self.centre(i, j).0.abs() > picture[0] {
                     continue;
                 }
                 pic_cells += 1;
-                if !covered(j * width + i) && !beyond[j * width + i] && ((r.0 < i && i < r.1) || (c.0 < j && j < c.1)) {
+                if !covered(k) && !beyond[k] && (in_row || enclosed[k]) {
                     lost += 1;
                 }
             }
-            (lost, pic_cells)
-        };
-        let sum = |a: (usize, usize), b: (usize, usize)| (a.0 + b.0, a.1 + b.1);
-        if par { (0..dims[1]).into_par_iter().map(row_lost).reduce(|| (0, 0), sum) } else { (0..dims[1]).map(row_lost).fold((0, 0), sum) }
+        }
+        (lost, pic_cells)
     }
 
     /// The owner test at cell index `k`: a fragment at 3D point `p` of a triangle with stretch `s` is kept when the

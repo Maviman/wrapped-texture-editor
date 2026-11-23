@@ -43,6 +43,10 @@ pub const HOLE_FILL: f64 = 8.0;
 /// (or one of them is flipped), the exact pins were inconsistent (a gentle cone) and the turn is relaxed again with the
 /// strip pinned only.
 pub const EXACT_STRAIN: f64 = 0.25;
+/// Stable (w2, item 1): a vertex with a closed laid fan whose |angle deficit| is at most this (radians) is flat: the
+/// exact region is developed through triangles with a flat corner. Rounding leaves 1e-8 on the samples' cylinders,
+/// planes and cones; a curved fine mesh has 1.5e-5 and more (WA4's 30 degree plate).
+pub const FLAT_TOL: f64 = 1e-6;
 
 // Round 9 (T5), test builds: the exact region switched off (`false`) on this thread, and what the last relaxation on
 // this thread did with it: (exact wedges pinned, fell back to the strip pins).
@@ -50,6 +54,8 @@ pub const EXACT_STRAIN: f64 = 0.25;
 thread_local! {
     pub(crate) static EXACT_REGION: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     pub(crate) static EXACT_OUTCOME: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
+    /// Stable (w2): the developed extension of the exact region switched off (`false`): round 9's seed-only region.
+    pub(crate) static EXACT_DEVELOP: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 /// Union-find: the root of `x` (path halving).
@@ -99,6 +105,13 @@ fn each<T: Send>(par: bool, v: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
     }
 }
 const ARAP_STOP: f64 = 0.0005;
+/// Stable (w2, item 3): the ARAP local step's target is the closest rotation scaled by `(det J)^(-AREA_PUSH / 2)`,
+/// clamped to `1 ..= AREA_PUSH_MAX`: a triangle laid smaller than its 3D area is asked to grow (a larger one keeps the
+/// rotation), so the solve gives back the area a pinned centre line and a steep bump left compressed (WA4 60 degrees:
+/// ink 1.118 -> 1.047; WA20: 1.189 -> 1.087). Shrinking stretched triangles too folded a closed lathe piece (WA21: 83
+/// flipped instead of 3). 0 = round 9's ARAP.
+pub const AREA_PUSH: f64 = 1.0;
+pub const AREA_PUSH_MAX: f64 = 1.5;
 const LSCM_TOL: f64 = 1e-6;
 const LSCM_ITERS: u32 = 600;
 const ARAP_TOL: f64 = 1e-5;
@@ -181,6 +194,10 @@ pub(super) fn fmm_update_tau(v: DVec3, a: DVec3, w: DVec3, gv: f64, ga: f64) -> 
 pub(super) struct Seams {
     /// Per half-edge `3 t + k`: the rules (bits S1-S5) that cut its edge; 0 = not cut.
     pub(super) cut: Vec<u8>,
+    /// Per vertex: its fan is open (a triangle round it not laid, a laid-set boundary or non-manifold edge).
+    pub(super) open: Vec<bool>,
+    /// Per vertex with a closed fan: its angle deficit (radians; 0 for open vertices).
+    pub(super) deficit: Vec<f64>,
 }
 
 /// The wedges and components of one turn's laid triangles.
@@ -548,8 +565,8 @@ impl<'a> Layout<'a> {
         // such vertices: its wedge is pinned at its seed position (bit-exact, as the seed path); only the rest is
         // solved. When the free triangles come out flipped or stretched beyond `EXACT_STRAIN` the pins were
         // inconsistent: the turn is solved again with the strip pins only (round 8).
-        let exact = self.exact_region(seed, &laid, &wedges, &pinned);
-        let exact_count = exact.iter().filter(|&&e| e).count() as u32;
+        let exact = self.exact_region(seed, &laid, &seams, &wedges, &pinned, &rest);
+        let exact_count = exact.iter().filter(|e| e.is_some()).count() as u32;
         #[cfg(test)]
         let use_exact = EXACT_REGION.with(|e| e.get()) && knob("WTE_TEST_EXACT_REGION", true);
         #[cfg(not(test))]
@@ -558,10 +575,10 @@ impl<'a> Layout<'a> {
         let (x, _, cg_iters) = if use_exact && exact_count > 0 {
             let mut x1 = x.clone();
             let mut pin1 = pinned.clone();
-            for (w, &e) in exact.iter().enumerate() {
-                if e {
+            for (w, e) in exact.iter().enumerate() {
+                if let Some((p, _)) = e {
                     pin1[w] = true;
-                    x1[w] = self.p2[wedges.vertex[w] as usize];
+                    x1[w] = *p;
                 }
             }
             // Stable (w1): the fallback is per component. A component whose exact pins do not hold is solved again
@@ -569,6 +586,9 @@ impl<'a> Layout<'a> {
             // failed: on the chess set the board, laid exactly from the strip, was turned by the free solve because a
             // pawn's pins failed). A jumped part re-placed from a changed source is solved again (`memo`) and checked
             // again. One component (no Jump, no cut-off piece) gives round 9's result.
+            // Stable (w2, item 1): the fallback has two steps. A component whose developed pins (`develop_exact`) do
+            // not hold first keeps the seed's exact region only (round 9's region: a steep bump inside a pinned
+            // plain has more surface than its pinned rim encloses); only when that fails too, the strip pins only.
             let ncomp = wedges.comps as usize;
             let mut comp_of_wedge = vec![NONE; nw];
             for (i, &w) in wedges.corner.iter().enumerate() {
@@ -576,34 +596,51 @@ impl<'a> Layout<'a> {
                     comp_of_wedge[w as usize] = wedges.comp[i / 3];
                 }
             }
-            let mut has_exact = vec![false; ncomp];
-            for (w, &e) in exact.iter().enumerate() {
-                if e && comp_of_wedge[w] != NONE {
-                    has_exact[comp_of_wedge[w] as usize] = true;
+            let (mut has_seed, mut has_dev) = (vec![false; ncomp], vec![false; ncomp]);
+            for (w, e) in exact.iter().enumerate() {
+                if let Some((_, dev)) = e
+                    && comp_of_wedge[w] != NONE
+                {
+                    let c = comp_of_wedge[w] as usize;
+                    if *dev {
+                        has_dev[c] = true;
+                    } else {
+                        has_seed[c] = true;
+                    }
                 }
             }
             let (mut xs, mut ps, mut cg, mut runs) = solve(&x1, &pin1, None);
-            let mut failed = vec![false; ncomp];
+            // Per component: 0 = every exact pin, 1 = the seed's exact region only, 2 = the strip pins only.
+            let mut level = vec![0u8; ncomp];
             loop {
-                let check: Vec<bool> = (0..ncomp).map(|c| has_exact[c] && !failed[c]).collect();
+                let check: Vec<bool> = (0..ncomp).map(|c| (has_seed[c] || has_dev[c]) && level[c] < 2).collect();
                 // Stable (w1, item 3): over the bucketed reach rectangle (round 9: the picture's own, so a reused
                 // parameterization could differ from a fresh one of another size in the bucket).
-                let mut now = self.exact_failed(&laid, &wedges, &xs, &ps, &rest, exact_rect, &check);
+                let now = self.exact_failed(&laid, &wedges, &xs, &ps, &rest, exact_rect, &check);
+                if knob("WTE_TEST_EXACT_DEBUG", false) {
+                    eprintln!("exact check: levels {level:?}, failed {now:?}, seed {has_seed:?}, developed {has_dev:?}");
+                }
                 if !now.iter().any(|&f| f) {
                     break;
                 }
-                // Test builds: round 9's all-or-nothing fallback, for the comparisons of the stable tests.
-                if knob("WTE_TEST_R9_FALLBACK", false) {
-                    now.clone_from(&has_exact);
+                for c in 0..ncomp {
+                    // Test builds: round 9's all-or-nothing fallback, for the comparisons of the stable tests.
+                    if knob("WTE_TEST_R9_FALLBACK", false) && (has_seed[c] || has_dev[c]) {
+                        level[c] = 2;
+                    } else if now[c] {
+                        level[c] = if level[c] == 0 && has_dev[c] && has_seed[c] { 1 } else { 2 };
+                    }
+                    fell_back |= level[c] == 2;
                 }
-                fell_back = true;
-                for (f, n) in failed.iter_mut().zip(&now) {
-                    *f |= *n;
-                }
-                for (w, &e) in exact.iter().enumerate() {
-                    if e && comp_of_wedge[w] != NONE && failed[comp_of_wedge[w] as usize] {
-                        x1[w] = x[w];
-                        pin1[w] = pinned[w];
+                for (w, e) in exact.iter().enumerate() {
+                    if let Some((_, dev)) = e
+                        && comp_of_wedge[w] != NONE
+                    {
+                        let l = level[comp_of_wedge[w] as usize];
+                        if l == 2 || (l == 1 && *dev) {
+                            x1[w] = x[w];
+                            pin1[w] = pinned[w];
+                        }
                     }
                 }
                 let (a, b, cg2, r) = solve(&x1, &pin1, Some(&runs));
@@ -691,7 +728,16 @@ impl<'a> Layout<'a> {
     /// Round 9 (T5): the exact region, per wedge (strip pins excluded): wedges of laid vertices that have one wedge,
     /// whose laid triangles are all isometric in the seed (not torn, edge ratios within `ISO_TOL`), connected to a
     /// pinned strip seed through such vertices.
-    fn exact_region(&self, seed: &[(u32, [DVec2; 3], bool)], laid: &[bool], wedges: &Wedges, strip_pins: &[bool]) -> Vec<bool> {
+    #[allow(clippy::too_many_arguments)]
+    fn exact_region(
+        &self,
+        seed: &[(u32, [DVec2; 3], bool)],
+        laid: &[bool],
+        seams: &Seams,
+        wedges: &Wedges,
+        strip_pins: &[bool],
+        rest: &[Option<(f64, [DVec2; 3])>],
+    ) -> Vec<Option<(DVec2, bool)>> {
         let patch = self.patch;
         let (ntri, nv, nw) = (patch.tv.len(), patch.pos.len(), wedges.vertex.len());
         let mut iso = vec![false; ntri];
@@ -762,7 +808,193 @@ impl<'a> Layout<'a> {
                 }
             }
         }
-        (0..nw).map(|w| reached[wedges.vertex[w] as usize] && !strip_pins[w]).collect()
+        let mut out: Vec<Option<(DVec2, bool)>> =
+            (0..nw).map(|w| (reached[wedges.vertex[w] as usize] && !strip_pins[w]).then(|| (self.p2[wedges.vertex[w] as usize], false))).collect();
+        #[cfg(test)]
+        let extend = knob("WTE_TEST_EXACT_DEVELOP", true) && EXACT_DEVELOP.with(|e| e.get());
+        #[cfg(not(test))]
+        let extend = true;
+        if extend {
+            self.develop_exact(laid, seams, wedges, strip_pins, rest, &wcount, &mut out);
+        }
+        out
+    }
+
+    /// Stable (w2, item 1): the exact region grown by **developing** the surface from it. The seed is not isometric
+    /// next to a curved part (the front's consensus at a cylinder's rim mixes the dome's unfolding into the side's
+    /// rows, WA35), but the surface there is developable: starting from the laid triangles whose corners are all
+    /// exact or strip pins and isometric, each laid triangle across an uncut manifold edge is unfolded rigidly onto
+    /// that edge (lowest `g` first) when one of its corners is **flat** (a closed laid fan with `|deficit| <=
+    /// FLAT_TOL`): a triangle whose corners are all curved (a dome) is left to the solve, so no curved fan closes
+    /// inside the developed region. A triangle whose third corner already has a position joins only when it is
+    /// isometric there. The developed wedges of vertices with one wedge are pinned at their developed positions;
+    /// then every laid triangle whose corners are all pinned must be isometric, else its developed corners are freed
+    /// (repeated until none fails). The exact pins' strain check and fallback stand behind this.
+    #[allow(clippy::too_many_arguments)]
+    fn develop_exact(
+        &self,
+        laid: &[bool],
+        seams: &Seams,
+        wedges: &Wedges,
+        strip_pins: &[bool],
+        rest: &[Option<(f64, [DVec2; 3])>],
+        wcount: &[u32],
+        out: &mut [Option<(DVec2, bool)>],
+    ) {
+        let patch = self.patch;
+        let (ntri, nw) = (patch.tv.len(), wedges.vertex.len());
+        // Positions per wedge: the strip pins (their seed positions) and the exact region.
+        let mut pos: Vec<Option<DVec2>> = (0..nw).map(|w| if strip_pins[w] { Some(self.p2[wedges.vertex[w] as usize]) } else { out[w].map(|(p, _)| p) }).collect();
+        let base: Vec<bool> = pos.iter().map(|p| p.is_some()).collect();
+        let flat_tol: f64 = knob("WTE_TEST_FLAT_TOL", FLAT_TOL);
+        let flat0 = |v: u32| !seams.open[v as usize] && patch.vtris(v).len() >= 3 && seams.deficit[v as usize].abs() <= flat_tol;
+        let flat_v: Vec<bool> = (0..patch.pos.len() as u32).map(flat0).collect();
+        // A flat vertex counts only inside a flat area (a triangle round it has three flat corners), not where a
+        // curved surface's deficit happens to cross zero on a line.
+        let core: Vec<bool> = (0..patch.pos.len() as u32)
+            .map(|v| flat_v[v as usize] && patch.vtris(v).iter().any(|&t| patch.tv[t as usize].iter().all(|&u| flat_v[u as usize])))
+            .collect();
+        let flat = |v: u32| core[v as usize];
+        let wedge3 = |t: usize| -> [u32; 3] { std::array::from_fn(|k| wedges.corner[t * 3 + k]) };
+        let usable = |t: usize| laid[t] && rest[t].is_some() && self.orient[t] != 0 && (0..3).all(|k| wedges.corner[t * 3 + k] != NONE);
+        let isometric = |t: usize, q: [DVec2; 3]| {
+            let p3 = patch.corners(t as u32);
+            let area = cross2(q[1] - q[0], q[2] - q[0]);
+            area * (self.orient[t] as f64) > 0.0
+                && (0..3).all(|i| {
+                    let j = (i + 1) % 3;
+                    let l3 = p3[i].distance(p3[j]);
+                    l3 > 0.0 && (q[i].distance(q[j]) / l3 - 1.0).abs() <= ISO_TOL
+                })
+        };
+        let at = |pos: &[Option<DVec2>], t: usize| -> Option<[DVec2; 3]> {
+            let w = wedge3(t);
+            Some([pos[w[0] as usize]?, pos[w[1] as usize]?, pos[w[2] as usize]?])
+        };
+        let tri_g = |t: usize| patch.tv[t].iter().map(|&v| self.key[v as usize]).fold(f64::NEG_INFINITY, f64::max);
+        #[derive(PartialEq)]
+        struct Item(f64, u32);
+        impl Eq for Item {}
+        impl PartialOrd for Item {
+            fn partial_cmp(&self, o: &Item) -> Option<Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+        impl Ord for Item {
+            fn cmp(&self, o: &Item) -> Ordering {
+                o.0.total_cmp(&self.0).then(o.1.cmp(&self.1))
+            }
+        }
+        // 0 = not visited, 1 = in the developed region, 2 = refused.
+        let mut state = vec![0u8; ntri];
+        let mut heap = BinaryHeap::new();
+        for (t, st) in state.iter_mut().enumerate() {
+            if usable(t) && at(&pos, t).is_some_and(|q| isometric(t, q)) {
+                *st = 1;
+                heap.push(Item(tri_g(t), t as u32));
+            }
+        }
+        if heap.is_empty() {
+            return;
+        }
+        while let Some(Item(_, t)) = heap.pop() {
+            let t = t as usize;
+            for k in 0..3 {
+                let he = t * 3 + k;
+                if seams.cut[he] != 0 {
+                    continue;
+                }
+                let mut members = laid_members(patch, laid, he);
+                let (Some(m0), Some(m1), None) = (members.next(), members.next(), members.next()) else { continue };
+                let other = if m0 as usize == he { m1 } else { m0 } as usize;
+                let (t2, k2) = (other / 3, other % 3);
+                if state[t2] != 0 || !usable(t2) || !patch.tv[t2].iter().any(|&v| flat(v)) {
+                    continue;
+                }
+                let w2 = wedge3(t2);
+                let [ia, ib] = [(k2 + 1) % 3, (k2 + 2) % 3];
+                let (Some(a), Some(b)) = (pos[w2[ia] as usize], pos[w2[ib] as usize]) else { continue };
+                // The third corner unfolded rigidly onto the edge, on the side of the triangle's orientation.
+                let p3 = patch.corners(t2 as u32);
+                let (la, lb, lab) = (p3[k2].distance(p3[ia]), p3[k2].distance(p3[ib]), p3[ia].distance(p3[ib]));
+                let e = b - a;
+                let el = e.length();
+                if !(lab > 0.0 && el > 0.0) {
+                    continue;
+                }
+                let xh = e / el;
+                let along = (la * la - lb * lb + lab * lab) / (2.0 * lab);
+                let off = (la * la - along * along).max(0.0).sqrt();
+                let mut q = [DVec2::ZERO; 3];
+                q[ia] = a;
+                q[ib] = b;
+                q[k2] = a + xh * along + xh.perp() * off;
+                if cross2(q[1] - q[0], q[2] - q[0]) * (self.orient[t2] as f64) < 0.0 {
+                    q[k2] = a + xh * along - xh.perp() * off;
+                }
+                let wc = w2[k2] as usize;
+                match pos[wc] {
+                    None => {
+                        pos[wc] = Some(q[k2]);
+                        state[t2] = 1;
+                        heap.push(Item(tri_g(t2), t2 as u32));
+                    }
+                    Some(have) => {
+                        q[k2] = have;
+                        if isometric(t2, q) {
+                            state[t2] = 1;
+                            heap.push(Item(tri_g(t2), t2 as u32));
+                        } else {
+                            state[t2] = 2;
+                        }
+                    }
+                }
+            }
+        }
+        // The developed wedges of one-wedge vertices are pinned; a laid triangle whose corners are all pinned must be
+        // isometric, else its developed corners are freed.
+        let mut pin: Vec<bool> = (0..nw).map(|w| base[w] || (pos[w].is_some() && wcount[wedges.vertex[w] as usize] == 1)).collect();
+        loop {
+            let mut changed = false;
+            for t in 0..ntri {
+                if !usable(t) {
+                    continue;
+                }
+                let w = wedge3(t);
+                if !w.iter().all(|&w| pin[w as usize]) || w.iter().all(|&w| base[w as usize]) {
+                    continue;
+                }
+                let q = w.map(|w| pos[w as usize].unwrap_or(DVec2::NAN));
+                if !isometric(t, q) {
+                    for &w in &w {
+                        if !base[w as usize] && pin[w as usize] {
+                            pin[w as usize] = false;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut added = 0u32;
+        for w in 0..nw {
+            if pin[w] && !base[w] {
+                out[w] = pos[w].map(|p| (p, true));
+                added += 1;
+            }
+        }
+        if knob("WTE_TEST_EXACT_DEBUG", false) {
+            let region = state.iter().filter(|&&s| s == 1).count();
+            let refused = state.iter().filter(|&&s| s == 2).count();
+            let flats = (0..patch.pos.len() as u32).filter(|&v| flat(v)).count();
+            let closed = (0..patch.pos.len()).filter(|&v| !seams.open[v]).count();
+            let mut d: Vec<f64> = (0..patch.pos.len()).filter(|&v| !seams.open[v] && patch.vtris(v as u32).len() >= 3).map(|v| seams.deficit[v].abs()).collect();
+            d.sort_by(f64::total_cmp);
+            let q = |f: f64| d.get(((d.len() as f64 * f) as usize).min(d.len().saturating_sub(1))).copied().unwrap_or(f64::NAN);
+            eprintln!("exact develop: region {region} triangles, refused {refused}, added {added} wedges; flat vertices {flats} of {closed} closed; |deficit| q0 {:.2e} q10 {:.2e} q25 {:.2e} q50 {:.2e} q90 {:.2e}", q(0.0), q(0.1), q(0.25), q(0.5), q(0.9));
+        }
     }
 
     /// Round 9 (T5): per component (`check`ed ones only), whether its exact pins failed: a free laid triangle of it
@@ -1274,7 +1506,20 @@ impl<'a> Layout<'a> {
                 mark(&mut cut, he, S5);
             }
         }
-        Seams { cut }
+        if knob("WTE_TEST_SEAM_DEBUG", false) {
+            for v in 0..nv {
+                if cone[v] || deficit[v].abs() > 0.3 {
+                    eprintln!("seam: vertex {v} pos {:?} deficit {:.1} deg cone {} open {}", patch.pos[v], deficit[v].to_degrees(), cone[v], open[v]);
+                }
+            }
+            for he in 0..ntri * 3 {
+                if laid[he / 3] && cut[he] != 0 && first_laid(patch, laid, he) {
+                    let [a, b] = edge_of(patch.tv[he / 3], he % 3);
+                    eprintln!("seam: edge {a}-{b} rules {:05b} {:?} -> {:?} g {:.3} {:.3}", cut[he], patch.pos[a as usize], patch.pos[b as usize], self.key[a as usize], self.key[b as usize]);
+                }
+            }
+        }
+        Seams { cut, open, deficit }
     }
 }
 
@@ -1411,9 +1656,18 @@ impl<'a> System<'a> {
     /// Per-triangle terms: `out[t][k]` = the term of corner `k` of triangle `t` in `H x` (`lscm`: the conformal
     /// energy's Hessian; else the ARAP global step's) or, with `rot`, in the ARAP right-hand side.
     fn terms(&self, lscm: bool, x: &[DVec2], rot: Option<&[DVec2]>, out: &mut [[DVec2; 3]]) {
+        self.terms_to(lscm, x, rot, None, out)
+    }
+
+    /// `terms` with, for ARAP, a general per-triangle target `[row x, row y]` (`shape`) instead of a rotation.
+    fn terms_to(&self, lscm: bool, x: &[DVec2], rot: Option<&[DVec2]>, shape: Option<&[[DVec2; 2]]>, out: &mut [[DVec2; 3]]) {
         let term = |t: usize| -> [DVec2; 3] {
             let (area, g) = self.rest[t];
             let c = self.tris[t];
+            if let Some(shape) = shape {
+                let [rx, ry] = shape[t];
+                return std::array::from_fn(|k| DVec2::new(rx.dot(g[k]), ry.dot(g[k])) * area);
+            }
             if let Some(rot) = rot {
                 let r = rot[t];
                 let (rx, ry) = (DVec2::new(r.x, -r.y), DVec2::new(r.y, r.x));
@@ -1553,6 +1807,12 @@ fn relax_component_from(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[b
     }
     let mut rot = vec![DVec2::X; tris.len()];
     let mut local = vec![(DVec2::X, 0.0f64); tris.len()];
+    // Stable (w2, item 3): the local target scaled against the current area ratio (`AREA_PUSH`; growth only).
+    let push: f64 = knob("WTE_TEST_AREA_PUSH", AREA_PUSH);
+    let push_max: f64 = knob("WTE_TEST_AREA_PUSH_MAX", AREA_PUSH_MAX);
+    let push_min: f64 = knob("WTE_TEST_AREA_PUSH_MIN", 1.0);
+    let shaped = push > 0.0;
+    let mut shape = if shaped { vec![[DVec2::X, DVec2::Y]; tris.len()] } else { Vec::new() };
     let mut terms = vec![[DVec2::ZERO; 3]; tris.len()];
     let mut rhs = vec![DVec2::ZERO; x.len()];
     let mut prev = f64::INFINITY;
@@ -1579,6 +1839,28 @@ fn relax_component_from(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[b
             rot[t] = r;
             energy += e;
         }
+        if shaped {
+            let xr: &[DVec2] = x;
+            each(sys.par, &mut shape, |t, o| {
+                let (_, g) = rest[t];
+                let xs = tris[t].map(|w| xr[w as usize]);
+                let jx = g[0] * xs[0].x + g[1] * xs[1].x + g[2] * xs[2].x;
+                let jy = g[0] * xs[0].y + g[1] * xs[1].y + g[2] * xs[2].y;
+                let det = jx.x * jy.y - jx.y * jy.x;
+                let c = if det > 0.0 && det.is_finite() { det.powf(-0.5 * push).clamp(push_min, push_max) } else { 1.0 };
+                let r = rot[t];
+                *o = [DVec2::new(r.x, -r.y) * c, DVec2::new(r.y, r.x) * c];
+            });
+            // The energy of the scaled targets (the objective the global step lowers), summed in triangle order.
+            energy = 0.0;
+            for t in 0..tris.len() {
+                let (area, g) = rest[t];
+                let xs = tris[t].map(|w| x[w as usize]);
+                let jx = g[0] * xs[0].x + g[1] * xs[1].x + g[2] * xs[2].x;
+                let jy = g[0] * xs[0].y + g[1] * xs[1].y + g[2] * xs[2].y;
+                energy += 0.5 * area * ((jx - shape[t][0]).length_squared() + (jy - shape[t][1]).length_squared());
+            }
+        }
         if debug {
             eprintln!("relax: ARAP energy {energy:.6e}");
         }
@@ -1587,7 +1869,7 @@ fn relax_component_from(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[b
         }
         prev = energy;
         // Global step.
-        sys.terms(false, x, Some(&rot), &mut terms);
+        sys.terms_to(false, x, Some(&rot), shaped.then_some(&shape[..]), &mut terms);
         sys.gather(&terms, &mut rhs);
         let n = sys.cg(false, &rhs, x, ARAP_TOL, arap_cg, budget);
         if debug {
@@ -1635,6 +1917,9 @@ pub(crate) struct OwnerTri {
     pub(crate) s: f32,
     /// Part (`Patch::part`) and oriented unit normal (zero for a degenerate triangle): the `buried` test.
     pub(crate) part: u32,
+    /// Stable (w2, item 4): the sheet (triangles joined over manifold edges; a non-manifold edge or a bow-tie vertex
+    /// separates sheets): a cell with candidates of two sheets at two places is mixed (the pages of a book).
+    pub(crate) sheet: u32,
     pub(crate) normal: DVec3,
     /// Laid (all corners final), not a halo triangle: only these count for `WrapStats::rejected`.
     pub(crate) laid: bool,
@@ -1808,12 +2093,12 @@ impl OwnerGrid {
                     let p = [p.x as f32, p.y as f32, p.z as f32];
                     let s = &mut out[k - base];
                     if s.best == NONE {
-                        *s = CellState { g, best: i, part0: t.part, p, first: p, seen: 0, closure: t.closure };
+                        *s = CellState { g, best: i, part0: t.sheet, p, first: p, seen: 0, closure: t.closure };
                         return;
                     }
                     s.closure |= t.closure;
                     if s.seen != 3 {
-                        if s.part0 != t.part {
+                        if s.part0 != t.sheet {
                             s.seen |= 1;
                         }
                         let d = Vec3::from(s.first).distance(Vec3::from(p)) as f64;

@@ -1144,7 +1144,11 @@ fn wa16_jump_small_gaps_continues_across_a_gap_as_flat_ground() {
 fn wa17_jump_small_gaps_climbs_a_cube_standing_on_the_floor() {
     let src = cells();
     // On the floor in front of the cube (+Z side), the picture's right pointing at the cube (-Z).
-    let base = wrapped(Vec3::new(0.0, 0.0, 1.2), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25));
+    // Stable (w2, item 2): centred at z = 0.95 (rounds 6-9: 1.2). From z = 1.2 the picture's last 0.2 of its 2.0
+    // length lay beyond the floor's edge (z = 2) and the floor under the cube was its only second place, so at most
+    // 0.90 of it could lie once (round 9: ink 0.915, dup 0) and `ink >= 0.95` asked for the copy under the cube. Now it
+    // runs from z = 1.95 on the floor (1.45) up the cube's side (0.55 of its 1.0 height): all of it has surface.
+    let base = wrapped(Vec3::new(0.0, 0.0, 0.95), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25));
     let area = 4.0 * 1.0 * 0.25;
     let (doc_off, off) = doc_with_stamp(samples::uv_cube_on_floor(), SIDE, base);
     let (cube_off, _) = ink_in(&doc_off, off, 0..12);
@@ -2103,8 +2107,9 @@ fn wa23_a_cone_tip_and_a_cube_corner_are_cut_once() {
 /// WA24: Jump small gaps enters only parts under the picture's footprint, and every picture spot lies once.
 #[test]
 fn wa24_jump_small_gaps_is_bounded_by_the_footprint() {
-    // WA17's setup: the picture from the floor up the cube's side.
-    let p = with_options(wrapped(Vec3::new(0.0, 0.0, 1.2), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false);
+    // WA17's setup: the picture from the floor up the cube's side (stable w2: centred at z = 0.95, so all of it has
+    // surface under it; from 1.2 at most 0.90 could lie once, check:A of round 9 section 2).
+    let p = with_options(wrapped(Vec3::new(0.0, 0.0, 0.95), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false);
     let (q, s, ink, doc, id) = r8_measure(samples::uv_cube_on_floor(), SIDE, p);
     let (cube, _) = ink_in(&doc, id, 0..12);
     println!("WA24 cube on floor: {}, cube texels {cube}, jumps {}", r8_line("WA17", &q, &s, ink), s.jumps);
@@ -3561,3 +3566,86 @@ fn check_b_probe() {
 // Stable (w1): the wrap correctness fixes' regression tests.
 #[path = "wrap_stable_tests.rs"]
 mod stable;
+
+/// Stable (w2, item 4, diagnostic): for a placement (`WTE_PROBE_MODEL`, `WTE_PROBE_BITS`, `WTE_PROBE_JUMP`), every
+/// picture point on a 240 x 120 grid where two or more stored triangles lie: is the owner's place visible along the
+/// projector's `out`, and the dropped places?
+#[test]
+#[ignore]
+fn w2_owner_probe() {
+    use crate::doc_build::TextureChoice;
+    let Ok(path) = std::env::var("WTE_PROBE_MODEL") else { return };
+    let bits = std::env::var("WTE_PROBE_BITS").expect("WTE_PROBE_BITS");
+    let groups: Vec<Vec<f32>> = bits.split(';').map(|g| g.split(',').map(|v| f32::from_bits(v.trim().parse::<u32>().unwrap())).collect()).collect();
+    let jump: bool = std::env::var("WTE_PROBE_JUMP").is_ok_and(|v| v == "true");
+    let model = crate::import::import_from_path(std::path::Path::new(&path), &Default::default(), &crate::progress::NoProgress).unwrap();
+    let n = model.mesh.sets.len();
+    let doc = Document::from_import(model, vec![TextureChoice::Detected; n], &crate::progress::NoProgress).unwrap();
+    let mut p = wrapped(Vec3::ZERO, Vec3::Y, Vec3::X, Vec2::ONE);
+    p.origin = Vec3::new(groups[0][0], groups[0][1], groups[0][2]);
+    p.rotation = Quat::from_xyzw(groups[1][0], groups[1][1], groups[1][2], groups[1][3]);
+    p.half_size = Vec2::new(groups[2][0], groups[2][1]);
+    p.wrap = WrapOptions { jump_gaps: jump, overlap: false };
+    let _ = owner_probe(&doc, &p);
+}
+
+/// The owner probe's measure for `p` on `doc` (stable w2): picture points on the surface on a 240 x 120 grid, those
+/// whose owner's place is hidden along `out`, and those whose owner is hidden while a dropped place is visible.
+pub(crate) fn owner_probe(doc: &Document, p: &Projector) -> (u32, u32, u32) {
+    let src = cells();
+    let maps = doc.texel_maps();
+    let graph = crate::wrap_param::WrapMesh::build(&doc.mesh);
+    let param = crate::wrap_param::wrap_param_in(&doc.mesh, &doc.bvh, &graph, &maps, src.size(), p).expect("param");
+    let (_, _, out) = p.axes();
+    let diag = doc.mesh.diag();
+    let layer = param.layers.last().unwrap();
+    let grid = layer.owner.as_ref().expect("owner grid");
+    let (hw, hh) = (p.half_size.x.abs(), p.half_size.y.abs());
+    let visible = |q: Vec3| doc.bvh.raycast(&doc.mesh, &Ray::new(q + out * 1e-4 * diag, out), 0.0, 10.0 * diag, Cull::None).is_none();
+    // [owner visible][loser visible] counts, and losers by (same mesh object as the owner? via distance)
+    let mut table = [[0u32; 2]; 2];
+    let mut points = 0u32;
+    let mut multi = 0u32;
+    let mut vis_owner = [0u32; 2];
+    let (nx, ny) = (240, 120);
+    for j in 0..ny {
+        for i in 0..nx {
+            let l = Vec2::new(-hw + (i as f32 + 0.5) * 2.0 * hw / nx as f32, -hh + (j as f32 + 0.5) * 2.0 * hh / ny as f32);
+            let Some(k) = grid.index(l.x, l.y) else { continue };
+            let mut here: Vec<Vec3> = Vec::new();
+            for (t, q) in layer.tris.iter().zip(&layer.corners) {
+                let (a, b, c) = (Vec2::from(q[0]), Vec2::from(q[1]), Vec2::from(q[2]));
+                let d = (b - a).perp_dot(c - a);
+                if d == 0.0 {
+                    continue;
+                }
+                let w1 = (l - a).perp_dot(c - a) / d;
+                let w2 = (b - a).perp_dot(l - a) / d;
+                let w0 = 1.0 - w1 - w2;
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    continue;
+                }
+                let pos = doc.mesh.tri_positions(*t);
+                here.push(pos[0] * w0 + pos[1] * w1 + pos[2] * w2);
+            }
+            if here.is_empty() {
+                continue;
+            }
+            points += 1;
+            let Some(owner) = grid.owner_at(k) else { continue };
+            let ov = visible(owner);
+            vis_owner[usize::from(ov)] += 1;
+            let losers: Vec<Vec3> = here.iter().copied().filter(|q| q.distance(owner) > 0.01 * diag).collect();
+            if !losers.is_empty() {
+                multi += 1;
+            }
+            for q in losers {
+                table[usize::from(ov)][usize::from(visible(q))] += 1;
+            }
+        }
+    }
+    eprintln!("owner probe: {points} picture points on the surface, {multi} with another place; owner visible {} / hidden {}", vis_owner[1], vis_owner[0]);
+    eprintln!("owner probe: dropped places: owner visible & dropped visible {}, owner visible & dropped hidden {}, owner HIDDEN & dropped VISIBLE {}, both hidden {}", table[1][1], table[1][0], table[0][1], table[0][0]);
+    eprintln!("owner probe: stats {:?}", param.stats());
+    (points, vis_owner[0], table[0][1])
+}

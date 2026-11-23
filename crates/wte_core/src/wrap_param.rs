@@ -86,6 +86,11 @@ type ExactKeys = (&'static std::thread::LocalKey<std::cell::Cell<bool>>, &'stati
 pub(crate) fn relax_exact_for_tests() -> ExactKeys {
     (&relax::EXACT_REGION, &relax::EXACT_OUTCOME)
 }
+/// Stable (w2), test builds: the developed extension of the exact region (`relax::EXACT_DEVELOP`) on this thread.
+#[cfg(test)]
+pub(crate) fn relax_develop_for_tests() -> &'static std::thread::LocalKey<std::cell::Cell<bool>> {
+    &relax::EXACT_DEVELOP
+}
 // Round 9 (package B, T7): the welded mesh graph, once per mesh (a child module: it shares the weld's helpers).
 #[path = "wrap_mesh.rs"]
 pub mod wrap_mesh;
@@ -138,6 +143,15 @@ pub struct WrapStats {
     /// layout (cut wedges, shrink, holes: an uncovered cell with covered cells on both sides in its row or column), as
     /// against picture beyond a mesh edge or beyond `ends_share` (the top layer's owner grid; 0 without one).
     pub lost_cut: f32,
+    /// Stable (w2, item 2): how much of the picture's height (across the spine) the surface it lies on can hold: the
+    /// largest 3D extent, along the picture's across axis, of the parts its laid triangles belong to, over the
+    /// picture's full across size, clamped to 1. Below 1 the part is narrower than the picture (a pawn under a picture
+    /// as wide as the board).
+    pub room: f32,
+    /// Stable (w2, item 2): the picture covers a whole closed part (every triangle of a part without boundary edges
+    /// laid on the first turn): a closed surface cannot lie flat, so the picture is cut open at its corners and loses
+    /// the surface's total curvature (4 pi on a box) to the gaps there (`lost_cut`; the Lantern's base block).
+    pub wraps_closed: bool,
 }
 
 /// Round 8 (plan 3.3): how once and how whole the picture of a wrapped stamp lies on the model, measured from its
@@ -208,6 +222,8 @@ pub struct WrapParam {
     ends: Option<f64>,
     /// Stable (w1, item 3): the spine ended at a boundary edge (bucketed: any size).
     spine_edge: bool,
+    /// Stable (w2, item 2): the largest 3D extent across the picture of the parts it lies on (`WrapStats::room`).
+    part_across: f64,
     diag: f64,
     memo: std::sync::Mutex<Option<([u32; 4], WrapStats)>>,
 }
@@ -2384,6 +2400,8 @@ fn wrap_param_from(
         passed: spine.passed,
         ends_share: 1.0,
         lost_cut: 0.0,
+        room: 1.0,
+        wraps_closed: false,
     };
     // The turns to lay: turn 0 (the Ends-meet spine), then with Overlap every later turn that starts inside the
     // picture, each with its along range (4.3b).
@@ -2434,6 +2452,23 @@ fn wrap_param_from(
         let closed = period.filter(|t| *t > 0.0);
         let period = if multi { closed } else { None };
         let (seed, cut, _) = layout.finish(hw, hh, clip, period);
+        // Stable (w2, item 2): a whole closed part laid on the first turn.
+        if turn_id == 0 {
+            let laid = layout.laid();
+            let mut whole = vec![true; patch.part_count as usize];
+            let mut any = vec![false; patch.part_count as usize];
+            for (t, c) in patch.tv.iter().enumerate() {
+                let part = patch.part[c[0] as usize] as usize;
+                if patch.degenerate(t as u32) {
+                    continue;
+                }
+                any[part] = true;
+                if !laid[t] || c.iter().any(|&v| patch.on_boundary[v as usize]) {
+                    whole[part] = false;
+                }
+            }
+            stats.wraps_closed = (0..whole.len()).any(|k| any[k] && whole[k]);
+        }
         stats.verts += layout.finals as u32;
         stats.limited |= layout.limited;
         stats.jumps += layout.jumps;
@@ -2508,6 +2543,7 @@ fn wrap_param_from(
             laid: &laid,
             closure: &closure_tris,
             bury_index: OnceLock::new(),
+            out,
         };
         let owner_started = Instant::now();
         let mut layer = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint);
@@ -2543,6 +2579,26 @@ fn wrap_param_from(
     let ends = ((spine.met_itself || spine.passed) && stats.turns == 1).then_some(spine.end0_plus + spine.end0_minus);
     stats.tris = layers.iter().map(|l| l.1.tris.len() as u32).sum();
     let _ = (rect, hw, hh);
+    // Stable (w2, item 2): the largest extent across the picture (3D, along the turned frame's across axis) of the
+    // parts the stored triangles belong to.
+    let across3 = if reach.spine_y { right_n } else { up_n };
+    let mut entered = vec![false; patch.part_count as usize];
+    for (_, l) in &layers {
+        for &t in &l.tris {
+            if let Ok(i) = patch.tris.binary_search(&t) {
+                entered[patch.part[patch.tv[i][0] as usize] as usize] = true;
+            }
+        }
+    }
+    let mut span = vec![(f64::INFINITY, f64::NEG_INFINITY); patch.part_count as usize];
+    for (v, &x) in patch.pos.iter().enumerate() {
+        let part = patch.part[v] as usize;
+        if entered[part] {
+            let d = x.dot(across3);
+            span[part] = (span[part].0.min(d), span[part].1.max(d));
+        }
+    }
+    let part_across = span.iter().filter(|s| s.1 >= s.0).map(|s| s.1 - s.0).fold(0.0f64, f64::max);
     let mut param = WrapParam {
         mesh_addr: mesh as *const MeshData as usize,
         mesh_tag: (mesh.tri_count(), mesh.uv_hash),
@@ -2561,6 +2617,7 @@ fn wrap_param_from(
         stats,
         ends,
         spine_edge: spine.reached_edge,
+        part_across,
         diag,
         memo: std::sync::Mutex::new(None),
     };
@@ -3014,6 +3071,9 @@ struct OwnerCtx<'c> {
     closure: &'c [bool],
     /// check:B (round 9): the entered parts' triangles by part and place, for `may_bury` (built on its first call).
     bury_index: OnceLock<BuryIndex>,
+    /// Stable (w2, item 4): the projector's `out` (towards the viewer the stamp faces): a place another entered
+    /// surface hides along it loses a mixed cell to one that is not hidden (`hidden_at`).
+    out: DVec3,
 }
 
 /// check:B (round 9, speed): the triangles of the entered parts of a patch, per part a box and a uniform grid of the
@@ -3193,6 +3253,33 @@ impl OwnerCtx<'_> {
         index.any(self.mesh, own, lo, hi, (lo + hi) * 0.5, (hi - lo).length() * 0.5)
     }
 
+    /// Stable (w2, item 4): true when a ray from `p` along the projector's `out` hits a triangle of an entered part
+    /// (its own included) beyond `1e-5 diag` (within 2 diag): the place is hidden from the side the stamp faces (the
+    /// inside of a helmet's shell plate under another plate). Hits outside the patch or on parts not entered are passed.
+    fn hidden_at(&self, p: DVec3) -> bool {
+        let patch = self.patch;
+        let n = self.out;
+        if n == DVec3::ZERO || !p.is_finite() || !n.is_finite() {
+            return false;
+        }
+        let eps = (1e-5 * patch.diag) as f32;
+        let o = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+        let ray = Ray::new(o, Vec3::new(n.x as f32, n.y as f32, n.z as f32));
+        let t_max = (2.0 * patch.diag) as f32;
+        let mut t_min = eps;
+        for _ in 0..16 {
+            let Some(hit) = self.bvh.raycast(self.mesh, &ray, t_min, t_max, Cull::None) else { return false };
+            if let Ok(l) = patch.tris.binary_search(&hit.tri) {
+                let part = patch.part[patch.tv[l][0] as usize];
+                if self.entered.get(part as usize).copied().unwrap_or(false) {
+                    return true;
+                }
+            }
+            t_min = hit.t + eps.max(hit.t * 1e-6);
+        }
+        false
+    }
+
     /// Round 9 (T1, answer (a)-1): true when the surface at `p` (oriented normal `n`, part `own`) lies under another
     /// entered part: a face of such a part touches `p` parallel to it (within `1e-5 diag`: something lying on it), or
     /// a ray from `p` along `n` hits such a part within `BURY_REACH x diag` (the floor under a cube, the board under a
@@ -3236,6 +3323,30 @@ fn make_layer(
     let patch = ctx.patch;
     tris.sort_by_key(|e| patch.tris[e.0 as usize]);
     let owner = if clip.is_none() {
+        // Stable (w2, item 4): the sheets of the patch (triangles joined over edges with exactly two triangles; the
+        // root is the lowest local triangle), for the owner grid's mixed cells.
+        let sheet = {
+            let n = patch.tv.len();
+            let mut uf: Vec<u32> = (0..n as u32).collect();
+            fn find(uf: &mut [u32], mut x: u32) -> u32 {
+                while uf[x as usize] != x {
+                    uf[x as usize] = uf[uf[x as usize] as usize];
+                    x = uf[x as usize];
+                }
+                x
+            }
+            for he in 0..n * 3 {
+                let (start, len) = patch.he_group[he];
+                if len == 2 {
+                    let (a, b) = (patch.edge_tris[start as usize] / 3, patch.edge_tris[start as usize + 1] / 3);
+                    let (ra, rb) = (find(&mut uf, a), find(&mut uf, b));
+                    if ra != rb {
+                        uf[ra.max(rb) as usize] = ra.min(rb);
+                    }
+                }
+            }
+            (0..n as u32).map(|t| find(&mut uf, t)).collect::<Vec<u32>>()
+        };
         // The corners as stored (f32) are what the bake interpolates: the grid is built from them, with the mesh's
         // f32 positions.
         let stored: Vec<relax::OwnerTri> = tris
@@ -3250,14 +3361,18 @@ fn make_layer(
                     p3,
                     s: relax::owner_scale(p3, q32),
                     part: patch.part[patch.tv[e.0 as usize][0] as usize],
+                    sheet: if relax::knob("WTE_TEST_OWNER_SHEETS", true) { sheet[e.0 as usize] } else { patch.part[patch.tv[e.0 as usize][0] as usize] },
                     normal: patch.geo[e.0 as usize] * o,
                     laid: ctx.laid.get(e.0 as usize).copied().unwrap_or(false),
                     closure: ctx.closure.get(e.0 as usize).copied().unwrap_or(false),
                 }
             })
             .collect();
-        let may = |i: usize| ctx.may_bury(stored[i].p3, stored[i].normal, stored[i].part);
-        let at = |i: usize, p: DVec3| ctx.buried_at(p, stored[i].normal, stored[i].part);
+        // Stable (w2, item 4): a place hidden along the projector's `out` by an entered surface is buried too (the
+        // owner of a mixed cell is the visible place when one is laid there).
+        let hidden_on = relax::knob("WTE_TEST_OWNER_VISIBLE", true);
+        let may = |i: usize| hidden_on || ctx.may_bury(stored[i].p3, stored[i].normal, stored[i].part);
+        let at = |i: usize, p: DVec3| ctx.buried_at(p, stored[i].normal, stored[i].part) || (hidden_on && ctx.hidden_at(p));
         let grid = OwnerGrid::build(&stored, reach, 0.0, &relax::Burial { may: &may, at: &at });
         Some(grid)
     } else {
@@ -3503,6 +3618,8 @@ impl WrapParam {
         st.stretch = stretches.get(((stretches.len() as f64 * 0.95) as usize).min(stretches.len().saturating_sub(1))).copied().unwrap_or(0.0);
         st.rejected = if rejected.1 == 0 { 0.0 } else { (rejected.0 as f64 / rejected.1 as f64) as f32 };
         st.lost_cut = if lost.1 == 0 { 0.0 } else { (lost.0 as f64 / lost.1 as f64) as f32 };
+        let across = 2.0 * if self.spine_y { hw } else { hh };
+        st.room = if across > 0.0 { (self.part_across / across).clamp(0.0, 1.0) as f32 } else { 1.0 };
         st
     }
 

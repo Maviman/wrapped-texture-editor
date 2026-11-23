@@ -173,7 +173,12 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
     }
     let cut = s.lost_cut >= LOST_CUT_LINE_MIN;
     if cut {
-        out.push(WrapLine::Warn(format!("{:.0} % of the picture is lost where the surface had to be cut", pct(s.lost_cut))));
+        // Stable (w2): a picture covering a whole closed part is cut open at its corners (a box cannot lie flat).
+        out.push(WrapLine::Warn(if s.wraps_closed {
+            format!("{:.0} % of the picture is lost where it is cut open round the closed part's corners", pct(s.lost_cut))
+        } else {
+            format!("{:.0} % of the picture is lost where the surface had to be cut", pct(s.lost_cut))
+        }));
     }
     if s.rejected >= HIDDEN_LINE_MIN {
         out.push(WrapLine::Warn(format!(
@@ -184,7 +189,12 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
     // Less on the surface than the ends and the cuts explain, and no edge reached: the covered share alone.
     let expected = if ends_cut { s.ends_share } else { 1.0 } - if cut { s.lost_cut } else { 0.0 };
     if !edge && s.covered < 0.98 && s.covered < expected - 0.02 {
-        out.push(WrapLine::Warn(format!("Only {:.0} % of the picture lies on the surface", (s.covered * 100.0).round())));
+        // Stable (w2): the part is narrower than the picture (`room`): that explains the share.
+        out.push(WrapLine::Warn(if s.room < 0.95 {
+            format!("The part is narrower than the picture: only {:.0} % of the picture lies on it", (s.covered * 100.0).round())
+        } else {
+            format!("Only {:.0} % of the picture lies on the surface", (s.covered * 100.0).round())
+        }));
     }
     if s.turns > 1 {
         out.push(WrapLine::Warn(format!("Wound {} times", s.turns)));
@@ -751,6 +761,8 @@ mod tests {
             passed: false,
             ends_share: 1.0,
             lost_cut: 0.0,
+            room: 1.0,
+            wraps_closed: false,
         };
         let opts = WrapOptions::default();
         assert!(wrap_stats_texts(&base, opts).is_empty(), "an exact (seed) wrap adds no line");
@@ -806,25 +818,31 @@ mod tests {
             passed: false,
             ends_share: 1.0,
             lost_cut: 0.0,
+            room: 1.0,
+            wraps_closed: false,
         };
         let opts = WrapOptions::default();
         let texts = |s: wte_core::WrapStats| wrap_stats_line_texts(&s, opts);
-        // The Lantern: no edge, the loss is cut wedges (round 9 said "runs off the surface: an edge ...").
-        let lantern = wte_core::WrapStats { covered: 0.8849, lost_cut: 0.1123, ..base };
-        assert_eq!(texts(lantern), vec!["11 % of the picture is lost where the surface had to be cut".to_owned()]);
+        // The Lantern: no edge, the loss is cut wedges (round 9 said "runs off the surface: an edge ..."); stable w2:
+        // the picture covers the whole closed base block, cut open at its corners.
+        let lantern = wte_core::WrapStats { covered: 0.8849, lost_cut: 0.1123, room: 0.9091, wraps_closed: true, ..base };
+        assert_eq!(texts(lantern), vec!["11 % of the picture is lost where it is cut open round the closed part's corners".to_owned()]);
+        let open_cut = wte_core::WrapStats { covered: 0.8849, lost_cut: 0.1123, ..base };
+        assert_eq!(texts(open_cut), vec!["11 % of the picture is lost where the surface had to be cut".to_owned()]);
         // The torus knot: a helix, its ends met; nothing ran off an edge.
         let knot = wte_core::WrapStats { covered: 0.44, passed: true, ends_share: 0.43, ..base };
         assert_eq!(texts(knot), vec!["Longer than the way round: 43 % shown, the ends meet at the back".to_owned()]);
         // many_islands with Jump on: one closure line (round 9 stacked "runs off", "The ends meet", "Longer than the
         // way round" and the parts line), the small covered share named without a cause, the parts.
-        let islands = wte_core::WrapStats { covered: 0.0333, met_itself: true, ends_share: 0.3318, jumps: 2, rejected: 0.0625, lost_cut: 0.0051, ..base };
+        // Stable w2: the islands are a tenth of the picture's height across (`room` 0.1029): the covered line says so.
+        let islands = wte_core::WrapStats { covered: 0.0333, met_itself: true, ends_share: 0.3318, jumps: 2, rejected: 0.0625, lost_cut: 0.0051, room: 0.1029, ..base };
         let lines = texts(islands);
         assert_eq!(
             lines,
             vec![
                 "The ends meet at the back: 33 % of the picture's length shown".to_owned(),
                 "6 % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there".to_owned(),
-                "Only 3 % of the picture lies on the surface".to_owned(),
+                "The part is narrower than the picture: only 3 % of the picture lies on it".to_owned(),
                 "Continued onto 2 separate parts".to_owned()
             ]
         );
@@ -889,6 +907,8 @@ mod tests {
             passed: true,
             ends_share: 0.43,
             lost_cut: 0.0,
+            room: 1.0,
+            wraps_closed: false,
         };
         let opts = WrapOptions::default();
         assert_eq!(wrap_stats_texts(&base, opts), vec![WrapLine::Warn("Longer than the way round: 43 % shown, the ends meet at the back".to_owned())]);

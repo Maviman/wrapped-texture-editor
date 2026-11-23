@@ -142,6 +142,12 @@ pinned at their seed positions (the exact region; a strain check falls back to t
 the traces come from opposite sides), not on open rough surfaces; the exact region falls back per component (the chess
 board keeps its exact layout under a pawn). Details 6.5a "Stable (w1)".
 
+`docs/notes/stable/w2.md`. The exact region is grown by developing the flat surface from it (a cylinder's rows next to
+its dome stay exact); the ARAP solve asks a compressed triangle to grow (steep bumps keep their area); the owner of a
+cell with candidates on two sheets prefers a place the stamp faces over one hidden along its `out` (a book's front
+page); `WrapStats::room` and `wraps_closed` say when the part is narrower than the picture or the picture covers a whole
+closed part. Details 6.5a "Stable (w2)".
+
 ### 1.7 Round 7 (brush speed)
 
 Round 7 (`target\round7_design\ROUND7_PLAN.md`) makes 3D dabs on very heavy models cheaper and properly parallel,
@@ -215,7 +221,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `uv_share.rs` | round 9 B | `UvShare`: per texture set a count raster of the UV footprints; per triangle "shares texels", the mesh's shared share; `UV_SHARE_WARN` (5.20 `stamp_shared_texels`) |
 | `wrap_relax.rs` | round 8 A | child module `wrap_param::relax`: seams S1-S5, wedges, LSCM / ARAP with the matrix-free CG, the owner grid (6.5a "Round 8") |
 | `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan and (round 8) WA4 / WA4b, WA20-WA27, WA29 (round 9) WA31-WA34, WA36, WA37 and `r8_quality_survey` (test-only module) |
-| `wrap_stable_tests.rs` | stable (w1) | the regression tests of the wrap correctness fixes after round 9 (`w1_*`; a child module of `wrap_tests.rs`, test-only) |
+| `wrap_stable_tests.rs` | stable (w1, w2) | the regression tests of the wrap correctness fixes after round 9 (`w1_*`, `w2_*`; a child module of `wrap_tests.rs`, test-only) |
 | `doc_stamps.rs` | C4; round 6 A | stamp/text commands on `Document`, source mip cache, `stamp_at`; round 6: the wrap dispatch of `bake_and_apply`, `ensure_wrap_param`, `stamp_wrap_*`, `stamp_ink_area` |
 | `text/mod.rs` | S | `TextSpec` (with `fx: TextFx`), `FontRef`, `TextAlign`, `Outline`, `TextLayout`, `PlacedGlyph`; round 4: `TextFx`, `Gap`, `Warp`, `WarpStyle`, `TextPath`, `PathShape`, `TextFrame`, `RasterQuality`, `TextRaster`, the limits (`GAP_MIN_EM` ... `MAX_STYLED_PIXELS`), `TextSpec::new`/`sanitize_fx`/`floats`/`floats_mut`/`differs_only_in_spacing` (complete + tests) |
 | `text/font_catalog.rs` | C4; round 4 T3 | `FontCatalog` (fontdb; the Windows font folders, file sizes read once, faces shared per file), `FontCache` (fontdue), bundled fonts, `FaceTraits`, `face_traits`, `FontCatalog::sample` (picker samples drawn with the styled painter's outline and coverage code) |
@@ -1333,7 +1339,10 @@ pub struct WrapStats { pub verts: u32, pub tris: u32, pub cut_tris: u32, pub cov
     // Round 9: the spine's traces passed beside each other (T2); the share of the picture's length laid when the ends
     // meet (1 for an open spine and for Overlap turns); the share of the picture's cells without an owner inside the
     // laid outline (A7).
-    pub passed: bool, pub ends_share: f32, pub lost_cut: f32 }
+    pub passed: bool, pub ends_share: f32, pub lost_cut: f32,
+    // Stable (w2): the largest 3D extent across the picture of the parts it lies on over the picture's height (<= 1);
+    // a whole closed part (no boundary edge) was laid on the first turn.
+    pub room: f32, pub wraps_closed: bool }
 /// Round 8 (`Document::stamp_wrap_quality`): ink area, the share of picture bins found in two places (`dup`, > 6 bins
 /// apart), the share of neighbouring bin pairs lying apart (`scatter`), the inked bins.
 pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub bins: u32 }
@@ -1341,7 +1350,8 @@ pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub 
 // OWNER_MAX_CELLS 1024, RELAX_CG_BUDGET 2500, PAR_MIN_UNKNOWNS 16384 (round 9 check:B: 8192), PAR_CHUNK 8192; round 9: OWNER_SAME 3 (OWNER_TOL
 // removed), BURY_REACH 0.04 (= 4 GAP_JUMP, x diag), CONE_RADIUS 0.1 (x across reach), RELAX_ARAP_ITERS 12 (was 6);
 // check:A: ENDS_MEET 2, HOLE_FILL 8 (S1 on an open spine, S5's small holes; 6.5a), COT_MAX 1e3 (private); round 9
-// check:A: PASS_NEAR 2 (x across reach, T2), EXACT_STRAIN 0.25 (T5).
+// check:A: PASS_NEAR 2 (x across reach, T2), EXACT_STRAIN 0.25 (T5); stable w2: FLAT_TOL 1e-6 (rad), AREA_PUSH 1,
+// AREA_PUSH_MAX 1.5.
 // WrapParam::src_size(), texel_world(): the inputs it was made for.
 /// None when the projector is unusable (non-finite, zero size, empty source) or no triangle lies within reach.
 pub fn wrap_param(mesh: &MeshData, bvh: &Bvh, maps: &[Arc<TexelMap>], src_size: [u32; 2], p: &Projector) -> Option<WrapParam>;
@@ -3498,6 +3508,45 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   marks only itself. Round 9 counted every footprint whose box exceeded one texture everywhere: one trim strip (u
   0..12, v 0.88..0.98) marked a plate on its own island (the code skeptic's trim_strip: 100 % shared).
 
+**Stable (w2): exact parts, steep bumps, the visible place** (`docs/notes/stable/w2.md`). Changes to the rules above:
+
+- **Developed exact region (item 1, `Layout::develop_exact`).** After round 9's exact region (seed-isometric vertices
+  connected to the strip), the region is grown by developing the surface: from the laid triangles whose corners are
+  all exact or strip pins and isometric there, a laid triangle across an uncut manifold edge is unfolded rigidly onto
+  that edge (lowest `g` first, a heap) when one of its corners is **flat**: a closed laid fan with `|deficit| <=
+  FLAT_TOL` (1e-6 rad; rounding leaves 1e-8 on flat samples, a curved fine mesh 1.5e-5 and more) that also has a
+  triangle with three flat corners round it (a flat area, not a line where a curved surface's deficit crosses zero).
+  So no curved fan closes inside the developed region. A triangle whose third corner already has a position joins only
+  when it is isometric (`ISO_TOL`) there. The developed wedges of one-wedge vertices are pinned at their developed
+  positions; a laid triangle whose corners are all pinned and not all round 9's must be isometric, else its developed
+  corners are freed (repeated). The check and fallback (`EXACT_STRAIN`, per component) have two steps: a component whose
+  developed pins fail keeps round 9's region only (a steep bump inside a pinned plain: WA35's bump plate), and only when
+  that fails too the strip pins only. Why: the front's seed is not isometric next to a curved part (the consensus at a
+  cylinder's rim mixes the dome's unfolding into the side's rows: WA35's capped cylinder side 92.37 % within 2/255, max
+  51); developed, 99.92 %, max 4. Not reached: the WaterBottle's round-6 label (its shoulder and the body's profile ring
+  are curved at every vertex, `|deficit|` >= 4.9e-3 rad: no flat vertex in the patch; w2 notes).
+- **Area push (item 3, `relax_component_from`).** The ARAP local step's target is the closest rotation `R` times `c =
+  (det J)^(-AREA_PUSH / 2)` clamped to `1 ..= AREA_PUSH_MAX` (1, 1.5): a triangle laid smaller than its 3D area is asked
+  to grow, a larger one keeps `R`; the energy for the stop rule is that of the scaled targets (summed in triangle
+  order). With the centre line pinned, a steep bump's extra surface was laid compressed (ink above 1): WA4 60 degrees
+  ink 1.1177 -> 1.0473, cells 0.769..1.432 -> 0.755..1.246; WA20 ink 1.189 -> 1.087, cells 0.665..2.886 -> 0.690..1.986
+  (still above 1.40). Symmetric scaling (shrinking stretched triangles too) folded WA21's closed lathe piece (83 flipped,
+  limit 68).
+- **Sheets and the visible place (item 4, owner grid).** Every stored triangle carries its **sheet** (triangles joined
+  over edges with exactly two triangles: a non-manifold edge or a bow-tie vertex separates sheets). A cell is mixed when
+  its candidates lie on two or more sheets (round 9: parts) at two or more places. In a mixed cell a candidate is
+  `buried` also when a ray from its point along the projector's `out` hits a triangle of an entered part (its own
+  included) beyond `1e-5 diag` within `2 diag` (`OwnerCtx::hidden_at`): of two places laid at one picture point the one
+  the stamp faces wins (`Burial::may` is true for every triangle then; ABeautifulGame Jump on owner 188 -> 200 ms).
+  Round 9 gave a book's far half to the page the spine continued on, hidden behind the page in front (nonmanifold.obj:
+  owner hidden at 2,253 of 5,186 picture points, 1,551 with a visible place dropped; now 43 / 0).
+- **Room and closed parts (item 2).** `WrapStats::room` = min(1, the largest extent, along the turned frame's across
+  axis, of the parts the stored triangles belong to (their patch vertices) / the picture's full across size); stored
+  as `WrapParam::part_across`, so a reused parameterization reports it for its own size. `wraps_closed`: a part
+  without boundary edges in the patch all of whose triangles are laid on the first turn. A closed surface cannot lie
+  flat: the picture is cut open at its corners and loses the part's total curvature to the gaps there (`lost_cut`; the
+  Lantern's 52-vertex base block: 11.2 %).
+
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 
 **Round 8 jobs** (`stamp_job.rs`, `doc_stamps.rs`; plan 3.4). `StampJobKind { Full, Preview, ParamOnly }` on
@@ -5463,6 +5512,9 @@ is not shown there" when `rejected >= 5 %` (DamagedHelmet Jump on; nonmanifold's
 when `covered < 0.98` and neither an edge nor the ends and cuts explain it (`covered` more than 2 % below
 `ends_share` (when cut) minus `lost_cut` (when shown)). The shared-texel line also shows for Project-mode stamps (the
 texture reuse is the model's, in any mode): an intended difference from the main build's panel (round 9's, kept).
+Stable (w2): the cut line reads "P % of the picture is lost where it is cut open round the closed part's corners" when
+`wraps_closed`; the covered line reads "The part is narrower than the picture: only P % of the picture lies on it"
+when `room < 0.95`.
 
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
@@ -6070,7 +6122,10 @@ verified before the views exist (section 10).
 setting a `coverage:` line (covered, ends_share, reached_edge, lost_cut, passed); after the Jump-on screenshot frames a
 third log state, `panel lines:` (the shared-texel share and whether the T9 line shows, ends_share and whether its line
 shows); and the asserts of ROUND9_PLAN 7.2: `covered >= 0.85 x ends_share` unless `reached_edge`, `lost_cut <= 10 %`,
-both settings.
+both settings. Stable (w2): `covered >= 0.85 x ends_share x room` (`WrapStats::room`: a part narrower than the picture
+across holds only that share of its height: ABeautifulGame Jump off on a pawn, many_islands' islands) and `lost_cut <=
+10 %` unless `wraps_closed` (a picture covering a whole closed part loses the part's total curvature at its corners:
+the Lantern's 52-vertex base block); the `coverage:` line also logs `room` and `wraps_closed`.
 
 ### 8.12 Theme and icon (`theme.rs`) [A1]
 
@@ -6598,6 +6653,10 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   `wrap_param::closure_tests::w1_near_closure_equals_the_plain_closure`, `w1_near_closure_scales_linearly`;
   `uv_share::tests::w1_a_tiled_trim_strip_does_not_mark_a_unique_island`;
   `tool_options::the_wrap_lines_name_the_right_cause_and_never_contradict`.
+- Stable (w2, `wrap_stable_tests.rs`; `docs/notes/stable/w2.md`): `w2_a_book_shows_the_picture_on_the_page_it_faces`,
+  `w2_room_and_a_whole_closed_part`, `w2_the_developed_region_stays_off_curved_surface`. Turned green by w2's changes:
+  WA35 (the developed exact region), WA4 (the area push); WA17 / WA24 with their picture centred at z = 0.95 instead
+  of 1.2 (from 1.2 at most 0.90 of the picture could lie once: check:A of round 9 section 2).
 
 ## 10. Work packages
 

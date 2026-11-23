@@ -285,3 +285,74 @@ fn w1_lost_cut_does_not_count_the_gaps_between_parts() {
     assert!(s.jumps > 100 && s.seams == 0, "{s:?}");
     assert!(s.lost_cut <= 0.01, "lost_cut {:.4} counts the gaps between the tiles: {s:?}", s.lost_cut);
 }
+
+// ----- stable (w2) -----
+
+/// Stable (w2, item 4): `test-assets/shapes/nonmanifold.obj`'s book (seven pages on one spine edge, one part welded
+/// at the spine) under the `wrap_surface` step-10 placement (Jump off): round 9 never asked which page is hidden, so
+/// the picture went to pages behind the one the stamp faces (owner hidden along `out` at 2,253 of 5,186 picture points,
+/// 1,551 of them with a visible place dropped). A cell with candidates on two sheets (separated by the non-manifold
+/// edge) at two places now goes to a place not hidden along the projector's `out` when one is laid there.
+#[test]
+fn w2_a_book_shows_the_picture_on_the_page_it_faces() {
+    use crate::doc_build::TextureChoice;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/shapes/nonmanifold.obj");
+    let model = crate::import::import_from_path(&path, &Default::default(), &crate::progress::NoProgress).expect("nonmanifold.obj");
+    let n = model.mesh.sets.len();
+    let doc = Document::from_import(model, vec![TextureChoice::Detected; n], &crate::progress::NoProgress).unwrap();
+    let mut p = wrapped(Vec3::ZERO, Vec3::Y, Vec3::X, Vec2::ONE);
+    p.origin = Vec3::from_array([1057008808u32, 1061764292, 3206634056].map(f32::from_bits));
+    p.rotation = Quat::from_array([3166529817u32, 1054725428, 3175393369, 1063670273].map(f32::from_bits));
+    p.half_size = Vec2::from_array([1075237229u32, 1066848621].map(f32::from_bits));
+    let (points, hidden, hidden_over_visible) = super::owner_probe(&doc, &p);
+    let mut doc = doc;
+    let blob = doc.add_image_blob("cells.png", png_of(&samples::cells_picture(PIC[0], PIC[1]))).unwrap();
+    let id = doc.add_stamp("Cells", StampSource::Image { blob }, Placement::Projected(p), TextureSetId(0)).unwrap();
+    let st = doc.ensure_wrap_param(id).expect("a parameterization");
+    let q = doc.stamp_wrap_quality(id).expect("a quality");
+    println!("W2 book: {q:?}, rejected {}", st.rejected);
+    println!("W2 book: {points} picture points on the surface, owner hidden at {hidden}, hidden while a visible place is dropped at {hidden_over_visible}");
+    assert!(points > 4000, "{points}");
+    assert!(hidden_over_visible == 0 && (hidden as f64) < 0.05 * points as f64, "{hidden} / {hidden_over_visible} of {points}");
+}
+
+/// Stable (w2, item 2): `room` and `wraps_closed`. A closed cube of side 1 under a picture 3 high covers the whole
+/// cube (the picture loses its corners' 720 degrees to cuts: `wraps_closed`) and the cube holds a third of the
+/// picture's height (`room` 1 / 3); a picture on a large plate has room 1 and covers no closed part.
+#[test]
+fn w2_room_and_a_whole_closed_part() {
+    let src = cells();
+    let model = Model::new(samples::seam_cube(1.0), SIDE);
+    let p = wrapped(Vec3::new(0.0, 0.0, 0.5), Vec3::Z, Vec3::Y, Vec2::new(3.0, 1.5));
+    let s = model.param(&src, &p).expect("a parameterization").stats();
+    println!("W2 cube under a large picture: {s:?}");
+    assert!(s.wraps_closed, "{s:?}");
+    assert!((s.room - 1.0 / 3.0).abs() < 0.02, "room {}", s.room);
+    let model = Model::new(samples::bumpy_plate(16, 0.0), SIDE);
+    let p = wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, Vec2::new(0.2, 0.1));
+    let s = model.param(&src, &p).expect("a parameterization").stats();
+    println!("W2 plate: {s:?}");
+    assert!(!s.wraps_closed && s.room == 1.0, "{s:?}");
+}
+
+/// Stable (w2, item 1): the developed exact region pins only flat surface: on WA4's bumpy plates (every vertex curved
+/// by 1.5e-5 rad or more) nothing is added to round 9's exact region, and the capped cylinder's side rows next to
+/// the dome are pinned at the exact unrolling (WA35).
+#[test]
+fn w2_the_developed_region_stays_off_curved_surface() {
+    use crate::wrap_param::relax_exact_for_tests as exact;
+    let src = cells();
+    let model = Model::new(samples::bumpy_plate_periods(48, 0.12, 2.0), SIDE);
+    let p = wrapped(Vec3::new(0.0, 0.0, 0.0), Vec3::Z, Vec3::Y, Vec2::new(0.4, 0.2));
+    let with = model.param(&src, &p).expect("a parameterization");
+    let (with_pins, _) = exact().1.with(|o| o.get());
+    crate::wrap_param::relax_develop_for_tests().with(|e| e.set(false));
+    let without = model.param(&src, &p);
+    let (without_pins, _) = exact().1.with(|o| o.get());
+    crate::wrap_param::relax_develop_for_tests().with(|e| e.set(true));
+    let without = without.expect("a parameterization");
+    println!("W2 bumpy plate: exact wedges {with_pins} with the developed region, {without_pins} without");
+    assert_eq!(with_pins, without_pins);
+    let bits = |l: Vec<testkit::Layer>| l.into_iter().map(|(t, c)| (t, c.iter().flatten().flatten().map(|v| v.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
+    assert!(bits(testkit::layers(&with)) == bits(testkit::layers(&without)), "the developed region changed a curved plate");
+}

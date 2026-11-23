@@ -1331,7 +1331,7 @@ pub struct WrapStats { pub verts: u32, pub tris: u32, pub cut_tris: u32, pub cov
 /// apart), the share of neighbouring bin pairs lying apart (`scatter`), the inked bins.
 pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub bins: u32 }
 // Round 8 constants (pub): WRAP_STOP_SLACK 1.7 (plan 1.3, see 6.5a), ISO_TOL 2e-4, CONE_CUT_DEG 45, SEAM_NEAR 3,
-// OWNER_MAX_CELLS 1024, RELAX_CG_BUDGET 2500, PAR_MIN_UNKNOWNS 16384, PAR_CHUNK 8192; round 9: OWNER_SAME 3 (OWNER_TOL
+// OWNER_MAX_CELLS 1024, RELAX_CG_BUDGET 2500, PAR_MIN_UNKNOWNS 16384 (round 9 check:B: 8192), PAR_CHUNK 8192; round 9: OWNER_SAME 3 (OWNER_TOL
 // removed), BURY_REACH 0.04 (= 4 GAP_JUMP, x diag), CONE_RADIUS 0.1 (x across reach), RELAX_ARAP_ITERS 12 (was 6);
 // check:A: ENDS_MEET 2, HOLE_FILL 8 (S1 on an open spine, S5's small holes; 6.5a), COT_MAX 1e3 (private); round 9
 // check:A: PASS_NEAR 2 (x across reach, T2), EXACT_STRAIN 0.25 (T5).
@@ -3334,7 +3334,12 @@ Steps 4-7 above are changed as follows (the rest stands).
    LSCM to a residual of 1e-6 of the right-hand side or 600 iterations, ARAP 1e-5 / 200, `RELAX_CG_BUDGET` (2,500)
    iterations per component in all. Deterministic: per-triangle terms (in parallel in fixed chunks of `PAR_CHUNK` from
    `PAR_MIN_UNKNOWNS` unknowns up) are gathered per unknown in incidence order, dot products are added chunk by chunk in
-   chunk order: the same bits with 1 or N threads. Triangles that are not laid (halo, degenerate) get their final corners
+   chunk order: the same bits with 1 or N threads. Round 9 check:B (speed, the same bits): every per-element kernel
+   (terms, gather, the CG updates and preconditioner, the ARAP local step with its energy summed in triangle order) runs
+   in chunks of 1,024 from 8,192 unknowns; the components are solved in levels (a component reads another's result
+   only through its jump source's relaxed pose, when that component comes first in the order; one level's components
+   in parallel, results written back in order); the exact region's fallback solve takes a component's first result
+   when its start positions and pins are bit-equal. Triangles that are not laid (halo, degenerate) get their final corners
    from their vertices' relaxed positions (the wedge of the vertex's first laid triangle) and the missing ones by the
    hinge (two final corners) or the relaxed frame of the final corner nearest the spine (one). `flipped` counts laid
    triangles inside the picture whose relaxed orientation is reversed; `seams` / `seams_by_rule` the seam edges inside
@@ -3414,10 +3419,13 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   entered part touches the point parallel to it (within `1e-5 diag`) or the ray from the point along its oriented
   normal hits one within `[1e-5, BURY_REACH (0.04)] x diag` (`Bvh::raycast`, hits of the own or not-entered parts
   skipped). Cost: `may_bury` once per triangle (another entered part's triangle meets the box of the prism its normal
-  sweeps); pass 1's owner (lowest `(g, triangle)`) stands unless it may be buried and is; only then the cell's
+  sweeps; round 9 check:B: answered from a per-layer index of the entered parts' triangles, per part a box and a grid
+  of triangle boxes, with the sphere query's tests in its f32 arithmetic: 155 s of thread time -> under 0.2 s on the
+  chess set with Jump on); pass 1's owner (lowest `(g, triangle)`) stands unless it may be buried and is; only then the cell's
   candidates are sorted by `(g, triangle)` and asked lazily. The build runs in 16-row chunks (each cell written by its
-  own chunk, triangles ascending; on the pool from 2,048 triangles or 20,000 mixed cells): the same owners with 1 or N
-  threads. `rejected` = the share of the (cell centre inside the picture, **laid** triangle covering it) pairs whose
+  own chunk, triangles ascending; on the pool from 2,048 triangles or 20,000 mixed cells, round 9 check:B also from
+  65,536 cells, with the cell array's first touch, the output grids, the row / column spans and the `lost_cut` rows):
+  the same owners with 1 or N threads. `rejected` = the share of the (cell centre inside the picture, **laid** triangle covering it) pairs whose
   triangle is not the owner's place. `lost_cut` = the share of the picture's cells without an owner that have owned
   cells on both sides in their row or in their column (inside the laid outline: cut wedges, opened seams, holes), as
   against picture beyond a mesh edge or beyond the spine's ends; check:A: uncovered picture cells 4-connected
@@ -5738,7 +5746,8 @@ has no cell. Measured on this machine (T7, release test build): 78 families, all
   an earlier frame of the drag does not hold the Final back (the Final starts in the same pump, the job's output lands
   stale).
 - Warm-up: the Transform tool's `ensure_wrap_param` asks for it whenever a 3D stamp is selected
-  (`WrapJobs::request_warmup(wrapped)`); `after_tools` starts `Document::wrap_mesh_warmup(..).run()` on a named
+  (`WrapJobs::request_warmup(wrapped)`) and (round 9 check:B, plan T8 "when Wrap is chosen") whenever the Stamp or Text
+  tool is active in Wrap mode (graph and shared texels, before the first wrapped stamp is placed); `after_tools` starts `Document::wrap_mesh_warmup(..).run()` on a named
   background thread (`wrap-warm-up`) outside `Jobs` when something is unbuilt and no warm-up runs (no `JobOutput`: it
   fills the document's `WrapMeshCell`, which the jobs share; a wrap job that needs the graph meanwhile waits in the
   cell's `OnceLock`). Logged as `wrap mesh: ...` (no `wrap:` line, Q5).

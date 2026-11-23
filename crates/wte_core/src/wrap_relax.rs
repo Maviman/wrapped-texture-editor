@@ -1567,6 +1567,9 @@ type CompOut = (Vec<u32>, Vec<DVec2>, Vec<bool>, CompRun);
 /// check:B (round 9): (first, last) covered cell per row or column of the owner grid.
 type Spans = Vec<(usize, usize)>;
 
+/// check:B (round 9): one row chunk of the owner grid's outputs (g, pos, scale) and of its per-cell marks.
+type GridOut<'a> = (((&'a mut [f32], &'a mut [[f32; 3]]), &'a mut [f32]), &'a mut [u8]);
+
 // ----- the owner grid (round 9, T1: the place owner) -----
 
 /// Round 9 (T1): a fragment is the same surface place as its cell's owner when its 3D point lies within this many
@@ -1869,34 +1872,35 @@ impl OwnerGrid {
                 eprintln!("owner: pass 2 {:.1} ms, {} cells asked", t0.elapsed().as_secs_f64() * 1e3, asked.into_inner());
             }
         }
-        let g_of = |s: &CellState| if s.best == NONE { f32::INFINITY } else { s.g as f32 };
-        let scale_of = |s: &CellState| if s.best == NONE { 1.0 } else { tris[s.best as usize].s };
-        let grid = if par {
-            OwnerGrid {
-                lo: [lo[0] as f32, lo[1] as f32],
-                cell: cell as f32,
-                dims,
-                g: cells.par_iter().map(g_of).collect(),
-                pos: cells.par_iter().map(|s| s.p).collect(),
-                scale: cells.par_iter().map(scale_of).collect(),
-            }
-        } else {
-            OwnerGrid {
-                lo: [lo[0] as f32, lo[1] as f32],
-                cell: cell as f32,
-                dims,
-                g: cells.iter().map(g_of).collect(),
-                pos: cells.iter().map(|s| s.p).collect(),
-                scale: cells.iter().map(scale_of).collect(),
+        // The output grids and a compact per-cell mark (bit 1: covered, bit 2: a closure triangle covers it) for the
+        // passes below, in one pass over the cells (check:B: on the pool in row chunks for a large grid).
+        let (mut g, mut pos, mut scale, mut mark) = (vec![0f32; n], vec![[0f32; 3]; n], vec![0f32; n], vec![0u8; n]);
+        let out = |(c, (((g, pos), scale), mark)): (usize, GridOut<'_>)| {
+            let base = c * chunk_rows * width;
+            for i in 0..g.len() {
+                let s = &cells[base + i];
+                let owned = s.best != NONE;
+                g[i] = if owned { s.g as f32 } else { f32::INFINITY };
+                pos[i] = s.p;
+                scale[i] = if owned { tris[s.best as usize].s } else { 1.0 };
+                mark[i] = u8::from(owned) | (u8::from(s.closure) << 1);
             }
         };
+        let rows = chunk_rows * width;
+        if par {
+            g.par_chunks_mut(rows).zip(pos.par_chunks_mut(rows)).zip(scale.par_chunks_mut(rows)).zip(mark.par_chunks_mut(rows)).enumerate().for_each(out);
+        } else {
+            g.chunks_mut(rows).zip(pos.chunks_mut(rows)).zip(scale.chunks_mut(rows)).zip(mark.chunks_mut(rows)).enumerate().for_each(out);
+        }
+        drop(cells);
+        let grid = OwnerGrid { lo: [lo[0] as f32, lo[1] as f32], cell: cell as f32, dims, g, pos, scale };
         // Round 9 (A7): `lost_cut`, the picture's cells without an owner inside the laid set's outline: an uncovered
         // cell with covered cells on both sides in its row or in its column (a cut wedge, a shrunk seam, a hole), as
         // against picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways).
         if debug {
             eprintln!("owner: grid out {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
-        let covered = |k: usize| cells[k].best != NONE;
+        let covered = |k: usize| mark[k] & 1 != 0;
         // Row spans per row; column spans per chunk of rows, merged by min / max (check:B: on the pool for a large
         // grid; the same spans).
         let row_span = |j: usize| {
@@ -1945,7 +1949,7 @@ impl OwnerGrid {
             let (i, j) = (k % width, k / width);
             [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < dims[1]).then(|| k + width)]
         };
-        let seed = |k: usize| !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| cells[m].closure);
+        let seed = |k: usize| !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| mark[m] & 2 != 0);
         let mut beyond = vec![false; n];
         // check:B: the seeds on the pool for a large grid (the flood below reaches the same set from them in any order).
         if par {
@@ -1997,7 +2001,7 @@ impl OwnerGrid {
         if debug {
             eprintln!("owner: lost {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
-        drop(cells);
+        drop(mark);
         // The rejected share at the cell centres inside the picture, of the laid triangles (`WrapStats::rejected`: the
         // laid picture area; a halo triangle hinged over a fold, e.g. a block's side hanging into a gap, is dropped
         // where another place owns its cells without counting). Per chunk, integer counts.

@@ -74,6 +74,8 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
         | A::AddPaintLayer
         | A::DuplicateLayer(_)
         | A::DeleteLayer(_)
+        | A::DuplicateLayers(_)
+        | A::DeleteLayers(_)
         | A::MergeDown(_)
         | A::RasterizeLayer(_)
         | A::MoveLayer { .. }
@@ -187,6 +189,41 @@ fn duplicate_layer(state: &mut AppState, layer: LayerId) {
                 session.active_set = set;
             }
             session.selected_stamp = session.doc.stamp_of_layer(copy);
+        }
+        Err(e) => report_edit_error(state, &e),
+    }
+}
+
+/// fix_export item 5: Duplicate on several selected layers, one undo step ("Duplicate Layers"). The copies become the
+/// selection; the copy of the active layer is the active one (and the selected stamp when it is a stamp's).
+fn duplicate_layers(state: &mut AppState, layers: &[LayerId]) {
+    let Some(session) = state.session.as_mut() else { return };
+    match session.doc.duplicate_layers(layers) {
+        Ok(copies) => {
+            let active = session.doc.set(session.active_set).and_then(|s| s.active);
+            session.selected_layers = copies;
+            session.selected_stamp = active.and_then(|id| session.doc.stamp_of_layer(id));
+        }
+        Err(e) => report_edit_error(state, &e),
+    }
+}
+
+/// fix_export item 5: Delete on several selected layers, one undo step ("Delete Layers"). A locked layer stays (a
+/// warning says how many); a stamp or text layer takes its stamp along, as Delete on one layer does. The selection
+/// collapses to the new active layer.
+fn delete_layers(state: &mut AppState, layers: &[LayerId]) {
+    let Some(session) = state.session.as_mut() else { return };
+    match session.doc.remove_layers(layers) {
+        Ok(removed) => {
+            session.selected_layers.clear();
+            if session.selected_stamp.is_some_and(|id| session.doc.stamp(id).is_none()) {
+                session.selected_stamp = None;
+            }
+            let kept = layers.len().saturating_sub(removed);
+            if kept > 0 {
+                let what = if kept == 1 { "1 locked layer was kept".to_owned() } else { format!("{kept} locked layers were kept") };
+                state.toasts.warn(format!("Deleted {removed} of {} layers: {what}", layers.len()));
+            }
         }
         Err(e) => report_edit_error(state, &e),
     }
@@ -380,27 +417,32 @@ fn close_dialog(app: &mut WteApp) {
     }
 }
 
-/// What opening the Export dialog does first: cancel the tool, flush a pending edit and settle the stamp bakes (round
-/// 5: the dialog's plan and preview read the final stamp pixels).
+/// What opening the Export dialog does first: cancel the tool and flush a pending edit. It no longer settles the stamp
+/// bakes on the UI thread (fix_export item 6: a wrapped stamp's Final takes seconds on a large model): the dialog's
+/// plan and preview follow the document when a Final lands, and the export itself waits for the Finals behind its
+/// progress dialog (`io_flows::start_export`).
 fn prepare_export(app: &mut WteApp) {
     cancel_tool(app);
     if let Some(doc) = app.state.doc_mut() {
         doc.flush_pending_edit();
     }
-    crate::stamp_bakes::settle(app);
 }
 
 /// The Export dialog opened for `layers` (the row menu's "Export this layer..." / "Export selected layers...", the
 /// Layer menu): the Layers choice "Selected" with these layers in stack order (only those of the set of the first
-/// existing one), that set, per-layer PNGs only. Without an existing layer the plain defaults stay.
+/// existing one), per-layer PNGs only. No set filter (fix_export item 3): the export takes the layers' set, and the
+/// other sets of a design that spans several (`export::linked_selection`). The normal ticks are kept in
+/// `other_ticks` and come back when the user switches the Layers choice to Visible / All (fix_export item 1).
+/// Without an existing layer the plain defaults stay.
 fn export_for_layers(state: &AppState, mut st: ExportDialogState, layers: &[LayerId]) -> ExportDialogState {
     let Some(session) = state.session.as_ref() else { return st };
     let doc = &session.doc;
     let Some((set_id, _)) = layers.iter().find_map(|id| doc.find_layer(*id)) else { return st };
     let Some(set) = doc.set(set_id) else { return st };
     let ordered: Vec<LayerId> = set.layers.iter().map(|l| l.id).filter(|id| layers.contains(id)).collect();
+    st.other_ticks = Some(crate::state::ExportTicks::of(&st.options));
     st.options.layers = Some(ordered.clone());
-    st.options.sets = Some(vec![set_id]);
+    st.options.sets = None;
     st.options.flat = None;
     st.options.per_layer_png = true;
     st.options.ora = false;
@@ -443,6 +485,7 @@ fn export_defaults(state: &AppState) -> Option<ExportDialogState> {
         show_preview: true,
         confirm_replace: None,
         selected_layers: session.layer_selection(),
+        other_ticks: None,
     })
 }
 
@@ -709,6 +752,11 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         }
         A::Cancel => cancel(app),
         A::DeleteSelection => {
+            let selection = app.state.session.as_ref().map(|s| s.layer_selection()).unwrap_or_default();
+            if selection.len() > 1 {
+                delete_layers(&mut app.state, &selection);
+                return;
+            }
             let Some(session) = app.state.session.as_mut() else { return };
             match session.selected_stamp.filter(|id| session.doc.stamp(*id).is_some()) {
                 Some(id) => {
@@ -829,6 +877,8 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         }
         A::DuplicateLayer(layer) => duplicate_layer(&mut app.state, layer),
         A::DeleteLayer(layer) => layer_command(app, |d| d.remove_layer(layer)),
+        A::DuplicateLayers(layers) => duplicate_layers(&mut app.state, &layers),
+        A::DeleteLayers(layers) => delete_layers(&mut app.state, &layers),
         A::MergeDown(layer) => {
             if settle_keeps_layer(app, layer) {
                 layer_command(app, |d| d.merge_down(layer).map(|_| ()));
@@ -847,7 +897,10 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::SetLayerBlend(layer, blend) => layer_command(app, |d| d.set_layer_blend(layer, blend)),
         A::RenameLayer(layer, name) => layer_command(app, |d| d.rename_layer(layer, &name)),
         A::DuplicateActiveLayer => {
-            if let Some(layer) = active_layer(&app.state) {
+            let selection = app.state.session.as_ref().map(|s| s.layer_selection()).unwrap_or_default();
+            if selection.len() > 1 {
+                run(app, A::DuplicateLayers(selection), frame);
+            } else if let Some(layer) = active_layer(&app.state) {
                 run(app, A::DuplicateLayer(layer), frame);
             }
         }
@@ -1105,12 +1158,15 @@ mod tests {
         assert_eq!(st.options.package, wte_core::ExportPackage::Files);
         assert!(st.options.flat.is_some() && st.options.per_layer_png && !st.options.include_hidden);
         assert_eq!(st.selected_layers.len(), 3);
-        // Opened for layers (any order, an unknown id ignored): stack order, per-layer PNGs only, that set.
+        // Opened for layers (any order, an unknown id ignored): stack order, per-layer PNGs only, no set filter (the
+        // layers decide the sets, fix_export item 3); the normal ticks are kept for Visible / All (item 1).
+        let normal = crate::state::ExportTicks::of(&st.options);
         let st = export_for_layers(&state, st, &[b, LayerId(9_999), base]);
         assert_eq!(st.options.layers, Some(vec![base, b]));
         assert_eq!(st.selected_layers, [base, b]);
-        assert_eq!(st.options.sets, Some(vec![TextureSetId(0)]));
+        assert_eq!(st.options.sets, None);
         assert!(st.options.flat.is_none() && st.options.per_layer_png && !st.options.ora && !st.options.psd);
+        assert_eq!(st.other_ticks, Some(normal));
         // Nothing that exists: the plain defaults stay.
         let st = export_for_layers(&state, export_defaults(&state).unwrap(), &[LayerId(9_999)]);
         assert_eq!(st.options.layers, None);

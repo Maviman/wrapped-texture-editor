@@ -73,6 +73,9 @@ const NAMES: &[&str] = &[
     "export_selected",
     "export_zip",
     "export_flow",
+    "export_unsettled",
+    "export_nouv",
+    "export_errors",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -140,6 +143,9 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "export_selected" => export_selected(),
         "export_zip" => export_zip(),
         "export_flow" => export_flow(args.path.is_some()),
+        "export_unsettled" => export_unsettled(args.path.is_some()),
+        "export_nouv" => export_nouv(),
+        "export_errors" => export_errors(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -1029,19 +1035,65 @@ fn selection_layer_name(doc: &Document, layer: LayerId) -> Result<String, String
     Ok(wte_core::export::layer_name(&doc.name, &set.name, doc.sets.len() > 1, index, l.kind_name(), &l.name))
 }
 
-/// The folder holds exactly the per-layer PNGs of these layers, each with its layer's pixels; returns the images.
+/// The per-layer files of a layer selection, as the export names them (`export::plan_contents`): every layer of the
+/// selection completed by the linked layers of its designs in other sets (fix_export item 3), with its file name.
+fn selection_files(doc: &Document, layers: &[LayerId]) -> Vec<(LayerId, String)> {
+    let snapshot = doc.snapshot();
+    let opts = ExportOptions {
+        dir: PathBuf::new(),
+        base_name: doc.name.clone(),
+        sets: None,
+        flat: None,
+        per_layer_png: true,
+        ora: false,
+        psd: false,
+        include_hidden: false,
+        dilate_px: 0,
+        layers: Some(layers.to_vec()),
+        package: wte_core::ExportPackage::Files,
+    };
+    wte_core::export::plan_contents(&snapshot, &opts)
+        .into_iter()
+        .filter_map(|f| match f.kind {
+            wte_core::PlannedKind::Layer { layer, .. } => Some((layer, f.name)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The folder holds exactly the per-layer PNGs of these layers and of the linked layers of their designs in other
+/// sets (fix_export item 3), each with its layer's pixels; returns the images of `layers`. Without a collision of set
+/// names, a file's name is `selection_layer_name` (the full export's name).
 fn expect_layer_files(state: &AppState, dir: &Path, layers: &[LayerId]) -> Result<Vec<PixelBuf>, String> {
     let doc = doc_of(state)?;
-    let mut want: Vec<String> = layers.iter().map(|l| selection_layer_name(doc, *l)).collect::<Result<_, _>>()?;
+    let files = selection_files(doc, layers);
+    let mut want: Vec<String> = files.iter().map(|(_, name)| name.clone()).collect();
     want.sort();
     let listing = dir_names(dir)?;
     if listing != want {
         return Err(format!("{} holds {listing:?}, expected exactly {want:?}", dir.display()));
     }
+    // Without colliding set names (no `_2`), every name is the plain pattern the full export gives that layer.
+    let stems: Vec<String> = doc.sets.iter().map(|s| wte_core::export::sanitize_file_stem(&s.name).to_lowercase()).collect();
+    if !(1..stems.len()).any(|i| stems[..i].contains(&stems[i])) {
+        for (id, name) in &files {
+            let plain = selection_layer_name(doc, *id)?;
+            if *name != plain {
+                return Err(format!("the file of {id:?} is {name}, expected {plain}"));
+            }
+        }
+    }
+    if files.len() > layers.len() {
+        log::info!("export: the selection of {} layer(s) brought {} linked layer(s) of other sets", layers.len(), files.len() - layers.len());
+    }
     let mut images = Vec::new();
     for id in layers {
-        let name = selection_layer_name(doc, *id)?;
-        let image = decode_named(&name, &std::fs::read(dir.join(&name)).map_err(|e| format!("{name}: {e}"))?)?;
+        if !files.iter().any(|(l, _)| l == id) {
+            return Err(format!("no file for the selected layer {id:?}"));
+        }
+    }
+    for (id, name) in &files {
+        let image = decode_named(name, &std::fs::read(dir.join(name)).map_err(|e| format!("{name}: {e}"))?)?;
         let (set, _) = doc.find_layer(*id).ok_or("no such layer")?;
         let set = doc.set(set).ok_or("no such set")?;
         let layer = doc.layer(*id).ok_or("no such layer")?;
@@ -1049,9 +1101,47 @@ fn expect_layer_files(state: &AppState, dir: &Path, layers: &[LayerId]) -> Resul
         if n != 0 {
             return Err(format!("{name}: {n} texels differ from the layer {:?}", layer.name));
         }
-        images.push(image);
+        if layers.contains(id) {
+            images.push((layers.iter().position(|l| l == id).unwrap_or(0), image));
+        }
     }
-    Ok(images)
+    images.sort_by_key(|(i, _)| *i);
+    Ok(images.into_iter().map(|(_, image)| image).collect())
+}
+
+/// fix_export item 8: no toast says "1 files".
+fn toasts_count_right(state: &AppState) -> Result<(), String> {
+    let labels = state.toasts.visible_labels();
+    if labels.iter().any(|l| l.contains(" 1 files") || l.contains("(1 files)")) {
+        return Err(format!("a toast says \"1 files\": {labels:?}"));
+    }
+    Ok(())
+}
+
+/// The bytes of every file of a folder, by name.
+fn dir_bytes(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    dir_names(dir)?
+        .into_iter()
+        .map(|n| {
+            let bytes = std::fs::read(dir.join(&n)).map_err(|e| format!("{n}: {e}"))?;
+            Ok((n, bytes))
+        })
+        .collect()
+}
+
+/// Two folders hold the same files, byte for byte.
+fn same_files(a: &Path, b: &Path) -> Result<usize, String> {
+    let (fa, fb) = (dir_bytes(a)?, dir_bytes(b)?);
+    let names = |f: &[(String, Vec<u8>)]| f.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    if names(&fa) != names(&fb) {
+        return Err(format!("{} holds {:?}, {} holds {:?}", a.display(), names(&fa), b.display(), names(&fb)));
+    }
+    for ((name, x), (_, y)) in fa.iter().zip(&fb) {
+        if x != y {
+            return Err(format!("{name} differs between {} and {}", a.display(), b.display()));
+        }
+    }
+    Ok(fa.len())
 }
 
 /// Texels of an image that are exactly `color`.
@@ -1578,6 +1668,48 @@ fn flow_steps() -> Vec<Step> {
             log::info!("export_flow: wrapped stamp file with {n} inked texels");
             Ok(())
         }),
+        Step::Assert("the toast counts the files right (\"1 file\")", |s, _| toasts_count_right(s)),
+        // fix_export item 1: the dialog opened for one layer, switched to Visible, exports everything again.
+        Step::Dyn("Export this layer again (the wrapped stamp)", |_, sc| {
+            Ok(vec![Step::Do(AppAction::ShowExportLayers(vec![LayerId(remembered(sc, "flow_wrap")?)]))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("switch the dialog's Layers choice to Visible", |s, _| {
+            let Dialog::Export(st) = &mut s.dialog else { return Err(format!("the Export dialog is not open ({})", dialog_name(&s.dialog))) };
+            crate::dialogs::export::switch_scope(st, crate::dialogs::export::LayerScope::Visible);
+            Ok(())
+        }),
+        Step::Assert("Visible: every texture set, the flattened texture and the normal formats again", |s, _| {
+            let Dialog::Export(st) = &s.dialog else { return Err("the Export dialog closed".to_owned()) };
+            let o = &st.options;
+            if o.layers.is_some() || o.sets.is_some() || o.include_hidden {
+                return Err(format!("layers {:?}, sets {:?}, hidden {}", o.layers, o.sets, o.include_hidden));
+            }
+            if o.flat != Some(FlatFormat::Png(PngLevel::Balanced)) || !o.per_layer_png || o.ora || o.psd {
+                return Err(format!("flat {:?}, per-layer {}, ora {}, psd {}", o.flat, o.per_layer_png, o.ora, o.psd));
+            }
+            let doc = doc_of(s)?;
+            let flats = wte_core::export::plan_contents(&doc.snapshot(), o).iter().filter(|f| f.kind == wte_core::PlannedKind::Flat).count();
+            if flats != doc.sets.len() {
+                return Err(format!("{flats} flattened textures for {} sets", doc.sets.len()));
+            }
+            Ok(())
+        }),
+        Step::Setup("and back to Selected", |s, _| {
+            let Dialog::Export(st) = &mut s.dialog else { return Err("the Export dialog closed".to_owned()) };
+            crate::dialogs::export::switch_scope(st, crate::dialogs::export::LayerScope::Selected);
+            Ok(())
+        }),
+        Step::Assert("Selected: the layer preset again (per-layer PNGs only)", |s, sc| {
+            let Dialog::Export(st) = &s.dialog else { return Err("the Export dialog closed".to_owned()) };
+            let o = &st.options;
+            if o.layers.as_deref() != Some(&[LayerId(remembered(sc, "flow_wrap")?)][..]) || o.flat.is_some() || !o.per_layer_png {
+                return Err(format!("layers {:?}, flat {:?}, per-layer {}", o.layers, o.flat, o.per_layer_png));
+            }
+            Ok(())
+        }),
+        Step::Do(AppAction::CloseDialog),
+        Step::WaitIdle,
         // A selection of two.
         Step::Dyn("select the stamp, Ctrl-select the text", |s, sc| {
             let (a, b) = flow_pair(s, sc)?;
@@ -1636,6 +1768,54 @@ fn flow_steps() -> Vec<Step> {
             log::info!("export_flow {}: {zip} {} bytes; {summary}", flow_tag(sc)?, bytes.len());
             Ok(())
         }),
+        // fix_export item 2: the selection as a zip into the same folder: its own name, the full package unchanged.
+        Step::Setup("remember the full package", |s, sc| {
+            let opts = flow_all_options(s, sc)?;
+            let bytes = std::fs::read(opts.dir.join(wte_core::export::package_name(&doc_of(s)?.name))).map_err(|e| e.to_string())?;
+            sc.values.insert("flow_zip", wte_core::fnv1a64(0, &bytes));
+            Ok(())
+        }),
+        Step::Dyn("export the selection as a zip into the same folder", |s, sc| {
+            let (a, b) = flow_pair(s, sc)?;
+            let opts = ExportOptions {
+                layers: Some(vec![a, b]),
+                flat: None,
+                ora: false,
+                psd: false,
+                ..flow_all_options(s, sc)?
+            };
+            Ok(vec![Step::Do(AppAction::RunExport(opts))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("<base>_selection.zip next to the unchanged <base>.zip; its entries are the full package's", |s, sc| {
+            let doc = doc_of(s)?;
+            let dir = flow_all_options(s, sc)?.dir;
+            let (full, sel) = (wte_core::export::package_name(&doc.name), wte_core::export::selection_package_name(&doc.name));
+            let mut want = vec![full.clone(), sel.clone()];
+            want.sort();
+            let listing = dir_names(&dir)?;
+            if listing != want {
+                return Err(format!("{} holds {listing:?}", dir.display()));
+            }
+            let full_bytes = std::fs::read(dir.join(&full)).map_err(|e| e.to_string())?;
+            if wte_core::fnv1a64(0, &full_bytes) != remembered(sc, "flow_zip")? {
+                return Err("the full package changed".to_owned());
+            }
+            let full_entries = wte_core::export::read_package(&full_bytes)?;
+            let sel_entries = wte_core::export::read_package(&std::fs::read(dir.join(&sel)).map_err(|e| e.to_string())?)?;
+            if sel_entries.len() < 2 {
+                return Err(format!("the selection zip holds {} entries", sel_entries.len()));
+            }
+            for (name, bytes) in &sel_entries {
+                match full_entries.iter().find(|(n, _)| n == name) {
+                    Some((_, b)) if b == bytes => {}
+                    Some(_) => return Err(format!("{name} differs from the full package's entry")),
+                    None => return Err(format!("{name} is not a name of the full package")),
+                }
+            }
+            log::info!("export_flow {}: {sel} with {} entries, all equal to the full package's", flow_tag(sc)?, sel_entries.len());
+            toasts_count_right(s)
+        }),
         Step::Assert("the exports left the document unchanged; no temp file anywhere", |s, sc| {
             let doc = doc_of(s)?;
             if flow_doc_key(doc) != remembered(sc, "flow_key")? {
@@ -1651,11 +1831,69 @@ fn flow_steps() -> Vec<Step> {
                     return Err(format!("a temp file or folder is left in {what}: {names:?}"));
                 }
             }
+            Ok(())
+        }),
+        // fix_export item 5: Duplicate and Delete on two selected layers, one undo step each.
+        Step::Dyn("select the pair again", |s, sc| {
+            let (a, b) = flow_pair(s, sc)?;
+            Ok(vec![Step::Do(AppAction::SelectLayer(a)), Step::Do(AppAction::ToggleLayerSelected(b))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("remember the history and the pair", |s, sc| {
+            let (a, b) = flow_pair(s, sc)?;
+            sc.values.insert("flow_pa", a.0);
+            sc.values.insert("flow_pb", b.0);
+            remember_undo(s, sc)
+        }),
+        Step::Do(AppAction::DuplicateActiveLayer),
+        Step::WaitIdle,
+        Step::Assert("Duplicate on two selected layers: two copies, selected, one undo step", |s, sc| {
+            undo_since(s, sc, 1)?;
+            let (a, b) = flow_pair(s, sc)?;
+            let selection = session_of(s)?.layer_selection();
+            if selection.len() != 2 || selection.contains(&a) || selection.contains(&b) {
+                return Err(format!("the selection after Duplicate is {selection:?} (originals {a:?}, {b:?})"));
+            }
+            Ok(())
+        }),
+        Step::Do(AppAction::Undo),
+        Step::WaitIdle,
+        Step::Assert("one Undo removes both copies", |s, sc| {
+            if flow_doc_key(doc_of(s)?) != remembered(sc, "flow_key")? {
+                return Err("the document differs after the undo of Duplicate".to_owned());
+            }
+            Ok(())
+        }),
+        Step::Dyn("select the pair again", |s, sc| {
+            let (a, b) = flow_pair(s, sc)?;
+            Ok(vec![Step::Do(AppAction::SelectLayer(a)), Step::Do(AppAction::ToggleLayerSelected(b))])
+        }),
+        Step::WaitIdle,
+        Step::Do(AppAction::DeleteSelection),
+        Step::WaitIdle,
+        Step::Assert("Delete on two selected layers: both gone, one undo step", |s, sc| {
+            undo_since(s, sc, 1)?;
+            let doc = doc_of(s)?;
+            for key in ["flow_pa", "flow_pb"] {
+                let id = LayerId(remembered(sc, key)?);
+                if doc.layer(id).is_some() {
+                    return Err(format!("the selected layer {id:?} is still there"));
+                }
+            }
+            Ok(())
+        }),
+        Step::Do(AppAction::Undo),
+        Step::WaitIdle,
+        Step::Assert("one Undo brings both back", |s, sc| {
+            if flow_doc_key(doc_of(s)?) != remembered(sc, "flow_key")? {
+                return Err("the document differs after the undo of Delete".to_owned());
+            }
             phase_mark(None);
             Ok(())
         }),
     ]
 }
+
 
 /// `export_flow [PATH]` (EXPORT_SELECT_PLAN 7): the user's workflow end to end on a generated cube as OBJ (+ MTL +
 /// texture), glTF, GLB and ASCII FBX, or once on PATH.
@@ -1679,6 +1917,364 @@ fn export_flow(has_path: bool) -> Vec<Step> {
     steps.push(Step::Do(AppAction::SetViewMode(ViewMode::Split)));
     steps.push(Step::WaitIdle);
     steps
+}
+
+/// The longest UI frame an export may cause while it waits for a wrapped stamp's Final (fix_export item 6).
+const EXPORT_MAX_FRAME_MS: f64 = 300.0;
+
+/// The options of `export_unsettled`: the wrapped stamp's layers (its linked layers of other sets come along) as
+/// per-layer PNGs and the flattened texture of that selection, into `<out_stem><suffix>`.
+fn unsettled_options(state: &AppState, sc: &Scratch, suffix: &str) -> Result<ExportOptions, String> {
+    let doc = doc_of(state)?;
+    let stamp = StampId(remembered(sc, "eu_stamp")?);
+    let layers: Vec<LayerId> = doc.stamp_layers(stamp).into_iter().map(|(_, l)| l).collect();
+    if layers.is_empty() {
+        return Err("the wrapped stamp has no layer".to_owned());
+    }
+    Ok(ExportOptions {
+        dir: with_suffix(&sc.out_stem, suffix),
+        layers: Some(layers),
+        flat: Some(FlatFormat::Png(PngLevel::Balanced)),
+        ora: false,
+        psd: false,
+        ..export_options(state, sc)?
+    })
+}
+
+/// `export_unsettled [PATH]` (fix_export item 6): a wrapped stamp is placed and exported at once, before its Final bake
+/// has landed (3-4 s on ABeautifulGame, seconds on high_poly_sphere). The export waits behind its progress dialog
+/// instead of on the UI thread: no frame takes `EXPORT_MAX_FRAME_MS` or more, and the files are byte-identical to an
+/// export made after waiting, and equal to the layers' Final pixels. The sphere sample without PATH.
+fn export_unsettled(has_path: bool) -> Vec<Step> {
+    let mut steps = if has_path { open_and_accept(true) } else { vec![Step::Do(AppAction::OpenSample(SampleKind::Sphere)), Step::WaitIdle] };
+    steps.extend([
+        Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
+        Step::WaitIdle,
+        Step::Do(AppAction::FrameModel),
+        Step::WaitIdle,
+        Step::Setup("Stamp tool: the sample image, 30 %, Wrap", |s, sc| {
+            setup_stamp_image(s, sc)?;
+            s.tools.stamp.size_frac = 0.3;
+            s.tools.stamp.rotation_deg = 0.0;
+            s.tools.stamp.mode = SurfaceMode::Wrap;
+            s.tools.stamp.wrap = WrapOptions::default();
+            Ok(())
+        }),
+        Step::Do(AppAction::SetTool(ToolKind::Stamp)),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
+        Step::BakeWait(false),
+        Step::Dyn("place the wrapped stamp", |s, _| {
+            let (xf, first, _) = stamp_spots(s)?;
+            Ok(vec![click(ViewId::Main3D, norm(&xf, first.pos))])
+        }),
+        Step::Setup("a Final is pending; reset the frame clock", |s, sc| {
+            // The stamp as it is now (its picture may not have landed yet: no coverage check).
+            let session = session_of(s)?;
+            let id = session.selected_stamp.ok_or("no stamp is selected")?;
+            let placement = session.doc.stamp(id).ok_or("the selected stamp does not exist")?.placement;
+            let Placement::Projected(p) = placement else { return Err("the stamp is not a 3D stamp".to_owned()) };
+            if p.mode != SurfaceMode::Wrap {
+                return Err(format!("the stamp was placed in {:?}", p.mode));
+            }
+            let pending = s.final_bakes_pending || doc_of(s)?.has_unbaked_stamps();
+            if !pending {
+                return Err("the Final bake already landed: the export would not wait".to_owned());
+            }
+            sc.values.insert("eu_stamp", id.0);
+            s.frame_work.reset();
+            for suffix in ["_a", "_b"] {
+                let dir = with_suffix(&sc.out_stem, suffix);
+                if dir.exists() {
+                    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        }),
+        Step::Dyn("Export at once, while the Final is pending", |s, sc| {
+            let opts = unsettled_options(s, sc, "_a")?;
+            log::info!("export_unsettled: export with the Final pending: {:?}", opts.layers);
+            Ok(vec![Step::Do(AppAction::RunExport(opts))])
+        }),
+        Step::BakeWait(true),
+        Step::WaitIdle,
+        Step::Assert("the UI kept drawing: no frame took 300 ms or more", |s, _| {
+            let ms = s.frame_work.max.as_secs_f64() * 1000.0;
+            log::info!("export_unsettled: longest frame {ms:.0} ms over {} frames", s.frame_work.frames);
+            if ms >= EXPORT_MAX_FRAME_MS {
+                return Err(format!("a frame took {ms:.0} ms (limit {EXPORT_MAX_FRAME_MS} ms)"));
+            }
+            if s.frame_work.frames < 3 {
+                return Err(format!("only {} frames were drawn during the export", s.frame_work.frames));
+            }
+            Ok(())
+        }),
+        Step::Assert("the export finished; nothing is pending; no dialog", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            if s.final_bakes_pending || doc_of(s)?.has_unbaked_stamps() {
+                return Err("a Final is still pending".to_owned());
+            }
+            if dir_names(&with_suffix(&sc.out_stem, "_a"))?.is_empty() {
+                return Err("nothing was exported".to_owned());
+            }
+            Ok(())
+        }),
+        Step::Dyn("Export again, after waiting", |s, sc| Ok(vec![Step::Do(AppAction::RunExport(unsettled_options(s, sc, "_b")?))])),
+        Step::WaitIdle,
+        Step::Assert("both exports are byte-identical, and the layer files are the Final pixels", |s, sc| {
+            let (a, b) = (with_suffix(&sc.out_stem, "_a"), with_suffix(&sc.out_stem, "_b"));
+            let n = same_files(&a, &b)?;
+            let doc = doc_of(s)?;
+            let stamp = StampId(remembered(sc, "eu_stamp")?);
+            let layers: Vec<LayerId> = doc.stamp_layers(stamp).into_iter().map(|(_, l)| l).collect();
+            let mut ink_total = 0;
+            for (id, name) in selection_files(doc, &layers) {
+                let image = decode_named(&name, &std::fs::read(a.join(&name)).map_err(|e| format!("{name}: {e}"))?)?;
+                let (set, _) = doc.find_layer(id).ok_or("no such layer")?;
+                let set = doc.set(set).ok_or("no such set")?;
+                let layer = doc.layer(id).ok_or("no such layer")?;
+                let d = differing(&image, &layer_canvas(layer, set.width, set.height));
+                if d != 0 {
+                    return Err(format!("{name}: {d} texels differ from the layer's Final pixels"));
+                }
+                ink_total += ink(&image);
+            }
+            if ink_total == 0 {
+                return Err("the wrapped stamp's files are empty".to_owned());
+            }
+            log::info!("export_unsettled: {n} files byte-identical; {ink_total} inked texels");
+            Ok(())
+        }),
+    ]);
+    steps
+}
+
+/// `export_nouv` (fix_export item 9, L3): a model without UVs (generated layout) is painted and stamped, exported, saved,
+/// reopened and exported again: both exports are byte-identical, file for file (flattened, per-layer, ORA, PSD), and
+/// so is a zip of the reopened document to the loose files.
+fn export_nouv() -> Vec<Step> {
+    vec![
+        Step::Setup("write the UV-less tetrahedron as OBJ", |_, sc| {
+            let dir = fresh_assets_dir(sc)?;
+            let (obj, _) = samples::to_obj(&samples::no_uv_tetra(), "", &[]);
+            write(&dir.join("tetra.obj"), obj.as_bytes())
+        }),
+        Step::Dyn("New from Model", |_, sc| Ok(vec![Step::Do(AppAction::NewFromModel(Some(assets_dir(sc).join("tetra.obj"))))])),
+        Step::WaitIdle,
+        Step::Assert("the import dialog generated a layout", |s, _| {
+            let st = import_dialog(s)?;
+            let model = st.model.as_ref().ok_or("the import dialog has no model")?;
+            if !model.report.no_uvs || !model.report.fallback_uvs_generated {
+                return Err("no generated layout".to_owned());
+            }
+            Ok(())
+        }),
+        Step::Do(AppAction::ImportCreate),
+        Step::WaitIdle,
+        Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
+        Step::WaitIdle,
+        Step::Do(AppAction::SetPrimaryColor(RED)),
+        Step::Do(AppAction::BrushSizeStep(3)),
+        Step::Dyn("brush stroke on the model", |s, _| model_stroke(s, ViewId::Main3D, &[[-0.35, 0.0], [0.0, 0.1], [0.3, -0.05]])),
+        Step::WaitIdle,
+        Step::Setup("register the sample stamp image (Project)", |s, sc| {
+            setup_stamp_image(s, sc)?;
+            s.tools.stamp.size_frac = 0.3;
+            s.tools.stamp.mode = SurfaceMode::Project;
+            Ok(())
+        }),
+        Step::Do(AppAction::SetTool(ToolKind::Stamp)),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
+        Step::Dyn("place the stamp", |s, _| {
+            let (xf, first, _) = stamp_spots(s)?;
+            Ok(vec![click(ViewId::Main3D, norm(&xf, first.pos))])
+        }),
+        Step::WaitIdle,
+        Step::Dyn("export everything", |s, sc| {
+            let dir = fresh_out_dir(sc, "_a")?;
+            Ok(vec![Step::Do(AppAction::RunExport(ExportOptions { dir, ..export_options(s, sc)? }))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the export holds the flattened texture, every layer, ORA and PSD", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let names = dir_names(&with_suffix(&sc.out_stem, "_a"))?;
+            let doc = doc_of(s)?;
+            let want = 1 + doc.sets[0].layers.iter().filter(|l| l.visible).count() + 2;
+            if names.len() != want {
+                return Err(format!("{} files, expected {want}: {names:?}", names.len()));
+            }
+            Ok(())
+        }),
+        Step::Dyn("Save As the project", |_, sc| Ok(vec![Step::Do(AppAction::SaveAs(Some(with_suffix(&sc.out_stem, ".wtep"))))])),
+        Step::WaitIdle,
+        Step::Dyn("open the saved project", |_, sc| Ok(vec![Step::Do(AppAction::OpenProject(Some(with_suffix(&sc.out_stem, ".wtep"))))])),
+        Step::WaitIdle,
+        Step::WaitFrames(3),
+        Step::Assert("the reopened project is open", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let session = session_of(s)?;
+            if session.path.as_deref() != Some(with_suffix(&sc.out_stem, ".wtep").as_path()) {
+                return Err(format!("the open document is {:?}", session.path));
+            }
+            Ok(())
+        }),
+        Step::Dyn("export everything again", |s, sc| {
+            let dir = fresh_out_dir(sc, "_b")?;
+            Ok(vec![Step::Do(AppAction::RunExport(ExportOptions { dir, ..export_options(s, sc)? }))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the two exports are byte-identical", |_, sc| {
+            let n = same_files(&with_suffix(&sc.out_stem, "_a"), &with_suffix(&sc.out_stem, "_b"))?;
+            log::info!("export_nouv: {n} files byte-identical before and after save + reopen");
+            Ok(())
+        }),
+        Step::Dyn("and as one zip", |s, sc| {
+            let dir = fresh_out_dir(sc, "_zip")?;
+            Ok(vec![Step::Do(AppAction::RunExport(ExportOptions { dir, package: wte_core::ExportPackage::Zip, ..export_options(s, sc)? }))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the zip's entries are the loose files", |s, sc| {
+            let doc = doc_of(s)?;
+            let zip = with_suffix(&sc.out_stem, "_zip").join(wte_core::export::package_name(&doc.name));
+            let entries = wte_core::export::read_package(&std::fs::read(&zip).map_err(|e| e.to_string())?)?;
+            let loose = dir_bytes(&with_suffix(&sc.out_stem, "_b"))?;
+            let mut sorted = entries.clone();
+            sorted.sort();
+            if sorted != loose {
+                return Err("the zip's entries differ from the loose files".to_owned());
+            }
+            toasts_count_right(s)
+        }),
+    ]
+}
+
+/// A `Step::Setup` function.
+type SetupFn = fn(&mut AppState, &mut Scratch) -> Result<(), String>;
+
+/// A process id that is not running (the stale temp files of `export_errors`).
+const DEAD_PID: u32 = u32::MAX - 3;
+
+/// `export_errors` (fix_export item 9, L1 / L4): exports into folders that cannot take them, driven through the app:
+/// a folder path that is a file, a planned file that is a folder (Files: nothing written, the old file kept), the zip's
+/// name taken by a folder (no stage folder, no temp file); each ends in the "Export failed" message and an error toast,
+/// and the app goes on. Then a crashed export's stage folder and temp files of a process that is not running are
+/// cleaned up by the next export into that folder.
+fn export_errors() -> Vec<Step> {
+    let mut steps = vec![Step::Do(AppAction::OpenSample(SampleKind::Sphere)), Step::WaitIdle];
+    let failing: [(&'static str, SetupFn); 3] = [
+        ("the folder path is a file", |s, sc| {
+            let root = fresh_out_dir(sc, "_err")?;
+            std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+            let file = root.join("a file");
+            std::fs::write(&file, b"x").map_err(|e| e.to_string())?;
+            err_export(s, sc, file.join("out"), wte_core::ExportPackage::Files)
+        }),
+        ("a planned file is a folder (Files)", |s, sc| {
+            let dir = fresh_out_dir(sc, "_err")?;
+            let opts = ExportOptions { dir: dir.clone(), ..export_options(s, sc)? };
+            let plan = wte_core::export::plan(&doc_of(s)?.snapshot(), &opts);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            std::fs::write(&plan[0], b"old").map_err(|e| e.to_string())?;
+            std::fs::create_dir(plan.last().ok_or("empty plan")?).map_err(|e| e.to_string())?;
+            sc.values.insert("err_files", 2);
+            err_export(s, sc, dir, wte_core::ExportPackage::Files)
+        }),
+        ("the zip's name is a folder", |s, sc| {
+            let dir = fresh_out_dir(sc, "_err")?;
+            std::fs::create_dir_all(dir.join(wte_core::export::package_name(&doc_of(s)?.name))).map_err(|e| e.to_string())?;
+            sc.values.insert("err_files", 1);
+            err_export(s, sc, dir, wte_core::ExportPackage::Zip)
+        }),
+    ];
+    for (what, setup) in failing {
+        steps.extend([
+            Step::Setup(what, setup),
+            Step::Dyn("export", |_, _| {
+                let opts = ERR_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("no options")?;
+                Ok(vec![Step::Do(AppAction::RunExport(opts))])
+            }),
+            Step::WaitIdle,
+            Step::Assert("\"Export failed\": the message and an error toast; nothing new in the folder; no temp file", |s, sc| {
+                match &s.dialog {
+                    Dialog::Message { title, lines } if title == "Export failed" => log::info!("export_errors: {lines:?}"),
+                    other => return Err(format!("the dialog is {} (expected the \"Export failed\" message)", dialog_name(other))),
+                }
+                if !s.toasts.visible_labels().iter().any(|l| l.starts_with("Export failed")) {
+                    return Err(format!("no error toast: {:?}", s.toasts.visible_labels()));
+                }
+                session_of(s)?;
+                let opts = ERR_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("no options")?;
+                if opts.dir.exists() {
+                    let names = dir_names(&opts.dir)?;
+                    if names.iter().any(|n| n.contains(".tmp-")) {
+                        return Err(format!("a temp file is left: {names:?}"));
+                    }
+                    let want = sc.values.get("err_files").copied().unwrap_or(0) as usize;
+                    if names.len() != want {
+                        return Err(format!("{} holds {names:?}: the export wrote files before it failed", opts.dir.display()));
+                    }
+                    for name in &names {
+                        let path = opts.dir.join(name);
+                        if path.is_file() && std::fs::read(&path).map_err(|e| e.to_string())? != b"old" {
+                            return Err(format!("{name} was replaced"));
+                        }
+                    }
+                }
+                Ok(())
+            }),
+            Step::Do(AppAction::CloseDialog),
+            Step::WaitIdle,
+        ]);
+    }
+    steps.extend([
+        Step::Setup("a crashed export's leftovers of a process that is not running", |s, sc| {
+            let dir = fresh_out_dir(sc, "_stale")?;
+            let doc = doc_of(s)?;
+            let zip = wte_core::export::package_name(&doc.name);
+            let stage = dir.join(format!("{zip}.tmp-{DEAD_PID}.d"));
+            std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+            std::fs::write(stage.join("half.png"), b"x").map_err(|e| e.to_string())?;
+            std::fs::write(dir.join(format!("{zip}.tmp-{DEAD_PID}")), b"x").map_err(|e| e.to_string())?;
+            std::fs::write(dir.join(format!("{}.png.tmp-{DEAD_PID}", wte_core::export::sanitize_file_stem(&doc.name))), b"x").map_err(|e| e.to_string())?;
+            std::fs::write(dir.join("notes.txt"), b"keep").map_err(|e| e.to_string())?;
+            if sc.values.get("expected_error_toasts").copied().unwrap_or(0) != 0 {
+                return Err("an announced error toast did not come".to_owned());
+            }
+            err_export(s, sc, dir, wte_core::ExportPackage::Zip)?;
+            sc.values.insert("expected_error_toasts", 0);
+            Ok(())
+        }),
+        Step::Dyn("export as a zip into that folder", |_, _| {
+            let opts = ERR_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("no options")?;
+            Ok(vec![Step::Do(AppAction::RunExport(opts))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the leftovers are gone, the zip is there, other files stay", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let doc = doc_of(s)?;
+            let names = dir_names(&with_suffix(&sc.out_stem, "_stale"))?;
+            let mut want = vec![wte_core::export::package_name(&doc.name), "notes.txt".to_owned()];
+            want.sort();
+            if names != want {
+                return Err(format!("the folder holds {names:?}, expected {want:?}"));
+            }
+            Ok(())
+        }),
+    ]);
+    steps
+}
+
+/// The options of the next `export_errors` export (set by its Setup steps, read by the Dyn and Assert steps).
+static ERR_OPTIONS: Mutex<Option<ExportOptions>> = Mutex::new(None);
+
+/// Stores the options of an `export_errors` export: everything into `dir`.
+fn err_export(state: &mut AppState, sc: &mut Scratch, dir: PathBuf, package: wte_core::ExportPackage) -> Result<(), String> {
+    let opts = ExportOptions { dir, package, ..export_options(state, sc)? };
+    sc.values.entry("err_files").or_insert(0);
+    *sc.values.entry("expected_error_toasts").or_insert(0) += 1;
+    *ERR_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()) = Some(opts);
+    Ok(())
 }
 
 /// Two-material sample: an image stamp across the material boundary, then a stroke from the other material across it.
@@ -1740,6 +2336,28 @@ fn multi() -> Vec<Step> {
             Ok(vec![drag(&xf, &[from, to])])
         }),
         Step::WaitIdle,
+        // fix_export item 3: "Export this layer" on the stamp's layer writes its layer of both sets.
+        Step::Dyn("Export this layer: the stamp's layer in its home set", |s, _| {
+            let (id, _) = placed_stamp(s, false)?;
+            let doc = doc_of(s)?;
+            let home = doc.stamp(id).ok_or("stamp missing")?.home_set;
+            let (_, layer) = doc.stamp_layers(id).into_iter().find(|(set, _)| *set == home).ok_or("no home layer")?;
+            Ok(vec![Step::Do(AppAction::ShowExportLayers(vec![layer]))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("into <out>_one", |s, sc| dialog_into(s, sc, "_one")),
+        Step::Dyn("Export (the dialog's options)", run_dialog_export),
+        Step::WaitIdle,
+        Step::Assert("the stamp's layers of both sets were exported, each its layer's pixels", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let (id, _) = placed_stamp(s, false)?;
+            let doc = doc_of(s)?;
+            let layers: Vec<LayerId> = doc.stamp_layers(id).into_iter().map(|(_, l)| l).collect();
+            let dir = with_suffix(&sc.out_stem, "_one");
+            expect_layer_files(s, &dir, &layers)?;
+            let n = dir_names(&dir)?.len();
+            if n != 2 { Err(format!("{n} files for a stamp across two sets")) } else { toasts_count_right(s) }
+        }),
         Step::Assert("paint in both sets, a new paint layer in the stamp's home set", |s, sc| {
             let doc = doc_of(s)?;
             let home = TextureSetId(remembered(sc, "home")? as u32);
@@ -3017,7 +3635,7 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)> {
     match name {
         "workflow_path" | "fuzz_path" | "brush_types_path" | "text_preview_path" | "final_bake_async" | "wrap_surface"
-        | "export_flow" => {
+        | "export_flow" | "export_unsettled" => {
             Some((Duration::from_secs(300), Duration::from_secs(3600)))
         }
         _ => None,
@@ -4284,6 +4902,23 @@ fn fuzz_action(f: &mut Fuzz, state: &AppState) -> (String, Vec<Step>) {
                     ],
                 );
             }
+            // fix_export item 9: multi-select, the commands on a selection, rename, export and save + reopen.
+            match f.below(20) {
+                13 => return (format!("layer {:?}: Ctrl-click (toggle in the selection)", layer.name), vec![Step::Do(A::ToggleLayerSelected(id))]),
+                14 => return (format!("layer {:?}: Shift-click (range select)", layer.name), vec![Step::Do(A::SelectLayerRange(id))]),
+                15 => {
+                    let selection = session.layer_selection();
+                    let action = if f.chance(0.5) { A::DuplicateLayers(selection.clone()) } else { A::DeleteLayers(selection.clone()) };
+                    return (format!("selection of {} layer(s): {action:?}", selection.len()), vec![Step::Do(action)]);
+                }
+                16 => {
+                    let name = f.pick(&["Renamed", "Gl\u{fc}hen \u{2728}", "a:b/c", "", "  ", "CON", "\u{8eab}\u{4f53}"]).to_owned();
+                    return (format!("layer {:?}: rename to {name:?}", layer.name), vec![Step::Do(A::RenameLayer(id, name))]);
+                }
+                17 | 18 => return ("export (to a temp folder)".to_owned(), vec![Step::Dyn("fuzz: export", fuzz_export)]),
+                19 => return ("save and reopen the project".to_owned(), vec![Step::Dyn("fuzz: save and reopen", fuzz_save_reopen)]),
+                _ => {}
+            }
             let action = match f.below(13) {
                 0 => A::AddPaintLayer,
                 1 => A::DuplicateLayer(id),
@@ -4410,6 +5045,79 @@ fn fuzz_action(f: &mut Fuzz, state: &AppState) -> (String, Vec<Step>) {
             (format!("stamp {:?}: {action:?}", stamp.name), steps)
         }
     }
+}
+
+/// fix_export item 9: a fuzz export into `<out_stem>_fuzz_export`: everything, the selection or one random layer; loose
+/// files or a zip; some formats. Afterwards no temp file may be left in the folder.
+fn fuzz_export(state: &AppState, sc: &Scratch) -> Result<Vec<Step>, String> {
+    let mut f = FUZZ.lock().unwrap_or_else(|e| e.into_inner());
+    let session = session_of(state)?;
+    let doc = &session.doc;
+    let layers = match f.below(3) {
+        0 => None,
+        1 => Some(session.layer_selection()),
+        _ => {
+            let all: Vec<LayerId> = doc.sets.iter().flat_map(|s| &s.layers).map(|l| l.id).collect();
+            if all.is_empty() { None } else { Some(vec![f.pick(&all)]) }
+        }
+    };
+    let opts = ExportOptions {
+        dir: with_suffix(&sc.out_stem, "_fuzz_export"),
+        base_name: doc.name.clone(),
+        sets: None,
+        flat: f.chance(0.5).then_some(FlatFormat::Png(PngLevel::Fast)),
+        per_layer_png: f.chance(0.8),
+        ora: f.chance(0.15),
+        psd: f.chance(0.15),
+        include_hidden: f.chance(0.5),
+        dilate_px: if f.chance(0.2) { 2 } else { 0 },
+        layers,
+        package: if f.chance(0.5) { wte_core::ExportPackage::Zip } else { wte_core::ExportPackage::Files },
+    };
+    log::info!("fuzz: export {:?} layers {:?} flat {:?} per-layer {} ora {} psd {}", opts.package, opts.layers, opts.flat, opts.per_layer_png, opts.ora, opts.psd);
+    Ok(vec![
+        Step::Do(AppAction::RunExport(opts)),
+        Step::WaitIdle,
+        Step::Dyn("fuzz: close a message", |s, _| {
+            Ok(if matches!(s.dialog, Dialog::Message { .. }) { vec![Step::Do(AppAction::CloseDialog), Step::WaitFrames(2)] } else { Vec::new() })
+        }),
+        Step::Assert("fuzz: the export left no temp file", |_, sc| {
+            let dir = with_suffix(&sc.out_stem, "_fuzz_export");
+            if !dir.exists() {
+                return Ok(());
+            }
+            let names = dir_names(&dir)?;
+            if names.iter().any(|n| n.contains(".tmp-")) {
+                return Err(format!("a temp file or folder is left: {names:?}"));
+            }
+            Ok(())
+        }),
+    ])
+}
+
+/// fix_export item 9: the fuzz saves the project as `<out_stem>_fuzz.wtep` and opens it again (the history starts
+/// over); the stamp tool gets its image again.
+fn fuzz_save_reopen(_state: &AppState, sc: &Scratch) -> Result<Vec<Step>, String> {
+    let path = with_suffix(&sc.out_stem, "_fuzz.wtep");
+    Ok(vec![
+        Step::Do(AppAction::SaveAs(Some(path.clone()))),
+        Step::WaitIdle,
+        Step::Do(AppAction::OpenProject(Some(path))),
+        Step::WaitIdle,
+        Step::Setup("fuzz: the stamp image again", |s, sc| {
+            if s.session.is_some() {
+                setup_stamp_image(s, sc)?;
+            }
+            Ok(())
+        }),
+        Step::Assert("fuzz: the reopened project is open and unmodified", |s, sc| {
+            let session = session_of(s)?;
+            if session.path.as_deref() != Some(with_suffix(&sc.out_stem, "_fuzz.wtep").as_path()) {
+                return Err(format!("the open document is {:?} (dialog {})", session.path, dialog_name(&s.dialog)));
+            }
+            Ok(())
+        }),
+    ])
 }
 
 /// One of the four text operations of the fuzz run (round 4): `0` a random gap value (sometimes out of range, which
@@ -7911,7 +8619,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 42);
+        assert_eq!(scenario_names().len(), 45);
     }
 
     #[test]

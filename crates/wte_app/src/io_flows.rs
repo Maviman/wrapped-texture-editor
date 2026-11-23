@@ -202,16 +202,12 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                     app.state.dialog = Dialog::None;
                 }
                 app.export_stash = None;
-                // The folder name only; the full path is the toast's hover text (R3-7).
-                let text = if report.packaged == 0 {
-                    format!("Exported {} files to {}", report.files.len(), folder_name(&dir))
-                } else {
-                    let zip = report.files.first().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    format!("Exported {zip} ({} files) to {}", report.packaged, folder_name(&dir))
-                };
+                app.export_feed = None;
+                let text = export_toast_text(&report, &dir);
                 app.state.toasts.push_with_detail(crate::action::ToastLevel::Info, text, dir.display().to_string());
             }
             Err(e) => {
+                app.export_feed = None;
                 // A cancelled export leaves the Export dialog open as it is.
                 let previous = std::mem::replace(&mut app.state.dialog, Dialog::None);
                 let lines = vec![format!("Export to {} failed.", dir.display()), e.clone()];
@@ -417,6 +413,23 @@ fn folder_name(dir: &Path) -> String {
     dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
+/// "1 file" / "N files".
+fn files_text(n: usize) -> String {
+    if n == 1 { "1 file".to_owned() } else { format!("{n} files") }
+}
+
+/// The toast of a finished export (fix_export item 8: singular for one file): "Exported 1 file to <folder>",
+/// "Exported 3 files to <folder>", "Exported <zip> (1 file) to <folder>". The folder name only; the full path is the
+/// toast's hover text (R3-7).
+pub(crate) fn export_toast_text(report: &wte_core::ExportReport, dir: &Path) -> String {
+    if report.packaged == 0 {
+        format!("Exported {} to {}", files_text(report.files.len()), folder_name(dir))
+    } else {
+        let zip = report.files.first().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        format!("Exported {zip} ({}) to {}", files_text(report.packaged), folder_name(dir))
+    }
+}
+
 /// Start of the texts of `cannot_open_text`.
 const CANNOT_OPEN: &str = "Cannot open ";
 
@@ -486,15 +499,120 @@ pub fn start_export(app: &mut WteApp, opts: ExportOptions) {
     }
     let Some(doc) = app.state.doc_mut() else { return };
     doc.flush_pending_edit();
-    crate::stamp_bakes::settle(app);
-    let Some(doc) = app.state.doc() else { return };
-    let snapshot = doc.snapshot();
-    log::info!("export to {}", opts.dir.display());
+    // fix_export item 6: no `settle` on the UI thread. When Final bakes are still due (a wrapped stamp placed or
+    // edited a moment ago: 3-4 s on ABeautifulGame), the job starts at once behind the progress dialog ("Finishing
+    // stamps") and gets the snapshot from `feed_waiting_export` when they have landed; the UI keeps drawing meanwhile.
+    let (tx, rx) = std::sync::mpsc::channel::<wte_core::DocumentSnapshot>();
+    let waiting = crate::stamp_bakes::bakes_pending(&app.state);
+    if !waiting {
+        let Some(doc) = app.state.doc() else { return };
+        if tx.send(doc.snapshot()).is_err() {
+            return;
+        }
+    }
+    log::info!("export to {}{}", opts.dir.display(), if waiting { " (waiting for the Final bakes)" } else { "" });
     app.jobs.spawn(&app.ctx, "Exporting", true, move |p| {
         let dir = opts.dir.clone();
+        let snapshot = match receive_snapshot(&rx, p) {
+            Ok(snapshot) => snapshot,
+            Err(e) => return JobOutput::Exported { result: Err(e), dir },
+        };
+        // fix_export item 7: what a crashed export of another process left in this folder.
+        wte_core::export::remove_stale_temps(&dir, &process_running);
         let result = wte_core::export::run(&snapshot, &opts, p).map_err(|e| e.to_string());
         JobOutput::Exported { result, dir }
     });
+    if waiting {
+        app.export_feed = Some(ExportFeed { tx, since: std::time::Instant::now() });
+    }
+}
+
+/// fix_export item 6: an export job waiting for its snapshot (`start_export`), and since when.
+pub struct ExportFeed {
+    tx: std::sync::mpsc::Sender<wte_core::DocumentSnapshot>,
+    since: std::time::Instant,
+}
+
+/// The export job's wait for its snapshot: shows "Finishing stamps" until it comes; `Err("cancelled")` when the user
+/// cancels meanwhile (the result counts as cancelled: `Finished::cancel_requested`), an error when the app dropped the
+/// export (the document went away).
+fn receive_snapshot(
+    rx: &std::sync::mpsc::Receiver<wte_core::DocumentSnapshot>,
+    p: &dyn Progress,
+) -> Result<wte_core::DocumentSnapshot, String> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut shown = false;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(if shown { 50 } else { 0 })) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(RecvTimeoutError::Disconnected) => return Err("the document is no longer open".to_owned()),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if p.cancelled() {
+            return Err(wte_core::ExportError::Cancelled.to_string());
+        }
+        if !shown {
+            p.report(0.0, "Finishing stamps");
+            shown = true;
+        }
+    }
+}
+
+/// fix_export item 6: called every frame by `App::logic` after `stamp_bakes::pump`. While an export waits for the
+/// Final bakes, does nothing as long as a bake (or the wrap job it waits for) runs on a worker; once none is pending
+/// it hands the job the snapshot. A Final that is due while no job runs (no worker thread could start) is baked here
+/// (`settle`, the old behaviour) so the export never waits forever.
+pub fn feed_waiting_export(app: &mut WteApp) {
+    if app.export_feed.is_none() {
+        return;
+    }
+    if crate::stamp_bakes::bakes_pending(&app.state) {
+        if crate::stamp_bakes::bake_job_running(&app.state) {
+            app.ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        }
+        log::warn!("export: a Final bake is due but none runs; baking it on the UI thread");
+        crate::stamp_bakes::settle(app);
+    }
+    let Some(feed) = app.export_feed.take() else { return };
+    let Some(snapshot) = app.state.doc().map(|d| d.snapshot()) else { return };
+    log::info!("export: the Final bakes landed after {:.0} ms; exporting", feed.since.elapsed().as_secs_f64() * 1000.0);
+    // A cancelled job has dropped the receiver: nothing to do.
+    let _ = feed.tx.send(snapshot);
+}
+
+/// Whether a process with this id is running (fix_export item 7: a temp file of an export whose process is gone is
+/// stale). Windows: `OpenProcess` + `GetExitCodeProcess` (a process that exists but may not be opened counts as
+/// running); elsewhere `/proc/<pid>`.
+pub fn process_running(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const STILL_ACTIVE: u32 = 259;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+            fn GetExitCodeProcess(process: *mut c_void, code: *mut u32) -> i32;
+            fn CloseHandle(handle: *mut c_void) -> i32;
+        }
+        // SAFETY: plain Win32 calls with a valid out pointer; the handle is closed before returning.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ACCESS_DENIED);
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            ok == 0 || code == STILL_ACTIVE
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
 }
 
 /// Starts the "Extract Original Files" job on the in-memory document (works for a document that was never saved).
@@ -834,6 +952,33 @@ mod tests {
         assert_eq!(cannot_open_text(&file), None);
         assert!(CANNOT_OPEN.ends_with(' '));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_toasts_count_files_in_the_singular_and_plural() {
+        let dir: PathBuf = ["E:", "x", "out"].iter().collect();
+        let files = |n: usize| (0..n).map(|i| dir.join(format!("f{i}.png"))).collect::<Vec<_>>();
+        let loose = |n| wte_core::ExportReport { files: files(n), bytes_written: 1, packaged: 0 };
+        assert_eq!(export_toast_text(&loose(1), &dir), "Exported 1 file to out");
+        assert_eq!(export_toast_text(&loose(2), &dir), "Exported 2 files to out");
+        let zip = |n| wte_core::ExportReport { files: vec![dir.join("m_selection.zip")], bytes_written: 1, packaged: n };
+        assert_eq!(export_toast_text(&zip(1), &dir), "Exported m_selection.zip (1 file) to out");
+        assert_eq!(export_toast_text(&zip(8), &dir), "Exported m_selection.zip (8 files) to out");
+    }
+
+    #[test]
+    fn this_process_runs_and_a_finished_one_does_not() {
+        assert!(process_running(std::process::id()));
+        // A child that has exited (and been reaped): its id is free.
+        let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
+            .args(if cfg!(windows) { &["/c", "exit"][..] } else { &[][..] })
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        drop(child);
+        assert!(!process_running(pid), "process {pid} still counts as running");
+        assert!(!process_running(u32::MAX - 3));
     }
 
     #[test]

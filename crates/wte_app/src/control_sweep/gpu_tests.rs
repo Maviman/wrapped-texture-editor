@@ -436,6 +436,128 @@ fn export_dialog_zip_package_and_selected_layers() {
     let _ = std::fs::remove_dir_all(&sel_dir);
 }
 
+/// fix_export item 9: replacing an existing zip through the app's confirm step: Replace writes the new package over
+/// the old file; no temp file is left; the toast names the zip.
+#[test]
+#[ignore = "needs a GPU"]
+fn export_dialog_replaces_a_zip_through_the_confirm() {
+    let mut a = FullApp::new(Some(SampleKind::Sphere));
+    let dir = scratch("export_replace");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("ball.zip"), b"an old package").unwrap();
+    a.menu(&["File", "Export..."]);
+    if let Dialog::Export(st) = &mut a.app.state.dialog {
+        st.options.dir = dir.clone();
+        st.options.base_name = "ball".to_owned();
+    }
+    a.idle(1);
+    a.click("Pack into one .zip file");
+    a.idle(2);
+    assert!(a.h.has("will be replaced"));
+    a.click("Export");
+    a.idle(2);
+    assert_eq!(a.export_state().confirm_replace.as_deref(), Some(&[dir.join("ball.zip")][..]));
+    assert!(a.h.has("Replace existing files?"));
+    a.click("Replace");
+    a.wait_jobs();
+    assert_eq!(a.dialog_name(), "None");
+    let listing: Vec<String> =
+        std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(listing, ["ball.zip"], "no temp file or stage folder");
+    let bytes = std::fs::read(dir.join("ball.zip")).unwrap();
+    assert_ne!(bytes, b"an old package");
+    let entries = wte_core::export::read_package(&bytes).unwrap();
+    assert!(entries.iter().any(|(n, _)| n == "ball.png"), "{:?}", entries.iter().map(|(n, _)| n).collect::<Vec<_>>());
+    assert!(a.state().toasts.visible_labels().iter().any(|l| l.starts_with("Exported ball.zip (")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// fix_export item 9: a zip export cancelled with the progress dialog's Cancel while it packs: no zip, no stage folder,
+/// no temp file (the folder it created is removed again), "Export cancelled", the document unchanged. Twelve UV stamps
+/// of noise make the per-layer files and the PSD large enough that packing takes a while.
+#[test]
+#[ignore = "needs a GPU"]
+fn a_zip_export_cancelled_while_packing_leaves_nothing() {
+    let mut a = FullApp::new(Some(SampleKind::Sphere));
+    {
+        let doc = a.app.state.doc_mut().unwrap();
+        let (w, h) = (doc.sets[0].width, doc.sets[0].height);
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise = vec![0u8; (w * h * 4) as usize];
+        for px in noise.chunks_mut(4) {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            px.copy_from_slice(&[seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255]);
+        }
+        let png = wte_core::encode_png(w, h, &noise, wte_core::PngLevel::Fast).unwrap();
+        let blob = doc.add_image_blob("noise.png", std::sync::Arc::from(png)).unwrap();
+        for i in 0..12 {
+            let placement = wte_core::Placement::Uv(wte_core::UvPlacement {
+                set: TextureSetId(0),
+                center_px: glam::Vec2::new(w as f32 / 2.0, h as f32 / 2.0),
+                size_px: glam::Vec2::new(w as f32, h as f32),
+                rotation: 0.0,
+                flip_x: i % 2 == 1,
+                flip_y: i % 3 == 1,
+                clip_to_islands: false,
+            });
+            doc.add_stamp(&format!("Noise {i}"), wte_core::StampSource::Image { blob }, placement, TextureSetId(0)).unwrap();
+        }
+    }
+    a.idle(3);
+    let revision = a.state().doc().unwrap().revision();
+    let root = scratch("export_cancel_packing");
+    let dir = root.join("out");
+    let opts = wte_core::ExportOptions {
+        dir: dir.clone(),
+        base_name: "ball".to_owned(),
+        sets: None,
+        flat: Some(FlatFormat::Png(wte_core::PngLevel::Balanced)),
+        per_layer_png: true,
+        ora: true,
+        psd: true,
+        include_hidden: false,
+        dilate_px: 0,
+        layers: None,
+        package: wte_core::ExportPackage::Zip,
+    };
+    a.app.state.push(AppAction::RunExport(opts));
+    a.idle(1);
+    assert!(a.app.jobs.modal_running(), "the export started");
+    let start = Instant::now();
+    let mut seen = false;
+    let mut stages: Vec<String> = Vec::new();
+    while a.app.jobs.any_running() {
+        assert!(start.elapsed() < Duration::from_secs(120), "the export did not end");
+        // Read the job's progress directly (between frames), then draw a frame.
+        if let Some(b) = a.app.jobs.busy() {
+            if stages.last() != Some(&b.stage) {
+                stages.push(b.stage.clone());
+            }
+            if b.modal && b.stage == "Packing" {
+                seen = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let toasts = a.state().toasts.visible_labels();
+    assert!(seen, "the export ended before it was seen packing: stages {stages:?}, toasts {toasts:?} after {:?}", start.elapsed());
+    // The progress dialog (it fades in over a frame or two), then its Cancel button.
+    a.idle(2);
+    assert!(a.app.jobs.modal_running(), "the export ended while the progress dialog appeared");
+    assert!(a.h.has("Exporting"), "the progress dialog is shown");
+    a.click("Cancel");
+    a.wait_jobs();
+    assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none(), "something is left in {}", dir.display());
+    assert!(!dir.exists(), "the folder the export created is removed again");
+    assert!(a.state().toasts.visible_labels().iter().any(|l| l == "Export cancelled"), "{:?}", a.state().toasts.visible_labels());
+    assert_eq!(a.dialog_name(), "None");
+    assert_eq!(a.state().doc().unwrap().revision(), revision);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Regression test of finding `esc-in-popup-cancels`, Export dialog: Esc pressed to close the format drop-down closes
 /// only the drop-down (it used to close the whole dialog, losing the chosen options); the next Esc closes the dialog.
 #[test]

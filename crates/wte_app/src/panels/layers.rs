@@ -548,15 +548,27 @@ fn footer(ui: &mut egui::Ui, state: &AppState, actions: &mut Vec<AppAction>, hit
             actions.push(AppAction::AddPaintLayer);
         }
         let Some(layer) = active else { return };
-        if ui.button("Duplicate").clicked() {
-            actions.push(AppAction::DuplicateLayer(layer.id));
+        // fix_export item 5: with several layers selected, Duplicate and Delete act on all of them (one undo step
+        // each); Merge Down stays on the active layer. The labels and tooltips say so.
+        let n = selection.len();
+        let multi = n > 1;
+        let duplicate = ui.button(if multi { format!("Duplicate ({n})") } else { "Duplicate".to_owned() });
+        let duplicate = if multi {
+            duplicate.on_hover_text(format!("Duplicate the {n} selected layers (one undo step)"))
+        } else {
+            duplicate
+        };
+        if duplicate.clicked() {
+            actions.push(if multi { AppAction::DuplicateLayers(selection.clone()) } else { AppAction::DuplicateLayer(layer.id) });
         }
         let can_merge = set.is_some_and(|s| can_merge_down(s, layer));
-        if ui
-            .add_enabled(can_merge, egui::Button::new("Merge Down"))
-            .on_disabled_hover_text("Needs an unlocked layer below")
-            .clicked()
-        {
+        let merge = ui.add_enabled(can_merge, egui::Button::new("Merge Down")).on_disabled_hover_text("Needs an unlocked layer below");
+        let merge = if multi {
+            merge.on_hover_text(format!("Merges the active layer, {}, into the layer below (not the other selected layers)", layer.name))
+        } else {
+            merge
+        };
+        if merge.clicked() {
             actions.push(AppAction::MergeDown(layer.id));
         }
         if ui
@@ -572,6 +584,21 @@ fn footer(ui: &mut egui::Ui, state: &AppState, actions: &mut Vec<AppAction>, hit
         } else {
             format!("The stamp's layer is locked in {}: unlock it there", set_names_text(&elsewhere))
         };
+        if multi {
+            let deletable = selection.iter().filter_map(|id| session.doc.layer(*id)).any(|l| {
+                !l.locked && locked_elsewhere(&session.doc, l).is_empty()
+            });
+            let delete = ui.add_enabled(deletable, egui::Button::new(format!("Delete ({n})")));
+            hits.push((PanelHit::LayersDelete, delete.rect));
+            if delete
+                .on_hover_text(format!("Delete the {n} selected layers (one undo step); locked layers stay"))
+                .on_disabled_hover_text("Every selected layer is locked")
+                .clicked()
+            {
+                actions.push(AppAction::DeleteLayers(selection.clone()));
+            }
+            return;
+        }
         let delete = ui.add_enabled(!layer.locked && elsewhere.is_empty(), egui::Button::new("Delete"));
         hits.push((PanelHit::LayersDelete, delete.rect));
         if delete.on_disabled_hover_text(why).clicked() {

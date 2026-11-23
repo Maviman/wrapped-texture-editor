@@ -32,6 +32,9 @@ pub struct WteApp {
     /// The Export dialog, parked while the `Dialog::Message` of a failed export is shown; restored when that message
     /// closes, so the user can retry (8.9: "the Export dialog stays open underneath").
     pub(crate) export_stash: Option<Box<ExportDialogState>>,
+    /// fix_export item 6: an export waiting behind its progress dialog for the Final bakes to land
+    /// (`io_flows::feed_waiting_export` hands its job the snapshot then).
+    pub(crate) export_feed: Option<io_flows::ExportFeed>,
     /// `pixels_per_point` the window's maximum inner size was last sent for (`cap_window_size`).
     max_size_ppp: Option<f32>,
     /// Frames the start-up check of the window geometry is still waiting for (`fit_window_to_monitor`); 0 = done.
@@ -170,6 +173,7 @@ impl WteApp {
             exit_code,
             ctx,
             export_stash: None,
+            export_feed: None,
             max_size_ppp: None,
             geometry_frames_left: if selftest_mode { 0 } else { GEOMETRY_CHECK_FRAMES },
             #[cfg(debug_assertions)]
@@ -281,6 +285,7 @@ impl eframe::App for WteApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         frame_profile::frame_begin();
+        self.state.frame_work.begin();
         let jobs = frame_profile::scope("jobs");
         for done in self.jobs.poll() {
             io_flows::on_job_output(self, done.output, done.cancel_requested); // may replace the session
@@ -292,6 +297,8 @@ impl eframe::App for WteApp {
         // the tool asks for a param-only job instead (`stamp_bakes`), started here.
         self.tools.ensure_wrap_param(&mut self.state);
         crate::stamp_bakes::after_tools(&mut self.state, &mut self.jobs, ctx);
+        // fix_export item 6: an export that waits for the Final bakes gets its snapshot once they have landed.
+        io_flows::feed_waiting_export(self);
         self.state.busy = self.jobs.busy();
         drop(jobs);
         if let Some(runner) = &mut self.selftest {
@@ -348,6 +355,7 @@ impl eframe::App for WteApp {
         crate::stamp_bakes::after_dispatch(&mut self.state, ui.ctx());
         drop(p);
         frame_profile::frame_end();
+        self.state.frame_work.end();
     }
 
     fn on_exit(&mut self) {
@@ -384,6 +392,7 @@ impl WteApp {
             exit_code: Arc::new(AtomicI32::new(0)),
             ctx,
             export_stash: None,
+            export_feed: None,
             max_size_ppp: None,
             geometry_frames_left: 0,
             #[cfg(debug_assertions)]

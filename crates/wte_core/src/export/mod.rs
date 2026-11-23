@@ -636,6 +636,7 @@ fn run_files(
     run.check_cancelled()?;
     progress.report(0.0, "Exporting");
     std::fs::create_dir_all(&opts.dir)?;
+    preflight(&opts.dir, items.iter().map(|item| item.path.as_path()))?;
 
     let mut groups: Vec<SetGroup> = Vec::new();
     let mut start = 0;
@@ -708,6 +709,23 @@ fn run_files(
         None if cancelled => Err(ExportError::Cancelled),
         None => Ok(report),
     }
+}
+
+/// Checks, before anything is written (fix_export item 9), that the output folder takes files (a probe file is
+/// created and removed again) and that no planned file is a folder. A read-only or blocked folder then fails before a
+/// single file of the export replaces an old one, so no mix of new and old files is left. A failure while writing
+/// (a full disk, a file held open by another program) still leaves the files written before it, as documented.
+fn preflight<'a>(dir: &Path, planned: impl Iterator<Item = &'a Path>) -> Result<(), ExportError> {
+    for path in planned {
+        if path.is_dir() {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return Err(ExportError::Io(std::io::Error::other(format!("\"{name}\" in the export folder is a folder"))));
+        }
+    }
+    let probe = temp_path_for(&dir.join(".wte-export-probe"));
+    std::fs::File::create(&probe)?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 /// Share of the progress bar for writing the files into the stage folder of a zip export; packing takes it up to
@@ -804,6 +822,7 @@ fn run_zip(
     let created = CreatedDir((!opts.dir.exists()).then(|| opts.dir.clone()));
     std::fs::create_dir_all(&opts.dir)?;
     let zip_path = opts.dir.join(package_name_for(opts));
+    preflight(&opts.dir, std::iter::once(zip_path.as_path()))?;
     let tmp_zip = temp_path_for(&zip_path);
     let mut stage_name = tmp_zip.file_name().unwrap_or_default().to_os_string();
     stage_name.push(".d");
@@ -2228,6 +2247,41 @@ mod tests {
         want.sort();
         assert_eq!(left, want);
         assert!(remove_stale_temps(&root.join("missing"), &|_| false).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Item 9 (L1): a folder that cannot take the export fails before anything is written: a planned file that is a
+    /// folder, a folder path that is a file. Files and Zip alike; the old files stay as they were.
+    #[test]
+    fn a_blocked_export_folder_fails_before_writing_anything() {
+        let doc = painted_two_set_doc();
+        let snapshot = doc.snapshot();
+        let root = temp_dir("export-blocked");
+        let dir = root.join("out");
+        let opts = every_format(&dir);
+        let planned = plan(&snapshot, &opts);
+        std::fs::create_dir_all(&dir).unwrap();
+        // An old export's file, and a folder in the way of the last planned file.
+        std::fs::write(&planned[0], b"old").unwrap();
+        std::fs::create_dir(planned.last().unwrap()).unwrap();
+        let result = run(&snapshot, &opts, &NoProgress);
+        assert!(matches!(&result, Err(ExportError::Io(e)) if e.to_string().contains("is a folder")), "{:?}", result.map(|r| r.files));
+        assert_eq!(std::fs::read(&planned[0]).unwrap(), b"old", "the old file was not replaced");
+        let mut want = vec![file_names(&planned[..1])[0].clone(), file_names(&planned[planned.len() - 1..])[0].clone()];
+        want.sort();
+        assert_eq!(dir_listing(&dir), want, "nothing else was written, no temp file");
+        // A zip whose name is taken by a folder: no stage folder, no temp zip.
+        let zip = ExportOptions { package: ExportPackage::Zip, ..opts.clone() };
+        std::fs::create_dir(dir.join("model.zip")).unwrap();
+        assert!(run(&snapshot, &zip, &NoProgress).is_err());
+        assert!(dir_listing(&dir).iter().all(|n| !n.contains(".tmp-")));
+        // The folder path is a file.
+        let file = root.join("a file");
+        std::fs::write(&file, b"x").unwrap();
+        for package in [ExportPackage::Files, ExportPackage::Zip] {
+            let blocked = ExportOptions { dir: file.join("out"), package, ..opts.clone() };
+            assert!(matches!(run(&snapshot, &blocked, &NoProgress), Err(ExportError::Io(_))));
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 

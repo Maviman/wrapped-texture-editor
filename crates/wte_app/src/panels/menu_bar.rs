@@ -204,6 +204,18 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     let can_merge = set.zip(active).is_some_and(|(s, l)| crate::panels::layers::can_merge_down(s, l));
     let can_rasterize = active.is_some_and(|l| !l.is_raster() && !l.locked);
     let can_delete = session.zip(active).is_some_and(|(s, l)| !l.locked && crate::panels::layers::locked_elsewhere(&s.doc, l).is_empty());
+    // fix_export item 5: with several layers selected, Duplicate and Delete act on all of them (one undo step each);
+    // Merge Down stays on the active layer.
+    let selection = session.map(|s| s.layer_selection()).unwrap_or_default();
+    let n = selection.len();
+    let multi = n > 1;
+    let can_delete = if multi {
+        session.is_some_and(|s| {
+            selection.iter().filter_map(|id| s.doc.layer(*id)).any(|l| !l.locked && crate::panels::layers::locked_elsewhere(&s.doc, l).is_empty())
+        })
+    } else {
+        can_delete
+    };
     let can_up = index.is_some_and(|i| i + 1 < count);
     let can_down = index.is_some_and(|i| i > 0);
     let active_id = active.map(|l| l.id);
@@ -211,16 +223,21 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     if item(ui, "New Paint Layer", "New Paint Layer", has_doc, false) {
         actions.push(AppAction::AddPaintLayer);
     }
-    if item(ui, "Duplicate", "Duplicate Layer", has_active, false) {
+    let duplicate_label = if multi { format!("Duplicate {n} Layers") } else { "Duplicate".to_owned() };
+    if item(ui, &duplicate_label, "Duplicate Layer", has_active, false) {
         actions.push(AppAction::DuplicateActiveLayer);
     }
-    if item(ui, "Merge Down", "Merge Down", can_merge, false) {
+    let merge_label = if multi { "Merge Down (active layer)" } else { "Merge Down" };
+    if item(ui, merge_label, "Merge Down", can_merge, false) {
         actions.push(AppAction::MergeActiveDown);
     }
-    if item(ui, "Delete", "", can_delete, false)
-        && let Some(id) = active_id
-    {
-        actions.push(AppAction::DeleteLayer(id));
+    let delete_label = if multi { format!("Delete {n} Layers") } else { "Delete".to_owned() };
+    if item(ui, &delete_label, "", can_delete, false) {
+        if multi {
+            actions.push(AppAction::DeleteLayers(selection.clone()));
+        } else if let Some(id) = active_id {
+            actions.push(AppAction::DeleteLayer(id));
+        }
     }
     if item(ui, "Rasterize", "", can_rasterize, false) {
         actions.push(AppAction::RasterizeActiveLayer);
@@ -234,7 +251,6 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     }
     ui.separator();
     // The Layers list's selection (Ctrl / Shift-click): one layer or several.
-    let selection = session.map(|s| s.layer_selection()).unwrap_or_default();
     let label = if selection.len() > 1 { format!("Export Selected Layers... ({})", selection.len()) } else { "Export Layer...".to_owned() };
     if item(ui, &label, "", has_active && !selection.is_empty(), false) {
         actions.push(AppAction::ShowExportLayers(selection));

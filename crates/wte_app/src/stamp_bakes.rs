@@ -1223,6 +1223,32 @@ mod tests {
         drain(&mut state, &mut jobs, &ctx, 4);
     }
 
+    /// check:B (round 9, plan T8): choosing Wrap in the Stamp tool warms up the graph before any stamp is placed; in
+    /// Project it warms up nothing until a 3D stamp is selected.
+    #[test]
+    fn choosing_wrap_in_the_stamp_tool_warms_up_the_graph() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut tools = ToolController::new();
+        let mut state = stamp_state(true);
+        state.tool = ToolKind::Stamp;
+        assert!(state.session.as_ref().unwrap().selected_stamp.is_none());
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.counters.warmups_started, 0, "Project: nothing to warm up");
+        state.tools.stamp.mode = wte_core::SurfaceMode::Wrap;
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.counters.warmups_started, 1);
+        join_warm_up(&mut state);
+        let cell = state.doc_mut().unwrap().wrap_mesh_cell();
+        assert!(cell.is_built() && cell.uv_built().is_some() && cell.builds() == 1);
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.counters.warmups_started, 1, "built once");
+        assert!(!jobs.any_running());
+    }
+
     /// check:B (round 9): a document opened while the previous one's warm-up runs gets its own warm-up (once the old
     /// thread ended; the Transform tool asks every frame) and its own graph; a document closed during a warm-up leaves
     /// nothing behind (the thread ends on its own and is joined; no new one starts without a document).

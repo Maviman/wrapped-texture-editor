@@ -70,3 +70,8 @@ New app tests (`stamp_bakes.rs`), both green:
   document's warm-up starts once the old thread ended, the tool asks every frame; its own cell, built once, shared
   texels known); a third document closed during its warm-up (the thread finishes on its own, is joined, nothing new
   starts without a document).
+- Finding (plan T8 says the graph is warmed up "when Wrap is chosen or a wrapped stamp is selected / loaded"; build:B
+  warmed up only for a selected stamp, so the first wrapped Final on a heavy model paid the graph build: ABeautifulGame
+  Jump off applied 2,025 ms for a 900 ms parameterization). Fixed: the Stamp or Text tool in Wrap mode asks for the
+  warm-up every frame (`TransformTool::ensure_wrap_param`); test `choosing_wrap_in_the_stamp_tool_warms_up_the_graph`.
+  No pixel can change (the warm-up only fills the shared cell). App tests 363 passed.

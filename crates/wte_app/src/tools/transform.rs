@@ -257,6 +257,14 @@ impl TransformTool {
     /// it asks `stamp_bakes` for a param-only job (`WrapJobs::request_param`) and the stats line says "Wrapping..." until
     /// that lands; a placement for which that job found no surface is not asked for again.
     pub(crate) fn ensure_wrap_param(&mut self, state: &mut AppState) -> bool {
+        // check:B (round 9, plan T8: "when Wrap is chosen"): the Stamp or Text tool set to Wrap warms up the mesh graph
+        // (and the shared texels) before the first wrapped stamp is placed, so its first Final does not pay the build.
+        if matches!(state.tool, crate::state::ToolKind::Stamp | crate::state::ToolKind::Text)
+            && state.tools.stamp.mode == SurfaceMode::Wrap
+            && state.session.is_some()
+        {
+            state.wrap_jobs.request_warmup(true);
+        }
         let Some((id, placement)) = selected(state) else { return false };
         let Placement::Projected(p) = placement else { return false };
         // Round 9 (package B, T8 / T9): a selected 3D stamp has the mesh's shared texels found, a wrapped one also the

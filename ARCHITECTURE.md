@@ -6592,6 +6592,13 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   texels: mirrored sample 0.5, sphere and cube on floor 0); the WA15 probe reports the graph build, the shared texels and
   per parameterization the phases of the graph path next to round 8's sphere path.
 
+- Stable (w1, `wrap_stable_tests.rs` unless noted; `docs/notes/stable/w1.md`): `w1_an_open_rough_field_never_closes`,
+  `w1_a_part_on_a_plane_keeps_the_rows_on_the_plane`, `w1_the_chess_board_keeps_the_rows_under_a_pawn` (skipped
+  without `ABeautifulGame.glb`), `w1_reuse_equals_fresh_within_the_bucket`, `w1_lost_cut_does_not_count_the_gaps_between_parts`;
+  `wrap_param::closure_tests::w1_near_closure_equals_the_plain_closure`, `w1_near_closure_scales_linearly`;
+  `uv_share::tests::w1_a_tiled_trim_strip_does_not_mark_a_unique_island`;
+  `tool_options::the_wrap_lines_name_the_right_cause_and_never_contradict`.
+
 ## 10. Work packages
 
 Wave 0 creates a compiling workspace; wave 1 implements `wte_core`; wave 2 implements `wte_app`. Inside a wave the packages are

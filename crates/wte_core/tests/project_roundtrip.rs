@@ -375,6 +375,27 @@ fn raster_stamp_and_text_layers_round_trip() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// accept_fixes item D: new image stamps are named after the file stem ("ring"); a project saved before that rule,
+/// with a stamp and layers named "ring.png", opens with those names unchanged.
+#[test]
+fn an_image_stamp_named_with_its_extension_loads_unchanged() {
+    let (mut doc, [image3d, ..]) = rich_document();
+    doc.rename_stamp(image3d, "ring.png").unwrap();
+    let names = |d: &Document| -> (String, Vec<String>) {
+        let stamp = d.stamp(image3d).unwrap().name.clone();
+        (stamp, d.stamp_layers(image3d).into_iter().map(|(_, l)| d.layer(l).unwrap().name.clone()).collect())
+    };
+    let before = names(&doc);
+    assert_eq!(before.0, "ring.png");
+    assert!(!before.1.is_empty() && before.1.iter().all(|n| n == "ring.png"), "{before:?}");
+    let dir = temp_dir("roundtrip_ext_name");
+    let path = dir.join("old.wtep");
+    project::save(&doc.snapshot(), &path, &save_options(), &NoProgress).unwrap();
+    let loaded = project::load(&path, &NoProgress).unwrap().document;
+    assert_eq!(names(&loaded), before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn corrupt_stamp_caches_are_rebuilt() {
     let (mut doc, _) = rich_document();

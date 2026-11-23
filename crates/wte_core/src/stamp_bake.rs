@@ -1105,9 +1105,10 @@ fn floor_grid(
 /// (4-neighbours): a neighbour's hit closest in depth belongs to it when the depth step is at most
 /// `grid step * (FIT_SLOPE_TOLERANCE * s + FIT_STEP_TOLERANCE)`, `s` = the steeper of the two hits' slopes
 /// (`tan` of the angle between the triangle normal and the projection axis, capped at `FIT_MAX_SLOPE`). A smooth
-/// surface passes, a jump at an object edge to a surface behind does not. Cells off that surface add their first
-/// (visible) hit only when it lies within one half size of the placement plane (the placement default of earlier
-/// versions), so a decal over many separate small parts still reaches the nearby ones. The fitted depths cover all
+/// surface passes, a jump at an object edge to a surface behind does not. Every cell adds its first (visible) hit only
+/// when it lies within one half size of the placement plane (the placement default of earlier versions): off the
+/// surface, so a decal over many separate small parts still reaches the nearby ones; on it, so a nearer part that
+/// hides the grown surface (a sleeve over a bottle's body) lies inside the box, not in its fade (accept_fixes item F). The fitted depths cover all
 /// that so that it lies before the fade (`extent / (1 - DEPTH_FADE_FRACTION)`), plus `FIT_MARGIN` half sizes, never
 /// less than the margin and never more than the sampled reach plus the margin. Only the placement point's own
 /// surface extends the box beyond one half size, and only front faces count, so the decal cannot leak through a thin
@@ -1175,9 +1176,12 @@ pub fn fit_projector_depth(mesh: &MeshData, bvh: &Bvh, p: &Projector) -> Project
             }
         }
     }
-    // Cells off that surface: their first (visible) hit still counts when it lies within the placement default depth
-    // (the larger half size), so a decal over a model of many separate parts reaches them as before.
-    let near_parts = cells.iter().zip(&surface).filter(|(_, on)| on.is_none()).filter_map(|(hits, _)| hits.first());
+    // The first (visible) hit of every cell still counts when it lies within the placement default depth (the larger
+    // half size): off the surface, so a decal over a model of many separate parts reaches them as before; on it, when a
+    // nearer part hides the tracked surface (accept_fixes item F: WaterBottle's grip sleeve stands ~4.5 mm in front of
+    // the body that continues under it; the grown surface follows the hidden body, and the visible sleeve fell into the
+    // front fade).
+    let near_parts = cells.iter().filter_map(|hits| hits.first());
     let (lo, hi) = surface
         .iter()
         .flatten()
@@ -2194,6 +2198,36 @@ mod tests {
             assert!(checked > 1000, "{name}: {checked}");
             assert!(old_cut > 20, "{name}: the old depth already covered the surface ({old_cut} texels cut)");
         }
+    }
+
+    /// accept_fixes item F: a decal placed on a body just above a sleeve that stands 0.05 in front of it (less than
+    /// the half size): the surface grown from the centre follows the body hidden under the sleeve, but the visible
+    /// sleeve must lie inside the box (before the fix it was beyond the front depth and cut off entirely).
+    #[test]
+    fn auto_fit_covers_a_visible_part_in_front_of_the_grown_surface() {
+        let mesh = mesh_of(samples::sleeve_quads());
+        let bvh = Bvh::build(&mesh);
+        let maps = maps_of(&mesh, 256);
+        let p = front_projector(0.5, 0.6, 0.0, 0.3, 0.01);
+        let fitted = fit_projector_depth(&mesh, &bvh, &p);
+        assert!(fitted.depth_front >= 0.05 / (1.0 - DEPTH_FADE_FRACTION), "the sleeve lies before the fade: {fitted:?}");
+        assert!(fitted.depth_front <= 0.05 / (1.0 - DEPTH_FADE_FRACTION) + FIT_MARGIN * 0.3 + 1e-4, "{fitted:?}");
+        assert!((fitted.depth_back - FIT_MARGIN * 0.3).abs() < 1e-4, "nothing behind the body: {fitted:?}");
+        let baked = dense(&bake_projected(&mesh, &bvh, &maps, &solid(WHITE), WHITE, &fitted, BakeQuality::Full), 0, 256);
+        let opaque = |uv: [f32; 4]| {
+            let mut n = 0;
+            for y in (uv[2] * 256.0) as u32..(uv[3] * 256.0) as u32 {
+                for x in (uv[0] * 256.0) as u32..(uv[1] * 256.0) as u32 {
+                    n += (baked.get(x, y)[3] == 255) as u32;
+                }
+            }
+            n
+        };
+        let (sleeve, body) = (opaque([0.55, 0.95, 0.55, 0.95]), opaque([0.05, 0.45, 0.05, 0.45]));
+        // The footprint, x 0.2..0.8 and y 0.3..0.9, lies 0.6 x 0.2 on the sleeve (y up to 0.5) and 0.6 x 0.4 on the
+        // visible body: about 61 x 41 texels on each quad's UV square (102 x 102 texels).
+        assert!(sleeve > 600, "the visible sleeve is painted at full weight: {sleeve} texels");
+        assert!(body > 1200, "the body above it too: {body} texels");
     }
 
     #[test]

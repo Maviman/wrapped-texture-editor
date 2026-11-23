@@ -119,6 +119,19 @@ fn anchored(mut placement: Placement, frame: Option<&TextFrame>) -> Placement {
 
 /// The warning for a stamp or text (`what`) whose bake covers no texel (also shown by `stamp_bakes` when the first
 /// bake of a new stamp lands on a worker, round 5).
+/// The name of a new image stamp (and of its layers) from the chosen image's file name: the file stem, so the layer
+/// reads "logo" and its per-layer export "..._stamp_logo.png" (accept_fixes item D). The blob keeps the full file name
+/// (the project's embedded file, Extract sources). "Stamp" for an empty name; a name that is all extension
+/// (".png") stays as it is.
+pub(crate) fn image_stamp_name(file_name: &str) -> String {
+    let name = file_name.trim();
+    if name.is_empty() {
+        return "Stamp".to_owned();
+    }
+    let stem = std::path::Path::new(name).file_stem().map(|s| s.to_string_lossy().trim().to_owned()).unwrap_or_default();
+    if stem.is_empty() { name.to_owned() } else { stem }
+}
+
 pub(crate) fn no_texels_text(what: &str) -> String {
     format!(
         "The {what} was added as a layer but covers no texels here (the surface faces away, is hidden, or has no room in the texture)"
@@ -190,9 +203,7 @@ impl StampPlaceTool {
             }
             ToolKind::Stamp => {
                 let blob = state.tools.stamp.source?;
-                let name = state.tools.stamp.source_name.trim();
-                let name = if name.is_empty() { "Stamp".to_owned() } else { name.to_owned() };
-                Some((StampSource::Image { blob }, name))
+                Some((StampSource::Image { blob }, image_stamp_name(&state.tools.stamp.source_name)))
             }
             _ => None,
         }
@@ -571,6 +582,16 @@ mod tests {
     }
 
     #[test]
+    fn an_image_stamp_is_named_after_the_file_stem() {
+        assert_eq!(image_stamp_name("wf_stamp.png"), "wf_stamp");
+        assert_eq!(image_stamp_name(" logo.v2.PNG "), "logo.v2");
+        assert_eq!(image_stamp_name("cells"), "cells");
+        assert_eq!(image_stamp_name(""), "Stamp");
+        assert_eq!(image_stamp_name("   "), "Stamp");
+        assert_eq!(image_stamp_name(".png"), ".png");
+    }
+
+    #[test]
     fn image_stamp_in_3d_becomes_a_layer_and_selects_it() {
         let mut state = state_with(SampleKind::Sphere);
         with_image(&mut state);
@@ -586,7 +607,8 @@ mod tests {
         let session = state.session.as_ref().unwrap();
         let id = session.selected_stamp.expect("new stamp selected");
         let stamp = session.doc.stamp(id).unwrap();
-        assert_eq!(stamp.name, "ring.png");
+        // accept_fixes item D: the layer is named after the file stem (its export is "..._stamp_ring.png").
+        assert_eq!(stamp.name, "ring");
         let Placement::Projected(pr) = stamp.placement else { panic!("projected") };
         let diag = session.doc.mesh.bounds.diagonal();
         assert!((pr.half_size.max_element() - 0.15 * diag / 2.0).abs() < 1e-4);

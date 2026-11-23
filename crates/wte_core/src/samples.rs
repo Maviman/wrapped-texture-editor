@@ -226,6 +226,16 @@ pub fn occluded_quads() -> RawMesh {
     RawMesh { triangles, materials: vec![material("Quads", [0.8, 0.8, 0.8, 1.0], None)] }
 }
 
+/// A body with a sleeve over its lower half (accept_fixes item F, like WaterBottle's grip): the unit square in the plane
+/// z = 0 (facing +Z, UV 0.05..0.45) continues under a second quad, x 0..1, y 0..0.5, 0.05 in front of it (UV
+/// 0.55..0.95). Rays through the lower half hit the sleeve first and the hidden body behind it.
+pub fn sleeve_quads() -> RawMesh {
+    let mut triangles = Vec::with_capacity(4);
+    push_xy_quad(&mut triangles, [0.0, 1.0], [0.0, 1.0], 0.0, [0.05, 0.45], [0.05, 0.45], 0);
+    push_xy_quad(&mut triangles, [0.0, 1.0], [0.0, 0.5], 0.05, [0.55, 0.95], [0.55, 0.95], 0);
+    RawMesh { triangles, materials: vec![material("Sleeve", [0.8, 0.8, 0.8, 1.0], None)] }
+}
+
 /// A fragmented atlas: the unit square in the plane z = 0 (facing +Z) cut into 4 x 4 quads, each mapped to its own
 /// small UV island (1/16 of the atlas wide, oriented like `flat_quad`) and the islands scattered over the atlas, so
 /// that neighbours on the surface lie far apart in UV (like an xatlas / Smart-UV packing).

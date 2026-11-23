@@ -377,8 +377,13 @@ pub fn show_side_panel(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelSt
         .frame(egui::Frame::new().inner_margin(egui::Margin { top: 4, bottom: 2, ..egui::Margin::ZERO }))
         .show(ui, |ui| {
             with_visible_scroll_bars(ui);
+            // accept_fixes item B: no minimum height. egui's default (64 pt) is more than a collapsed Color section
+            // (about 28 pt): the frame then reported a taller rect, which the exact-size panel cut to its size from
+            // the bottom, so it told the area above that the Color section began 43 pt lower than drawn and the tool
+            // options ran over its header and the Layers tab strip.
             let out = egui::ScrollArea::vertical()
                 .id_salt("side_color_scroll")
+                .min_scrolled_height(0.0)
                 .auto_shrink([false, false])
                 .show(ui, |ui| color::show(ui, state, ps, square));
             let content = Rect::from_min_size(out.inner_rect.min - out.state.clamped_offset(), out.content_size);
@@ -397,11 +402,16 @@ pub fn show_side_panel(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelSt
     rects.color = color.response.rect;
 
     with_visible_scroll_bars(ui);
-    let settings = egui::ScrollArea::vertical().id_salt("side_settings_scroll").auto_shrink([false, false]).show(ui, |ui| {
-        let options = tool_options::show(ui, state, ps);
-        texture_sets::show(ui, state, ps);
-        options
-    });
+    // No minimum height either (accept_fixes item B): in a short window the area takes only the room that is left.
+    let settings = egui::ScrollArea::vertical()
+        .id_salt("side_settings_scroll")
+        .min_scrolled_height(0.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let options = tool_options::show(ui, state, ps);
+            texture_sets::show(ui, state, ps);
+            options
+        });
     state.panel_rects.insert(PanelHit::SettingsArea, settings.inner_rect);
     rects.tool_area = settings.inner_rect;
     rects.tool_options = settings.inner;

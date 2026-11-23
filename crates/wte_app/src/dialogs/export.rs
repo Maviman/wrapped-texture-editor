@@ -245,6 +245,12 @@ pub(super) fn file_kind(kind: PlannedKind) -> FileKind {
     }
 }
 
+/// Whether a planned file is the per-layer PNG of a hidden layer.
+pub(super) fn hidden_layer_file(snapshot: &DocumentSnapshot, kind: PlannedKind) -> bool {
+    let PlannedKind::Layer { layer, .. } = kind else { return false };
+    snapshot.sets.iter().flat_map(|set| &set.layers).any(|l| l.id == layer && !l.visible)
+}
+
 /// The planned files that already exist on disk (nothing while the folder is empty: relative paths would point at
 /// the working directory).
 pub(super) fn existing_files(dir: &Path, plan: &[PathBuf]) -> Vec<PathBuf> {
@@ -264,6 +270,8 @@ pub(super) struct PlanCache {
     /// The files of the export (`export::plan_contents`): the loose files, or the zip's entries.
     pub(super) names: Vec<String>,
     pub(super) kinds: Vec<FileKind>,
+    /// Per name: a per-layer file of a hidden layer (marked "(hidden)" in the list, accept_fixes item E2).
+    pub(super) hidden: Vec<bool>,
     /// Per `plan` path: whether it exists on disk.
     pub(super) exists: Vec<bool>,
     checked_at: f64,
@@ -280,6 +288,7 @@ impl PlanCache {
             plan,
             names: contents.iter().map(|f| f.name.clone()).collect(),
             kinds: contents.iter().map(|f| file_kind(f.kind)).collect(),
+            hidden: contents.iter().map(|f| hidden_layer_file(snapshot, f.kind)).collect(),
             exists: Vec::new(),
             checked_at: now,
         };
@@ -625,17 +634,28 @@ fn options_ui(
                 if cache.names.is_empty() {
                     ui.weak("No files");
                 }
+                // The lines as drawn, markers included (the self-test reads them, `ToolProbe::export_files`).
+                let mut lines = Vec::with_capacity(cache.names.len());
                 for (i, name) in cache.names.iter().enumerate() {
+                    let mut line = name.clone();
                     ui.horizontal(|ui| {
                         ui.add(egui::Label::new(egui::RichText::new(name).monospace()).truncate());
+                        if cache.hidden.get(i).copied().unwrap_or(false) {
+                            ui.weak("(hidden)");
+                            line.push_str(" (hidden)");
+                        }
                         if cache.kinds.get(i) == Some(&FileKind::Layer { separate: true }) {
                             ui.colored_label(crate::theme::ACCENT, "separate layer");
+                            line.push_str(" separate layer");
                         }
                         if !packed && cache.exists.get(i).copied().unwrap_or(false) {
                             ui.colored_label(super::warn_color(ui), "will be replaced");
+                            line.push_str(" will be replaced");
                         }
                     });
+                    lines.push(line);
                 }
+                cx.state.tool_probe.export_files = lines;
             },
         );
     });
@@ -653,16 +673,21 @@ fn preview_ui(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, st: &ExportDialogState, si
         ui.selectable_value(&mut cx.state.preview.lit, false, "Unlit");
         ui.weak("Drag to orbit, wheel to zoom");
     });
-    ui.add(egui::Label::new(egui::RichText::new(preview_caption(&st.options)).small().weak()).wrap());
+    let caption = preview_caption(&st.options);
+    cx.state.tool_probe.export_caption = Some(caption.to_owned());
+    ui.add(egui::Label::new(egui::RichText::new(caption).small().weak()).wrap());
 }
 
-/// The caption under the preview: under a layer selection with a flattened texture, the preview (the whole texture)
-/// is not what the flattened file holds.
+/// The caption under the preview, by case (accept_fixes item A). The preview always shows the whole texture as the
+/// app composites it (the visible layers); it claims "exactly as exported" only when a flattened texture is written
+/// with the same layers: Visible or All (the flattened texture is the visible layers under All too, 7.x; All adds the
+/// hidden layers to the per-layer, ORA and PSD files only).
 pub(super) fn preview_caption(opts: &ExportOptions) -> &'static str {
-    if opts.layers.is_some() && opts.flat.is_some() {
-        "The preview shows the whole texture; the flattened file holds only the selected layers"
-    } else {
-        "Shows the flattened texture exactly as exported (seam padding and JPEG compression not shown)"
+    match (opts.layers.is_some(), opts.flat.is_some()) {
+        (true, true) => "The preview shows the whole texture; the flattened file holds only the selected layers",
+        (true, false) => "The preview shows the whole texture; only the selected layers are exported, as separate files",
+        (false, false) => "The preview shows the layers together; no flattened texture is exported",
+        (false, true) => "Shows the flattened texture exactly as exported (seam padding and JPEG compression not shown)",
     }
 }
 
@@ -879,8 +904,10 @@ mod tests {
                 FileKind::Layer { separate: true },
             ]
         );
+        assert_eq!(PlanCache::build(&snap, &opts, 0, 0.0).hidden, [false, false, false, false, true]);
         opts.include_hidden = false;
         assert_eq!(PlanCache::build(&snap, &opts, 0, 0.0).kinds.len(), 4);
+        assert!(!PlanCache::build(&snap, &opts, 0, 0.0).hidden.contains(&true));
         opts.sets = Some(vec![TextureSetId(7)]);
         assert!(PlanCache::build(&snap, &opts, 0, 0.0).kinds.is_empty());
         // ORA and PSD are layered files.
@@ -899,6 +926,8 @@ mod tests {
         let cache = PlanCache::build(&snap, &opts, 0, 0.0);
         assert_eq!(cache.names, ["model_L02_stamp_Logo.png", "model_L03_text_Title.png"]);
         assert_eq!(cache.kinds, [FileKind::Layer { separate: true }; 2]);
+        // accept_fixes item E2: the hidden text layer's file is marked, the stamp's is not.
+        assert_eq!(cache.hidden, [false, true]);
         assert_eq!(cache.plan.len(), 2);
         // Packed: one file on disk, the same names inside.
         opts.package = ExportPackage::Zip;
@@ -944,13 +973,37 @@ mod tests {
         let many: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect();
         assert_eq!(selection_names(&many), "a, b, c and 2 more");
         assert_eq!(selection_names(&[]), "");
-        // The preview caption names what the flattened file holds under a selection.
+    }
+
+    /// accept_fixes item A: the preview caption by case. Only a flattened texture of the same layers as the preview
+    /// is called "exactly as exported".
+    #[test]
+    fn the_preview_caption_says_what_the_export_writes() {
+        let exact = "Shows the flattened texture exactly as exported (seam padding and JPEG compression not shown)";
+        let selected = [LayerId(5), LayerId(9)];
+        // Visible and All with a flattened texture: the preview is the flattened file (visible layers in both).
         let mut opts = options(r"E:\out");
-        assert!(preview_caption(&opts).starts_with("Shows the flattened texture"));
-        opts.layers = Some(selected.to_vec());
-        assert!(preview_caption(&opts).contains("only the selected layers"));
+        for hidden in [false, true] {
+            opts.include_hidden = hidden;
+            assert_eq!(preview_caption(&opts), exact);
+        }
+        // Visible / All without a flattened texture: nothing flattened is written.
         opts.flat = None;
-        assert!(preview_caption(&opts).starts_with("Shows the flattened texture"));
+        for hidden in [false, true] {
+            opts.include_hidden = hidden;
+            let c = preview_caption(&opts);
+            assert!(c.contains("no flattened texture is exported") && !c.contains("exactly"), "{c}");
+        }
+        // Selected with the flattened texture on: the file holds only the selected layers.
+        opts.layers = Some(selected.to_vec());
+        opts.flat = Some(FlatFormat::Png(PngLevel::Balanced));
+        assert_eq!(preview_caption(&opts), "The preview shows the whole texture; the flattened file holds only the selected layers");
+        // Selected with it off (the default of "Export selected layers..."): no flattened file at all.
+        opts.flat = None;
+        assert_eq!(
+            preview_caption(&opts),
+            "The preview shows the whole texture; only the selected layers are exported, as separate files"
+        );
     }
 
     /// fix_export item 1: a dialog opened for layers, switched to Visible / All, exports every set with the normal

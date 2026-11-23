@@ -111,6 +111,9 @@ pub struct FinalBakes {
     marked: HashMap<StampId, Instant>,
     /// Round 8: the stamp and the "applied after" milliseconds of the last applied Final (the scenario's log).
     last_applied: Option<(StampId, f64)>,
+    /// accept_fixes item C: the `settle` calls that had work to do (waited for or baked a Final on the UI thread),
+    /// for the self-test: an action that must not block the UI leaves it unchanged.
+    settles: u64,
 }
 
 /// The one bake job running on a worker.
@@ -132,6 +135,11 @@ impl FinalBakes {
     /// Round 8: the stamp and the "applied after" milliseconds of the last applied Final bake.
     pub(crate) fn last_applied(&self) -> Option<(StampId, f64)> {
         self.last_applied
+    }
+
+    /// accept_fixes item C: how many `settle` calls waited for or baked a Final on the UI thread.
+    pub(crate) fn settle_count(&self) -> u64 {
+        self.settles
     }
 }
 
@@ -457,6 +465,7 @@ pub(crate) fn settle_with(state: &mut AppState, jobs: &mut Jobs) {
         doc.settle_final_bakes();
     }
     if worked {
+        state.final_bakes.settles += 1;
         log::info!("final bake: settle waited {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
     }
     debug_assert!(

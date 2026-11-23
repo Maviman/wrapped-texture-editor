@@ -85,7 +85,10 @@ text_preview_path brush_hover final_bake_async wrap_surface export_selected expo
 without one it writes a cube as OBJ+MTL+PNG, glTF, GLB and ASCII FBX and runs the whole flow on each (paint, stamp,
 text, wrapped stamp, then export one layer, a selection and everything as one zip, checked file by file);
 `export_selected` drives Ctrl / Shift / plain / right clicks in the Layers panel and the dialog's "Selected (N)";
-`export_zip` checks the zip against the loose files and the replace step. `tools/round3_audit/sweep.ps1` runs a jobs file of
+`export_zip` checks the zip against the loose files and the replace step. `export_checks` (accept_fixes item E) checks
+the written files against a reference compositor written out in the test (ARCHITECTURE 6.6): hidden layers under
+Visible / All, a Shift-click range across a hidden layer (the dialog marks its file "(hidden)"), Base + one layer
+flattened, 50 % Multiply within 2/255. `tools/round3_audit/sweep.ps1` runs a jobs file of
 `scenario[,path]` lines.
 
 ### 4.2 Switches (environment variables)
@@ -116,6 +119,8 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
   `cargo test --workspace`; `cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1` (WA7, check:A, 200 ms);
   `cargo test -p wte_app perf_ -- --ignored --test-threads=1` (font sample job, 0.5 s); the GPU app tests
   `cargo test -p wte_app -- --ignored --skip perf_`. ARCHITECTURE.md section 9 has the details.
+- Branch `stable` after the acceptance fixes (`docs/notes/stable/accept_fixes.md`): `cargo test --workspace` 1,232
+  passed, 1 failed (WA20, the known red), 43 ignored; clippy 0 warnings; GPU app tests 18 passed; 47 scenarios.
 - Every round checked that unrelated scenarios stay **pixel-identical** to the previous exe (`shot.png`, toast
   area excepted) and that exports are byte-identical (`tools/round3/check_exports.py` must PASS).
 

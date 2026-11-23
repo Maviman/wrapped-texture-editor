@@ -77,6 +77,7 @@ const NAMES: &[&str] = &[
     "save_unsettled",
     "export_nouv",
     "export_errors",
+    "export_checks",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -148,6 +149,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "save_unsettled" => save_unsettled(args.path.is_some()),
         "export_nouv" => export_nouv(),
         "export_errors" => export_errors(),
+        "export_checks" => export_checks(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -1311,6 +1313,382 @@ fn export_selected() -> Vec<Step> {
             }
             log::info!("export_selected: flattened selection transparent in {clear} texels the Base covers");
             undo_since(s, sc, 0)
+        }),
+        Step::WaitFrames(2),
+    ]);
+    steps
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// accept_fixes item E: end-to-end export checks against an independent reference compositor
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Largest per-channel difference (0..255) an exported flattened texture may have from `reference_composite`.
+const EC_TOLERANCE: u8 = 2;
+
+/// One blend of ARCHITECTURE 6.6 (`B(Cb, Cs)`, values 0..1), written out here and not taken from the core.
+fn reference_blend(mode: BlendMode, cb: f64, cs: f64) -> f64 {
+    match mode {
+        BlendMode::Normal => cs,
+        BlendMode::Multiply => cb * cs,
+        BlendMode::Screen => cb + cs - cb * cs,
+        BlendMode::Overlay => {
+            if cb <= 0.5 {
+                2.0 * cb * cs
+            } else {
+                1.0 - 2.0 * (1.0 - cb) * (1.0 - cs)
+            }
+        }
+        BlendMode::Add => (cb + cs).min(1.0),
+        BlendMode::Darken => cb.min(cs),
+        BlendMode::Lighten => cb.max(cs),
+    }
+}
+
+/// An independent reference of the flattened texture (accept_fixes item E4): the layers (full-canvas pictures, bottom
+/// first, with their opacity and blend) folded with the per-pixel formula of ARCHITECTURE 6.6 in `f64`, the opacity
+/// quantized to `round(opacity * 255)` and the accumulator to u8 after each layer as documented, with the alpha-0 rule.
+/// Layers at opacity 0 contribute nothing.
+fn reference_composite(layers: &[(&PixelBuf, f32, BlendMode)], width: u32, height: u32) -> PixelBuf {
+    let mut out = PixelBuf::new(width, height);
+    for (k, acc) in out.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        for (picture, opacity, mode) in layers {
+            let op = (opacity.clamp(0.0, 1.0) * 255.0).round() as f64;
+            if op == 0.0 {
+                continue;
+            }
+            let src = &picture.data[k * 4..k * 4 + 4];
+            let a_s = src[3] as f64 / 255.0 * (op / 255.0);
+            let a_b = acc[3] as f64 / 255.0;
+            if a_s == 0.0 {
+                // Alpha-0 rule: a fully transparent source only carries its colour into an all-zero pixel.
+                if *acc == [0, 0, 0, 0] {
+                    *acc = [src[0], src[1], src[2], 0];
+                }
+                continue;
+            }
+            if a_b == 0.0 {
+                *acc = [src[0], src[1], src[2], (a_s * 255.0).round() as u8];
+                continue;
+            }
+            let a_o = a_s + a_b * (1.0 - a_s);
+            let mut next = [0u8; 4];
+            for c in 0..3 {
+                let (cs, cb) = (src[c] as f64 / 255.0, acc[c] as f64 / 255.0);
+                let co = ((1.0 - a_b) * a_s * cs + a_b * a_s * reference_blend(*mode, cb, cs) + (1.0 - a_s) * a_b * cb) / a_o;
+                next[c] = (co.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+            next[3] = (a_o * 255.0).round() as u8;
+            *acc = next;
+        }
+    }
+    out
+}
+
+/// (texels whose largest channel difference is above `tolerance`, the largest difference) between two pictures.
+fn channel_diff(a: &PixelBuf, b: &PixelBuf, tolerance: u8) -> Result<(usize, u8), String> {
+    if (a.width, a.height) != (b.width, b.height) {
+        return Err(format!("{}x{} against {}x{}", a.width, a.height, b.width, b.height));
+    }
+    let (mut over, mut worst) = (0, 0u8);
+    for (x, y) in a.data.as_chunks::<4>().0.iter().zip(b.data.as_chunks::<4>().0) {
+        let d = (0..4).map(|c| x[c].abs_diff(y[c])).max().unwrap_or(0);
+        worst = worst.max(d);
+        over += (d > tolerance) as usize;
+    }
+    Ok((over, worst))
+}
+
+/// The stack index of a per-layer file name (`..._L<nn>_...`), `None` for any other name.
+fn layer_index_of(name: &str) -> Option<usize> {
+    name.match_indices("_L").find_map(|(at, _)| {
+        let rest = name.get(at + 2..at + 5)?.as_bytes();
+        (rest[2] == b'_' && rest[0].is_ascii_digit() && rest[1].is_ascii_digit()).then(|| ((rest[0] - b'0') * 10 + rest[1] - b'0') as usize)
+    })
+}
+
+/// The files of an export folder, read without the export's own planning: the flattened PNG (the one name without a
+/// `_L<nn>_` layer index) and the per-layer PNGs by their stack index (0 = bottom), decoded.
+type ExportFolder = (Option<PixelBuf>, Vec<(usize, String, PixelBuf)>);
+
+fn read_folder(dir: &Path) -> Result<ExportFolder, String> {
+    let mut flat = None;
+    let mut layers = Vec::new();
+    for name in dir_names(dir)? {
+        let bytes = std::fs::read(dir.join(&name)).map_err(|e| format!("{name}: {e}"))?;
+        match layer_index_of(&name) {
+            Some(i) => layers.push((i, name.clone(), decode_named(&name, &bytes)?)),
+            None if flat.is_none() && name.ends_with(".png") => flat = Some(decode_named(&name, &bytes)?),
+            None => return Err(format!("{}: unexpected file {name}", dir.display())),
+        }
+    }
+    layers.sort_by_key(|(i, _, _)| *i);
+    Ok((flat, layers))
+}
+
+/// The reference composite of the layers at these stack indices of set 0, from the per-layer PNGs of the full export
+/// (`<out>_ec_all`, every layer), with the document's opacity and blend of each layer.
+fn reference_of(state: &AppState, sc: &Scratch, indices: &[usize]) -> Result<PixelBuf, String> {
+    let set = &doc_of(state)?.sets[0];
+    let (_, files) = read_folder(&with_suffix(&sc.out_stem, "_ec_all"))?;
+    let mut stack = Vec::new();
+    for &i in indices {
+        let (_, _, picture) = files.iter().find(|(k, _, _)| *k == i).ok_or_else(|| format!("no per-layer PNG with index {i}"))?;
+        let layer = set.layers.get(i).ok_or_else(|| format!("no layer {i}"))?;
+        stack.push((picture, layer.opacity, layer.blend));
+    }
+    Ok(reference_composite(&stack, set.width, set.height))
+}
+
+/// The export options of `export_checks`: flattened PNG and per-layer PNGs, no seam padding, into `<out><suffix>`.
+fn ec_options(state: &AppState, sc: &Scratch, suffix: &str, include_hidden: bool) -> Result<ExportOptions, String> {
+    Ok(ExportOptions { dir: fresh_out_dir(sc, suffix)?, ora: false, psd: false, include_hidden, ..export_options(state, sc)? })
+}
+
+/// Stack index (set 0) of a content layer: "base" or a role of `content_layer`.
+fn ec_index(state: &AppState, role: &str) -> Result<usize, String> {
+    let doc = doc_of(state)?;
+    let id = if role == "base" { doc.sets[0].layers.first().ok_or("no layer")?.id } else { content_layer(state, role)? };
+    doc.find_layer(id).map(|(_, i)| i).ok_or_else(|| format!("no {role} layer"))
+}
+
+/// The flattened PNGs of the Visible and the All export of `export_checks`.
+fn ec_flats(sc: &Scratch) -> Result<(PixelBuf, PixelBuf), String> {
+    let (vis, _) = read_folder(&with_suffix(&sc.out_stem, "_ec_vis"))?;
+    let (all, _) = read_folder(&with_suffix(&sc.out_stem, "_ec_all"))?;
+    Ok((vis.ok_or("Visible wrote no flattened PNG")?, all.ok_or("All wrote no flattened PNG")?))
+}
+
+/// The caption of the export dialog for a layer selection without the flattened texture (accept_fixes item A).
+const EC_CAPTION_SELECTED: &str = "The preview shows the whole texture; only the selected layers are exported, as separate files";
+/// The caption for a layer selection with the flattened texture.
+const EC_CAPTION_SELECTED_FLAT: &str = "The preview shows the whole texture; the flattened file holds only the selected layers";
+
+/// `export_checks` (accept_fixes item E): the default content (Base, Paint 1 with the strokes, the Logo stamp, the
+/// WTE text) with Logo hidden and Paint 1 at 50 % opacity in Multiply. Every check reads the written files and
+/// compares them with `reference_composite` (ARCHITECTURE 6.6 written out in the test) over the per-layer PNGs of the
+/// full export, not with the export's own code:
+/// (E1) Visible leaves the hidden Logo out of the flattened PNG and of the per-layer files; All writes its per-layer
+/// file (its layer's pixels) and, by the contract of `ExportOptions::include_hidden`, the same flattened PNG of the
+/// visible layers, which differs from the reference with Logo where Logo is opaque; (E4) both flattened files equal the
+/// reference of the visible layers within 2/255,
+/// and the reference with Paint 1 as Normal 100 % does not (the blend and opacity are applied); (E2) Shift-click from
+/// Paint 1 to WTE selects the hidden Logo too: "Export selected layers..." lists its file with "(hidden)" (the others
+/// without), shows the selection caption, and writes it with its layer's pixels; (E3) Base and WTE selected with the
+/// flattened texture ticked: the flattened file is Base + WTE only (the reference of those two, not of the visible
+/// stack).
+fn export_checks() -> Vec<Step> {
+    use egui::Modifiers as M;
+    use egui::PointerButton as B;
+    let mut steps = default_content();
+    steps.extend([
+        Step::Dyn("hide Logo; Paint 1 at 50 % in Multiply", |s, _| {
+            let (stamp, paint) = (content_layer(s, "stamp")?, content_layer(s, "paint")?);
+            Ok(vec![
+                Step::Do(AppAction::SetLayerVisible(stamp, false)),
+                Step::Do(AppAction::SetLayerOpacity(paint, 0.5, Commit::Final)),
+                Step::Do(AppAction::SetLayerBlend(paint, BlendMode::Multiply)),
+            ])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the stack is Base, Paint 1 (50 %, Multiply), Logo (hidden), WTE", |s, _| {
+            let set = &doc_of(s)?.sets[0];
+            let order: Vec<usize> = ["base", "paint", "stamp", "text"].iter().map(|r| ec_index(s, r)).collect::<Result<_, _>>()?;
+            if order != [0, 1, 2, 3] || set.layers.len() != 4 {
+                return Err(format!("the layers are {:?}", set.layers.iter().map(|l| &l.name).collect::<Vec<_>>()));
+            }
+            let (paint, logo) = (&set.layers[1], &set.layers[2]);
+            if paint.opacity != 0.5 || paint.blend != BlendMode::Multiply || logo.visible {
+                return Err(format!("Paint 1 {} {:?}, Logo visible {}", paint.opacity, paint.blend, logo.visible));
+            }
+            Ok(())
+        }),
+        // (E1) Visible, then All.
+        Step::Dyn("(E1) export Visible", |s, sc| Ok(vec![Step::Do(AppAction::RunExport(ec_options(s, sc, "_ec_vis", false)?))])),
+        Step::WaitIdle,
+        Step::Dyn("(E1) export All", |s, sc| Ok(vec![Step::Do(AppAction::RunExport(ec_options(s, sc, "_ec_all", true)?))])),
+        Step::WaitIdle,
+        Step::Assert("(E1) Visible leaves the hidden Logo out; All adds its per-layer file, not to the flattened PNG", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let (_, vis_layers) = read_folder(&with_suffix(&sc.out_stem, "_ec_vis"))?;
+            let (_, all_layers) = read_folder(&with_suffix(&sc.out_stem, "_ec_all"))?;
+            let (vis_flat, all_flat) = ec_flats(sc)?;
+            let idx = |v: &[(usize, String, PixelBuf)]| v.iter().map(|(i, _, _)| *i).collect::<Vec<_>>();
+            if idx(&vis_layers) != [0, 1, 3] || idx(&all_layers) != [0, 1, 2, 3] {
+                return Err(format!("per-layer files: Visible {:?}, All {:?}", idx(&vis_layers), idx(&all_layers)));
+            }
+            if !all_layers[2].1.contains("_stamp_") {
+                return Err(format!("the file of index 2 is {}", all_layers[2].1));
+            }
+            for (v, a) in vis_layers.iter().zip([&all_layers[0], &all_layers[1], &all_layers[3]]) {
+                if v.1 != a.1 || v.2 != a.2 {
+                    return Err(format!("{} differs between Visible and All", v.1));
+                }
+            }
+            let doc = doc_of(s)?;
+            let logo_layer = doc.layer(content_layer(s, "stamp")?).ok_or("no Logo layer")?;
+            if differing(&all_layers[2].2, &layer_canvas(logo_layer, doc.sets[0].width, doc.sets[0].height)) != 0 {
+                return Err("the hidden Logo's file is not its layer's pixels".to_owned());
+            }
+            // The flattened texture is the visible layers under All too: both files are the same picture, and where
+            // Logo is opaque it differs from the stack with Logo (the hidden layer is left out).
+            if differing(&vis_flat, &all_flat) != 0 {
+                return Err("the flattened PNGs of Visible and All differ".to_owned());
+            }
+            let with_logo = reference_of(s, sc, &[0, 1, 2, 3])?;
+            let logo = &all_layers[2].2;
+            let (mut covered, mut left_out) = (0usize, 0usize);
+            for ((a, b), l) in all_flat.data.as_chunks::<4>().0.iter().zip(with_logo.data.as_chunks::<4>().0).zip(logo.data.as_chunks::<4>().0) {
+                if l[3] == 255 {
+                    covered += 1;
+                    left_out += ((0..4).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0) > 8) as usize;
+                }
+            }
+            log::info!("export_checks (E1): Logo opaque in {covered} texels; the flattened PNG differs from the stack with Logo in {left_out}");
+            if covered == 0 || (left_out as f64) < 0.5 * covered as f64 {
+                return Err(format!(
+                    "the flattened PNG shows the hidden Logo: only {left_out} of its {covered} opaque texels differ from the stack with it"
+                ));
+            }
+            Ok(())
+        }),
+        Step::Assert("(E4) the flattened files equal the reference composite (50 % Multiply) within 2/255", |s, sc| {
+            let (vis_flat, all_flat) = ec_flats(sc)?;
+            let vis_ref = reference_of(s, sc, &[0, 1, 3])?;
+            let (vo, vw) = channel_diff(&vis_flat, &vis_ref, EC_TOLERANCE)?;
+            let (ao, aw) = channel_diff(&all_flat, &vis_ref, EC_TOLERANCE)?;
+            // The same stack with Paint 1 as Normal 100 %: the files must not match it (the blend is applied).
+            let set = &doc_of(s)?.sets[0];
+            let (_, files) = read_folder(&with_suffix(&sc.out_stem, "_ec_all"))?;
+            let normal = reference_composite(
+                &[
+                    (&files[0].2, set.layers[0].opacity, set.layers[0].blend),
+                    (&files[1].2, 1.0, BlendMode::Normal),
+                    (&files[3].2, set.layers[3].opacity, set.layers[3].blend),
+                ],
+                set.width,
+                set.height,
+            );
+            let (no, nw) = channel_diff(&vis_flat, &normal, 8)?;
+            log::info!(
+                "export_checks (E4): Visible {vo} texels over 2/255 (max {vw}), All {ao} (max {aw}); against Paint 1 as Normal 100 %: {no} texels over 8/255 (max {nw})"
+            );
+            if vo != 0 || ao != 0 {
+                return Err(format!("the flattened files differ from the reference: Visible {vo} texels (max {vw}), All {ao} (max {aw})"));
+            }
+            if no < 100 {
+                return Err(format!("only {no} texels tell 50 % Multiply from Normal 100 %: the check cannot see the blend"));
+            }
+            Ok(())
+        }),
+        // (E2) Shift-click range across the hidden Logo.
+        Step::Setup("(E2) remember the history and the revision", remember_selection_base),
+        Step::Dyn("(E2) click Paint 1's name", |s, _| name_click(s, "paint", B::Primary, M::NONE)),
+        Step::WaitIdle,
+        Step::Dyn("(E2) Shift-click WTE's name", |s, _| name_click(s, "text", B::Primary, M::SHIFT)),
+        Step::WaitIdle,
+        Step::Assert("(E2) Paint 1, the hidden Logo and WTE are selected", |s, sc| expect_selection(s, sc, &["paint", "stamp", "text"], "paint")),
+        Step::Dyn("(E2) right-click Paint 1's name", |s, _| name_click(s, "paint", B::Secondary, M::NONE)),
+        Step::WaitFrames(3),
+        Step::Dyn("(E2) click \"Export selected layers... (3)\"", |s, _| menu_click(s, PanelHit::LayerMenuExportSelected)),
+        Step::WaitIdle,
+        Step::WaitFrames(3),
+        Step::Assert("(E2) the dialog lists Logo's file as hidden, the others not, with the selection caption", |s, _| {
+            let Dialog::Export(st) = &s.dialog else { return Err(format!("the Export dialog is not open ({})", dialog_name(&s.dialog))) };
+            if st.options.flat.is_some() {
+                return Err("the layer preset ticks the flattened texture".to_owned());
+            }
+            let lines = &s.tool_probe.export_files;
+            log::info!("export_checks (E2): file list {lines:?}; caption {:?}", s.tool_probe.export_caption);
+            if lines.len() != 3 {
+                return Err(format!("the list shows {lines:?}"));
+            }
+            for line in lines {
+                let hidden = line.contains("_stamp_");
+                if line.contains("(hidden)") != hidden {
+                    return Err(format!("the line {line:?} is {}marked hidden", if hidden { "not " } else { "" }));
+                }
+            }
+            if s.tool_probe.export_caption.as_deref() != Some(EC_CAPTION_SELECTED) {
+                return Err(format!("the caption is {:?}", s.tool_probe.export_caption));
+            }
+            Ok(())
+        }),
+        Step::Shot("hidden"),
+        Step::Setup("(E2) export into <out>_ec_sel", |s, sc| dialog_into(s, sc, "_ec_sel")),
+        Step::Dyn("(E2) Export (the dialog's options)", run_dialog_export),
+        Step::WaitIdle,
+        Step::Assert("(E2) the hidden Logo's file is written with the two others, each its layer's pixels", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let (flat, files) = read_folder(&with_suffix(&sc.out_stem, "_ec_sel"))?;
+            let idx: Vec<usize> = files.iter().map(|(i, _, _)| *i).collect();
+            if flat.is_some() || idx != [1, 2, 3] {
+                return Err(format!("the selection wrote a flattened file: {}, layer files {idx:?}", flat.is_some()));
+            }
+            let set = &doc_of(s)?.sets[0];
+            for (i, name, picture) in &files {
+                if differing(picture, &layer_canvas(&set.layers[*i], set.width, set.height)) != 0 {
+                    return Err(format!("{name} is not its layer's pixels"));
+                }
+            }
+            if ink(&files[1].2) == 0 {
+                return Err("the hidden Logo's file is empty".to_owned());
+            }
+            undo_since(s, sc, 0)
+        }),
+        // (E3) Base and WTE with the flattened texture.
+        Step::Dyn("(E3) select Base, Ctrl-select WTE", |s, _| {
+            let base = doc_of(s)?.sets[0].layers[0].id;
+            Ok(vec![Step::Do(AppAction::SelectLayer(base)), Step::Do(AppAction::ToggleLayerSelected(content_layer(s, "text")?))])
+        }),
+        Step::WaitIdle,
+        Step::Dyn("(E3) Export selected layers", |s, _| {
+            let selection = session_of(s)?.layer_selection();
+            let want = vec![doc_of(s)?.sets[0].layers[0].id, content_layer(s, "text")?];
+            if selection != want {
+                return Err(format!("the selection is {selection:?}, expected Base and WTE {want:?}"));
+            }
+            Ok(vec![Step::Do(AppAction::ShowExportLayers(selection))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("(E3) tick the flattened texture (PNG), no seam padding, into <out>_ec_base", |s, sc| {
+            dialog_into(s, sc, "_ec_base")?;
+            let Dialog::Export(st) = &mut s.dialog else { return Err("the Export dialog closed".to_owned()) };
+            st.options.flat = Some(FlatFormat::Png(PngLevel::Balanced));
+            st.options.dilate_px = 0;
+            Ok(())
+        }),
+        Step::WaitFrames(3),
+        Step::Assert("(E3) the caption says the flattened file holds only the selected layers", |s, _| {
+            if s.tool_probe.export_caption.as_deref() != Some(EC_CAPTION_SELECTED_FLAT) {
+                return Err(format!("the caption is {:?}", s.tool_probe.export_caption));
+            }
+            Ok(())
+        }),
+        Step::Dyn("(E3) Export (the dialog's options)", run_dialog_export),
+        Step::WaitIdle,
+        Step::Assert("(E3) the flattened file is Base + WTE only", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let (flat, files) = read_folder(&with_suffix(&sc.out_stem, "_ec_base"))?;
+            let flat = flat.ok_or("the selection wrote no flattened PNG")?;
+            let idx: Vec<usize> = files.iter().map(|(i, _, _)| *i).collect();
+            if idx != [0, 3] {
+                return Err(format!("the per-layer files of the selection are {idx:?}"));
+            }
+            let want = reference_of(s, sc, &[0, 3])?;
+            let (over, worst) = channel_diff(&flat, &want, EC_TOLERANCE)?;
+            let (vis_flat, _) = ec_flats(sc)?;
+            let (paint_shows, _) = channel_diff(&flat, &vis_flat, 8)?;
+            log::info!(
+                "export_checks (E3): {over} texels over 2/255 from Base + WTE (max {worst}); {paint_shows} texels differ from the visible stack (Paint 1)"
+            );
+            if over != 0 {
+                return Err(format!("{over} texels differ from Base + WTE (max {worst}/255)"));
+            }
+            if paint_shows == 0 {
+                return Err("the flattened selection equals the visible stack: Paint 1 is in it".to_owned());
+            }
+            Ok(())
         }),
         Step::WaitFrames(2),
     ]);
@@ -3178,6 +3556,34 @@ fn assert_side_panel_layout(s: &AppState, _: &Scratch) -> Result<(), String> {
     Ok(())
 }
 
+/// accept_fixes item B: the three areas of the side panel lie one below the other without overlapping, at any length
+/// of the tool options: the tool options' scroll area ends above the Color section, the Color section above the
+/// lower area (tab strip Layers | Brush | Text), and no tab button reaches into the Color section or the tool area.
+/// Then the checks of `assert_side_panel_layout`.
+fn assert_side_areas_apart(s: &AppState, sc: &Scratch) -> Result<(), String> {
+    let r = &s.side_rects;
+    log::info!(
+        "side areas: panel {:?}, tool area {:?}, tool options {:?}, color {:?}, lower area {:?}, tabs {:?}",
+        r.panel, r.tool_area, r.tool_options, r.color, r.bottom_area, r.tab_buttons
+    );
+    let (tool, color, lower) = (r.tool_area, r.color, r.bottom_area);
+    if [tool, color, lower].iter().any(|a| !a.is_finite() || a.height() <= 0.0) {
+        return Err(format!("an area was not drawn: tool {tool:?}, color {color:?}, lower {lower:?}"));
+    }
+    if tool.bottom() > color.top() + 0.5 {
+        return Err(format!("the tool options ({tool:?}) run {:.1} pt into the Color section ({color:?})", tool.bottom() - color.top()));
+    }
+    if color.bottom() > lower.top() + 0.5 {
+        return Err(format!("the Color section ({color:?}) runs {:.1} pt into the lower area ({lower:?})", color.bottom() - lower.top()));
+    }
+    for tab in r.tab_buttons.iter().filter(|t| t.is_finite()) {
+        if tab.top() < color.bottom() - 0.5 || tab.top() < tool.bottom() - 0.5 {
+            return Err(format!("the tab button {tab:?} lies under the Color section {color:?} or the tool area {tool:?}"));
+        }
+    }
+    assert_side_panel_layout(s, sc)
+}
+
 /// The layer at `index` (bottom first) of set 0 satisfies `check`.
 fn layer_is(state: &AppState, index: usize, what: &str, check: fn(&Layer) -> bool) -> Result<(), String> {
     let layer = doc_of(state)?.sets[0].layers.get(index).ok_or_else(|| format!("no layer {index}"))?;
@@ -4427,6 +4833,16 @@ fn workflow_path(has_path: bool) -> Vec<Step> {
         }),
         Step::WaitIdle,
         Step::Assert("the image stamp was placed and selected", |s, _| placed_stamp(s, false).map(|_| ())),
+        Step::Assert("the stamp and its layer are named after the file stem (\"wf_stamp\")", |s, _| {
+            let (id, _) = placed_stamp(s, false)?;
+            let doc = doc_of(s)?;
+            let stamp = doc.stamp(id).ok_or("the stamp is gone")?;
+            let layers: Vec<&str> = doc.stamp_layers(id).into_iter().filter_map(|(_, l)| doc.layer(l)).map(|l| l.name.as_str()).collect();
+            if stamp.name != "wf_stamp" || layers.iter().any(|n| *n != "wf_stamp") {
+                return Err(format!("the stamp is {:?}, its layers {layers:?}", stamp.name));
+            }
+            Ok(())
+        }),
         checkpoint!("image stamp", true),
         phase!("text stamp"),
         Step::Setup("text content", |s, _| {
@@ -7295,10 +7711,12 @@ fn gate_mark(what: &'static str) -> Step {
 /// Check-and-fix, the other rows of the plan's event table (1.5), each against the same steps with the wait on: (g) a
 /// Final, then the Preview view mode, a tool change and the camera at once -> the same composite; (i) a Final, then a
 /// brush stroke at once (a result that lands during the stroke waits for its end) -> the same composite; (k) a Final,
-/// the export dialog in the next frame -> it opens with nothing waiting; (h) a Final, Rasterize in the next frame ->
-/// the same pixels; (j) a Final, another document in the next frame -> the late result is dropped (other document).
-/// In the asynchronous mode the log shows "result dropped (stale)" (a, e), "result dropped (other document)" (j) and
-/// "settle waited" (c, d, f, k, h); with `WTE_SYNC_FINAL_BAKES=1` the same steps give the same hashes.
+/// the export dialog in the next frame -> it opens at once without a settle on the UI thread (the export job waits
+/// for the bake, fix pass 2), and after `WaitIdle` nothing is unbaked and the dialog is still open; (h) a Final,
+/// Rasterize in the next frame -> the same pixels; (j) a Final, another document in the next frame -> the late result
+/// is dropped (other document). In the asynchronous mode the log shows "result dropped (stale)" (a, e), "result
+/// dropped (other document)" (j) and "settle waited" (d, h); with `WTE_SYNC_FINAL_BAKES=1` the same steps give the
+/// same hashes.
 fn final_bake_async(has_path: bool) -> Vec<Step> {
     let mut steps = if has_path { open_and_accept(true) } else { vec![Step::Do(AppAction::OpenSample(SampleKind::Sphere)), Step::WaitIdle] };
     steps.extend([
@@ -7493,7 +7911,12 @@ fn final_bake_async(has_path: bool) -> Vec<Step> {
             fba_nothing_unbaked(s, sc)?;
             fba_hash_is(s, sc, "fba_stroke")
         }),
-        // (k) the export dialog right after a Final: it opens after the bake landed (settle).
+        // (k) the export dialog right after a Final: it opens at once, without waiting for the bake on the UI thread
+        // (fix pass 2: the export job waits instead); the bake lands while the dialog is open.
+        Step::Setup("(k) remember the settle count", |s, sc| {
+            sc.values.insert("fba_settles", s.final_bakes.settle_count());
+            Ok(())
+        }),
         Step::Dyn("(k) Final scale, the export dialog in the next frame", |s, _| {
             let (id, placement, _) = fba_image_stamp(s)?;
             Ok(vec![
@@ -7501,12 +7924,22 @@ fn final_bake_async(has_path: bool) -> Vec<Step> {
                 Step::Do(AppAction::ShowExport),
             ])
         }),
-        Step::Assert("(k) the export dialog is open and nothing waits for a bake", |s, _| {
+        Step::Assert("(k) the export dialog is open and the UI did not wait for the bake", |s, sc| {
             if !matches!(s.dialog, Dialog::Export(_)) {
                 return Err("the export dialog is not open".to_owned());
             }
-            if doc_of(s)?.has_unbaked_stamps() {
-                return Err("the export dialog opened before the Final bake landed".to_owned());
+            let (now, before) = (s.final_bakes.settle_count(), remembered(sc, "fba_settles")?);
+            if now != before {
+                return Err(format!("opening the dialog waited for the Final bake on the UI thread ({before} -> {now} settles)"));
+            }
+            log::info!("(k) the dialog opened; bake still pending: {}", s.final_bakes_pending || doc_of(s)?.has_unbaked_stamps());
+            Ok(())
+        }),
+        Step::WaitIdle,
+        Step::Assert("(k) the bake landed with the dialog open", |s, sc| {
+            fba_nothing_unbaked(s, sc)?;
+            if !matches!(s.dialog, Dialog::Export(_)) {
+                return Err(format!("the export dialog closed ({})", dialog_name(&s.dialog)));
             }
             Ok(())
         }),
@@ -8342,6 +8775,7 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
         // longer than the way round). Stable (fix-wrap, item 2): logged before the asserts, so a model that fails
         // one of them (nonmanifold, noisy400, tiles300) still logs what its panel says.
         Step::Setup("(10) log the panel lines (Jump small gaps on)", ws_log_panel_lines),
+        Step::Assert("(10) the side panel's areas do not overlap (long tool options, Color collapsed)", assert_side_areas_apart),
         Step::Assert("(10) ink <= 1.3, dup <= 3 %, scatter <= 5 % with Jump small gaps off and on", |_, sc| {
             let mut bad = Vec::new();
             for (jump, keys) in [("off", WS_Q_OFF), ("on", WS_Q_ON)] {
@@ -8817,7 +9251,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 46);
+        assert_eq!(scenario_names().len(), 47);
     }
 
     #[test]

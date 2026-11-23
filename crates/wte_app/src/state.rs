@@ -465,6 +465,11 @@ pub struct ToolProbe {
     /// Round 6 (R6-2): the two Wrap option controls ("Jump small gaps", "Ends meet | Overlap") as the tool options drew
     /// them in the last frame: `Some(enabled)`, `None` when they were not shown (scenario `wrap_surface`, step 4d).
     pub wrap_controls: Option<bool>,
+    /// accept_fixes (items A, E2): the export dialog's preview caption and its file list lines as drawn in the last
+    /// frame the dialog showed them ("<name>" + " (hidden)" / " separate layer" / " will be replaced"). Left as they
+    /// were when the dialog closes.
+    pub export_caption: Option<String>,
+    pub export_files: Vec<String>,
 }
 
 /// Where the sample of one font family lies in the sample atlases.

@@ -5595,7 +5595,8 @@ carries a catalog face).
     act on the active layer: "Merges the active layer, <name>, into the layer below (not the other selected layers)";
     Rasterize enabled: "Rasterizes the active layer, <name>, into a paint layer (not the other selected layers)",
     disabled: "Rasterize acts on the active layer, <name>, only (not the other selected layers): it is already a paint
-    layer" / "it is locked" (`layers::rasterize_multi_hover`).
+    layer" (any paint layer, also the locked Base: check_polish) / "it is locked" (a locked stamp or text layer)
+    (`layers::rasterize_multi_hover`).
   - **Thumbnail policy** (performance at 4K/8K): a layer thumbnail (`doc.layer_thumbnail` ->
     `ColorImage::from_rgba_unmultiplied` -> `ctx.load_texture`) is cached per layer under the key `(LayerId, Layer::version())`
     and regenerated only when that layer's version changed — never because `doc.revision()` changed. At most 2 thumbnails are
@@ -7061,8 +7062,12 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   is the warm-up's "shared texels found ... (N % of the surface)"); a `composite hash` line per Jump setting (every
   set's composite) for byte-equality checks across runs.
 
-- Polish (wall-clock tests, item 4): every test with a wall-clock limit is an ignored `perf_*` test, run serially on an
-  otherwise idle machine; the parallel runs skip them. The gate commands:
+- Polish (wall-clock tests, item 4): the tests with a tight wall-clock limit (WA7, check:A, the font sample job) are
+  ignored `perf_*` tests, run serially on an otherwise idle machine; the parallel runs skip them. check_polish: two
+  timed tests are not `perf_*`: `texel_map::tests::tiled_uvs_build_in_one_pass_over_the_image` runs in the parallel run
+  with a coarse 1 s guard (a 1024² build and a raster, against the old per-tile cost), and the ignored
+  `tip_bake::tests::load_times` (P10, models of this machine, 1 / 2 / 8 s) runs in none of the commands below. The gate
+  commands:
   `cargo test --workspace` (no perf test runs: all are ignored);
   `cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1` (WA7, check:A);
   `cargo test -p wte_app perf_ -- --ignored --test-threads=1` (`text_ops::tests::perf_sample_job_for_the_machine_fonts`,

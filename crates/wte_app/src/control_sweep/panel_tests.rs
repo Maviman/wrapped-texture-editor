@@ -328,6 +328,16 @@ fn footer_rasterize_names_the_active_layer_when_several_are_selected() {
     app.idle(2);
     assert!(app.h.has("2 layers selected \u{b7} tools paint on Paint 1"));
     assert!(tooltip_after_hover(&mut app, &paint_note), "disabled Rasterize names the active layer: {:?}", app.h.labels());
+    // check_polish: the locked Base is a paint layer too: that is the reason given, not its lock.
+    let base_name = app.state.doc().unwrap().layer(base).unwrap().name.clone();
+    assert!(app.state.doc().unwrap().layer(base).unwrap().locked, "the Base layer is locked");
+    app.state.doc_mut().unwrap().set_active_layer(TextureSetId(0), Some(base)).unwrap();
+    app.idle(2);
+    assert!(app.h.get("Rasterize").disabled);
+    let base_note = rasterize_multi_hover(&base_name, Some("it is already a paint layer"));
+    assert!(tooltip_after_hover(&mut app, &base_note), "locked Base: {:?}", app.h.labels());
+    app.state.doc_mut().unwrap().set_active_layer(TextureSetId(0), Some(paint)).unwrap();
+    app.idle(2);
 
     // A stamp layer active within a selection of two: Rasterize is enabled and its tooltip names that layer.
     let doc = app.state.doc_mut().unwrap();

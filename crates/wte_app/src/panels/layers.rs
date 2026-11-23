@@ -577,7 +577,9 @@ fn footer(ui: &mut egui::Ui, state: &AppState, actions: &mut Vec<AppAction>, hit
         let rasterize = if multi {
             rasterize.on_hover_text(rasterize_multi_hover(&layer.name, None)).on_disabled_hover_text(rasterize_multi_hover(
                 &layer.name,
-                Some(if layer.locked { "it is locked" } else { "it is already a paint layer" }),
+                // check_polish: a paint layer is never rasterized, locked or not (the locked Base must not suggest that
+                // unlocking it would help).
+                Some(if layer.is_raster() { "it is already a paint layer" } else { "it is locked" }),
             ))
         } else {
             rasterize.on_hover_text("Turn the stamp or text layer into an ordinary paint layer")

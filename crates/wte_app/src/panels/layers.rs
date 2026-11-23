@@ -571,11 +571,18 @@ fn footer(ui: &mut egui::Ui, state: &AppState, actions: &mut Vec<AppAction>, hit
         if merge.clicked() {
             actions.push(AppAction::MergeDown(layer.id));
         }
-        if ui
-            .add_enabled(!layer.is_raster() && !layer.locked, egui::Button::new("Rasterize"))
-            .on_hover_text("Turn the stamp or text layer into an ordinary paint layer")
-            .clicked()
-        {
+        let rasterize = ui.add_enabled(!layer.is_raster() && !layer.locked, egui::Button::new("Rasterize"));
+        // Polish item 5: like Merge Down, Rasterize acts on the active layer only; with several layers selected the
+        // tooltip says so, enabled or not.
+        let rasterize = if multi {
+            rasterize.on_hover_text(rasterize_multi_hover(&layer.name, None)).on_disabled_hover_text(rasterize_multi_hover(
+                &layer.name,
+                Some(if layer.locked { "it is locked" } else { "it is already a paint layer" }),
+            ))
+        } else {
+            rasterize.on_hover_text("Turn the stamp or text layer into an ordinary paint layer")
+        };
+        if rasterize.clicked() {
             actions.push(AppAction::RasterizeLayer(layer.id));
         }
         let elsewhere = locked_elsewhere(&session.doc, layer);
@@ -606,6 +613,15 @@ fn footer(ui: &mut egui::Ui, state: &AppState, actions: &mut Vec<AppAction>, hit
         }
     });
     Rect::from_min_max(Pos2::new(row.response.rect.left(), top), row.response.rect.max)
+}
+
+/// The footer Rasterize's tooltip with several layers selected (polish item 5): it acts on the active layer only;
+/// `blocked` = why it cannot (the disabled tooltip).
+pub(crate) fn rasterize_multi_hover(active: &str, blocked: Option<&str>) -> String {
+    match blocked {
+        None => format!("Rasterizes the active layer, {active}, into a paint layer (not the other selected layers)"),
+        Some(why) => format!("Rasterize acts on the active layer, {active}, only (not the other selected layers): {why}"),
+    }
 }
 
 fn icon_color(ui: &egui::Ui, resp: &egui::Response) -> Color32 {

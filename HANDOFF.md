@@ -109,6 +109,11 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 ### 4.4 Test counts and identity checks
 
 - Landed build (rounds 6+7): `cargo test --workspace` **1,116 passed, 33 ignored, 0 failed**; clippy 0 warnings.
+- Wall-clock tests (branch `stable`, polish item 4): every test with a time limit is an ignored `perf_*` test and runs
+  serially on an otherwise idle machine, never in the parallel run. Gate commands:
+  `cargo test --workspace`; `cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1` (WA7, check:A, 200 ms);
+  `cargo test -p wte_app perf_ -- --ignored --test-threads=1` (font sample job, 0.5 s); the GPU app tests
+  `cargo test -p wte_app -- --ignored --skip perf_`. ARCHITECTURE.md section 9 has the details.
 - Every round checked that unrelated scenarios stay **pixel-identical** to the previous exe (`shot.png`, toast
   area excepted) and that exports are byte-identical (`tools/round3/check_exports.py` must PASS).
 

@@ -416,9 +416,9 @@ pub(crate) fn on_output_with(state: &mut AppState, generation: u64, output: Box<
 }
 
 /// Waits for the bake in flight of the open document and applies it, then bakes every other waiting stamp on the UI
-/// thread (`Document::settle_final_bakes`). The one place the UI thread blocks on a worker (4.6). Called before the
-/// snapshot of save, and before merge down and rasterize. Export does not call it (fix_export item 6): its job waits
-/// behind the progress dialog until the bakes have landed (`io_flows::feed_waiting_export`), and so does not freeze
+/// thread (`Document::settle_final_bakes`). The one place the UI thread blocks on a worker (4.6). Called before merge
+/// down and rasterize. Export (fix_export item 6) and save (polish item 2) do not call it: their jobs wait behind the
+/// progress dialog until the bakes have landed (`io_flows::feed_waiting_snapshot`), and so do not freeze
 /// the UI for a wrapped stamp's Final (seconds on a large model). Stamps of an open pending
 /// edit are not baked (the callers that keep pixels flush first; merge down and rasterize bake their own stamp in the
 /// core, rule 8).

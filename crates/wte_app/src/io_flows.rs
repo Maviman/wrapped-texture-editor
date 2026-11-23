@@ -168,6 +168,7 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
             }
         },
         JobOutput::Saved { result, scene_generation, then } => {
+            app.snapshot_feed = None;
             let Some(session) = app.state.session.as_mut().filter(|s| s.scene_generation == scene_generation) else {
                 log::warn!("ignoring the result of a save that belongs to a document that is no longer open");
                 return;
@@ -202,12 +203,12 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                     app.state.dialog = Dialog::None;
                 }
                 app.export_stash = None;
-                app.export_feed = None;
+                app.snapshot_feed = None;
                 let text = export_toast_text(&report, &dir);
                 app.state.toasts.push_with_detail(crate::action::ToastLevel::Info, text, dir.display().to_string());
             }
             Err(e) => {
-                app.export_feed = None;
+                app.snapshot_feed = None;
                 // A cancelled export leaves the Export dialog open as it is.
                 let previous = std::mem::replace(&mut app.state.dialog, Dialog::None);
                 let lines = vec![format!("Export to {} failed.", dir.display()), e.clone()];
@@ -471,11 +472,19 @@ pub fn start_save(app: &mut WteApp, path: PathBuf, then: Option<Pending>) {
     let Some(session) = app.state.session.as_mut() else { return };
     session.doc.ui_state = ui_state;
     session.doc.flush_pending_edit();
-    // Round 5: a saved project never holds the cache of a stamp whose Full bake is still due.
-    crate::stamp_bakes::settle(app);
-    let Some(session) = app.state.session.as_ref() else { return };
-    let snapshot = session.doc.snapshot();
     let scene_generation = session.scene_generation;
+    // Round 5: a saved project never holds the cache of a stamp whose Full bake is still due. Polish item 2: as for
+    // export (fix_export item 6), no `settle` on the UI thread: while Final bakes are due (a wrapped stamp placed or
+    // edited a moment ago: 3-4 s on ABeautifulGame) the job starts at once behind the progress dialog ("Finishing
+    // stamps") and gets the snapshot from `feed_waiting_snapshot` when they have landed.
+    let (tx, rx) = std::sync::mpsc::channel::<wte_core::DocumentSnapshot>();
+    let waiting = crate::stamp_bakes::bakes_pending(&app.state);
+    if !waiting {
+        let Some(doc) = app.state.doc() else { return };
+        if tx.send(doc.snapshot()).is_err() {
+            return;
+        }
+    }
     let opts = SaveOptions {
         png: PngLevel::Fast,
         write_flattened: true,
@@ -483,13 +492,20 @@ pub fn start_save(app: &mut WteApp, path: PathBuf, then: Option<Pending>) {
         now_unix: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
-    log::info!("save {}", path.display());
+    log::info!("save {}{}", path.display(), if waiting { " (waiting for the Final bakes)" } else { "" });
     app.jobs.spawn(&app.ctx, "Saving project", true, move |p| {
+        let snapshot = match receive_snapshot(&rx, p) {
+            Ok(snapshot) => snapshot,
+            Err(e) => return JobOutput::Saved { result: Err(e), scene_generation, then },
+        };
         let saved_state = snapshot.history_state;
         let result =
             wte_core::project::save(&snapshot, &path, &opts, p).map(|stats| (path, saved_state, stats.reuse)).map_err(|e| e.to_string());
         JobOutput::Saved { result, scene_generation, then }
     });
+    if waiting {
+        app.snapshot_feed = Some(SnapshotFeed { tx, since: std::time::Instant::now(), what: "save" });
+    }
 }
 
 /// Starts the export job.
@@ -501,7 +517,7 @@ pub fn start_export(app: &mut WteApp, opts: ExportOptions) {
     doc.flush_pending_edit();
     // fix_export item 6: no `settle` on the UI thread. When Final bakes are still due (a wrapped stamp placed or
     // edited a moment ago: 3-4 s on ABeautifulGame), the job starts at once behind the progress dialog ("Finishing
-    // stamps") and gets the snapshot from `feed_waiting_export` when they have landed; the UI keeps drawing meanwhile.
+    // stamps") and gets the snapshot from `feed_waiting_snapshot` when they have landed; the UI keeps drawing meanwhile.
     let (tx, rx) = std::sync::mpsc::channel::<wte_core::DocumentSnapshot>();
     let waiting = crate::stamp_bakes::bakes_pending(&app.state);
     if !waiting {
@@ -523,19 +539,21 @@ pub fn start_export(app: &mut WteApp, opts: ExportOptions) {
         JobOutput::Exported { result, dir }
     });
     if waiting {
-        app.export_feed = Some(ExportFeed { tx, since: std::time::Instant::now() });
+        app.snapshot_feed = Some(SnapshotFeed { tx, since: std::time::Instant::now(), what: "export" });
     }
 }
 
-/// fix_export item 6: an export job waiting for its snapshot (`start_export`), and since when.
-pub struct ExportFeed {
+/// fix_export item 6: an export job waiting for its snapshot (`start_export`), and since when; polish item 2: a save
+/// job too (`start_save`). `what` names the job in the log. One modal job runs at a time, so one feed is enough.
+pub struct SnapshotFeed {
     tx: std::sync::mpsc::Sender<wte_core::DocumentSnapshot>,
     since: std::time::Instant,
+    what: &'static str,
 }
 
-/// The export job's wait for its snapshot: shows "Finishing stamps" until it comes; `Err("cancelled")` when the user
-/// cancels meanwhile (the result counts as cancelled: `Finished::cancel_requested`), an error when the app dropped the
-/// export (the document went away).
+/// The export or save job's wait for its snapshot: shows "Finishing stamps" until it comes; `Err("cancelled")` when the
+/// user cancels meanwhile (the result counts as cancelled: `Finished::cancel_requested`), an error when the app dropped
+/// the feed (the document went away).
 fn receive_snapshot(
     rx: &std::sync::mpsc::Receiver<wte_core::DocumentSnapshot>,
     p: &dyn Progress,
@@ -558,12 +576,12 @@ fn receive_snapshot(
     }
 }
 
-/// fix_export item 6: called every frame by `App::logic` after `stamp_bakes::pump`. While an export waits for the
-/// Final bakes, does nothing as long as a bake (or the wrap job it waits for) runs on a worker; once none is pending
-/// it hands the job the snapshot. A Final that is due while no job runs (no worker thread could start) is baked here
-/// (`settle`, the old behaviour) so the export never waits forever.
-pub fn feed_waiting_export(app: &mut WteApp) {
-    if app.export_feed.is_none() {
+/// fix_export item 6: called every frame by `App::logic` after `stamp_bakes::pump`. While an export (polish item 2: or
+/// a save) waits for the Final bakes, does nothing as long as a bake (or the wrap job it waits for) runs on a worker;
+/// once none is pending it hands the job the snapshot. A Final that is due while no job runs (no worker thread could
+/// start) is baked here (`settle`, the old behaviour) so the job never waits forever.
+pub fn feed_waiting_snapshot(app: &mut WteApp) {
+    if app.snapshot_feed.is_none() {
         return;
     }
     if crate::stamp_bakes::bakes_pending(&app.state) {
@@ -571,12 +589,13 @@ pub fn feed_waiting_export(app: &mut WteApp) {
             app.ctx.request_repaint_after(std::time::Duration::from_millis(50));
             return;
         }
-        log::warn!("export: a Final bake is due but none runs; baking it on the UI thread");
+        let what = app.snapshot_feed.as_ref().map_or("", |f| f.what);
+        log::warn!("{what}: a Final bake is due but none runs; baking it on the UI thread");
         crate::stamp_bakes::settle(app);
     }
-    let Some(feed) = app.export_feed.take() else { return };
+    let Some(feed) = app.snapshot_feed.take() else { return };
     let Some(snapshot) = app.state.doc().map(|d| d.snapshot()) else { return };
-    log::info!("export: the Final bakes landed after {:.0} ms; exporting", feed.since.elapsed().as_secs_f64() * 1000.0);
+    log::info!("{}: the Final bakes landed after {:.0} ms; starting", feed.what, feed.since.elapsed().as_secs_f64() * 1000.0);
     // A cancelled job has dropped the receiver: nothing to do.
     let _ = feed.tx.send(snapshot);
 }

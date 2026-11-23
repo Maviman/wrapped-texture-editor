@@ -197,7 +197,7 @@ layer of every set it touches (7.4). (4) File names come from one reference plan
 selection uses the full export's names, `_2` included (7.5). (5) Delete and Duplicate act on every selected layer as one
 undo step (`Document::remove_layers` / `duplicate_layers`, `group_edits`); Merge Down stays on the active layer (8.7).
 (6) Export no longer settles the Final bakes on the UI thread: its job waits behind the progress dialog until they land
-(`io_flows::feed_waiting_export`, 8.9). (7) Each export removes the temp files and stage folders of crashed exports whose
+(`io_flows::feed_waiting_snapshot`, 8.9; polish item 2: Save and Save As do the same). (7) Each export removes the temp files and stage folders of crashed exports whose
 process is not running (`export::remove_stale_temps`). (8) "Exported 1 file". A read-only or blocked folder fails before
 anything is written (`preflight`, 7.4).
 
@@ -5590,7 +5590,12 @@ carries a catalog face).
     primary drag reorders (`dragged_by(Primary)`). With N > 1 the footer starts with the weak line "N layers selected ·
     tools paint on <active name>". The name's hover text: "Click: select | Ctrl / Shift-click: select more | Right-click:
     export | Double-click: rename | Drag: reorder". Every layer command (footer, Layer menu, shortcuts, the Delete key)
-    still acts on the active layer only.
+    still acts on the active layer only (fix_export item 5 later made Duplicate and Delete act on the selection, "Duplicate
+    (N)" / "Delete (N)"). With N > 1 the footer's Merge Down and (polish item 5) Rasterize say in their tooltips that they
+    act on the active layer: "Merges the active layer, <name>, into the layer below (not the other selected layers)";
+    Rasterize enabled: "Rasterizes the active layer, <name>, into a paint layer (not the other selected layers)",
+    disabled: "Rasterize acts on the active layer, <name>, only (not the other selected layers): it is already a paint
+    layer" / "it is locked" (`layers::rasterize_multi_hover`).
   - **Thumbnail policy** (performance at 4K/8K): a layer thumbnail (`doc.layer_thumbnail` ->
     `ColorImage::from_rgba_unmultiplied` -> `ctx.load_texture`) is cached per layer under the key `(LayerId, Layer::version())`
     and regenerated only when that layer's version changed — never because `doc.revision()` changed. At most 2 thumbnails are
@@ -5783,6 +5788,16 @@ whether or not their lines show) and shows only when that rest is 2 % or more (D
 surface"); the "Only P %" / "narrower" line's expected share also drops the gaps and neighbouring-part shares when their
 lines show.
 
+Polish (item 3, `tool_options::largest_wrap_loss`): when the "Only P % of the picture lies on the surface" line shows and
+no cause line passed its threshold (no gaps, neighbouring-part, cut or ends-with-share line; "runs off" never shows with
+it), the line names the largest loss with its share: ", mostly lost to cuts (S %)" (`lost_cut`), "in the gaps between
+separate parts" (`gaps`), "where it meets a neighbouring part" (`at_part`), "beyond where the picture closed on itself"
+(`beyond`, only when the spine met or passed itself and no ends line shows) or the rest (`1 - shown - beyond - lost_cut -
+gaps - at_part`): "running off the surface" when `reached_edge`, else "hidden or folded"; nothing below 0.5 %
+(`LARGEST_LOSS_MIN`). S is rounded like the other lines (at least 1 %). DamagedHelmet Jump on: "Only 97 % of the
+picture lies on the surface, mostly lost to cuts (2 %)" (`lost_cut` 1.96 %, below the cut line's 2 %). The "narrower"
+line names no cause (the room is the cause).
+
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
 ```rust
@@ -5837,7 +5852,9 @@ them as `AppAction::Cancel` (`ModalResponse::should_close()` may be used for the
   with `include_hidden` false / true; Selected = `layers: Some(st.selected_layers)` (and clears the set filter when the
   layers change: their set decides), disabled with N = 0 (hover "Select layers in the Layers list first"). Under Selected a
   weak line names the layers ("Logo, WTE", after three "... and 2 more", `selection_names`; fix_export: "+ its layer in 1
-  other texture set" / "+ their layers in N other texture sets" when designs span sets, `linked_extra`) and the
+  other texture set" / "+ their layers in N other texture sets" when designs span sets, `linked_extra` / `linked_note`;
+  polish item 1: N counts the distinct texture sets that hold the added layers, not the layers, so two selected designs
+  across the same two sets read "+ their layers in 1 other texture set"; "its" for one design, "layer" for one layer) and the
   texture-set checkboxes are hidden. fix_export: a change of the choice goes through `switch_scope(st, scope)`: when the
   dialog was opened for layers (`other_ticks` is `Some`) and the choice moves between Selected and Visible / All, the
   sets, flattened format, per-layer, ORA and PSD ticks of the two sides swap (`ExportTicks::of` / `apply`) and the format
@@ -5926,8 +5943,8 @@ pub fn pump(app: &mut WteApp);
 /// Stamp / Text tool (8.6); `Busy(out)` -> held; `Stale` / `Failed` -> log.
 pub fn on_output(app: &mut WteApp, generation: u64, output: Box<StampBakeOutput>);
 /// Waits for the bake in flight of the open document (`jobs.wait_for`) and applies it, then `doc.settle_final_bakes()`.
-/// Called in `start_save` after its `flush_pending_edit()` and before `snapshot()`, and before `MergeDown` /
-/// `RasterizeLayer` (fix_export: no longer by `start_export` nor the `ShowExport` arm: `feed_waiting_export`) (which `MergeActiveDown` / `RasterizeActiveLayer` reach);
+/// Called before `MergeDown` / `RasterizeLayer` (fix_export: no longer by `start_export` nor the `ShowExport` arm; polish
+/// item 2: no longer by `start_save`; both wait through `feed_waiting_snapshot`) (which `MergeActiveDown` / `RasterizeActiveLayer` reach);
 /// a layer that is gone after it (the bake removed an empty layer outside the home set) is left alone. Afterwards
 /// `debug_assert!(!doc.has_unbaked_stamps())` (unless a stroke is open).
 pub fn settle(app: &mut WteApp);
@@ -5985,16 +6002,23 @@ pub fn handle_close_request(app: &mut WteApp, ctx: &egui::Context);
 pub fn update_title(app: &mut WteApp, ctx: &egui::Context);
 pub fn start_import(app: &mut WteApp, path: PathBuf, fallback_uvs: bool);
 pub fn start_open_project(app: &mut WteApp, path: PathBuf);
+/// Writes `UiState::capture` into `doc.ui_state` and flushes the pending edit. Polish item 2: no `settle` (it froze the
+/// UI for a wrapped stamp's Final, 3-4 s on ABeautifulGame): as `start_export`, when `stamp_bakes::bakes_pending` the
+/// modal "Saving project" job starts at once and waits in `receive_snapshot` ("Finishing stamps", Cancel = "Save
+/// cancelled") for the snapshot `feed_waiting_snapshot` sends (`SnapshotFeed { what: "save" }`); else it gets
+/// `doc.snapshot()` right away. Then `project::save`; `JobOutput::Saved` clears the feed. Scenario `save_unsettled`.
 pub fn start_save(app: &mut WteApp, path: PathBuf, then: Option<Pending>);
 /// fix_export: flushes the pending edit; no `settle`. When `stamp_bakes::bakes_pending` (a Final in flight, held or due),
 /// the modal "Exporting" job starts at once and waits in `receive_snapshot` ("Finishing stamps", Cancel works) for the
-/// snapshot that `feed_waiting_export` sends; else it gets the snapshot right away. The job then runs
+/// snapshot that `feed_waiting_snapshot` sends; else it gets the snapshot right away. The job then runs
 /// `export::remove_stale_temps(dir, process_running)` and `export::run`.
 pub fn start_export(app: &mut WteApp, opts: ExportOptions);
-/// fix_export: every frame after `stamp_bakes::pump`: while an export waits (`WteApp::export_feed`) and a Final bake or a
+/// fix_export: every frame after `stamp_bakes::pump`: while an export or (polish item 2) a save waits
+/// (`WteApp::snapshot_feed: Option<SnapshotFeed { tx, since, what }>`, one modal job at a time) and a Final bake or a
 /// wrap job runs on a worker, nothing (a repaint in 50 ms); once no bake is pending, sends `doc.snapshot()` to the job; a
-/// bake that is due while no job runs (no worker thread) is settled here so the export never waits forever.
-pub fn feed_waiting_export(app: &mut WteApp);
+/// bake that is due while no job runs (no worker thread) is settled here so the job never waits forever. Log:
+/// "<export|save>: the Final bakes landed after T ms; starting".
+pub fn feed_waiting_snapshot(app: &mut WteApp);
 /// fix_export: `OpenProcess` + `GetExitCodeProcess` (Windows; access denied counts as running), `/proc/<pid>` elsewhere.
 pub fn process_running(pid: u32) -> bool;
 pub fn install_document(app: &mut WteApp, doc: Document, path: Option<PathBuf>, force_save_as: bool);
@@ -6415,7 +6439,7 @@ the import scenarios write their files with `samples::to_obj` and `encode_png` i
 Round 4: 37 scenarios (25 of round 3, the ten above and the gate's two measuring scenarios `text_preview_path` and
 `brush_hover`); round 5 adds `final_bake_async` (38); round 6 adds `wrap_surface` (39); export-select adds
 `export_selected`, `export_zip` and `export_flow` (42, rows below the table); fix_export adds `export_unsettled`,
-`export_nouv` and `export_errors` (45); `scenarios::tests` checks the count. fix_export also extends `export_flow` (the
+`export_nouv` and `export_errors` (45); polish adds `save_unsettled` (46); `scenarios::tests` checks the count. fix_export also extends `export_flow` (the
 dialog's Layers choice switched to Visible and back after "Export this layer"; the toast says "1 file"; everything as
 loose files into `<out>_<model>_loose`, equal to the zip's entries byte for byte; the selection as a zip into `_all`:
 `<base>_selection.zip` next to the unchanged `<base>.zip`, every entry equal to the full package's; Duplicate and Delete
@@ -6428,6 +6452,7 @@ counted down) instead of failing (`export_errors`).
 | Scenario | Steps | Asserts |
 |---|---|---|
 | `export_unsettled` [PATH] | fix_export item 6. The sphere sample (or PATH); the sample image as a 30 % Wrap stamp placed with `BakeWait(false)`; the frame clock (`AppState::frame_work`) reset while the Final is pending; `RunExport` of the stamp's layers (+ flattened) into `<out>_a` at once; after it, the same export into `<out>_b` | the Final was pending at the export; no frame of UI work took 300 ms or more, at least 3 frames drawn; the two folders byte-identical; every layer file equals its layer's Final pixels, with ink. Run on ABeautifulGame (Final ~1-4 s) and `high_poly_sphere.obj` (~4 s) |
+| `save_unsettled` [PATH] | Polish item 2. The same start as `export_unsettled` (`place_wrapped_at_once`, `wrapped_stamp_pending`); `SaveAs(<out>_a.wtep)` at once while the Final is pending; after it, `SaveAs(<out>_b.wtep)` | the Final was pending at the save; no frame of UI work took 300 ms (`SAVE_MAX_FRAME_MS`) or more, at least 3 frames drawn; saved as `_a.wtep`, not modified, nothing pending, no dialog; the two projects' manifests equal apart from `saved_unix` (every entry's size and CRC-32), both load with the same sets, layer ids, names and pixels, equal to the document's; the stamp's saved layers have ink (`same_project`). Run on ABeautifulGame |
 | `export_nouv` | fix_export item 9 (L3). The UV-less tetrahedron (generated layout), a stroke and a Project stamp; everything exported into `<out>_a`; Save As, Open; everything again into `<out>_b`; then as a zip into `<out>_zip` | the export holds flattened + every visible layer + ORA + PSD; `_a` and `_b` byte-identical; the zip's entries equal the loose files |
 | `export_errors` | fix_export item 9 (L1, L4). Sphere sample; three exports that cannot work: the folder path under a file, a planned file that is a folder (Files, an old file in the folder), the zip's name a folder; then a folder with a dead process's stage folder, temp zip and temp PNG plus `notes.txt`, exported as a zip | each failure: the "Export failed" message, an error toast (announced), nothing new written, the old file unchanged, no `.tmp-` entry; the last export removes the leftovers and keeps `notes.txt` |
 
@@ -6929,7 +6954,8 @@ and text layers (exactly those two files, each = `dense(layer)`).
   field history, angle wrap), `text_tab.rs` (strip boxes, slot texts, Add point) and `font_picker.rs` (search order).
 
 - T7: `text_ops::tests::{the_bundled_families_get_a_sample_each, samples_are_packed_into_atlases_of_204_cells,
-  samples_are_requested_once_per_catalog}`, ignored `sample_job_for_the_machine_fonts` (machine fonts, 0.5 s limit);
+  samples_are_requested_once_per_catalog}`, ignored `perf_sample_job_for_the_machine_fonts` (machine fonts, 0.5 s limit;
+  polish item 4: a serial perf test, see "Wall-clock tests" below);
   `tools::stamp_place::tests::{text_source_copies_fx, the_draft_takes_a_font_the_project_already_holds,
   a_plain_draft_is_placed_as_in_round_3, a_styled_draft_is_placed_with_its_anchor_at_the_click,
   hover_with_the_text_tool_caches_a_preview_of_the_draft, a_changed_draft_replaces_the_hover_preview,
@@ -7034,6 +7060,33 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   `at_part`, `panel lines:` adds both and says "shared texels under the picture" (the stamp's share; the whole mesh's
   is the warm-up's "shared texels found ... (N % of the surface)"); a `composite hash` line per Jump setting (every
   set's composite) for byte-equality checks across runs.
+
+- Polish (wall-clock tests, item 4): every test with a wall-clock limit is an ignored `perf_*` test, run serially on an
+  otherwise idle machine; the parallel runs skip them. The gate commands:
+  `cargo test --workspace` (no perf test runs: all are ignored);
+  `cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1` (WA7, check:A);
+  `cargo test -p wte_app perf_ -- --ignored --test-threads=1` (`text_ops::tests::perf_sample_job_for_the_machine_fonts`,
+  0.5 s; 649 ms under a game's load in fix pass 2, 340-424 ms alone);
+  `cargo test -p wte_app -- --ignored --skip perf_` (the GPU app tests).
+  The limits are unchanged.
+
+**Polish tests**: `dialogs::export::tests::the_linked_note_counts_texture_sets_not_layers` (item 1: two designs across
+the same two sets, selected in set 0: 2 layers in 1 set; each design in a different set: 2 sets; all of a design
+selected: no note); `control_sweep::panel_tests::footer_rasterize_names_the_active_layer_when_several_are_selected`
+(item 5: real hover over the footer Rasterize until egui shows the tooltip: with two layers selected it names the active
+layer, disabled on a paint layer and enabled on a stamp layer, whose click queues `RasterizeLayer` of the active layer
+only; one layer selected: the plain tooltip); `tool_options::tests::the_wrap_lines_name_the_right_cause_and_never_contradict`
+(item 3: DamagedHelmet Jump on reads "Only 97 % of the picture lies on the surface, mostly lost to cuts (2 %)"; a case
+per cause below its line's threshold: gaps, neighbouring part, running off the surface, hidden or folded, beyond where
+the picture closed on itself; no cause appended while a cause line shows; the contradiction sweep unchanged);
+`selftest::scenarios::tests::expected_selection_layers_follow_the_stamp_links` (item 6); scenario `save_unsettled`
+(item 2, 8.11).
+
+Polish item 6: `export_flow`'s `expect_layer_files` (also `export_selected`, `multi`) no longer takes the expected
+layers from `export::plan_contents` alone: `expected_selection_layers` works them out from the document's `StampId`
+links (`Document::stamp_layers` of each selected stamp or text layer) and the planned files' layers must equal them;
+the names still come from the plan (they are checked against `selection_layer_name` when no set names collide).
+`export_unsettled` checks that the plan holds exactly the stamp's layers.
 
 **fix_export tests**: core `export::tests::{a_selection_has_the_full_exports_names_when_set_names_collide,
 a_selection_of_a_colliding_set_writes_the_full_exports_file, a_design_across_two_sets_exports_its_layer_of_every_set,

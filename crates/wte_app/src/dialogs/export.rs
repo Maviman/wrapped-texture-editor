@@ -157,13 +157,47 @@ pub(crate) fn switch_scope(st: &mut ExportDialogState, scope: LayerScope) {
     apply_scope(&mut st.options, scope, &selected);
 }
 
-/// How many layers a selection gains from its designs in other sets (`export::linked_selection`): one more per other
-/// set a selected stamp or text layer's design spans (fix_export item 3).
-pub(super) fn linked_extra(doc: &wte_core::Document, layers: &[LayerId]) -> usize {
+/// What a selection gains from its designs in other sets (`export::linked_selection`, fix_export item 3): the designs
+/// that bring linked layers, those layers, and the distinct texture sets that hold them. Two designs that span the same
+/// sets count those sets once (polish item 1).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub(super) struct LinkedExtra {
+    pub designs: usize,
+    pub layers: usize,
+    pub sets: usize,
+}
+
+pub(super) fn linked_extra(doc: &wte_core::Document, layers: &[LayerId]) -> LinkedExtra {
     let mut stamps: Vec<wte_core::StampId> = layers.iter().filter_map(|id| doc.stamp_of_layer(*id)).collect();
     stamps.sort_unstable_by_key(|s| s.0);
     stamps.dedup();
-    stamps.iter().map(|s| doc.stamp_layers(*s).iter().filter(|(_, l)| !layers.contains(l)).count()).sum()
+    let mut out = LinkedExtra::default();
+    let mut sets: Vec<TextureSetId> = Vec::new();
+    for s in stamps {
+        let extra: Vec<(TextureSetId, LayerId)> = doc.stamp_layers(s).into_iter().filter(|(_, l)| !layers.contains(l)).collect();
+        if extra.is_empty() {
+            continue;
+        }
+        out.designs += 1;
+        out.layers += extra.len();
+        sets.extend(extra.iter().map(|(set, _)| *set));
+    }
+    sets.sort_unstable();
+    sets.dedup();
+    out.sets = sets.len();
+    out
+}
+
+/// The note after the selected names for `linked_extra`: "+ its layer in 1 other texture set", "+ their layers in 2
+/// other texture sets", ...; `None` when the selection gains nothing.
+pub(super) fn linked_note(extra: LinkedExtra) -> Option<String> {
+    if extra.layers == 0 {
+        return None;
+    }
+    let whose = if extra.designs == 1 { "its" } else { "their" };
+    let what = if extra.layers == 1 { "layer" } else { "layers" };
+    let sets = if extra.sets == 1 { "1 other texture set".to_owned() } else { format!("{} other texture sets", extra.sets) };
+    Some(format!(" + {whose} {what} in {sets}"))
 }
 
 /// The names of the selected layers for the line under the Layers choice: "A, B, C" or "A, B, C and 2 more".
@@ -477,15 +511,11 @@ fn options_ui(
                     .flatten()
                     .filter_map(|id| cx.state.doc().and_then(|d| d.layer(*id)).map(|l| l.name.clone()))
                     .collect();
-                let extra = cx.state.doc().map_or(0, |d| linked_extra(d, st.options.layers.as_deref().unwrap_or(&[])));
+                let extra = cx.state.doc().map_or_else(LinkedExtra::default, |d| linked_extra(d, st.options.layers.as_deref().unwrap_or(&[])));
                 let mut line = selection_names(&names);
-                if extra > 0 {
-                    // A design across several texture sets has one layer per set: all of them are exported.
-                    line.push_str(&if extra == 1 {
-                        " + its layer in 1 other texture set".to_owned()
-                    } else {
-                        format!(" + their layers in {extra} other texture sets")
-                    });
+                // A design across several texture sets has one layer per set: all of them are exported.
+                if let Some(note) = linked_note(extra) {
+                    line.push_str(&note);
                 }
                 ui.add(egui::Label::new(egui::RichText::new(line).small().weak()).truncate());
             }
@@ -1044,5 +1074,42 @@ mod tests {
         assert!(cache.exists.iter().all(|e| !e));
         assert_eq!(cache.revision, snap.revision);
         assert_eq!(cache.generation, 3);
+    }
+
+    /// Polish item 1: the note under "Selected" counts the distinct texture sets that hold the added layers, not the
+    /// layers, when two selected designs span the same sets.
+    #[test]
+    fn the_linked_note_counts_texture_sets_not_layers() {
+        use glam::{Vec2, Vec3};
+        let mut doc = Document::sample(SampleKind::TwoMaterial);
+        assert_eq!(doc.sets.len(), 2);
+        let img = wte_core::samples::sample_stamp_image(32);
+        let png = wte_core::encode_png(img.width, img.height, &img.data, PngLevel::Fast).unwrap();
+        let blob = doc.add_image_blob("logo.png", Arc::from(png)).unwrap();
+        let p = wte_core::Projector::from_surface(Vec3::new(0.0, 0.5, 0.5), Vec3::Z, Vec3::Y, Vec2::splat(0.4), 0.6);
+        let mut design = |name: &str| {
+            let id = doc.add_stamp(name, wte_core::StampSource::Image { blob }, wte_core::Placement::Projected(p), TextureSetId(0)).unwrap();
+            let linked = doc.stamp_layers(id);
+            assert_eq!(linked.iter().map(|(s, _)| s.0).collect::<Vec<_>>(), [0, 1], "{name} spans both sets");
+            (linked[0].1, linked[1].1)
+        };
+        let (a0, a1) = design("A");
+        let (b0, b1) = design("B");
+        let note = |layers: &[LayerId]| linked_note(linked_extra(&doc, layers));
+
+        // Two designs selected in set 0: two more layers, both in the one other set.
+        assert_eq!(linked_extra(&doc, &[a0, b0]), LinkedExtra { designs: 2, layers: 2, sets: 1 });
+        assert_eq!(note(&[a0, b0]).as_deref(), Some(" + their layers in 1 other texture set"));
+        // One design: its one layer in the other set.
+        assert_eq!(note(&[a0]).as_deref(), Some(" + its layer in 1 other texture set"));
+        assert_eq!(note(&[b1]).as_deref(), Some(" + its layer in 1 other texture set"));
+        // Each design selected in a different set: the added layers lie in both sets.
+        assert_eq!(linked_extra(&doc, &[a0, b1]), LinkedExtra { designs: 2, layers: 2, sets: 2 });
+        assert_eq!(note(&[a0, b1]).as_deref(), Some(" + their layers in 2 other texture sets"));
+        // All of a design's layers selected: nothing is added for it.
+        assert_eq!(note(&[a0, a1]), None);
+        assert_eq!(note(&[a0, a1, b0]).as_deref(), Some(" + its layer in 1 other texture set"));
+        assert_eq!(note(&[a0, a1, b0, b1]), None);
+        assert_eq!(note(&[]), None);
     }
 }

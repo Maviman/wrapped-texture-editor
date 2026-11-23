@@ -74,6 +74,7 @@ const NAMES: &[&str] = &[
     "export_zip",
     "export_flow",
     "export_unsettled",
+    "save_unsettled",
     "export_nouv",
     "export_errors",
 ];
@@ -144,6 +145,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "export_zip" => export_zip(),
         "export_flow" => export_flow(args.path.is_some()),
         "export_unsettled" => export_unsettled(args.path.is_some()),
+        "save_unsettled" => save_unsettled(args.path.is_some()),
         "export_nouv" => export_nouv(),
         "export_errors" => export_errors(),
         _ => return None,
@@ -1061,12 +1063,35 @@ fn selection_files(doc: &Document, layers: &[LayerId]) -> Vec<(LayerId, String)>
         .collect()
 }
 
+/// Polish item 6: the layers a selection exports, worked out from the document's own stamp links and not from the
+/// export code under test (`export::linked_selection` / `plan_contents`): the selected layers that exist, then for each
+/// selected stamp or text layer every layer linked to its `StampId` (`Document::stamp_layers`), without duplicates;
+/// sorted by id.
+fn expected_selection_layers(doc: &Document, layers: &[LayerId]) -> Vec<LayerId> {
+    let mut out: Vec<LayerId> = layers.iter().copied().filter(|id| doc.layer(*id).is_some()).collect();
+    for id in layers {
+        if let Some(stamp) = doc.layer(*id).and_then(Layer::stamp_id) {
+            out.extend(doc.stamp_layers(stamp).into_iter().map(|(_, l)| l));
+        }
+    }
+    out.sort_unstable_by_key(|l| l.0);
+    out.dedup();
+    out
+}
+
 /// The folder holds exactly the per-layer PNGs of these layers and of the linked layers of their designs in other
 /// sets (fix_export item 3), each with its layer's pixels; returns the images of `layers`. Without a collision of set
-/// names, a file's name is `selection_layer_name` (the full export's name).
+/// names, a file's name is `selection_layer_name` (the full export's name). Polish item 6: the planned files' layers
+/// must be `expected_selection_layers` (the document's own stamp links), so the plan is checked, not trusted.
 fn expect_layer_files(state: &AppState, dir: &Path, layers: &[LayerId]) -> Result<Vec<PixelBuf>, String> {
     let doc = doc_of(state)?;
     let files = selection_files(doc, layers);
+    let mut planned: Vec<LayerId> = files.iter().map(|(l, _)| *l).collect();
+    planned.sort_unstable_by_key(|l| l.0);
+    let expected = expected_selection_layers(doc, layers);
+    if planned != expected {
+        return Err(format!("the export plans the layers {planned:?}, the document's stamp links give {expected:?}"));
+    }
     let mut want: Vec<String> = files.iter().map(|(_, name)| name.clone()).collect();
     want.sort();
     let listing = dir_names(dir)?;
@@ -1970,43 +1995,10 @@ fn unsettled_options(state: &AppState, sc: &Scratch, suffix: &str) -> Result<Exp
 /// instead of on the UI thread: no frame takes `EXPORT_MAX_FRAME_MS` or more, and the files are byte-identical to an
 /// export made after waiting, and equal to the layers' Final pixels. The sphere sample without PATH.
 fn export_unsettled(has_path: bool) -> Vec<Step> {
-    let mut steps = if has_path { open_and_accept(true) } else { vec![Step::Do(AppAction::OpenSample(SampleKind::Sphere)), Step::WaitIdle] };
+    let mut steps = place_wrapped_at_once(has_path);
     steps.extend([
-        Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
-        Step::WaitIdle,
-        Step::Do(AppAction::FrameModel),
-        Step::WaitIdle,
-        Step::Setup("Stamp tool: the sample image, 30 %, Wrap", |s, sc| {
-            setup_stamp_image(s, sc)?;
-            s.tools.stamp.size_frac = 0.3;
-            s.tools.stamp.rotation_deg = 0.0;
-            s.tools.stamp.mode = SurfaceMode::Wrap;
-            s.tools.stamp.wrap = WrapOptions::default();
-            Ok(())
-        }),
-        Step::Do(AppAction::SetTool(ToolKind::Stamp)),
-        Step::WaitIdle,
-        Step::WaitFrames(2),
-        Step::BakeWait(false),
-        Step::Dyn("place the wrapped stamp", |s, _| {
-            let (xf, first, _) = stamp_spots(s)?;
-            Ok(vec![click(ViewId::Main3D, norm(&xf, first.pos))])
-        }),
         Step::Setup("a Final is pending; reset the frame clock", |s, sc| {
-            // The stamp as it is now (its picture may not have landed yet: no coverage check).
-            let session = session_of(s)?;
-            let id = session.selected_stamp.ok_or("no stamp is selected")?;
-            let placement = session.doc.stamp(id).ok_or("the selected stamp does not exist")?.placement;
-            let Placement::Projected(p) = placement else { return Err("the stamp is not a 3D stamp".to_owned()) };
-            if p.mode != SurfaceMode::Wrap {
-                return Err(format!("the stamp was placed in {:?}", p.mode));
-            }
-            let pending = s.final_bakes_pending || doc_of(s)?.has_unbaked_stamps();
-            if !pending {
-                return Err("the Final bake already landed: the export would not wait".to_owned());
-            }
-            sc.values.insert("eu_stamp", id.0);
-            s.frame_work.reset();
+            wrapped_stamp_pending(s, sc)?;
             for suffix in ["_a", "_b"] {
                 let dir = with_suffix(&sc.out_stem, suffix);
                 if dir.exists() {
@@ -2052,7 +2044,11 @@ fn export_unsettled(has_path: bool) -> Vec<Step> {
             let stamp = StampId(remembered(sc, "eu_stamp")?);
             let layers: Vec<LayerId> = doc.stamp_layers(stamp).into_iter().map(|(_, l)| l).collect();
             let mut ink_total = 0;
-            for (id, name) in selection_files(doc, &layers) {
+            let files = selection_files(doc, &layers);
+            if files.len() != layers.len() || !layers.iter().all(|l| files.iter().any(|(f, _)| f == l)) {
+                return Err(format!("the export plans {files:?} for the stamp's layers {layers:?}"));
+            }
+            for (id, name) in files {
                 let image = decode_named(&name, &std::fs::read(a.join(&name)).map_err(|e| format!("{name}: {e}"))?)?;
                 let (set, _) = doc.find_layer(id).ok_or("no such layer")?;
                 let set = doc.set(set).ok_or("no such set")?;
@@ -2072,6 +2068,170 @@ fn export_unsettled(has_path: bool) -> Vec<Step> {
     ]);
     steps
 }
+
+/// The wrapped stamp `place_wrapped_at_once` placed, with its Final still pending: remembered as `eu_stamp`; the
+/// frame clock is reset.
+fn wrapped_stamp_pending(s: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
+    // The stamp as it is now (its picture may not have landed yet: no coverage check).
+    let session = session_of(s)?;
+    let id = session.selected_stamp.ok_or("no stamp is selected")?;
+    let placement = session.doc.stamp(id).ok_or("the selected stamp does not exist")?.placement;
+    let Placement::Projected(p) = placement else { return Err("the stamp is not a 3D stamp".to_owned()) };
+    if p.mode != SurfaceMode::Wrap {
+        return Err(format!("the stamp was placed in {:?}", p.mode));
+    }
+    let pending = s.final_bakes_pending || doc_of(s)?.has_unbaked_stamps();
+    if !pending {
+        return Err("the Final bake already landed: nothing would wait".to_owned());
+    }
+    sc.values.insert("eu_stamp", id.0);
+    s.frame_work.reset();
+    Ok(())
+}
+
+/// `export_unsettled` and `save_unsettled`: the model (the sphere sample without PATH), the Stamp tool in Wrap mode
+/// with the sample image, and one wrapped stamp placed by a click, without waiting for its Final bake.
+fn place_wrapped_at_once(has_path: bool) -> Vec<Step> {
+    let mut steps = if has_path { open_and_accept(true) } else { vec![Step::Do(AppAction::OpenSample(SampleKind::Sphere)), Step::WaitIdle] };
+    steps.extend([
+        Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
+        Step::WaitIdle,
+        Step::Do(AppAction::FrameModel),
+        Step::WaitIdle,
+        Step::Setup("Stamp tool: the sample image, 30 %, Wrap", |s, sc| {
+            setup_stamp_image(s, sc)?;
+            s.tools.stamp.size_frac = 0.3;
+            s.tools.stamp.rotation_deg = 0.0;
+            s.tools.stamp.mode = SurfaceMode::Wrap;
+            s.tools.stamp.wrap = WrapOptions::default();
+            Ok(())
+        }),
+        Step::Do(AppAction::SetTool(ToolKind::Stamp)),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
+        Step::BakeWait(false),
+        Step::Dyn("place the wrapped stamp", |s, _| {
+            let (xf, first, _) = stamp_spots(s)?;
+            Ok(vec![click(ViewId::Main3D, norm(&xf, first.pos))])
+        }),
+    ]);
+    steps
+}
+
+/// The longest UI frame a save may cause while it waits for a wrapped stamp's Final (polish item 2).
+const SAVE_MAX_FRAME_MS: f64 = 300.0;
+
+/// `save_unsettled [PATH]` (polish item 2): a wrapped stamp is placed and the project saved at once (Save As), before
+/// its Final bake has landed (3-4 s on ABeautifulGame). The save waits behind its progress dialog instead of on the UI
+/// thread: no frame takes `SAVE_MAX_FRAME_MS` or more. The project equals one saved after waiting (the manifest, whose
+/// entries carry each file's size and CRC-32, apart from the save time; every layer's pixels after loading both), and
+/// its stamp layers hold the Final pixels. The sphere sample without PATH.
+fn save_unsettled(has_path: bool) -> Vec<Step> {
+    let mut steps = place_wrapped_at_once(has_path);
+    steps.extend([
+        Step::Setup("a Final is pending; reset the frame clock", |s, sc| {
+            wrapped_stamp_pending(s, sc)?;
+            for suffix in ["_a.wtep", "_b.wtep"] {
+                let path = with_suffix(&sc.out_stem, suffix);
+                if path.exists() {
+                    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        }),
+        Step::Dyn("Save As at once, while the Final is pending", |_, sc| {
+            log::info!("save_unsettled: save with the Final pending");
+            Ok(vec![Step::Do(AppAction::SaveAs(Some(with_suffix(&sc.out_stem, "_a.wtep"))))])
+        }),
+        Step::BakeWait(true),
+        Step::WaitIdle,
+        Step::Assert("the UI kept drawing: no frame took 300 ms or more", |s, _| {
+            let ms = s.frame_work.max.as_secs_f64() * 1000.0;
+            log::info!("save_unsettled: longest frame {ms:.0} ms over {} frames", s.frame_work.frames);
+            if ms >= SAVE_MAX_FRAME_MS {
+                return Err(format!("a frame took {ms:.0} ms (limit {SAVE_MAX_FRAME_MS} ms)"));
+            }
+            if s.frame_work.frames < 3 {
+                return Err(format!("only {} frames were drawn during the save", s.frame_work.frames));
+            }
+            Ok(())
+        }),
+        Step::Assert("the project was saved; nothing is pending; no dialog", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            if s.final_bakes_pending || doc_of(s)?.has_unbaked_stamps() {
+                return Err("a Final is still pending".to_owned());
+            }
+            let path = with_suffix(&sc.out_stem, "_a.wtep");
+            let session = session_of(s)?;
+            if session.doc.is_modified() || session.path.as_deref() != Some(path.as_path()) {
+                return Err(format!("the document is not saved as {} (path {:?})", path.display(), session.path));
+            }
+            file_non_empty(&path)
+        }),
+        Step::Dyn("Save As again, after waiting", |_, sc| Ok(vec![Step::Do(AppAction::SaveAs(Some(with_suffix(&sc.out_stem, "_b.wtep"))))])),
+        Step::WaitIdle,
+        Step::Assert("both projects hold the same content, and the stamp's layers the Final pixels", |s, sc| {
+            let (a, b) = (with_suffix(&sc.out_stem, "_a.wtep"), with_suffix(&sc.out_stem, "_b.wtep"));
+            let doc = doc_of(s)?;
+            let stamp = StampId(remembered(sc, "eu_stamp")?);
+            same_project(&a, &b, doc, stamp)
+        }),
+    ]);
+    steps
+}
+
+/// Polish item 2: the projects `a` and `b` hold the same content: equal manifests apart from `saved_unix` (the manifest
+/// lists every entry with its size and CRC-32, so equal manifests mean equal entries), and, loaded, the same layers
+/// with the same pixels in every set. The layers of `stamp` hold `doc`'s (Final) pixels, and are not empty.
+fn same_project(a: &Path, b: &Path, doc: &Document, stamp: StampId) -> Result<(), String> {
+    let manifest = |p: &Path| wte_core::project::read_manifest(p).map_err(|e| format!("{}: {e}", p.display()));
+    let (ma, mut mb) = (manifest(a)?, manifest(b)?);
+    mb.saved_unix = ma.saved_unix;
+    if ma != mb {
+        let (va, vb) = (serde_json::to_value(&ma).map_err(|e| e.to_string())?, serde_json::to_value(&mb).map_err(|e| e.to_string())?);
+        let differ: Vec<String> = va
+            .as_object()
+            .map(|o| o.keys().filter(|k| va.get(k.as_str()) != vb.get(k.as_str())).cloned().collect())
+            .unwrap_or_default();
+        return Err(format!("the manifests differ in {differ:?}"));
+    }
+    let load = |p: &Path| wte_core::project::load(p, &wte_core::NoProgress).map(|r| r.document).map_err(|e| format!("{}: {e}", p.display()));
+    let (da, db) = (load(a)?, load(b)?);
+    if da.sets.len() != db.sets.len() || da.sets.len() != doc.sets.len() {
+        return Err(format!("{} / {} / {} texture sets", da.sets.len(), db.sets.len(), doc.sets.len()));
+    }
+    let mut layers = 0;
+    for ((sa, sb), sd) in da.sets.iter().zip(&db.sets).zip(&doc.sets) {
+        let ids = |set: &wte_core::TextureSet| set.layers.iter().map(|l| (l.id, l.name.clone())).collect::<Vec<_>>();
+        if ids(sa) != ids(sb) || ids(sa) != ids(sd) {
+            return Err(format!("set {:?}: the layers differ: {:?} / {:?} / {:?}", sa.name, ids(sa), ids(sb), ids(sd)));
+        }
+        for ((la, lb), ld) in sa.layers.iter().zip(&sb.layers).zip(&sd.layers) {
+            let (pa, pb) = (layer_canvas(la, sa.width, sa.height), layer_canvas(lb, sb.width, sb.height));
+            let n = differing(&pa, &pb);
+            if n != 0 {
+                return Err(format!("layer {:?}: {n} texels differ between the two projects", la.name));
+            }
+            let n = differing(&pa, &layer_canvas(ld, sd.width, sd.height));
+            if n != 0 {
+                return Err(format!("layer {:?}: {n} texels of the saved project differ from the document", la.name));
+            }
+            layers += 1;
+        }
+    }
+    let mut ink_total = 0;
+    for (set, id) in doc.stamp_layers(stamp) {
+        let set = da.set(set).ok_or("no such set in the saved project")?;
+        let layer = da.layer(id).ok_or("the stamp's layer is missing from the saved project")?;
+        ink_total += ink(&layer_canvas(layer, set.width, set.height));
+    }
+    if ink_total == 0 {
+        return Err("the wrapped stamp's saved layers are empty".to_owned());
+    }
+    log::info!("save_unsettled: both projects equal ({} sets, {layers} layers); {ink_total} inked texels", ma.sets.len());
+    Ok(())
+}
+
 
 /// `export_nouv` (fix_export item 9, L3): a model without UVs (generated layout) is painted and stamped, exported, saved,
 /// reopened and exported again: both exports are byte-identical, file for file (flattened, per-layer, ORA, PSD), and
@@ -3659,7 +3819,7 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)> {
     match name {
         "workflow_path" | "fuzz_path" | "brush_types_path" | "text_preview_path" | "final_bake_async" | "wrap_surface"
-        | "export_flow" | "export_unsettled" => {
+        | "export_flow" | "export_unsettled" | "save_unsettled" => {
             Some((Duration::from_secs(300), Duration::from_secs(3600)))
         }
         _ => None,
@@ -8657,7 +8817,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 45);
+        assert_eq!(scenario_names().len(), 46);
     }
 
     #[test]
@@ -8720,5 +8880,32 @@ mod tests {
         assert!(assert_default_content(&state, &scratch).is_err());
         assert!(assert_fresh_sphere(&state, &scratch).is_ok());
         assert!(changed_since(&state, &scratch, "initial_composite").is_err());
+    }
+
+    /// Polish item 6: export_flow's expected layers of a selection come from the document's stamp links, not from the
+    /// export code under test; on a design across two sets they agree with `export::linked_selection`.
+    #[test]
+    fn expected_selection_layers_follow_the_stamp_links() {
+        let mut doc = Document::sample(SampleKind::TwoMaterial);
+        let img = wte_core::samples::sample_stamp_image(32);
+        let png = wte_core::encode_png(img.width, img.height, &img.data, wte_core::PngLevel::Fast).unwrap();
+        let blob = doc.add_image_blob("logo.png", Arc::from(png)).unwrap();
+        let p = wte_core::Projector::from_surface(Vec3::new(0.0, 0.5, 0.5), Vec3::Z, Vec3::Y, Vec2::splat(0.4), 0.6);
+        let stamp = doc.add_stamp("Logo", StampSource::Image { blob }, Placement::Projected(p), TextureSetId(0)).unwrap();
+        let linked: Vec<LayerId> = doc.stamp_layers(stamp).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(linked.len(), 2, "the decal spans both sets");
+        let paint = doc.sets[1].layers.iter().find(|l| l.stamp_id().is_none()).unwrap().id;
+        let sorted = |mut v: Vec<LayerId>| {
+            v.sort_unstable_by_key(|l| l.0);
+            v
+        };
+        assert_eq!(expected_selection_layers(&doc, &[linked[0]]), sorted(linked.clone()));
+        assert_eq!(expected_selection_layers(&doc, &[linked[1], linked[1]]), sorted(linked.clone()));
+        assert_eq!(expected_selection_layers(&doc, &[paint]), [paint]);
+        assert_eq!(expected_selection_layers(&doc, &[paint, linked[1], LayerId(99_999)]), sorted(vec![paint, linked[0], linked[1]]));
+        let snapshot = doc.snapshot();
+        for sel in [vec![linked[0]], vec![paint, linked[1]], vec![paint]] {
+            assert_eq!(expected_selection_layers(&doc, &sel), sorted(wte_core::export::linked_selection(&snapshot, &sel)), "{sel:?}");
+        }
     }
 }

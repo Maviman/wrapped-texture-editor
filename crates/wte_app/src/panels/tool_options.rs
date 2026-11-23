@@ -168,7 +168,8 @@ pub(crate) fn ends_cut_shown(s: &WrapStats) -> bool {
 /// - laid picture dropped because another place owns its picture points (`rejected` >= 5 %: surface under another part
 ///   with Jump small gaps, or a layout folded over itself, the Lantern's and nonmanifold's single parts): an overlap
 ///   line (stable fix_wrap_1: it says each spot is shown once, as it is: no loss);
-/// - less than 98 % on the surface and none of the above explains it: the covered share, without a cause;
+/// - less than 98 % on the surface and none of the above explains it: the shown share; polish item 3: when no cause
+///   line above passed its threshold, with the largest cause and its share (`largest_wrap_loss`);
 /// - then the round-6 lines (turns, parts, limit).
 pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
     let mut out = Vec::new();
@@ -240,7 +241,15 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
         out.push(WrapLine::Warn(if s.room < 0.95 {
             format!("The part is narrower than the picture: only {:.0} % of the picture lies on it", (s.shown * 100.0).round())
         } else {
-            format!("Only {:.0} % of the picture lies on the surface", (s.shown * 100.0).round())
+            // Polish item 3: no cause line passed its threshold: name the largest cause with its share (DamagedHelmet
+            // Jump on: "..., mostly lost to cuts (2 %)").
+            let mut line = format!("Only {:.0} % of the picture lies on the surface", (s.shown * 100.0).round());
+            if !(gaps || at_part || cut || ends_cut)
+                && let Some((what, share)) = largest_wrap_loss(s, ends)
+            {
+                line.push_str(&format!(", mostly {what} ({:.0} %)", pct(share)));
+            }
+            line
         }));
     }
     if s.turns > 1 {
@@ -253,6 +262,26 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
         out.push(WrapLine::Warn("Too large for this model: the wrap stops at 1 million vertices / 8 turns".to_owned()));
     }
     out
+}
+
+/// Below this share a loss is not named as the largest cause of the "Only N %" line.
+const LARGEST_LOSS_MIN: f32 = 0.005;
+
+/// Polish item 3: the largest of the losses that make up `1 - shown`, for the "Only N % of the picture lies on the
+/// surface" line when none has a line of its own: lost to cuts (`lost_cut`), in the gaps between separate parts
+/// (`gaps`), where it meets a neighbouring part (`at_part`), beyond where the picture closed on itself (`beyond`, only
+/// when the spine met itself or passed beside itself and no ends line shows, `ends`), and the rest (as in the runs-off line): running off the surface when an edge was reached,
+/// else hidden or folded. `None` when the largest is below `LARGEST_LOSS_MIN`.
+fn largest_wrap_loss(s: &WrapStats, ends: bool) -> Option<(&'static str, f32)> {
+    let rest = 1.0 - s.shown - s.beyond - s.lost_cut - s.gaps - s.at_part;
+    let causes = [
+        ("lost to cuts", s.lost_cut),
+        ("in the gaps between separate parts", s.gaps),
+        ("where it meets a neighbouring part", s.at_part),
+        ("beyond where the picture closed on itself", if ends || !(s.met_itself || s.passed) { 0.0 } else { s.beyond }),
+        (if s.reached_edge { "running off the surface" } else { "hidden or folded" }, rest),
+    ];
+    causes.into_iter().filter(|c| c.1 >= LARGEST_LOSS_MIN).max_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 /// Stable (w1): the texts of `wrap_stats_texts` (the self-test's log of the panel lines).
@@ -926,14 +955,50 @@ mod tests {
         // DamagedHelmet with Jump on: 18 % of the laid picture on overlapping plates (round 9: no line); stable
         // (fix_wrap_1): 2.6 % of the cells bare (`shown` 0.974, `covered` 1.0). Stable (fix-wrap, the sweep's numbers):
         // 1.96 % of them are lost to cuts inside the laid outline and 0.52 % in gaps between its plates, 0.1 % is
-        // left: no "3 % runs off the surface" (fix_wrap_1's line), the shown share without a cause.
+        // left: no "3 % runs off the surface" (fix_wrap_1's line), the shown share. Polish item 3: no cause passed its
+        // threshold, so the line names the largest (the cuts' 1.96 %, gate report open item 4).
         let helmet = wte_core::WrapStats { covered: 1.0, shown: 0.9737, reached_edge: true, rejected: 0.1795, jumps: 9, lost_cut: 0.0196, gaps: 0.0052, at_part: 0.0005, ..base };
         assert_eq!(
             texts(helmet),
             vec![
                 "18 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned(),
-                "Only 97 % of the picture lies on the surface".to_owned(),
+                "Only 97 % of the picture lies on the surface, mostly lost to cuts (2 %)".to_owned(),
                 "Continued onto 9 separate parts".to_owned()
+            ]
+        );
+        // Polish item 3: the largest cause below its own line's threshold, for each kind of loss; never one that has a
+        // line, and nothing named while a cause line shows.
+        let small = wte_core::WrapStats { covered: 1.0, shown: 0.97, ..base };
+        let only = |s: wte_core::WrapStats| texts(s).into_iter().find(|l| l.starts_with("Only ")).unwrap_or_default();
+        assert_eq!(
+            only(wte_core::WrapStats { gaps: 0.016, at_part: 0.01, lost_cut: 0.004, reached_edge: true, ..small }),
+            "Only 97 % of the picture lies on the surface, mostly in the gaps between separate parts (2 %)"
+        );
+        assert_eq!(
+            only(wte_core::WrapStats { at_part: 0.018, gaps: 0.01, ..small }),
+            "Only 97 % of the picture lies on the surface, mostly where it meets a neighbouring part (2 %)"
+        );
+        assert_eq!(
+            only(wte_core::WrapStats { lost_cut: 0.012, reached_edge: true, ..small }),
+            "Only 97 % of the picture lies on the surface, mostly running off the surface (2 %)",
+            "an edge reached: the rest (1.8 %, below the runs-off line's 2 %) runs off"
+        );
+        assert_eq!(
+            only(wte_core::WrapStats { shown: 0.95, lost_cut: 0.01, ..small }),
+            "Only 95 % of the picture lies on the surface, mostly hidden or folded (4 %)",
+            "no edge reached: the rest is hidden or folded"
+        );
+        assert_eq!(
+            only(wte_core::WrapStats { shown: 0.972, met_itself: true, ends_share: 0.9, beyond: 0.018, ..small }),
+            "Only 97 % of the picture lies on the surface, mostly beyond where the picture closed on itself (2 %)"
+        );
+        // A cause line shows (cut 3 %): the "Only" line names no cause of its own.
+        let with_cut = texts(wte_core::WrapStats { shown: 0.90, lost_cut: 0.03, ..small });
+        assert_eq!(
+            with_cut,
+            vec![
+                "3 % of the picture is lost where the surface had to be cut".to_owned(),
+                "Only 90 % of the picture lies on the surface".to_owned()
             ]
         );
         // nonmanifold: an edge and overlapping pages, both true; stable (fix_wrap_1): `shown` 0.178 (ink 0.188) where

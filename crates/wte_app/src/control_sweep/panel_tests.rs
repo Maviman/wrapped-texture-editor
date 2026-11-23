@@ -298,6 +298,59 @@ fn merge_down_is_disabled_when_the_layer_below_is_locked() {
     assert!(!app.menu_entry(&["Edit", "Delete"]).disabled);
 }
 
+/// Polish item 5: with several layers selected, the footer's Rasterize says (like Merge Down) that it acts on the
+/// active layer only, in its tooltip whether it is enabled (a stamp layer) or not (a paint layer). One layer selected:
+/// the plain tooltip.
+#[test]
+fn footer_rasterize_names_the_active_layer_when_several_are_selected() {
+    use crate::panels::layers::rasterize_multi_hover;
+    let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+    let (paint, base) = paint_and_base(&app.state);
+    let tooltip_after_hover = |app: &mut PanelApp, text: &str| -> bool {
+        app.hover(pos2(600.0, 500.0));
+        app.idle(2);
+        let at = app.h.get("Rasterize").rect.center();
+        app.hover(at);
+        // egui shows a tooltip once the pointer has rested on the widget for `tooltip_delay` (0.5 s = 30 frames).
+        for _ in 0..90 {
+            app.idle(1);
+            if app.h.has(text) {
+                return true;
+            }
+        }
+        false
+    };
+    let paint_note = rasterize_multi_hover("Paint 1", Some("it is already a paint layer"));
+    assert!(app.h.get("Rasterize").disabled, "Paint 1 is a paint layer");
+    assert!(!tooltip_after_hover(&mut app, &paint_note), "one layer selected: no selection note");
+
+    app.state.session.as_mut().unwrap().selected_layers = vec![base, paint];
+    app.idle(2);
+    assert!(app.h.has("2 layers selected \u{b7} tools paint on Paint 1"));
+    assert!(tooltip_after_hover(&mut app, &paint_note), "disabled Rasterize names the active layer: {:?}", app.h.labels());
+
+    // A stamp layer active within a selection of two: Rasterize is enabled and its tooltip names that layer.
+    let doc = app.state.doc_mut().unwrap();
+    let img = wte_core::samples::sample_stamp_image(32);
+    let png = wte_core::encode_png(img.width, img.height, &img.data, wte_core::PngLevel::Fast).unwrap();
+    let blob = doc.add_image_blob("logo.png", std::sync::Arc::from(png)).unwrap();
+    let d = doc.mesh.bounds.diagonal();
+    let p = Projector::from_surface(Vec3::new(0.0, 0.0, doc.mesh.bounds.max.z), Vec3::Z, Vec3::Y, GVec2::splat(d * 0.1), d * 0.1);
+    let id = doc.add_stamp("Logo", StampSource::Image { blob }, Placement::Projected(p), TextureSetId(0)).unwrap();
+    let layer = doc.stamp_layers(id)[0].1;
+    let name = doc.layer(layer).unwrap().name.clone();
+    assert_eq!(doc.sets[0].active_layer().map(|l| l.id), Some(layer), "the new stamp's layer is active");
+    app.state.session.as_mut().unwrap().selected_layers = vec![paint, layer];
+    app.idle(2);
+    assert!(!app.h.get("Rasterize").disabled);
+    let stamp_note = rasterize_multi_hover(&name, None);
+    assert!(stamp_note.contains(&name) && stamp_note.contains("active layer"));
+    assert!(tooltip_after_hover(&mut app, &stamp_note), "enabled Rasterize names the active layer: {:?}", app.h.labels());
+    app.take();
+    app.click("Rasterize");
+    assert!(matches!(app.take()[..], [AppAction::RasterizeLayer(l)] if l == layer), "only the active layer");
+}
+
 /// Regression test of finding `cross-set-lock-invisible`: a projected stamp spans both sets of the Two Materials
 /// sample and its layer in the other (non-home) set is locked. The home set's Layers row shows a dimmed lock, its
 /// Delete is disabled (it could only fail), and the tool options name the set that holds the lock and offer to show it.

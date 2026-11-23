@@ -196,10 +196,12 @@ mod tests {
     }
 
     /// FEATURE_TEXT 8.4: the sample job for every family of this machine at most 0.5 s with a warm file cache.
-    /// Reads the fonts of this machine; run with `--ignored`.
+    /// Reads the fonts of this machine. Polish item 4: a wall-clock limit, so it runs with the serial perf tests on an
+    /// otherwise idle machine (`cargo test -p wte_app perf_ -- --ignored --test-threads=1`), like WA7 and check:A in
+    /// wte_core; the GPU app tests skip it (`-- --ignored --skip perf_`). Under load it took 649 ms (fix pass 2 gate).
     #[test]
-    #[ignore = "reads the installed fonts of this machine; timing"]
-    fn sample_job_for_the_machine_fonts() {
+    #[ignore = "perf: run serially by the gate (cargo test -p wte_app perf_ -- --ignored --test-threads=1)"]
+    fn perf_sample_job_for_the_machine_fonts() {
         if !std::path::Path::new(r"C:\Windows\Fonts").is_dir() {
             eprintln!("SKIP: no C:\\Windows\\Fonts");
             return;

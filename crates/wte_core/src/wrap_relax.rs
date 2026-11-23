@@ -527,9 +527,7 @@ impl<'a> Layout<'a> {
                     pinned[w as usize] = pins[i];
                 }
                 cg_iters += run.cg;
-                if memo.is_none() {
-                    runs[c as usize] = Some(run);
-                }
+                runs[c as usize] = Some(run);
             }
         }
         (x, pinned, cg_iters, runs)
@@ -555,14 +553,51 @@ impl<'a> Layout<'a> {
                     x1[w] = self.p2[wedges.vertex[w] as usize];
                 }
             }
-            let (xs, ps, cg, runs) = solve(&x1, &pin1, None);
-            if self.exact_holds(&laid, &wedges, &xs, &ps, &rest, rect) {
-                (xs, ps, cg)
-            } else {
-                fell_back = true;
-                let (xs, ps, cg2, _) = solve(&x, &pinned, Some(&runs));
-                (xs, ps, cg + cg2)
+            // Stable (w1): the fallback is per component. A component whose exact pins do not hold is solved again
+            // with its strip pins only; the others keep theirs (round 9 dropped every component's exact pins when one
+            // failed: on the chess set the board, laid exactly from the strip, was turned by the free solve because a
+            // pawn's pins failed). A jumped part re-placed from a changed source is solved again (`memo`) and checked
+            // again. One component (no Jump, no cut-off piece) gives round 9's result.
+            let ncomp = wedges.comps as usize;
+            let mut comp_of_wedge = vec![NONE; nw];
+            for (i, &w) in wedges.corner.iter().enumerate() {
+                if w != NONE {
+                    comp_of_wedge[w as usize] = wedges.comp[i / 3];
+                }
             }
+            let mut has_exact = vec![false; ncomp];
+            for (w, &e) in exact.iter().enumerate() {
+                if e && comp_of_wedge[w] != NONE {
+                    has_exact[comp_of_wedge[w] as usize] = true;
+                }
+            }
+            let (mut xs, mut ps, mut cg, mut runs) = solve(&x1, &pin1, None);
+            let mut failed = vec![false; ncomp];
+            loop {
+                let check: Vec<bool> = (0..ncomp).map(|c| has_exact[c] && !failed[c]).collect();
+                let mut now = self.exact_failed(&laid, &wedges, &xs, &ps, &rest, rect, &check);
+                if !now.iter().any(|&f| f) {
+                    break;
+                }
+                // Test builds: round 9's all-or-nothing fallback, for the comparisons of the stable tests.
+                if knob("WTE_TEST_R9_FALLBACK", false) {
+                    now.clone_from(&has_exact);
+                }
+                fell_back = true;
+                for (f, n) in failed.iter_mut().zip(&now) {
+                    *f |= *n;
+                }
+                for (w, &e) in exact.iter().enumerate() {
+                    if e && comp_of_wedge[w] != NONE && failed[comp_of_wedge[w] as usize] {
+                        x1[w] = x[w];
+                        pin1[w] = pinned[w];
+                    }
+                }
+                let (a, b, cg2, r) = solve(&x1, &pin1, Some(&runs));
+                (xs, ps, runs) = (a, b, r);
+                cg += cg2;
+            }
+            (xs, ps, cg)
         } else {
             let (xs, ps, cg, _) = solve(&x, &pinned, None);
             (xs, ps, cg)
@@ -728,16 +763,24 @@ impl<'a> Layout<'a> {
         (0..nw).map(|w| reached[wedges.vertex[w] as usize] && !strip_pins[w]).collect()
     }
 
-    /// Round 9 (T5): the exact pins held: no free laid triangle meeting `rect` (a corner not pinned) is flipped and
-    /// their 95th-percentile `|area ratio - 1|` is within `EXACT_STRAIN`.
-    fn exact_holds(&self, laid: &[bool], wedges: &Wedges, x: &[DVec2], pinned: &[bool], rest: &[Option<(f64, [DVec2; 3])>], rect: [f64; 2]) -> bool {
+    /// Round 9 (T5): per component (`check`ed ones only), whether its exact pins failed: a free laid triangle of it
+    /// meeting `rect` (a corner not pinned) is flipped, or their 95th-percentile `|area ratio - 1|` exceeds
+    /// `EXACT_STRAIN` (stable w1: per component, round 9 pooled all components).
+    #[allow(clippy::too_many_arguments)]
+    fn exact_failed(&self, laid: &[bool], wedges: &Wedges, x: &[DVec2], pinned: &[bool], rest: &[Option<(f64, [DVec2; 3])>], rect: [f64; 2], check: &[bool]) -> Vec<bool> {
         let patch = self.patch;
-        let mut ratios: Vec<f64> = Vec::new();
+        let mut ratios: Vec<Vec<f64>> = vec![Vec::new(); check.len()];
+        let mut failed = vec![false; check.len()];
         for t in 0..patch.tv.len() {
             let Some((area3, _)) = rest[t] else { continue };
             if !laid[t] {
                 continue;
             }
+            let c = wedges.comp[t];
+            if c == NONE || !check[c as usize] || failed[c as usize] {
+                continue;
+            }
+            let c = c as usize;
             let w: [u32; 3] = std::array::from_fn(|k| wedges.corner[t * 3 + k]);
             if w.iter().all(|&w| pinned[w as usize]) {
                 continue;
@@ -748,15 +791,18 @@ impl<'a> Layout<'a> {
             }
             let area = 0.5 * cross2(q[1] - q[0], q[2] - q[0]);
             if !area.is_finite() || area * (self.orient[t] as f64) <= 0.0 {
-                return false;
+                failed[c] = true;
+                continue;
             }
-            ratios.push((area.abs() / area3 - 1.0).abs());
+            ratios[c].push((area.abs() / area3 - 1.0).abs());
         }
-        if ratios.is_empty() {
-            return true;
+        for (c, r) in ratios.iter_mut().enumerate() {
+            if !failed[c] && !r.is_empty() {
+                r.sort_by(f64::total_cmp);
+                failed[c] = r[((r.len() as f64 * 0.95) as usize).min(r.len() - 1)] > EXACT_STRAIN;
+            }
         }
-        ratios.sort_by(f64::total_cmp);
-        ratios[((ratios.len() as f64 * 0.95) as usize).min(ratios.len() - 1)] <= EXACT_STRAIN
+        failed
     }
 
     /// Round 9 (T4): the Fermi position of vertex `v`: its continuous spine foot along the spine and its geodesic

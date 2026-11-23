@@ -3557,3 +3557,7 @@ fn check_b_probe() {
         eprintln!("probe sphere path: {:.1} ms, print {:016x}", ms(t), crate::wrap_param::sphere_check::print_of(sphere.as_ref()));
     }
 }
+
+// Stable (w1): the wrap correctness fixes' regression tests.
+#[path = "wrap_stable_tests.rs"]
+mod stable;

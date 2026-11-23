@@ -51,6 +51,15 @@ pub const WRAP_MAX_TURNS: u32 = 8;
 /// check:A (round 9, T2): the turn-0 traces have passed each other when their heads pass within this many bucketed
 /// across reaches (the picture's full height: its bands overlap).
 pub const PASS_NEAR: f64 = 2.0;
+/// Stable (w1): the turn-0 traces pass (or meet on each other's path) only when they come from opposite sides: the
+/// cosine between their directions is below this. Round a tube, a helix or a piece the two traces come round towards
+/// each other (torus knot -0.998, WA32 -0.93 / -0.66, WA21's lathe piece -0.35); on an open rough surface or a part they
+/// wander side by side (an open noisy height field +0.95 / +0.39, the chess pawn +0.45).
+pub const PASS_FACING: f64 = 0.0;
+/// Stable (w1): a pass is a continuous crossing: the - head's offset along the + trace's direction falls by at most
+/// this many times the arc length both traces went since the last check (real passes: 0.9-1.0 x; an open rough field
+/// whose + trace turned on a steep facet: 10-15 x, the offset jumping by 11 at heads 50 apart).
+pub const PASS_STEP: f64 = 2.0;
 /// Anchor: candidate triangles within this distance (times the diagonal) of the nearest one compete for the anchor.
 const ANCHOR_TIE: f64 = 1e-4;
 /// Round 8: the front stops at this many times the bucketed across reach (geodesic distance from the spine), so a
@@ -1664,6 +1673,26 @@ fn enter_turn(spine: &mut Spine, tr: &mut Trace, pick: usize, mask: u16, end0: &
     true
 }
 
+/// Stable (w1): whether a turn-0 trace (sign `sign`) entering triangle `n` with direction `d` closes the spine on a
+/// turn-0 path crossed there: the other trace's path only coming from the other side (`d . d0 < PASS_FACING`), its own
+/// path only the same way round (`d . d0 > -PASS_FACING`), the anchor's triangle always. Round a band or a piece the
+/// traces come round towards each other; on an open rough surface they cross each other's paths going the same way
+/// (the noisy 400 field: +0.39) and run on.
+fn closes_on(dir0: &HashMap<u32, (DVec3, i8)>, n: u32, d: DVec3, sign: f64) -> bool {
+    let Some(&(d0, s0)) = dir0.get(&n) else {
+        return true;
+    };
+    if relax::knob("WTE_TEST_R9_PASS", false) {
+        return true;
+    }
+    let c = d.dot(d0);
+    match s0 {
+        0 => true,
+        s if f64::from(s) == sign => c > -PASS_FACING,
+        _ => c < PASS_FACING,
+    }
+}
+
 /// Traces the spine from the anchor both ways (4.3 step 3; Overlap 4.3b; the spine's jump 4.3a). The two traces
 /// advance alternately (the one with the smaller arc length first, + on ties), so a picture longer than the way round
 /// has its ends meet opposite the anchor.
@@ -1671,6 +1700,10 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, across: f64, footprin
     let ntri = patch.tv.len();
     // The turns that crossed each triangle (`turn_bit`).
     let mut crossed: Vec<u16> = vec![0; ntri];
+    // Stable (w1): per triangle a turn-0 trace crossed first, that trace's direction there and sign (0: the anchor's,
+    // both traces).
+    let mut dir0: HashMap<u32, (DVec3, i8)> = HashMap::new();
+    dir0.insert(anchor.tri, (anchor.d, 0));
     let mut spine = Spine {
         strips: Vec::new(),
         end0_plus: 0.0,
@@ -1734,7 +1767,16 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, across: f64, footprin
                 if d < near && d < d0 {
                     pass_armed = true;
                 }
-                if pass_armed && a0 > 0.0 && ahead <= 0.0 && d < near {
+                // Stable (w1): only heads coming from opposite sides (`PASS_FACING`) whose offset crossed zero
+                // continuously (`PASS_STEP`) pass.
+                // (`WTE_TEST_R9_PASS`: round 9's rule, test builds only.)
+                let ds = (now[0] - s0[0]) + (now[1] - s0[1]);
+                if pass_armed
+                    && a0 > 0.0
+                    && ahead <= 0.0
+                    && d < near
+                    && ((traces[0].d.dot(traces[1].d) < PASS_FACING && a0 - ahead <= PASS_STEP * ds) || relax::knob("WTE_TEST_R9_PASS", false))
+                {
                     let f = (a0 / (a0 - ahead)).clamp(0.0, 1.0);
                     let at = [s0[0] + f * (now[0] - s0[0]), s0[1] + f * (now[1] - s0[1])];
                     spine.passed = true;
@@ -1805,8 +1847,13 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, across: f64, footprin
                 tr.active = false;
                 continue;
             }
-            if !enter_turn(&mut spine, tr, pick, crossed[n as usize], &mut end0, &mut total_turns, opts) {
+            // Stable (w1): a turn-0 path that is no closure (`closes_on`) does not count: the trace runs on.
+            let mask = if tr.turn == 0 && !closes_on(&dir0, n, d, tr.sign) { crossed[n as usize] & !turn_bit(0) } else { crossed[n as usize] };
+            if !enter_turn(&mut spine, tr, pick, mask, &mut end0, &mut total_turns, opts) {
                 continue;
+            }
+            if tr.turn == 0 {
+                dir0.entry(n).or_insert((d, tr.sign as i8));
             }
             tr.tri = n;
             tr.q = q;
@@ -1877,8 +1924,13 @@ fn trace_spine(patch: &Patch, anchor: &Anchor, reach: f64, across: f64, footprin
             tr.active = false;
             continue;
         }
-        if !enter_turn(&mut spine, tr, pick, crossed[n as usize], &mut end0, &mut total_turns, opts) {
+        // Stable (w1): a turn-0 path that is no closure (`closes_on`) does not count: the trace runs on.
+        let mask = if tr.turn == 0 && !closes_on(&dir0, n, d, tr.sign) { crossed[n as usize] & !turn_bit(0) } else { crossed[n as usize] };
+        if !enter_turn(&mut spine, tr, pick, mask, &mut end0, &mut total_turns, opts) {
             continue;
+        }
+        if tr.turn == 0 {
+            dir0.entry(n).or_insert((d, tr.sign as i8));
         }
         tr.tri = n;
         tr.q = q;

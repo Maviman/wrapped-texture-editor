@@ -136,6 +136,12 @@ laid outline. check:A added T5: laid vertices whose seed triangles are all isome
 pinned at their seed positions (the exact region; a strain check falls back to the strip pins). Details 6.5a "Round
 9". Not done: package B (speed).
 
+### 1.6d Stable (after round 9): wrap correctness fixes
+
+`docs/notes/stable/w1.md`. The ends meet only where the spine really closes round something (a tube, a helix, a piece:
+the traces come from opposite sides), not on open rough surfaces; the exact region falls back per component (the chess
+board keeps its exact layout under a pawn). Details 6.5a "Stable (w1)".
+
 ### 1.7 Round 7 (brush speed)
 
 Round 7 (`target\round7_design\ROUND7_PLAN.md`) makes 3D dabs on very heavy models cheaper and properly parallel,
@@ -209,6 +215,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `uv_share.rs` | round 9 B | `UvShare`: per texture set a count raster of the UV footprints; per triangle "shares texels", the mesh's shared share; `UV_SHARE_WARN` (5.20 `stamp_shared_texels`) |
 | `wrap_relax.rs` | round 8 A | child module `wrap_param::relax`: seams S1-S5, wedges, LSCM / ARAP with the matrix-free CG, the owner grid (6.5a "Round 8") |
 | `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan and (round 8) WA4 / WA4b, WA20-WA27, WA29 (round 9) WA31-WA34, WA36, WA37 and `r8_quality_survey` (test-only module) |
+| `wrap_stable_tests.rs` | stable (w1) | the regression tests of the wrap correctness fixes after round 9 (`w1_*`; a child module of `wrap_tests.rs`, test-only) |
 | `doc_stamps.rs` | C4; round 6 A | stamp/text commands on `Document`, source mip cache, `stamp_at`; round 6: the wrap dispatch of `bake_and_apply`, `ensure_wrap_param`, `stamp_wrap_*`, `stamp_ink_area` |
 | `text/mod.rs` | S | `TextSpec` (with `fx: TextFx`), `FontRef`, `TextAlign`, `Outline`, `TextLayout`, `PlacedGlyph`; round 4: `TextFx`, `Gap`, `Warp`, `WarpStyle`, `TextPath`, `PathShape`, `TextFrame`, `RasterQuality`, `TextRaster`, the limits (`GAP_MIN_EM` ... `MAX_STYLED_PIXELS`), `TextSpec::new`/`sanitize_fx`/`floats`/`floats_mut`/`differs_only_in_spacing` (complete + tests) |
 | `text/font_catalog.rs` | C4; round 4 T3 | `FontCatalog` (fontdb; the Windows font folders, file sizes read once, faces shared per file), `FontCache` (fontdue), bundled fonts, `FaceTraits`, `face_traits`, `FontCatalog::sample` (picker samples drawn with the styled painter's outline and coverage code) |
@@ -3438,6 +3445,24 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   point from those), so the islands' padding continues the picture where its inside neighbours show it.
   `surface_of` picks, of the triangles containing the point, the one whose 3D point there lies nearest the cell owner's
   point (no owner: the lowest `g`).
+
+**Stable (w1): wrap correctness fixes after round 9** (`docs/notes/stable/w1.md`). Changes to the round-9 rules above:
+
+- **Ends meet only round something (item 1).** A pass (T2) also needs the heads to come from opposite sides
+  (`d+ . d- < PASS_FACING`, 0) and the offset to cross zero continuously (it falls by at most `PASS_STEP` (2) x the
+  arc length both traces went since the last check). The shared-triangle rule (`met_itself`) keeps, per triangle a
+  turn-0 trace crossed first, that trace's direction and sign: entering the other trace's path closes only coming from
+  the other side (`d . d0 < PASS_FACING`), its own path only the same way round (`> -PASS_FACING`), the anchor's
+  triangle always (`closes_on`); otherwise the trace runs on. On an open rough surface the traces wander side by side
+  and cross each other's paths going the same way (noisy height fields: cosines +0.39 .. +0.95, offset jumps of 10-15 x
+  the step); round a tube, a helix or a piece they come round towards each other (torus knot -0.998, WA32 -0.66 ..
+  -0.93, WA21's lathe piece -0.35).
+- **Exact region fallback per component (item 1).** The exact pins' check (flipped free triangle meeting the picture,
+  95th-percentile strain over `EXACT_STRAIN`) is made per component; only a failing component is solved again with its
+  strip pins (and the jumped parts re-placed from a changed source, which are checked again, until no new component
+  fails). One component gives round 9's result. Round 9 dropped every component's exact pins when one failed: on the
+  chess set (step 10, Jump on) a pawn's failure freed the board, laid exactly from the strip, and the solve turned the
+  board's picture 40-90 degrees against the frame.
 
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 

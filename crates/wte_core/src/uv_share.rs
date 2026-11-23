@@ -22,6 +22,10 @@ pub const UV_SHARE_PX: f64 = 8.0;
 pub const UV_SHARE_WORK: f64 = 64e6;
 /// Least share of a selected stamp's area on triangles that share texels for which the panel warns.
 pub const UV_SHARE_WARN: f32 = 0.05;
+/// Stable (w1, item 5): a footprint whose UV box spans more than one texture (a tiled trim strip, u 0..12) is
+/// rasterized wrapped into the unit square up to this many textures of box area; beyond, it counts everywhere when it
+/// holds a whole texture (an inscribed circle of diameter sqrt 2), else only itself is marked.
+pub const UV_SHARE_TILED_MAX: f64 = 64.0;
 
 /// The shared-texel triangles of one mesh.
 #[derive(Debug)]
@@ -34,9 +38,10 @@ pub struct UvShare {
     pub build_ms: f64,
 }
 
-/// The pixel centres (wrapped into the raster) the UV triangle `uv` covers, edges included; `f(index)` per centre.
-/// Returns the number of centres visited.
-fn raster(uv: [Vec2; 3], res: u32, f: &mut impl FnMut(usize)) -> usize {
+/// The pixel centres (wrapped into the raster) the UV triangle `uv` covers, edges included; `f(index)` per centre (a
+/// footprint wider than the raster visits a texel once per copy). Returns the number of centres visited; 0 for a
+/// footprint whose box exceeds `max_box` rasters.
+fn raster(uv: [Vec2; 3], res: u32, max_box: f64, f: &mut impl FnMut(usize)) -> usize {
     let r = res as f64;
     let p = uv.map(|q| [q.x as f64 * r, q.y as f64 * r]);
     let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
@@ -46,9 +51,8 @@ fn raster(uv: [Vec2; 3], res: u32, f: &mut impl FnMut(usize)) -> usize {
     let s = area.signum();
     let (x0, x1) = (p.iter().map(|q| q[0]).fold(f64::INFINITY, f64::min), p.iter().map(|q| q[0]).fold(f64::NEG_INFINITY, f64::max));
     let (y0, y1) = (p.iter().map(|q| q[1]).fold(f64::INFINITY, f64::min), p.iter().map(|q| q[1]).fold(f64::NEG_INFINITY, f64::max));
-    // A footprint over more than one whole raster (a tiled triangle reuses texels by itself) is not rasterized: the
-    // caller counts it everywhere.
-    if (x1 - x0) * (y1 - y0) > r * r {
+    // A footprint over more than `max_box` whole rasters is not rasterized (the caller decides).
+    if (x1 - x0) * (y1 - y0) > max_box * r * r || !(x1 - x0).is_finite() || !(y1 - y0).is_finite() {
         return 0;
     }
     let edge = |a: [f64; 2], b: [f64; 2], x: f64, y: f64| s * ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]));
@@ -67,6 +71,15 @@ fn raster(uv: [Vec2; 3], res: u32, f: &mut impl FnMut(usize)) -> usize {
         }
     }
     n
+}
+
+/// Stable (w1, item 5): whether the UV triangle `uv` holds a whole texture (a unit square: its inscribed circle has a
+/// diameter of at least sqrt 2), so that wrapped it covers every texel.
+fn holds_a_texture(uv: [Vec2; 3]) -> bool {
+    let p = uv.map(|q| glam::DVec2::new(q.x as f64, q.y as f64));
+    let area = 0.5 * (p[1] - p[0]).perp_dot(p[2] - p[0]).abs();
+    let perimeter = p[0].distance(p[1]) + p[1].distance(p[2]) + p[2].distance(p[0]);
+    perimeter > 0.0 && 4.0 * area / perimeter >= std::f64::consts::SQRT_2
 }
 
 /// The pixel (wrapped) of the centroid of a UV triangle.
@@ -118,33 +131,91 @@ impl UvShare {
             while r < UV_SHARE_MAX_RES && uv_area * (r as f64) * (r as f64) < UV_SHARE_PX * tris.len() as f64 {
                 r *= 2;
             }
-            let work = |r: u32| tris.iter().map(|&t| box_area(t).min(1.0)).sum::<f64>() * (r as f64) * (r as f64);
+            let work = |r: u32| tris.iter().map(|&t| box_area(t).min(UV_SHARE_TILED_MAX)).sum::<f64>() * (r as f64) * (r as f64);
             while r > 128 && work(r) > UV_SHARE_WORK {
                 r /= 2;
             }
-            let huge: Vec<bool> = tris.iter().map(|&t| box_area(t) > 1.0).collect();
-            let everywhere = huge.iter().filter(|&&h| h).count().min(255) as u8;
+            // Stable (w1, item 5): a footprint whose box spans more than one texture (`tiled`) is rasterized wrapped,
+            // each texel once (it may cover a texel several times by itself: then it shares, with itself); round 9
+            // counted every such footprint everywhere, so one trim strip (u 0..12, v 0.88..0.98) marked every other
+            // triangle of its set as sharing. Beyond `UV_SHARE_TILED_MAX` textures: everywhere when it holds a whole
+            // texture (`huge`), else not counted (only itself marked).
+            #[derive(Clone, Copy, PartialEq)]
+            enum Kind {
+                Plain,
+                Tiled,
+                Huge,
+                Unknown,
+            }
+            let kind: Vec<Kind> = tris
+                .iter()
+                .map(|&t| {
+                    let a = box_area(t);
+                    if a <= 1.0 {
+                        Kind::Plain
+                    } else if a <= UV_SHARE_TILED_MAX {
+                        Kind::Tiled
+                    } else if holds_a_texture(mesh.tri_uvs(t)) {
+                        Kind::Huge
+                    } else {
+                        Kind::Unknown
+                    }
+                })
+                .collect();
+            let everywhere = kind.iter().filter(|&&k| k == Kind::Huge).count().min(255) as u8;
             count.clear();
             count.resize(r as usize * r as usize, 0);
-            // Pass 1: every footprint counted (a huge one counts everywhere; one that covers no pixel centre is not
-            // counted: it would make its neighbour's pixel look shared).
-            for (&t, &h) in tris.iter().zip(&huge) {
-                if !h {
-                    raster(mesh.tri_uvs(t), r, &mut |i| count[i] = count[i].saturating_add(1));
+            let mut seen: Vec<bool> = if kind.contains(&Kind::Tiled) { vec![false; r as usize * r as usize] } else { Vec::new() };
+            let mut texels: Vec<usize> = Vec::new();
+            // The distinct texels of a tiled footprint (in `texels`) and whether it covers one twice by itself.
+            let distinct = |uv: [Vec2; 3], seen: &mut Vec<bool>, texels: &mut Vec<usize>| -> bool {
+                texels.clear();
+                let n = raster(uv, r, UV_SHARE_TILED_MAX, &mut |i| {
+                    if !seen[i] {
+                        seen[i] = true;
+                        texels.push(i);
+                    }
+                });
+                for &i in texels.iter() {
+                    seen[i] = false;
+                }
+                n > texels.len()
+            };
+            let mut self_twice = vec![false; tris.len()];
+            // Pass 1: every footprint counted, a tiled one once per texel (a huge one counts everywhere; one that covers
+            // no pixel centre is not counted: it would make its neighbour's pixel look shared).
+            for (k, (&t, &kd)) in tris.iter().zip(&kind).enumerate() {
+                match kd {
+                    Kind::Plain => {
+                        raster(mesh.tri_uvs(t), r, 1.0, &mut |i| count[i] = count[i].saturating_add(1));
+                    }
+                    Kind::Tiled => {
+                        self_twice[k] = distinct(mesh.tri_uvs(t), &mut seen, &mut texels);
+                        for &i in &texels {
+                            count[i] = count[i].saturating_add(1);
+                        }
+                    }
+                    Kind::Huge | Kind::Unknown => {}
                 }
             }
-            // Pass 2: a triangle shares texels when more than half of its footprint is counted twice or more (a huge
-            // footprint covers some texels twice by itself; one without a pixel centre when two other footprints cover
-            // its centroid).
-            for (&t, &h) in tris.iter().zip(&huge) {
-                if h {
-                    shares[t as usize] = true;
-                    continue;
-                }
+            // Pass 2: a triangle shares texels when more than half of its footprint (a tiled one: its distinct texels)
+            // is counted twice or more, or (tiled) it covers texels twice by itself; one without a pixel centre when two
+            // other footprints cover its centroid; a huge or unknown one always.
+            for (k, (&t, &kd)) in tris.iter().zip(&kind).enumerate() {
                 let uv = mesh.tri_uvs(t);
-                let mut twice = 0usize;
-                let n = raster(uv, r, &mut |i| twice += usize::from(count[i].saturating_add(everywhere) >= 2));
-                shares[t as usize] = if n == 0 { centroid_pixel(uv, r).is_some_and(|i| count[i].saturating_add(everywhere) >= 2) } else { 2 * twice > n };
+                shares[t as usize] = match kd {
+                    Kind::Huge | Kind::Unknown => true,
+                    Kind::Tiled => {
+                        distinct(uv, &mut seen, &mut texels);
+                        let twice = texels.iter().filter(|&&i| count[i].saturating_add(everywhere) >= 2).count();
+                        self_twice[k] || 2 * twice > texels.len()
+                    }
+                    Kind::Plain => {
+                        let mut twice = 0usize;
+                        let n = raster(uv, r, 1.0, &mut |i| twice += usize::from(count[i].saturating_add(everywhere) >= 2));
+                        if n == 0 { centroid_pixel(uv, r).is_some_and(|i| count[i].saturating_add(everywhere) >= 2) } else { 2 * twice > n }
+                    }
+                };
             }
         }
         let (mut all, mut shared) = (0.0f64, 0.0f64);
@@ -210,5 +281,30 @@ mod tests {
             println!("WA39 {what}: share {:.4} ({:.1} ms)", s.mesh_share(), s.build_ms);
             assert!(s.mesh_share() == 0.0, "{what}: share {}", s.mesh_share());
         }
+    }
+
+    /// Stable (w1, item 5): a plate on its own island (u, v 0..0.5) and a tiled trim strip (u 0..12, v 0.88..0.98):
+    /// the strip reuses its texels (by itself), the plate does not. Round 9: the strip's box (over one texture) counted
+    /// it everywhere and the plate was marked too (the code skeptic's trim_strip: 100 % shared). A footprint over a
+    /// whole texture still marks every triangle of its set; a huge sliver marks only itself.
+    #[test]
+    fn w1_a_tiled_trim_strip_does_not_mark_a_unique_island() {
+        let mut t = Vec::new();
+        quad(&mut t, [0.0, 1.0], [0.0, 0.5], [0.0, 0.5]);
+        quad(&mut t, [2.0, 14.0], [0.0, 12.0], [0.88, 0.98]);
+        let s = UvShare::build(&mesh_of(RawMesh { triangles: t.clone(), materials: samples::mirrored_quads().materials }));
+        println!("W1 plate + trim strip: plate {} {}, strip {} {}, share {:.4} ({:.1} ms)", s.shares(0), s.shares(1), s.shares(2), s.shares(3), s.mesh_share(), s.build_ms);
+        assert!(!s.shares(0) && !s.shares(1), "the plate's own island is marked shared: {s:?}");
+        assert!(s.shares(2) && s.shares(3), "the tiled strip reuses its texels: {s:?}");
+        assert!((s.mesh_share() - 12.0 / 13.0).abs() < 1e-3, "share {}", s.mesh_share());
+        // A quad over 3 x 3 textures (holds whole textures) marks the plate; a 10,000-wide sliver marks only itself.
+        let mut big = t[..2].to_vec();
+        quad(&mut big, [2.0, 3.0], [0.0, 3.0], [0.0, 3.0]);
+        let s = UvShare::build(&mesh_of(RawMesh { triangles: big, materials: samples::mirrored_quads().materials }));
+        assert!(s.shares(0) && s.shares(1) && s.shares(2), "a footprint over whole textures shares with everything: {s:?}");
+        let mut sliver = t[..2].to_vec();
+        quad(&mut sliver, [2.0, 3.0], [0.0, 10000.0], [0.9, 0.91]);
+        let s = UvShare::build(&mesh_of(RawMesh { triangles: sliver, materials: samples::mirrored_quads().materials }));
+        assert!(!s.shares(0) && !s.shares(1) && s.shares(2), "a huge sliver marks only itself: {s:?}");
     }
 }

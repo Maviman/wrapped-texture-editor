@@ -3488,6 +3488,12 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   owner part): a gap between two parts (Jump small gaps: tiles, kit-bashed pieces) is not surface lost to a cut. For
   one part this is round 9's span rule, cell for cell (the sweep's Lantern: 11.23 % either way); a 40 x 40 tiled floor
   with Jump on: 17.06 % -> 0.
+- **Tiled UV footprints (item 5, `uv_share.rs`).** A triangle whose UV box spans more than one texture but at most
+  `UV_SHARE_TILED_MAX` (64) is rasterized wrapped into the unit square, each texel once (it shares when it covers a
+  texel twice by itself, or as any other footprint when more than half of its texels are counted twice); beyond that,
+  one that holds a whole texture (inscribed circle of diameter sqrt 2) counts everywhere as before and a huge sliver
+  marks only itself. Round 9 counted every footprint whose box exceeded one texture everywhere: one trim strip (u
+  0..12, v 0.88..0.98) marked a plate on its own island (the code skeptic's trim_strip: 100 % shared).
 
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 

@@ -2719,23 +2719,12 @@ fn collect_grown(mesh: &MeshData, bvh: &Bvh, g: &WrapMesh, p: &Projector, radius
             }
             boxes.push(bx);
         }
-        let gap = GAP_JUMP * diag;
-        let near_box = |a: (DVec3, DVec3), b: (DVec3, DVec3)| (b.0 - a.1).max(a.0 - b.1).max(DVec3::ZERO).length() <= gap;
-        let mut taken = vec![false; boxes.len()];
         let first = comp[anchor_t as usize];
         if first == 0 {
             return None;
         }
-        taken[first as usize - 1] = true;
-        let mut queue = vec![first as usize - 1];
-        while let Some(i) = queue.pop() {
-            for j in 0..boxes.len() {
-                if !taken[j] && near_box(boxes[i], boxes[j]) {
-                    taken[j] = true;
-                    queue.push(j);
-                }
-            }
-        }
+        // Stable (w1): the closure over a grid of the boxes (round 9 tested every box per part taken: quadratic).
+        let (taken, _) = near_closure(&boxes, first as usize - 1, GAP_JUMP * diag);
         cands = found.iter().copied().filter(|&(t, _)| mark[t as usize] == 1 && taken[comp[t as usize] as usize - 1]).collect();
     }
     drop((mark, vseen));
@@ -2753,6 +2742,117 @@ fn collect_grown(mesh: &MeshData, bvh: &Bvh, g: &WrapMesh, p: &Projector, radius
     }
     let anchor_l = patch.tris.binary_search(&anchor_t).ok()? as u32;
     Some(Collected { patch, anchor_l, limited })
+}
+
+/// Stable (w1): whether two part boxes lie within `gap` of each other (round 9's test in `collect_grown`).
+fn boxes_near(a: (DVec3, DVec3), b: (DVec3, DVec3), gap: f64) -> bool {
+    (b.0 - a.1).max(a.0 - b.1).max(DVec3::ZERO).length() <= gap
+}
+
+/// Most grid cells a box is entered in; a larger box is tested against every box (`near_closure`).
+const CLOSURE_BIG_CELLS: u64 = 4096;
+
+/// Stable (w1): the parts reached from part `first` over boxes within `gap` of each other (`boxes_near`),
+/// transitively, and the number of boxes visited. The same set as testing every box per part taken (round 9,
+/// quadratic: 160,635 candidates of 90,000 tiles took 4 s), found over a uniform grid: cell side the larger of `gap`
+/// and the median box extent; each box is entered in the cells its box meets, a part taken asks the cells its box
+/// grown by `gap` meets. A box meeting more than `CLOSURE_BIG_CELLS` cells is kept in a list every taken part tests,
+/// and tests every box itself when taken. The order of the work never changes the set.
+fn near_closure(boxes: &[(DVec3, DVec3)], first: usize, gap: f64) -> (Vec<bool>, u64) {
+    let n = boxes.len();
+    let mut taken = vec![false; n];
+    if first >= n {
+        return (taken, 0);
+    }
+    taken[first] = true;
+    let finite = |b: &(DVec3, DVec3)| b.0.is_finite() && b.1.is_finite();
+    let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+    let mut extents: Vec<f64> = Vec::with_capacity(n);
+    for b in boxes.iter().filter(|b| finite(b)) {
+        lo = lo.min(b.0);
+        hi = hi.max(b.1);
+        extents.push((b.1 - b.0).max_element());
+    }
+    let mut tests = 0u64;
+    // Degenerate input (no finite box, or a gap that is not a finite non-negative number): the plain closure.
+    if extents.is_empty() || !(gap.is_finite() && gap >= 0.0) {
+        let mut queue = vec![first];
+        while let Some(i) = queue.pop() {
+            for j in 0..n {
+                tests += 1;
+                if !taken[j] && boxes_near(boxes[i], boxes[j], gap) {
+                    taken[j] = true;
+                    queue.push(j);
+                }
+            }
+        }
+        return (taken, tests);
+    }
+    extents.sort_by(f64::total_cmp);
+    let span = (hi - lo).max_element();
+    // At most 2^20 cells per axis.
+    let h = gap.max(extents[extents.len() / 2]).max(span / (1u64 << 20) as f64).max(f64::MIN_POSITIVE);
+    let cell = |x: f64, o: f64| (((x - o) / h).floor().clamp(0.0, ((1u64 << 20) - 1) as f64)) as u64;
+    let range = |a: DVec3, b: DVec3| -> [[u64; 2]; 3] { [[cell(a.x, lo.x), cell(b.x, lo.x)], [cell(a.y, lo.y), cell(b.y, lo.y)], [cell(a.z, lo.z), cell(b.z, lo.z)]] };
+    let count = |r: &[[u64; 2]; 3]| r.iter().map(|a| a[1] - a[0] + 1).product::<u64>();
+    let key = |x: u64, y: u64, z: u64| (x << 42) | (y << 21) | z;
+    let mut entries: Vec<(u64, u32)> = Vec::new();
+    let mut big: Vec<u32> = Vec::new();
+    let mut is_big = vec![false; n];
+    for (i, b) in boxes.iter().enumerate() {
+        if !finite(b) {
+            big.push(i as u32);
+            is_big[i] = true;
+            continue;
+        }
+        let r = range(b.0, b.1);
+        if count(&r) > CLOSURE_BIG_CELLS {
+            big.push(i as u32);
+            is_big[i] = true;
+            continue;
+        }
+        for x in r[0][0]..=r[0][1] {
+            for y in r[1][0]..=r[1][1] {
+                for z in r[2][0]..=r[2][1] {
+                    entries.push((key(x, y, z), i as u32));
+                }
+            }
+        }
+    }
+    entries.sort_unstable();
+    let mut queue = vec![first];
+    let take = |j: usize, i: usize, taken: &mut Vec<bool>, queue: &mut Vec<usize>, tests: &mut u64| {
+        *tests += 1;
+        if !taken[j] && boxes_near(boxes[i], boxes[j], gap) {
+            taken[j] = true;
+            queue.push(j);
+        }
+    };
+    while let Some(i) = queue.pop() {
+        if is_big[i] || !finite(&boxes[i]) {
+            for j in 0..n {
+                take(j, i, &mut taken, &mut queue, &mut tests);
+            }
+            continue;
+        }
+        for &j in &big {
+            take(j as usize, i, &mut taken, &mut queue, &mut tests);
+        }
+        let g = DVec3::splat(gap);
+        let r = range(boxes[i].0 - g, boxes[i].1 + g);
+        for x in r[0][0]..=r[0][1] {
+            for y in r[1][0]..=r[1][1] {
+                for z in r[2][0]..=r[2][1] {
+                    let k = key(x, y, z);
+                    let start = entries.partition_point(|e| e.0 < k);
+                    for e in entries[start..].iter().take_while(|e| e.0 == k) {
+                        take(e.1 as usize, i, &mut taken, &mut queue, &mut tests);
+                    }
+                }
+            }
+        }
+    }
+    (taken, tests)
 }
 
 /// Round 9 (package B, WA28), test builds: while switched on for the calling thread, every `wrap_param_in` also runs
@@ -3469,5 +3569,91 @@ pub(crate) mod testkit {
 
     pub(crate) fn reach(p: &WrapParam) -> [f64; 2] {
         p.reach
+    }
+}
+
+/// Stable (w1), item 2: the part closure of `collect_grown` over a grid is the plain closure, near-linear.
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+
+    /// The plain (round 9) closure: every box tested per part taken.
+    fn plain(boxes: &[(DVec3, DVec3)], first: usize, gap: f64) -> Vec<bool> {
+        let mut taken = vec![false; boxes.len()];
+        taken[first] = true;
+        let mut queue = vec![first];
+        while let Some(i) = queue.pop() {
+            for j in 0..boxes.len() {
+                if !taken[j] && boxes_near(boxes[i], boxes[j], gap) {
+                    taken[j] = true;
+                    queue.push(j);
+                }
+            }
+        }
+        taken
+    }
+
+    /// `n x n` tiles of side 0.9 one unit apart in the XZ plane (as the code skeptic's tiles300), plus a floor box under
+    /// them all and a far tile.
+    fn tiles(n: u32, floor: bool) -> Vec<(DVec3, DVec3)> {
+        let mut b = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                let o = DVec3::new(i as f64, 0.0, j as f64);
+                b.push((o, o + DVec3::new(0.9, 0.0, 0.9)));
+            }
+        }
+        if floor {
+            b.push((DVec3::new(0.0, -0.5, 0.0), DVec3::new(n as f64, -0.5, n as f64)));
+        }
+        b.push((DVec3::splat(10.0 * n as f64), DVec3::splat(10.0 * n as f64 + 1.0)));
+        b
+    }
+
+    #[test]
+    fn w1_near_closure_equals_the_plain_closure() {
+        // Random boxes of mixed sizes (a deterministic LCG), several gaps and starts; tiles with and without a floor.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for round in 0..6 {
+            let mut boxes = Vec::new();
+            for k in 0..400 {
+                let c = DVec3::new(rnd(), rnd(), rnd()) * 20.0;
+                let size = if k % 50 == 0 { 8.0 * rnd() } else { 0.5 * rnd() };
+                let e = DVec3::new(rnd(), rnd(), rnd()) * size;
+                boxes.push((c - e, c + e));
+            }
+            for gap in [0.0, 0.2, 0.7, 3.0] {
+                let first = (round * 37) % boxes.len();
+                let (grid, _) = near_closure(&boxes, first, gap);
+                assert_eq!(grid, plain(&boxes, first, gap), "round {round}, gap {gap}");
+            }
+        }
+        for floor in [false, true] {
+            let boxes = tiles(30, floor);
+            for gap in [0.05, 0.11, 4.0] {
+                assert_eq!(near_closure(&boxes, 0, gap).0, plain(&boxes, 0, gap), "tiles, floor {floor}, gap {gap}");
+            }
+        }
+    }
+
+    /// The box tests grow linearly with the parts at a fixed gap (round 9 tested every part per part taken:
+    /// quadratic; parts100 / parts200 took 43 / 694 ms to collect, tiles300 4 s).
+    #[test]
+    fn w1_near_closure_scales_linearly() {
+        let mut per = Vec::new();
+        for n in [40u32, 160] {
+            let boxes = tiles(n, false);
+            let (taken, tests) = near_closure(&boxes, 0, 0.15);
+            let reached = taken.iter().filter(|&&t| t).count();
+            println!("W1 closure {n} x {n} tiles, gap 0.15: {reached} parts reached, {tests} box tests ({:.2} per part)", tests as f64 / reached as f64);
+            assert_eq!(reached, (n * n) as usize);
+            per.push(tests as f64 / reached as f64);
+        }
+        // 16 x the parts: the tests per part stay (the plain closure: 16 x, 25,600 per part at 160 x 160).
+        assert!(per[1] <= 1.5 * per[0] && per[1] <= 64.0, "box tests per part {per:?}");
     }
 }

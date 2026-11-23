@@ -3463,6 +3463,11 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   fails). One component gives round 9's result. Round 9 dropped every component's exact pins when one failed: on the
   chess set (step 10, Jump on) a pawn's failure freed the board, laid exactly from the strip, and the solve turned the
   board's picture 40-90 degrees against the frame.
+- **Part closure in near-linear time (item 2).** `collect_grown`'s closure over the part boxes (Jump small gaps)
+  finds the boxes near a taken part over a uniform grid (`near_closure`: cell side the larger of the gap and the
+  median box extent, at most 2^20 cells per axis; a box meeting more than `CLOSURE_BIG_CELLS` (4,096) cells is tested
+  by every taken part and tests every box itself). The same set as round 9's test of every box per part taken
+  (quadratic): the same candidates, layouts and fingerprints (tiles300 with Jump on: collect 6,010 -> 107 ms).
 
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 

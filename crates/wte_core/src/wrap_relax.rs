@@ -198,16 +198,27 @@ pub(super) struct Wedges {
 pub(super) struct Relaxed {
     /// Per stored triangle: local triangle, corners, corner depths `g`.
     pub(super) tris: Vec<(u32, [DVec2; 3], [f64; 3])>,
-    /// Seam edges inside the picture (all rules) and per rule S1..S5.
-    pub(super) seams: u32,
-    pub(super) seams_by_rule: [u32; 5],
-    /// Triangles with a seam edge inside the picture, relaxed triangles flipped inside the picture, CG iterations.
-    pub(super) cut_tris: u32,
+    /// Relaxed triangles flipped inside the picture (the debug line), CG iterations.
     pub(super) flipped: u32,
     pub(super) cg_iters: u32,
     /// check:A (round 9): per local triangle, laid with an edge cut by a closure (S1 / S2): where the ends or the
     /// halves meet (`lost_cut` does not count the picture beyond that line).
     pub(super) closure: Vec<bool>,
+    /// Stable (w1, item 3): the size-dependent statistics' inputs: per local triangle, laid and relaxed with its
+    /// orientation reversed (`flipped` counts those meeting the picture); every laid seam half-edge as (local
+    /// triangle, relaxed end points, rule bits, first of its edge) (`seams`, `cut_tris` count those meeting it).
+    pub(super) flip: Vec<bool>,
+    pub(super) seam_edges: Vec<SeamEdge>,
+}
+
+/// Stable (w1, item 3): one laid seam half-edge of a relaxed layout: local triangle, end points, rule bits (S1..S5) and
+/// whether it is the first laid half-edge of its edge.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SeamEdge {
+    pub(crate) tri: u32,
+    pub(crate) ends: [DVec2; 2],
+    pub(crate) rules: u8,
+    pub(crate) first: bool,
 }
 
 /// True when the 2D box of `q` meets `|x| <= rect[0], |y| <= rect[1]`.
@@ -340,7 +351,7 @@ impl<'a> Layout<'a> {
     /// Steps 5-6 (3.2): seams over the laid triangles, wedges, LSCM then ARAP per component, the halo from the relaxed
     /// corners. `seed` is the seed result (local triangle, corners, torn); `rect` the picture rectangle with its
     /// border; `period` the closed spine's period (S1); `anchor` the anchor's local triangle.
-    pub(super) fn relax(&mut self, seed: &[(u32, [DVec2; 3], bool)], rect: [f64; 2], period: Option<f64>, anchor: u32, cone_radius: f64) -> Relaxed {
+    pub(super) fn relax(&mut self, seed: &[(u32, [DVec2; 3], bool)], rect: [f64; 2], exact_rect: [f64; 2], period: Option<f64>, anchor: u32, cone_radius: f64) -> Relaxed {
         let patch = self.patch;
         let ntri = patch.tv.len();
         let laid = self.laid();
@@ -575,7 +586,9 @@ impl<'a> Layout<'a> {
             let mut failed = vec![false; ncomp];
             loop {
                 let check: Vec<bool> = (0..ncomp).map(|c| has_exact[c] && !failed[c]).collect();
-                let mut now = self.exact_failed(&laid, &wedges, &xs, &ps, &rest, rect, &check);
+                // Stable (w1, item 3): over the bucketed reach rectangle (round 9: the picture's own, so a reused
+                // parameterization could differ from a fresh one of another size in the bucket).
+                let mut now = self.exact_failed(&laid, &wedges, &xs, &ps, &rest, exact_rect, &check);
                 if !now.iter().any(|&f| f) {
                     break;
                 }
@@ -633,6 +646,7 @@ impl<'a> Layout<'a> {
         }
         let mut tris = Vec::with_capacity(seed.len());
         let mut flipped = 0u32;
+        let mut flip = vec![false; ntri];
         for (i, (t, q_seed, _)) in seed.iter().enumerate() {
             let t = *t;
             let q: [DVec2; 3] = if laid[t as usize] {
@@ -643,46 +657,34 @@ impl<'a> Layout<'a> {
             if !q.iter().all(|p| p.is_finite()) {
                 continue;
             }
-            if laid[t as usize] && rest[t as usize].is_some() && meets(&q, rect) {
+            if laid[t as usize] && rest[t as usize].is_some() {
                 let area = cross2(q[1] - q[0], q[2] - q[0]);
-                if area * (self.orient[t as usize] as f64) <= 0.0 {
+                flip[t as usize] = area * (self.orient[t as usize] as f64) <= 0.0;
+                if flip[t as usize] && meets(&q, rect) {
                     flipped += 1;
                 }
             }
             tris.push((t, q, self.corner_g(t)));
         }
-        // Seam statistics inside the picture.
-        let mut seams_by_rule = [0u32; 5];
-        let mut seam_count = 0u32;
-        let mut cut_tri = vec![false; ntri];
+        // The laid seam half-edges (stable w1, item 3: the seam statistics are measured per picture size from them,
+        // `WrapParam::size_stats`).
+        let mut seam_edges = Vec::new();
         for he in 0..ntri * 3 {
             if !laid[he / 3] || seams.cut[he] == 0 {
                 continue;
             }
             let (t, k) = (he / 3, he % 3);
             let [a, b] = [(k + 1) % 3, (k + 2) % 3].map(|i| x[wedges.corner[t * 3 + i] as usize]);
-            if !meets(&[a, b], rect) {
-                continue;
-            }
-            cut_tri[t] = true;
-            if first_laid(patch, &laid, he) {
-                seam_count += 1;
-                for (r, slot) in seams_by_rule.iter_mut().enumerate() {
-                    if seams.cut[he] & (1 << r) != 0 {
-                        *slot += 1;
-                    }
-                }
-            }
+            seam_edges.push(SeamEdge { tri: t as u32, ends: [a, b], rules: seams.cut[he], first: first_laid(patch, &laid, he) });
         }
         let closure: Vec<bool> = (0..ntri).map(|t| laid[t] && (0..3).any(|k| seams.cut[t * 3 + k] & (S1 | S2) != 0)).collect();
         Relaxed {
             closure,
             tris,
-            seams: seam_count,
-            seams_by_rule,
-            cut_tris: cut_tri.iter().filter(|&&c| c).count() as u32,
             flipped,
             cg_iters,
+            flip,
+            seam_edges,
         }
     }
 
@@ -1670,6 +1672,14 @@ pub(crate) struct OwnerGrid {
     pub(crate) g: Vec<f32>,
     pub(crate) pos: Vec<[f32; 3]>,
     pub(crate) scale: Vec<f32>,
+    /// Stable (w1, item 3): the statistics' per-cell inputs, so that a reused parameterization reports `rejected` and
+    /// `lost_cut` for any picture size: the grid's origin and cell in f64 (the build's arithmetic), per cell the mark
+    /// (bit 1 covered, bit 2 a closure triangle covers it) and the (laid triangle, centre) pairs and those the owner
+    /// test drops (saturating).
+    lo64: [f64; 2],
+    cell64: f64,
+    mark: Vec<u8>,
+    pairs: Vec<[u16; 2]>,
 }
 
 /// The barycentric weights of `c` in the layout triangle `q` when it lies inside (edges included), else `None`.
@@ -1724,9 +1734,9 @@ impl OwnerTri {
 impl OwnerGrid {
     /// The grid over `|x| <= half[0], |y| <= half[1]` with cells of at least `min_cell` (at most `OWNER_MAX_CELLS` on
     /// the long side) from the stored triangles `tris` (ascending triangle id). `buried` is asked only in cells whose
-    /// candidates come from two or more parts. Also returns, of the (cell centre, covering triangle) pairs inside
-    /// `picture`, those the owner test drops and all.
-    pub(crate) fn build(tris: &[OwnerTri], half: [f64; 2], min_cell: f64, picture: [f64; 2], buried: &Burial<'_>) -> (OwnerGrid, (usize, usize), (usize, usize)) {
+    /// candidates come from two or more parts. Stable (w1, item 3): `rejected_pairs` and `lost_cells` measure the
+    /// statistics for a picture from what it stores.
+    pub(crate) fn build(tris: &[OwnerTri], half: [f64; 2], min_cell: f64, buried: &Burial<'_>) -> OwnerGrid {
         let long = 2.0 * half[0].max(half[1]);
         let cell = min_cell.max(long / OWNER_MAX_CELLS as f64).max(1e-30);
         let dims = [((2.0 * half[0] / cell).ceil() as usize).clamp(1, 4 * OWNER_MAX_CELLS), ((2.0 * half[1] / cell).ceil() as usize).clamp(1, 4 * OWNER_MAX_CELLS)];
@@ -1939,13 +1949,83 @@ impl OwnerGrid {
             g.chunks_mut(rows).zip(pos.chunks_mut(rows)).zip(scale.chunks_mut(rows)).zip(mark.chunks_mut(rows)).enumerate().for_each(out);
         }
         drop(cells);
-        let grid = OwnerGrid { lo: [lo[0] as f32, lo[1] as f32], cell: cell as f32, dims, g, pos, scale };
-        // Round 9 (A7): `lost_cut`, the picture's cells without an owner inside the laid set's outline: an uncovered
-        // cell with covered cells on both sides in its row or in its column (a cut wedge, a shrunk seam, a hole), as
-        // against picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways).
+        let mut grid = OwnerGrid { lo: [lo[0] as f32, lo[1] as f32], cell: cell as f32, dims, g, pos, scale, lo64: lo, cell64: cell, mark: Vec::new(), pairs: Vec::new() };
         if debug {
             eprintln!("owner: grid out {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
+        // Per cell, of the laid triangles covering its centre: all and those the owner test drops (`WrapStats::
+        // rejected`: the laid picture area; a halo triangle hinged over a fold, e.g. a block's side hanging into a gap,
+        // is dropped where another place owns its cells without counting). Per chunk of rows, each cell by its own
+        // chunk (stable w1: every cell; the picture's are summed by `rejected_pairs`).
+        let mut pairs = vec![[0u16; 2]; n];
+        let count = |(c, out): (usize, &mut [[u16; 2]])| {
+            let base = c * chunk_rows * width;
+            let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
+            for &i in &bins[c] {
+                let t = &tris[i as usize];
+                if !t.laid {
+                    continue;
+                }
+                visit(&t.q, r0, r1, &mut |k, _, w| {
+                    let e = &mut out[k - base];
+                    e[0] = e[0].saturating_add(1);
+                    let (_, p) = t.at(w);
+                    if !grid.keeps(k, Vec3::new(p.x as f32, p.y as f32, p.z as f32), t.s) {
+                        e[1] = e[1].saturating_add(1);
+                    }
+                });
+            }
+        };
+        if par {
+            pairs.par_chunks_mut(chunk_rows * width).enumerate().for_each(count);
+        } else {
+            pairs.chunks_mut(chunk_rows * width).enumerate().for_each(count);
+        }
+        grid.mark = mark;
+        grid.pairs = pairs;
+        if debug {
+            eprintln!("owner: done {:.1} ms ({} x {} cells, {} triangles)", t0.elapsed().as_secs_f64() * 1e3, dims[0], dims[1], tris.len());
+        }
+        grid
+    }
+
+    /// Stable (w1, item 3): the centre of cell `(i, j)` (the build's f64 arithmetic).
+    fn centre(&self, i: usize, j: usize) -> (f64, f64) {
+        (self.lo64[0] + (i as f64 + 0.5) * self.cell64, self.lo64[1] + (j as f64 + 0.5) * self.cell64)
+    }
+
+    /// Of the (cell centre inside `picture`, laid triangle covering it) pairs, those the owner test drops and all.
+    pub(crate) fn rejected_pairs(&self, picture: [f64; 2]) -> (usize, usize) {
+        let [w, h] = self.dims;
+        let (mut rejected, mut total) = (0usize, 0usize);
+        for j in 0..h {
+            if self.centre(0, j).1.abs() > picture[1] {
+                continue;
+            }
+            for i in 0..w {
+                if self.centre(i, j).0.abs() > picture[0] {
+                    continue;
+                }
+                let e = self.pairs[j * w + i];
+                total += e[0] as usize;
+                rejected += e[1] as usize;
+            }
+        }
+        (rejected, total)
+    }
+
+    /// Round 9 (A7): `lost_cut`, the picture's cells without an owner inside the laid set's outline: an uncovered cell
+    /// with covered cells on both sides in its row or in its column (a cut wedge, a shrunk seam, a hole), as against
+    /// picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways). Returns (lost,
+    /// picture cells). Stable (w1, item 3): from the stored marks, for any picture.
+    pub(crate) fn lost_cells(&self, picture: [f64; 2]) -> (usize, usize) {
+        let dims = self.dims;
+        let width = dims[0];
+        let n = dims[0] * dims[1];
+        let chunk_rows = OWNER_CHUNK_ROWS;
+        let chunks = dims[1].div_ceil(chunk_rows);
+        let par = n >= OWNER_PAR_CELLS;
+        let mark = &self.mark;
         let covered = |k: usize| mark[k] & 1 != 0;
         // Row spans per row; column spans per chunk of rows, merged by min / max (check:B: on the pool for a large
         // grid; the same spans).
@@ -1988,7 +2068,7 @@ impl OwnerGrid {
         // tooth line, and with a helix the band past the meeting line) is not lost to a cut. Uncovered picture
         // cells 4-connected through uncovered picture cells to a cell a closure triangle covers are left out.
         let in_picture = |i: usize, j: usize| {
-            let (x, y) = (lo[0] + (i as f64 + 0.5) * cell, lo[1] + (j as f64 + 0.5) * cell);
+            let (x, y) = self.centre(i, j);
             x.abs() <= picture[0] && y.abs() <= picture[1]
         };
         let neighbours = |k: usize| {
@@ -2010,9 +2090,6 @@ impl OwnerGrid {
             }
         }
         let mut queue: Vec<usize> = beyond.iter().enumerate().filter_map(|(k, &b)| b.then_some(k)).collect();
-        if debug {
-            eprintln!("owner: spans, seeds {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
-        }
         while let Some(k) = queue.pop() {
             for m in neighbours(k).into_iter().flatten() {
                 if !beyond[m] && !covered(m) && in_picture(m % width, m / width) {
@@ -2025,13 +2102,11 @@ impl OwnerGrid {
         let row_lost = |j: usize| {
             let r = rspan[j];
             let (mut lost, mut pic_cells) = (0usize, 0usize);
-            let y = lo[1] + (j as f64 + 0.5) * cell;
-            if y.abs() > picture[1] {
+            if self.centre(0, j).1.abs() > picture[1] {
                 return (0, 0);
             }
             for (i, c) in cspan.iter().enumerate() {
-                let x = lo[0] + (i as f64 + 0.5) * cell;
-                if x.abs() > picture[0] {
+                if self.centre(i, j).0.abs() > picture[0] {
                     continue;
                 }
                 pic_cells += 1;
@@ -2042,42 +2117,7 @@ impl OwnerGrid {
             (lost, pic_cells)
         };
         let sum = |a: (usize, usize), b: (usize, usize)| (a.0 + b.0, a.1 + b.1);
-        let (lost, pic_cells) =
-            if par { (0..dims[1]).into_par_iter().map(row_lost).reduce(|| (0, 0), sum) } else { (0..dims[1]).map(row_lost).fold((0, 0), sum) };
-        if debug {
-            eprintln!("owner: lost {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
-        }
-        drop(mark);
-        // The rejected share at the cell centres inside the picture, of the laid triangles (`WrapStats::rejected`: the
-        // laid picture area; a halo triangle hinged over a fold, e.g. a block's side hanging into a gap, is dropped
-        // where another place owns its cells without counting). Per chunk, integer counts.
-        let count = |c: usize| {
-                let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
-                let (mut total, mut rejected) = (0usize, 0usize);
-                for &i in &bins[c] {
-                    let t = &tris[i as usize];
-                    if !t.laid {
-                        continue;
-                    }
-                    visit(&t.q, r0, r1, &mut |k, c, w| {
-                        if c.x.abs() > picture[0] || c.y.abs() > picture[1] {
-                            return;
-                        }
-                        total += 1;
-                        let (_, p) = t.at(w);
-                        if !grid.keeps(k, Vec3::new(p.x as f32, p.y as f32, p.z as f32), t.s) {
-                            rejected += 1;
-                        }
-                    });
-                }
-                (rejected, total)
-        };
-        let counts: Vec<(usize, usize)> = if par { (0..chunks).into_par_iter().map(count).collect() } else { (0..chunks).map(count).collect() };
-        let rej = counts.iter().fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
-        if debug {
-            eprintln!("owner: done {:.1} ms ({} x {} cells, {} triangles)", t0.elapsed().as_secs_f64() * 1e3, dims[0], dims[1], tris.len());
-        }
-        (grid, rej, (lost, pic_cells))
+        if par { (0..dims[1]).into_par_iter().map(row_lost).reduce(|| (0, 0), sum) } else { (0..dims[1]).map(row_lost).fold((0, 0), sum) }
     }
 
     /// The owner test at cell index `k`: a fragment at 3D point `p` of a triangle with stretch `s` is kept when the

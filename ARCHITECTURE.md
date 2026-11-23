@@ -1347,10 +1347,12 @@ pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub 
 pub fn wrap_param(mesh: &MeshData, bvh: &Bvh, maps: &[Arc<TexelMap>], src_size: [u32; 2], p: &Projector) -> Option<WrapParam>;
 impl WrapParam {
     pub fn stats(&self) -> WrapStats;
-    /// `stats` with `covered` measured for `p`'s size (a projector it serves: a scale inside the reach bucket reuses
-    /// the parameterization, so the stored `covered` is that of the size it was built for). Used by the Document
-    /// queries and the `wrap:` log line.
+    /// `stats` measured for `p`'s size (a projector it serves: a scale inside the reach bucket reuses the
+    /// parameterization). Stable (w1): every size-dependent field, equal to a fresh build's (round 9: `covered` only);
+    /// `stats_for` takes the source size it was made for, `stats_for_src` the current one (the picture's border).
+    /// Used by the Document queries and the `wrap:` log line.
     pub fn stats_for(&self, p: &Projector) -> WrapStats;
+    pub fn stats_for_src(&self, p: &Projector, src_size: [u32; 2]) -> WrapStats;
     /// Same mesh Arc, origin and rotation bit-equal, same spine axis and options, same bucketed reach and (round 9)
     /// the same front stop (6.5a "Reuse").
     pub fn serves(&self, mesh: &Arc<MeshData>, p: &Projector) -> bool;
@@ -3239,7 +3241,8 @@ which other triangles the candidate set holds.
    (`cut_tris`).
 7. **Store.** Per triangle its `TriId` and three `[f32; 2]` corners, ascending `TriId`; `covered` = clipped parameter
    area / picture area (clamped to 1); a lazy uniform grid for `surface_of`. A reused parameterization (a scale inside the
-   reach bucket) reports `covered` for the current picture (`WrapParam::stats_for`, from the stored corners).
+   reach bucket) reports `covered` for the current picture (`WrapParam::stats_for`, from the stored corners; stable w1:
+   every size-dependent statistic, 6.5a "Stable (w1)").
 
 **Jump small gaps** (`jump_gaps`; only when the candidates hold two or more parts, otherwise byte-identical to off):
 a part "near another" has another part's box within `GAP_JUMP * diag` of its box (sweep over the boxes; those parts are
@@ -3468,6 +3471,18 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   median box extent, at most 2^20 cells per axis; a box meeting more than `CLOSURE_BIG_CELLS` (4,096) cells is tested
   by every taken part and tests every box itself). The same set as round 9's test of every box per part taken
   (quadratic): the same candidates, layouts and fingerprints (tiles300 with Jump on: collect 6,010 -> 107 ms).
+- **Reuse equals fresh (item 3).** The exact pins' check uses the bucketed reach rectangle (`footprint`), not the
+  picture's own rectangle: every layout decision now depends on the bucket only, so a parameterization reused for any
+  size in its bucket bakes byte for byte like a fresh one (round 9: WA35's bump plate scaled by 0.95 baked differently).
+  Every size-dependent statistic is measured by one function from stored inputs, for a fresh build and for
+  `WrapParam::stats_for` / `stats_for_src` (the source size gives the picture's one-texel border) alike
+  (`size_stats`): `covered` (the stored f32 corners clipped to the picture; round 9: f64 areas before storing),
+  `reached_edge` (the spine's, or one of the layer's final boundary vertices, kept as a Pareto front of `(|x|, |y|)`,
+  inside the picture), `ends_share` (the stored sum of the ends over twice the size's needed along), `flipped`,
+  `stretch` (per stored triangle its `|area ratio - 1|` and flip flag; the picture test on the stored corners),
+  `seams` / `seams_by_rule` / `cut_tris` (the relaxed layout's laid seam half-edges with their f64 ends, plus a seed
+  layout's torn triangles), `rejected` / `lost_cut` (per owner cell the mark and the (laid triangle, centre) pair counts,
+  `OwnerGrid::rejected_pairs` / `lost_cells`). The last size asked is memoised. Round 9 refreshed `covered` only.
 
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 

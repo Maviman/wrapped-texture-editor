@@ -1522,11 +1522,11 @@ impl Document {
         if let Some(w) = self.bakes.wrap_params.get(id)
             && w.serves_inputs(&self.mesh, &maps, mips.size(), &p)
         {
-            return Some(w.stats_for(&p));
+            return Some(w.stats_for_src(&p, mips.size()));
         }
         let graph = self.wrap_mesh_cell();
         let param = Arc::new(wrap_param_in(&self.mesh, &self.bvh, graph.get(&self.mesh), &maps, mips.size(), &p)?);
-        let s = param.stats_for(&p);
+        let s = param.stats_for_src(&p, mips.size());
         log::info!(
             "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh), covered {:.1} %, cut {} (ensure)",
             id.0,

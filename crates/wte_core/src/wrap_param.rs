@@ -173,6 +173,8 @@ pub(crate) struct WrapLayer {
     pub(crate) owner: Option<OwnerGrid>,
     /// Uniform grid over the layer's coordinate box for `surface_of` (built on first use).
     grid: OnceLock<Grid>,
+    /// Stable (w1, item 3): the size-dependent statistics' inputs.
+    stats: LayerStats,
 }
 
 /// The parameterization of the surface around one wrapped stamp (4.3). Immutable; shared by `Arc`.
@@ -201,6 +203,29 @@ pub struct WrapParam {
     /// Layers bottom first (the last is the top turn). One layer unless Overlap laid several turns.
     pub(crate) layers: Vec<WrapLayer>,
     stats: WrapStats,
+    /// Stable (w1, item 3): the sum of the turn-0 ends when they met (one layer), the model diagonal (the reach of
+    /// another size), and the last `stats_for` (half extents and source size bits, stats).
+    ends: Option<f64>,
+    /// Stable (w1, item 3): the spine ended at a boundary edge (bucketed: any size).
+    spine_edge: bool,
+    diag: f64,
+    memo: std::sync::Mutex<Option<([u32; 4], WrapStats)>>,
+}
+
+/// Stable (w1, item 3): what a layer's size-dependent statistics are computed from (`WrapParam::size_stats`), so that
+/// a parameterization reused for another size in its reach bucket reports what a fresh one would.
+#[derive(Default)]
+pub(crate) struct LayerStats {
+    /// Per stored triangle (layer order): its `|area ratio - 1|` (NaN: degenerate, a sliver or below `1e-12 diag^2`).
+    stretch: Vec<f32>,
+    /// Stored triangles (layer order) laid and relaxed with their orientation reversed.
+    flip: Vec<u32>,
+    /// The relaxed layout's laid seam half-edges.
+    seams: Vec<relax::SeamEdge>,
+    /// Seed layouts: the torn triangles (`cut_tris`, all of them).
+    cut_fixed: u32,
+    /// `(|x|, |y|)` of the final boundary vertices, Pareto-minimal.
+    edge_pts: Vec<[f64; 2]>,
 }
 
 impl std::fmt::Debug for WrapParam {
@@ -979,7 +1004,9 @@ struct Layout<'a> {
     entered: Vec<bool>,
     entered_count: usize,
     jumps: u32,
-    reached_edge: bool,
+    /// Stable (w1, item 3): `(|x|, |y|)` of the final vertices on a boundary edge, Pareto-minimal (`reached_edge`
+    /// for any picture size: one of them inside the picture).
+    edge_pts: Vec<[f64; 2]>,
     limited: bool,
 }
 
@@ -1011,7 +1038,7 @@ impl<'a> Layout<'a> {
             entered: vec![false; patch.part_count as usize],
             entered_count: 0,
             jumps: 0,
-            reached_edge: false,
+            edge_pts: Vec::new(),
             limited: false,
         }
     }
@@ -1258,7 +1285,7 @@ impl<'a> Layout<'a> {
     }
 
     /// Runs the front until the key exceeds `stop` (4.3 step 4). `jump` handles Jump small gaps per final vertex.
-    fn run(&mut self, stop: f64, rect: [f64; 2], jump: &mut Option<Jumper<'_>>) {
+    fn run(&mut self, stop: f64, jump: &mut Option<Jumper<'_>>) {
         loop {
             // The main front first; a fallback-only vertex when it has nothing left.
             let entry = match self.heap.pop() {
@@ -1284,8 +1311,8 @@ impl<'a> Layout<'a> {
             }
             self.finalize(v);
             let p = self.p2[vi];
-            if self.patch.on_boundary[vi] && p.x.abs() <= rect[0] && p.y.abs() <= rect[1] {
-                self.reached_edge = true;
+            if self.patch.on_boundary[vi] && p.is_finite() {
+                self.edge_pts.push([p.x.abs(), p.y.abs()]);
             }
             if let Some(j) = jump.as_mut() {
                 j.jump_from_vertex(self, v);
@@ -2336,9 +2363,6 @@ fn wrap_param_from(
     let rect = [hw, hh];
     let footprint = if reach.spine_y { [across_r, along_r] } else { [along_r, across_r] };
     let picture = [hw + 2.0 * hw / src_size[0] as f64, hh + 2.0 * hh / src_size[1] as f64];
-    let mut stretches: Vec<f64> = Vec::new();
-    let mut rejected = (0usize, 0usize);
-    let mut lost_cut = (0usize, 0usize);
     let mut stats = WrapStats {
         verts: 0,
         tris: 0,
@@ -2381,7 +2405,6 @@ fn wrap_param_from(
     let multi = turns.len() > 1;
     let axis = usize::from(reach.spine_y);
     let mut layers: Vec<(i32, WrapLayer)> = Vec::new();
-    let mut covered = 0.0;
     for &(turn_id, lo, hi, period) in &turns {
         let mut strips: Vec<&StripTri> = spine.strips.iter().filter(|s| s.turn == turn_id).collect();
         if strips.is_empty() {
@@ -2405,14 +2428,13 @@ fn wrap_param_from(
         let front_started = Instant::now();
         let mut turn_jumper = if opts.jump_gaps { Jumper::new(mesh, bvh, &patch) } else { None };
         layout.footprint = footprint;
-        layout.run(stop, rect, &mut turn_jumper);
+        layout.run(stop, &mut turn_jumper);
         phase_times::add(1, front_started.elapsed().as_micros() as u64);
         let clip = multi.then_some((axis, lo, hi));
         let closed = period.filter(|t| *t > 0.0);
         let period = if multi { closed } else { None };
-        let (seed, cut, seed_area) = layout.finish(hw, hh, clip, period);
+        let (seed, cut, _) = layout.finish(hw, hh, clip, period);
         stats.verts += layout.finals as u32;
-        stats.reached_edge |= layout.reached_edge;
         stats.limited |= layout.limited;
         stats.jumps += layout.jumps;
         // Round 8 (3.2 steps 4-6): the seed is kept where it is exact (developable surfaces, closures); else the layout
@@ -2421,15 +2443,19 @@ fn wrap_param_from(
         // check:A (round 9): the triangles next to a closure (`lost_cut`): torn in an exact seed, cut by S1 / S2 when
         // relaxed.
         let mut closure_tris = vec![false; patch.tv.len()];
-        let (tris, area) = if multi || layout.seed_is_exact(&seed, footprint, closed) {
-            stats.cut_tris += cut;
+        // Stable (w1, item 3): the size-dependent statistics' inputs (`LayerStats`).
+        let mut flip: Vec<bool> = Vec::new();
+        let mut seam_edges: Vec<relax::SeamEdge> = Vec::new();
+        let mut cut_fixed = 0u32;
+        let tris = if multi || layout.seed_is_exact(&seed, footprint, closed) {
+            cut_fixed = cut;
             for (t, _, torn) in &seed {
                 closure_tris[*t as usize] = *torn;
             }
-            (seed.iter().map(|(t, q, _)| (*t, *q, layout.corner_g(*t))).collect::<Vec<_>>(), seed_area)
+            seed.iter().map(|(t, q, _)| (*t, *q, layout.corner_g(*t))).collect::<Vec<_>>()
         } else {
             let relax_started = Instant::now();
-            let r = layout.relax(&seed, picture, closed, anchor_l, relax::knob("WTE_TEST_CONE_RADIUS", relax::CONE_RADIUS) * across_r);
+            let r = layout.relax(&seed, picture, footprint, closed, anchor_l, relax::knob("WTE_TEST_CONE_RADIUS", relax::CONE_RADIUS) * across_r);
             phase_times::add(2, relax_started.elapsed().as_micros() as u64);
             if relax::knob("WTE_TEST_RELAX_DEBUG", false) {
                 let laid = layout.laid();
@@ -2450,20 +2476,16 @@ fn wrap_param_from(
                 }
             }
             stats.relaxed = true;
-            stats.seams += r.seams;
-            for (a, b) in stats.seams_by_rule.iter_mut().zip(r.seams_by_rule) {
-                *a += b;
-            }
-            stats.cut_tris += r.cut_tris;
-            stats.flipped += r.flipped;
             stats.cg_iters += r.cg_iters;
-            let area = r.tris.iter().map(|(_, q, _)| layer_area(*q, hw, hh, clip, period)).sum::<f64>();
             closure_tris = r.closure;
-            (r.tris, area)
+            flip = r.flip;
+            seam_edges = r.seam_edges;
+            r.tris
         };
-        covered += area;
+        // Per local triangle its area ratio's distance from 1 (`stretch`; NaN: left out).
+        let mut ratio: Vec<f32> = vec![f32::NAN; patch.tv.len()];
         for (t, q, _) in &tris {
-            if patch.degenerate(*t) || !relax::meets(q, picture) {
+            if patch.degenerate(*t) {
                 continue;
             }
             let p3 = patch.corners(*t);
@@ -2472,7 +2494,7 @@ fn wrap_param_from(
             // check:A: slivers and near-zero-area triangles (left out of the energies, 3.1) are left out here too: their
             // area ratio says nothing (check_a8's slivered plate reported a stretch of 2.7e6 %).
             if a3 >= 1e-12 * patch.diag * patch.diag && !relax::sliver(p3) && (a2 / a3).is_finite() {
-                stretches.push((a2 / a3 - 1.0).abs());
+                ratio[*t as usize] = (a2 / a3 - 1.0).abs() as f32;
             }
         }
         let along_clip = clip.map(|(_, lo, hi)| [lo as f32, hi as f32]);
@@ -2488,12 +2510,24 @@ fn wrap_param_from(
             bury_index: OnceLock::new(),
         };
         let owner_started = Instant::now();
-        let (layer, (rej, lost)) = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
+        let mut layer = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint);
         phase_times::add(3, owner_started.elapsed().as_micros() as u64);
-        rejected.0 += rej.0;
-        rejected.1 += rej.1;
-        lost_cut.0 += lost.0;
-        lost_cut.1 += lost.1;
+        let local = |t: TriId| patch.tris.binary_search(&t).unwrap_or(0);
+        let mut edge_pts = std::mem::take(&mut layout.edge_pts);
+        edge_pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        let mut front: Vec<[f64; 2]> = Vec::new();
+        for e in edge_pts {
+            if front.last().is_none_or(|l| e[1] < l[1]) {
+                front.push(e);
+            }
+        }
+        layer.stats = LayerStats {
+            stretch: layer.tris.iter().map(|&t| ratio[local(t)]).collect(),
+            flip: layer.tris.iter().enumerate().filter(|&(_, &t)| flip.get(local(t)).copied().unwrap_or(false)).map(|(k, _)| k as u32).collect(),
+            seams: seam_edges,
+            cut_fixed,
+            edge_pts: front,
+        };
         layers.push((turn_id, layer));
     }
     if layers.is_empty() {
@@ -2505,19 +2539,11 @@ fn wrap_param_from(
     let order = |turn: i32| if flip { -turn } else { turn };
     layers.sort_by_key(|l| order(l.0));
     stats.turns = layers.len() as u32;
-    // Round 9 (T2): the share of the picture's length the spine lays (Ends meet).
-    if (spine.met_itself || spine.passed) && stats.turns == 1 {
-        let share = (spine.end0_plus + spine.end0_minus) / (2.0 * reach.needed_along);
-        stats.ends_share = if share.is_finite() { share.clamp(0.0, 1.0) as f32 } else { 1.0 };
-    }
+    // Round 9 (T2): the share of the picture's length the spine lays (Ends meet): the ends' sum, for any size.
+    let ends = ((spine.met_itself || spine.passed) && stats.turns == 1).then_some(spine.end0_plus + spine.end0_minus);
     stats.tris = layers.iter().map(|l| l.1.tris.len() as u32).sum();
-    stats.covered = (covered / (4.0 * hw * hh)).clamp(0.0, 1.0) as f32;
-    stretches.sort_by(f64::total_cmp);
-    stats.stretch = stretches.get(((stretches.len() as f64 * 0.95) as usize).min(stretches.len().saturating_sub(1))).copied().unwrap_or(0.0) as f32;
-    stats.rejected = if rejected.1 == 0 { 0.0 } else { (rejected.0 as f64 / rejected.1 as f64) as f32 };
-    stats.lost_cut = if lost_cut.1 == 0 { 0.0 } else { (lost_cut.0 as f64 / lost_cut.1 as f64) as f32 };
-    stats.micros = started.elapsed().as_micros() as u64;
-    Some(WrapParam {
+    let _ = (rect, hw, hh);
+    let mut param = WrapParam {
         mesh_addr: mesh as *const MeshData as usize,
         mesh_tag: (mesh.tri_count(), mesh.uv_hash),
         origin_bits: p.origin.to_array().map(f32::to_bits),
@@ -2533,7 +2559,15 @@ fn wrap_param_from(
         half_bits: [p.half_size.x.abs().to_bits(), p.half_size.y.abs().to_bits()],
         layers: layers.into_iter().map(|l| l.1).collect(),
         stats,
-    })
+        ends,
+        spine_edge: spine.reached_edge,
+        diag,
+        memo: std::sync::Mutex::new(None),
+    };
+    // Stable (w1, item 3): the size-dependent statistics by the same function a reused parameterization uses.
+    param.stats = param.size_stats(p, src_size);
+    param.stats.micros = started.elapsed().as_micros() as u64;
+    Some(param)
 }
 
 /// Round 8's candidate collection (the sphere path, kept for WA28's comparison): every triangle within `radius` of
@@ -3189,13 +3223,8 @@ impl OwnerCtx<'_> {
     }
 }
 
-/// The owner grid's counts of a layer: (rejected, all) (cell centre, laid triangle) pairs and (lost_cut, all) picture
-/// cells.
-type OwnerCounts = ((usize, usize), (usize, usize));
-
 /// The stored layer of one turn: ascending mesh triangle, f32 corners and corner depths, and (a layer not clipped to
 /// an Overlap turn's range) the owner grid over the reach rectangle `reach` (half extents; round 9: the place owner).
-/// Also returns the owner test's (cell centre, triangle) pairs inside `picture`: (rejected, all).
 fn make_layer(
     ctx: &OwnerCtx<'_>,
     mut tris: Vec<(u32, [DVec2; 3], [f64; 3])>,
@@ -3203,11 +3232,10 @@ fn make_layer(
     period: Option<f32>,
     axis: usize,
     reach: [f64; 2],
-    picture: [f64; 2],
-) -> (WrapLayer, OwnerCounts) {
+) -> WrapLayer {
     let patch = ctx.patch;
     tris.sort_by_key(|e| patch.tris[e.0 as usize]);
-    let (owner, rej) = if clip.is_none() {
+    let owner = if clip.is_none() {
         // The corners as stored (f32) are what the bake interpolates: the grid is built from them, with the mesh's
         // f32 positions.
         let stored: Vec<relax::OwnerTri> = tris
@@ -3230,12 +3258,12 @@ fn make_layer(
             .collect();
         let may = |i: usize| ctx.may_bury(stored[i].p3, stored[i].normal, stored[i].part);
         let at = |i: usize, p: DVec3| ctx.buried_at(p, stored[i].normal, stored[i].part);
-        let (grid, rej, lost) = OwnerGrid::build(&stored, reach, 0.0, picture, &relax::Burial { may: &may, at: &at });
-        (Some(grid), (rej, lost))
+        let grid = OwnerGrid::build(&stored, reach, 0.0, &relax::Burial { may: &may, at: &at });
+        Some(grid)
     } else {
-        (None, ((0, 0), (0, 0)))
+        None
     };
-    let layer = WrapLayer {
+    WrapLayer {
         tris: tris.iter().map(|e| patch.tris[e.0 as usize]).collect(),
         corners: tris.iter().map(|e| e.1.map(|q| [q.x as f32, q.y as f32])).collect(),
         clip,
@@ -3244,8 +3272,8 @@ fn make_layer(
         depth: tris.iter().map(|e| e.2.map(|g| g as f32)).collect(),
         owner,
         grid: OnceLock::new(),
-    };
-    (layer, rej)
+        stats: LayerStats::default(),
+    }
 }
 
 /// Barycentric weights of `p` in the triangle `(a, b, c)` (centroid for a degenerate one).
@@ -3362,25 +3390,56 @@ impl WrapParam {
         self.texel_world
     }
 
-    /// `stats` for the picture of `p` (a projector this parameterization serves): `covered` is measured for `p`'s
-    /// size. A parameterization is reused for a scale inside its reach bucket (4.4), and its stored `covered` is the
-    /// share of the picture it was built for; a larger picture may run off the surface where the smaller did not.
-    /// Every other field is the stored one (`reached_edge` stays the one of the build).
+    /// `stats` for the picture of `p` (a projector this parameterization serves) with the source size it was made for
+    /// (`stats_for_src`).
     pub fn stats_for(&self, p: &Projector) -> WrapStats {
-        let (hw, hh) = (p.half_size.x.abs(), p.half_size.y.abs());
-        if [hw.to_bits(), hh.to_bits()] == self.half_bits {
+        self.stats_for_src(p, self.src_size)
+    }
+
+    /// `stats` for the picture of `p` and a source of `src_size` pixels (a projector this parameterization serves). A
+    /// parameterization is reused for a scale inside its reach bucket (4.4); stable (w1, item 3): every
+    /// size-dependent field is measured for `p`'s size (`size_stats`, the function a fresh build uses): `covered`,
+    /// `reached_edge`, `ends_share`, `flipped`, `seams`, `seams_by_rule`, `cut_tris`, `stretch`, `rejected`,
+    /// `lost_cut`. Round 9 refreshed only `covered`.
+    pub fn stats_for_src(&self, p: &Projector, src_size: [u32; 2]) -> WrapStats {
+        let key = [p.half_size.x.abs().to_bits(), p.half_size.y.abs().to_bits(), src_size[0], src_size[1]];
+        if key[..2] == self.half_bits && src_size == self.src_size {
             return self.stats;
         }
-        let (hw, hh) = (hw as f64, hh as f64);
-        if !(hw > 0.0 && hh > 0.0 && hw.is_finite() && hh.is_finite()) {
-            return self.stats;
+        if let Ok(m) = self.memo.lock()
+            && let Some((k, st)) = *m
+            && k == key
+        {
+            return st;
         }
+        let st = self.size_stats(p, src_size);
+        if let Ok(mut m) = self.memo.lock() {
+            *m = Some((key, st));
+        }
+        st
+    }
+
+    /// Stable (w1, item 3): `stats` with every size-dependent field measured for the picture of `p` (`src_size` source
+    /// pixels: its one-texel border) from the stored layers: `covered` (clipped stored corners over the picture),
+    /// `reached_edge` (the spine's, or a final boundary vertex inside the picture), `ends_share`, `flipped`, `seams`,
+    /// `seams_by_rule`, `cut_tris`, `stretch` (95th percentile), `rejected` and `lost_cut` (the owner grid). A size
+    /// without a reach keeps the stored stats.
+    fn size_stats(&self, p: &Projector, src_size: [u32; 2]) -> WrapStats {
+        let Some(r) = reach_of(p, src_size, self.diag) else { return self.stats };
+        let (hw, hh) = (r.hw, r.hh);
+        let picture = [hw + 2.0 * hw / src_size[0] as f64, hh + 2.0 * hh / src_size[1] as f64];
+        let mut st = self.stats;
         let mut area = 0.0;
+        let (mut flipped, mut seams, mut by_rule, mut cut) = (0u32, 0u32, [0u32; 5], 0u32);
+        let mut stretches: Vec<f32> = Vec::new();
+        let (mut rejected, mut lost) = ((0usize, 0usize), (0usize, 0usize));
+        let mut edge = false;
         for layer in &self.layers {
             let clip = layer.clip.map(|[lo, hi]| (layer.axis, lo as f64, hi as f64));
             let period = layer.period.map(|t| t as f64).filter(|t| *t > 0.0 && clip.is_some());
+            let q64 = |c: &[[f32; 2]; 3]| c.map(|q| DVec2::new(q[0] as f64, q[1] as f64));
             for c in &layer.corners {
-                let q = c.map(|q| DVec2::new(q[0] as f64, q[1] as f64));
+                let q = q64(c);
                 if !q.iter().all(|p| p.is_finite()) {
                     continue;
                 }
@@ -3398,8 +3457,53 @@ impl WrapParam {
                     _ => clipped_area(q, hw, hh, clip),
                 };
             }
+            let ls = &layer.stats;
+            for (c, &x) in layer.corners.iter().zip(&ls.stretch) {
+                if x.is_finite() && relax::meets(&q64(c), picture) {
+                    stretches.push(x);
+                }
+            }
+            flipped += ls.flip.iter().filter(|&&k| relax::meets(&q64(&layer.corners[k as usize]), picture)).count() as u32;
+            let mut cut_tris: Vec<u32> = Vec::new();
+            for e in ls.seams.iter().filter(|e| relax::meets(&e.ends, picture)) {
+                cut_tris.push(e.tri);
+                if e.first {
+                    seams += 1;
+                    for (r, slot) in by_rule.iter_mut().enumerate() {
+                        if e.rules & (1 << r) != 0 {
+                            *slot += 1;
+                        }
+                    }
+                }
+            }
+            cut_tris.sort_unstable();
+            cut_tris.dedup();
+            cut += ls.cut_fixed + cut_tris.len() as u32;
+            edge |= ls.edge_pts.iter().any(|e| e[0] <= hw && e[1] <= hh);
+            if let Some(grid) = &layer.owner {
+                let (a, b) = (grid.rejected_pairs(picture), grid.lost_cells(picture));
+                rejected = (rejected.0 + a.0, rejected.1 + a.1);
+                lost = (lost.0 + b.0, lost.1 + b.1);
+            }
         }
-        WrapStats { covered: (area / (4.0 * hw * hh)).clamp(0.0, 1.0) as f32, ..self.stats }
+        st.covered = (area / (4.0 * hw * hh)).clamp(0.0, 1.0) as f32;
+        st.reached_edge = self.spine_edge || edge;
+        st.ends_share = match self.ends {
+            Some(sum) => {
+                let share = sum / (2.0 * r.needed_along);
+                if share.is_finite() { share.clamp(0.0, 1.0) as f32 } else { 1.0 }
+            }
+            None => 1.0,
+        };
+        st.flipped = flipped;
+        st.seams = seams;
+        st.seams_by_rule = by_rule;
+        st.cut_tris = cut;
+        stretches.sort_by(f32::total_cmp);
+        st.stretch = stretches.get(((stretches.len() as f64 * 0.95) as usize).min(stretches.len().saturating_sub(1))).copied().unwrap_or(0.0);
+        st.rejected = if rejected.1 == 0 { 0.0 } else { (rejected.0 as f64 / rejected.1 as f64) as f32 };
+        st.lost_cut = if lost.1 == 0 { 0.0 } else { (lost.0 as f64 / lost.1 as f64) as f32 };
+        st
     }
 
     /// True when this parameterization serves `p` on `mesh` (4.4): the same mesh, `origin` and `rotation`

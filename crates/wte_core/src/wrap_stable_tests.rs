@@ -214,3 +214,45 @@ fn w1_the_chess_board_keeps_the_rows_under_a_pawn() {
     assert!(share >= 0.7, "the board receives only {share:.4} of the picture");
     assert!(!s.passed, "{s:?}");
 }
+
+/// Stable (w1), item 3: a parameterization reused for another size in its reach bucket bakes byte for byte like a
+/// fresh one of that size, and reports the same statistics (every field but the build time). Cases where the exact
+/// region decides (WA35's capped cylinder with the picture over the dome's shoulder, the plate with a 45 degree bump),
+/// a closed helix (WA32's torus: `passed`, `ends_share`), the cube on the floor with Jump on (the owner grid's
+/// `rejected`, `lost_cut`). Round 9 scaled by 1.0001 only; the exact pins' check used the unbucketed picture and the
+/// stats of a reused parameterization were those of the size it was built for (`covered` aside).
+#[test]
+fn w1_reuse_equals_fresh_within_the_bucket() {
+    let torus = wa32_cases().pop().expect("the torus case");
+    let cases: Vec<(&str, RawMesh, Projector)> = vec![
+        ("WA35 capped cylinder", samples::capped_cylinder(), wrapped(cylinder_anchor(Some(20), 0.9).0, cylinder_anchor(Some(20), 0.9).1, Vec3::Y, Vec2::new(0.3, 0.6))),
+        ("WA35 bump plate", a9_bump_plate(Vec2::new(0.1, 0.12), 0.04, 45.0), wrapped(Vec3::ZERO, Vec3::Z, Vec3::Y, Vec2::new(0.4, 0.2))),
+        ("WA32 torus", torus.1, torus.2),
+        ("WA24 cube on the floor", samples::uv_cube_on_floor(), with_options(wrapped(Vec3::new(0.0, 0.0, 1.2), Vec3::Y, Vec3::NEG_X, Vec2::new(1.0, 0.25)), true, false)),
+    ];
+    let no_time = |s: WrapStatsAlias| WrapStatsAlias { micros: 0, ..s };
+    for (what, raw, p) in cases {
+        let mut reused_sizes = 0;
+        for f in [0.84f32, 0.9, 0.95, 0.98, 0.995, 1.005, 1.02, 1.05, 1.1, 1.18] {
+            let (mut doc, id) = doc_with_stamp(raw.clone(), 512, p);
+            let (first, _) = doc.wrap_cache_probe(id);
+            let first = first.expect("a cached parameterization");
+            let scaled = Projector { half_size: p.half_size * f, ..p };
+            doc.set_stamp_placement(id, Placement::Projected(scaled), Commit::Final).unwrap();
+            let (now, _) = doc.wrap_cache_probe(id);
+            if !now.is_some_and(|w| Arc::ptr_eq(&w, &first)) {
+                continue;
+            }
+            reused_sizes += 1;
+            let reused_stats = doc.stamp_wrap_stats(id).expect("stats");
+            let reused_bake = doc_state(&mut doc);
+            let (mut fresh_doc, fresh_id) = doc_with_stamp(raw.clone(), 512, scaled);
+            let fresh_stats = fresh_doc.stamp_wrap_stats(fresh_id).expect("stats");
+            println!("W1 reuse {what} x {f}: reused {reused_stats:?}");
+            assert_eq!(doc_state(&mut fresh_doc).sets, reused_bake.sets, "{what} x {f}: the reused and the fresh parameterization bake differently");
+            assert_eq!(no_time(reused_stats), no_time(fresh_stats), "{what} x {f}: the reused parameterization reports other stats");
+        }
+        println!("W1 reuse {what}: {reused_sizes} sizes reused");
+        assert!(reused_sizes >= 2, "{what}: only {reused_sizes} sizes stay in the bucket");
+    }
+}

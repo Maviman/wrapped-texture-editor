@@ -246,7 +246,7 @@ pub(crate) fn wrap_bake(
     };
     let param_ms = started.elapsed().as_secs_f64() * 1e3;
     let baked = bake_wrapped(mesh, maps, &param, mips, tint, p, quality);
-    let s = param.stats_for(p);
+    let s = param.stats_for_src(p, mips.size());
     let line = format!(
         "wrap: stamp {} param {} verts {} tris in {:.1} ms ({}), covered {:.1} %, cut {}, turns {}, jumps {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}, passed {}, ends {:.1} %, lost_cut {:.2} %; bake {:.1} ms ({:?})",
         id.0,
@@ -293,7 +293,7 @@ pub(crate) fn wrap_param_only(
         return Some(UsedWrap { param: w, fresh: false });
     }
     let param = fresh_param(id, mesh, bvh, graph, maps, src_size, p)?;
-    let s = param.stats_for(p);
+    let s = param.stats_for_src(p, src_size);
     log::info!(
         "wrap: stamp {} param {} verts {} tris in {:.1} ms (fresh, param only), covered {:.1} %, cut {}, relaxed {}, seams {}, stretch {:.1} %, rejected {:.2} %, cg_iters {}, passed {}, ends {:.1} %, lost_cut {:.2} %",
         id.0,

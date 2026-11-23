@@ -2349,7 +2349,7 @@ mod tests {
                 report.bytes_written,
                 t.elapsed().as_secs_f64()
             );
-            assert_eq!(report.files.len().max(report.packaged), 2 * (1 + 4 + 2));
+            assert_eq!(report.files.len().max(report.packaged), 2 * (1 + 5 + 2), "flat, Base, Paint 1, three more, ORA, PSD per set");
         }
         let entries = zip_entries(&root.join("Zip").join("big.zip"));
         for (name, bytes) in &entries {

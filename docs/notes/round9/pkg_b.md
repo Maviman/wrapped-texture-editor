@@ -11,11 +11,11 @@ build:B (Opus). Date 2026-11-22. Logs and runs: `target\round9\pkg_b\` (git-igno
 |---|---|---|---|
 | (1) | `wrap_mesh.rs` (WrapMesh: weld + snap per mesh, CSR, global edges), `Patch::from_graph`; round 8's `Patch::build` kept as `build_sphere` under `#[cfg(test)]` | done | fb4e3ab |
 | (2) | growth from the anchor (`collect_grown`), Jump closure by part boxes; `Jumper::new` without the hash map | done | fb4e3ab |
-| (3) | `BakeSets::wrap_mesh` (`WrapMeshCell`), jobs carry it, warm-up | done (warm-up reworked: background thread) | fb4e3ab, B7 commit |
+| (3) | `BakeSets::wrap_mesh` (`WrapMeshCell`), jobs carry it, warm-up | done (warm-up reworked: background thread) | fb4e3ab, 9f23c6b |
 | (4) | Final-wait rule (T8) | done | fb4e3ab |
-| (5) | `uv_share.rs` + panel lines (T9; "Longer than the way round") | done | fb4e3ab (+ work cap in the B7 commit) |
+| (5) | `uv_share.rs` + panel lines (T9; "Longer than the way round") | done | fb4e3ab, 9f23c6b (work cap), 81e09c1 (fine meshes) |
 | (6) | step 10: `shot_off.png`, coverage asserts, third log state (panel lines) | done | fb4e3ab |
-| (7) | WA15 probe with phases, sweep, identity, timings, ARCHITECTURE | done | last commits |
+| (7) | WA15 probe with phases, sweep, identity, timings, ARCHITECTURE | done | 9f23c6b, 81e09c1 |
 
 Steps (1)-(6) went into one commit (fb4e3ab) because they were built and tested together (the doc plumbing changes the
 callers of `wrap_param`); every later fix is its own commit.

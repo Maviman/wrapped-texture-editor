@@ -6367,7 +6367,9 @@ counted down) instead of failing (`export_errors`).
 |---|---|---|
 | `export_unsettled` [PATH] | fix_export item 6. The sphere sample (or PATH); the sample image as a 30 % Wrap stamp placed with `BakeWait(false)`; the frame clock (`AppState::frame_work`) reset while the Final is pending; `RunExport` of the stamp's layers (+ flattened) into `<out>_a` at once; after it, the same export into `<out>_b` | the Final was pending at the export; no frame of UI work took 300 ms or more, at least 3 frames drawn; the two folders byte-identical; every layer file equals its layer's Final pixels, with ink. Run on ABeautifulGame (Final ~1-4 s) and `high_poly_sphere.obj` (~4 s) |
 | `export_nouv` | fix_export item 9 (L3). The UV-less tetrahedron (generated layout), a stroke and a Project stamp; everything exported into `<out>_a`; Save As, Open; everything again into `<out>_b`; then as a zip into `<out>_zip` | the export holds flattened + every visible layer + ORA + PSD; `_a` and `_b` byte-identical; the zip's entries equal the loose files |
-| `export_errors` | fix_export item 9 (L1, L4). Sphere sample; three exports that cannot work: the folder path under a file, a planned file that is a folder (Files, an old file in the folder), the zip's name a folder; then a folder with a dead process's stage folder, temp zip and temp PNG plus `notes.txt`, exported as a zip | each failure: the "Export failed" message, an error toast (announced), nothing new written, the old file unchanged, no `.tmp-` entry; the last export removes the leftovers and keeps `notes.txt` | Gate 3 added named mid-run captures (`Step::Shot`) for the report:
+| `export_errors` | fix_export item 9 (L1, L4). Sphere sample; three exports that cannot work: the folder path under a file, a planned file that is a folder (Files, an old file in the folder), the zip's name a folder; then a folder with a dead process's stage folder, temp zip and temp PNG plus `notes.txt`, exported as a zip | each failure: the "Export failed" message, an error toast (announced), nothing new written, the old file unchanged, no `.tmp-` entry; the last export removes the leftovers and keeps `notes.txt` |
+
+Gate 3 added named mid-run captures (`Step::Shot`) for the report:
 `brush_shape` `_dialog` (the closing dialog), `text_tab` `_page_character` / `_page_warp` / `_page_path`, `text_fonts`
 `_picker`, `text_warp` `_warp3d`, `text_path` `_circle3d`, `text_gaps` `_gap3d`. The ten were written and
 first run by their author packages (ROUND4_PLAN 2.2 item 11) and pasted by the gate (sitting M2). `brush_tab` applies
@@ -6954,7 +6956,12 @@ the_zip_name_follows_the_layers_choice}`, `io_flows::tests::{export_toasts_count
 this_process_runs_and_a_finished_one_does_not}`; GPU (ignored) `control_sweep::gpu_tests::{export_dialog_replaces_a_zip_through_the_confirm,
 a_zip_export_cancelled_while_packing_leaves_nothing}`; scenarios `export_unsettled`, `export_nouv`, `export_errors` and the
 `export_flow` / `multi` / `fuzz_path` additions (8.11). `tools/stable/verify_zip_vs_loose.py` checks export_flow's zips
-against its loose files outside the app.
+against its loose files outside the app. The independent check (`docs/notes/stable/check_exp2.md`) adds
+`tools/stable/check_exp2_verify.py` (`python -E -P`, numpy + Pillow): per export_flow run folder, the full zip against
+the loose files (names, bytes, 1980 dates, UTF-8 flag), every `_selection.zip` entry and every `_one` / `_sel` file
+against the full zip's file of that name, the flattened PNG of each set against a straight-alpha normal-over
+re-composite of its per-layer PNGs (within 2/255), ORA (`mimetype` first and stored, layer count, `mergedimage.png` =
+flattened) and PSD headers, and no `.tmp-` entry left.
 
 **Export-select app tests** (EXPORT_SELECT_PLAN 6.2): `panels::layers::tests::row_clicks_select_toggle_or_extend` (the
 `row_click_action` table); `dispatch::tests::{ctrl_and_shift_select_layers_without_touching_the_document` (toggle add /

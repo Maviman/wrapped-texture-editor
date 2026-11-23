@@ -115,12 +115,12 @@ x Jump off / on), e.g. ABeautifulGame `7497da3c18a487b4` / `0e04f53c2484ec79`, h
 Exe sweep step 10 (`param` = the `wrap:` line, `applied` = "Final applied after"; round 8 alone = `wte_r8.exe` run here
 alone, round 8 sweep = today's r8 logs with three runs in parallel):
 
-| line | round 8 | build:B | check:B (`s_cb2` / `s_cb3`) | plan 7.3 |
+| line | round 8 | build:B | check:B (`s_cb2`; `s_cb3`; `s_final`) | plan 7.3 |
 |---|---|---|---|---|
-| T-a high_poly_sphere param / applied | 11.0 / 11.1 s (sweep) | 6.4 / 6.9 s | 5.6 / 6.1 s; 6.1 / 6.6 s | <= 5 s and <= 0.5 x r8: **not met** (relax 86-90 %: one 78k-wedge component, solved twice because its 2-wedge exact region falls back; ~2.7 ms per CG step, memory-bound) |
-| T-b ABeautifulGame Jump off param / applied | 2.77 / 2.87 s alone (3.44 s sweep) | 1.36 / 2.15 s | 0.90 / 2.03 s; 1.13 / 2.05 s | <= 1.0 s: param met in one of two runs; applied includes the first wrap's graph wait (0.8 s) |
-| T-b ABeautifulGame Jump on | 13.5 / 14.2 s alone (20.3 s sweep) | 29.0 / 29.7 s | 7.2 / 8.1 s; 6.6 / 7.3 s (probe 5.6-7.2 s) | <= 6 s: **not met** (ratio to round 8 alone 0.49-0.53; relax ~75 %) |
-| Avocado off / on param | 8.4 / 19.3 ms alone | 34.5 / 60.0 ms | 21.5 / 41.0; 19.1 / 36.4 ms (probe after the last owner change: 14 / 49 ms) | - |
+| T-a high_poly_sphere param / applied | 11.0 / 11.1 s (sweep) | 6.4 / 6.9 s | 5.6 / 6.1 s; 6.1 / 6.6 s; 5.2 / 5.7 s (on: 5.0 / 5.05 s) | <= 5 s and <= 0.5 x r8: **not met** (relax 86-90 %: one 78k-wedge component, solved twice because its 2-wedge exact region falls back; ~2.7 ms per CG step, memory-bound) |
+| T-b ABeautifulGame Jump off param / applied | 2.77 / 2.87 s alone (3.44 s sweep) | 1.36 / 2.15 s | 0.90 / 2.03 s; 1.13 / 2.05 s; 0.75 / 1.58 s | <= 1.0 s: param met in one of two runs; applied includes the first wrap's graph wait (0.8 s) |
+| T-b ABeautifulGame Jump on | 13.5 / 14.2 s alone (20.3 s sweep) | 29.0 / 29.7 s | 7.2 / 8.1 s; 6.6 / 7.3 s; 6.9 / 7.7 s (probe 5.6-7.2 s) | <= 6 s: **not met** (ratio to round 8 alone 0.49-0.53; relax ~75 %) |
+| Avocado off / on param | 8.4 / 19.3 ms alone | 34.5 / 60.0 ms | 21.5 / 41.0; 19.1 / 36.4; 15.6 / 29.6 ms | - |
 
 WA15 probe (release `wrap_bench_models`, `wa15.log`), graph path:
 
@@ -132,3 +132,16 @@ WA15 probe (release `wrap_bench_models`, `wa15.log`), graph path:
 | board 20 %, Jump on | 4,648 ms | 861 ms (relax 68 %) | T-d <= max(1.5 x off, 150 ms) = 150 ms: not met |
 | piece 20 %, Jump on | 945 ms | 546 ms (relax 54 %) | T-d <= 211 ms: not met |
 | board 100 %, Jump on | 104.8 s | 26.9 s | - |
+
+## 8. Final state (HEAD of `round9-b` after check:B)
+
+- `cargo test --workspace --no-fail-fast`: **1,170 passed / 5 failed / 35 ignored** (363 + 760 + 15 + 9 + 23; +3 app
+  tests, +2 ignored tools). Failing, asserts untouched, numbers equal to A's: `wa4_r8` (60 deg ink 1.1177, cells
+  0.769..1.432), `wa20` (ink 1.1890, cells 0.665..2.886), `wa17` / `wa24` (ink 0.915 / 0.9146), `wa35` (92.3681 %, max
+  51). Clippy 0. Release build ok (`bin\wte_cb_final.exe`).
+- Final sweep (`s_final`): every composite, step-10 line and shot equal to `s_cb3` and to build:B's sweep; red step-10
+  asserts unchanged (ABeautifulGame, many_islands: picture larger than the part; Lantern: lost_cut 11.23 %).
+- Open (gate / user): T-a (high_poly_sphere 5.0-6.6 s against 5 s), T-b Jump on (6.6-7.2 s against 6 s), T-d (Jump
+  on at the WA15 spots); the step-10 exemption for a part smaller than the picture across; Lantern's corner and
+  tree-cotree cuts (package A); a faster solve for one large component needs a quality decision (fewer iterations, a
+  better preconditioner): every speed change here kept every bit.

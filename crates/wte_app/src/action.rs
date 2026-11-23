@@ -50,7 +50,8 @@ pub enum AppAction {
     Redo,
     /// Esc: cancel the interaction / close the dialog / leave Preview (order in 8.3).
     Cancel,
-    /// Delete: the selected stamp, else the active layer of the active set.
+    /// Delete: the selected layers when several are selected (fix_export item 5), else the selected stamp, else the
+    /// active layer of the active set.
     DeleteSelection,
 
     // ---- view ----
@@ -88,6 +89,10 @@ pub enum AppAction {
     AddPaintLayer,
     DuplicateLayer(LayerId),
     DeleteLayer(LayerId),
+    /// fix_export item 5: Duplicate on a multi-selection of the Layers list: every listed layer, one undo step.
+    DuplicateLayers(Vec<LayerId>),
+    /// fix_export item 5: Delete on a multi-selection of the Layers list: every listed layer, one undo step.
+    DeleteLayers(Vec<LayerId>),
     MergeDown(LayerId),
     RasterizeLayer(LayerId),
     MoveLayer { layer: LayerId, to_index: usize },

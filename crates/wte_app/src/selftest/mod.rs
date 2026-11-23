@@ -308,7 +308,15 @@ impl Runner {
             let new: Vec<String> = state.toasts.error_texts()[self.error_baseline.min(state.toasts.error_texts().len())..].to_vec();
             self.error_baseline = state.toasts.error_count();
             for text in new {
-                self.fail(EXIT_FAILED, format!("error toast: {text}"));
+                // fix_export item 9: a scenario that drives a failure on purpose announces its error toasts
+                // (`expected_error_toasts` in the scratch values); each one announced is taken instead of failing.
+                let expected = self.scratch.values.get("expected_error_toasts").copied().unwrap_or(0);
+                if expected > 0 {
+                    self.scratch.values.insert("expected_error_toasts", expected - 1);
+                    log::info!("expected error toast: {text}");
+                } else {
+                    self.fail(EXIT_FAILED, format!("error toast: {text}"));
+                }
             }
         }
         if self.run_start.elapsed() > self.run_timeout && !self.failing {

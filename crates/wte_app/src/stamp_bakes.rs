@@ -387,6 +387,21 @@ fn needs_frame_after_dispatch(state: &mut AppState) -> bool {
     ((bakes.in_flight.is_none() && waiting && !waits_for_wrap) || wrap_waiting) && !doc.stroke_active()
 }
 
+/// fix_export item 6: true while `settle` would have something to do for the open document: a Final bake of it in
+/// flight, an output held, or a stamp still waiting for its Final.
+pub(crate) fn bakes_pending(state: &AppState) -> bool {
+    let current = state.session.as_ref().map(|s| s.scene_generation);
+    state.final_bakes.in_flight.as_ref().is_some_and(|f| Some(f.generation) == current)
+        || state.final_bakes.held.is_some()
+        || state.doc().is_some_and(|d| d.has_unbaked_stamps())
+}
+
+/// fix_export item 6: true while a Final bake or a wrap job runs on a worker, i.e. the pending Finals progress without
+/// the UI thread (`pump` starts the next one when it lands).
+pub(crate) fn bake_job_running(state: &AppState) -> bool {
+    state.final_bakes.in_flight.is_some() || state.wrap_jobs.in_flight.is_some()
+}
+
 /// Called from `io_flows::on_job_output` with the output of a bake job.
 pub fn on_output(app: &mut WteApp, generation: u64, output: Box<StampBakeOutput>) {
     on_output_with(&mut app.state, generation, output);
@@ -402,7 +417,9 @@ pub(crate) fn on_output_with(state: &mut AppState, generation: u64, output: Box<
 
 /// Waits for the bake in flight of the open document and applies it, then bakes every other waiting stamp on the UI
 /// thread (`Document::settle_final_bakes`). The one place the UI thread blocks on a worker (4.6). Called before the
-/// snapshot of save and export, by the export dialog, and before merge down and rasterize. Stamps of an open pending
+/// snapshot of save, and before merge down and rasterize. Export does not call it (fix_export item 6): its job waits
+/// behind the progress dialog until the bakes have landed (`io_flows::feed_waiting_export`), and so does not freeze
+/// the UI for a wrapped stamp's Final (seconds on a large model). Stamps of an open pending
 /// edit are not baked (the callers that keep pixels flush first; merge down and rasterize bake their own stamp in the
 /// core, rule 8).
 pub fn settle(app: &mut WteApp) {

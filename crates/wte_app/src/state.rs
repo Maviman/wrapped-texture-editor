@@ -821,6 +821,66 @@ pub struct ExportDialogState {
     /// The layer selection captured when the dialog opened, bottom to top: what the Layers choice "Selected (N)"
     /// exports.
     pub selected_layers: Vec<LayerId>,
+    /// fix_export item 1: the texture sets and file kinds of the *other* side of the Layers choice, when the dialog
+    /// was opened for layers ("Export this layer...", "Export selected layers..."): the dialog's normal ticks while the
+    /// choice is Selected, the layer preset (per-layer PNGs only) while it is Visible / All. Switching sides swaps
+    /// them (`dialogs::export::switch_scope`), so Visible / All export everything again. `None` for a dialog opened
+    /// with Export...: its ticks stay as they are.
+    pub other_ticks: Option<ExportTicks>,
+}
+
+/// The texture sets and file kinds of the export options (one side of the Layers choice, fix_export item 1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportTicks {
+    pub sets: Option<Vec<TextureSetId>>,
+    pub flat: Option<wte_core::FlatFormat>,
+    pub per_layer_png: bool,
+    pub ora: bool,
+    pub psd: bool,
+}
+
+impl ExportTicks {
+    /// The ticks of `opts`.
+    pub fn of(opts: &ExportOptions) -> ExportTicks {
+        ExportTicks { sets: opts.sets.clone(), flat: opts.flat, per_layer_png: opts.per_layer_png, ora: opts.ora, psd: opts.psd }
+    }
+
+    /// Writes the ticks into `opts`.
+    pub fn apply(self, opts: &mut ExportOptions) {
+        opts.sets = self.sets;
+        opts.flat = self.flat;
+        opts.per_layer_png = self.per_layer_png;
+        opts.ora = self.ora;
+        opts.psd = self.psd;
+    }
+}
+
+/// fix_export item 6: the longest UI-thread work of one frame (`App::logic` start to `App::ui` end) since the last
+/// `reset`. The self-test asserts on it ("the UI never froze": an export right after a wrapped stamp's placement must
+/// not wait for its Final bake on the UI thread).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameWork {
+    start: Option<std::time::Instant>,
+    pub max: std::time::Duration,
+    pub frames: u64,
+}
+
+impl FrameWork {
+    pub fn begin(&mut self) {
+        self.start = Some(std::time::Instant::now());
+    }
+
+    pub fn end(&mut self) {
+        if let Some(start) = self.start.take() {
+            self.max = self.max.max(start.elapsed());
+            self.frames += 1;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.max = std::time::Duration::ZERO;
+        self.frames = 0;
+    }
 }
 
 /// The modal dialog that is open, if any.
@@ -983,6 +1043,8 @@ pub struct AppState {
     /// Mirror for the self-test runner and the tests: a wrap job is in flight, an output held, a wrapped stamp waits
     /// for its Preview job or a param-only job was asked for (`stamp_bakes`).
     pub wrap_jobs_pending: bool,
+    /// fix_export item 6: the longest frame of UI-thread work (the self-test's freeze check).
+    pub frame_work: FrameWork,
 }
 
 /// When the deferred stamp Preview bakes (`Document::bake_stale_previews`) may run next: after a bake that took `t`,
@@ -1073,6 +1135,7 @@ impl AppState {
             final_bakes: crate::stamp_bakes::FinalBakes::default(),
             wrap_jobs: crate::stamp_bakes::WrapJobs::default(),
             wrap_jobs_pending: false,
+            frame_work: FrameWork::default(),
         }
     }
 

@@ -109,6 +109,74 @@ impl Document {
         Ok(())
     }
 
+    /// Removes several layers as one undo step "Delete Layers" (fix_export item 5: Delete on a multi-selection of the
+    /// Layers list). Each id is removed as by `remove_layer` (a stamp / text layer removes its whole stamp, all linked
+    /// layers); ids that are gone by then (another set's layer of a stamp removed earlier, an unknown id) are skipped,
+    /// and so is a locked layer. Returns how many of `layers` were removed; `Err` with the first error when none was.
+    pub fn remove_layers(&mut self, layers: &[LayerId]) -> Result<usize, EditError> {
+        self.guard_no_stroke()?;
+        let mut first_error = None;
+        let removed = self.group_edits("Delete Layers", |doc| {
+            let mut removed = 0;
+            for &id in layers {
+                if doc.find_layer(id).is_none() {
+                    continue;
+                }
+                match doc.remove_layer(id) {
+                    Ok(()) => removed += 1,
+                    Err(e) => {
+                        first_error.get_or_insert(e);
+                    }
+                }
+            }
+            removed
+        });
+        match (removed, first_error) {
+            (0, Some(e)) => Err(e),
+            (0, None) => Err(EditError::UnknownLayer),
+            (n, _) => Ok(n),
+        }
+    }
+
+    /// Duplicates several layers as one undo step "Duplicate Layers" (fix_export item 5), each as by
+    /// `duplicate_layer` (a stamp / text layer duplicates its stamp). Returns the copies in the order of `layers`
+    /// (unknown ids are skipped). When the active layer of a set was among `layers`, its copy is that set's active
+    /// layer afterwards; `Err` with the first error when nothing was copied.
+    pub fn duplicate_layers(&mut self, layers: &[LayerId]) -> Result<Vec<LayerId>, EditError> {
+        self.guard_no_stroke()?;
+        let actives: Vec<Option<LayerId>> = self.sets.iter().map(|s| s.active).collect();
+        let mut first_error = None;
+        let copies = self.group_edits("Duplicate Layers", |doc| {
+            let mut copies = Vec::new();
+            for &id in layers {
+                if doc.find_layer(id).is_none() {
+                    continue;
+                }
+                match doc.duplicate_layer(id) {
+                    Ok(copy) => {
+                        copies.push((id, copy));
+                    }
+                    Err(e) => {
+                        first_error.get_or_insert(e);
+                    }
+                }
+            }
+            for (set, active) in doc.sets.iter_mut().zip(actives) {
+                if let Some(&(_, copy)) = copies.iter().find(|(original, _)| Some(*original) == active)
+                    && set.layer(copy).is_some()
+                {
+                    set.active = Some(copy);
+                }
+            }
+            copies
+        });
+        match (copies.is_empty(), first_error) {
+            (true, Some(e)) => Err(e),
+            (true, None) => Err(EditError::UnknownLayer),
+            (false, _) => Ok(copies.into_iter().map(|(_, copy)| copy).collect()),
+        }
+    }
+
     /// Raster: copies pixels into a new unlocked layer "<name> copy" directly above. Stamp/text: exactly
     /// `let s = self.duplicate_stamp(stamp)?;` then the new stamp's linked layer in the same set is returned.
     ///
@@ -489,6 +557,80 @@ mod tests {
         for layer in doc.sets.iter().flat_map(|s| &s.layers).filter(|l| l.is_raster()) {
             assert_eq!(Arc::strong_count(raster_arc(doc, layer.id)), 1, "{what}: layer {:?} is pinned", layer.id);
         }
+    }
+
+    /// fix_export item 5: Delete and Duplicate on several layers are one undo step each; undo restores the document
+    /// byte for byte, redo repeats all of it; a locked layer is skipped, a stamp layer takes its stamp along.
+    #[test]
+    fn several_layers_are_deleted_and_duplicated_as_one_undo_step() {
+        let mut doc = doc_with_stamp();
+        paint_rect(&mut doc, LayerId(3), IRect::new(20, 20, 70, 60), [200, 40, 40, 180]);
+        paint_rect(&mut doc, LayerId(1), IRect::new(0, 0, 40, 96), [30, 90, 200, 255]);
+        doc.history.clear();
+        let extra = doc.add_raster_layer(S0, Some("Extra")).unwrap();
+        doc.history.clear();
+        doc.set_active_layer(S0, Some(LayerId(3))).unwrap();
+        let before = doc_state(&mut doc);
+
+        // Duplicate a paint layer, the stamp layer and another paint layer: one entry.
+        let copies = doc.duplicate_layers(&[LayerId(1), LayerId(101), LayerId(3)]).unwrap();
+        assert_eq!(copies.len(), 3);
+        assert_eq!(doc.history.undo_len(), 1, "one undo step");
+        assert_eq!(doc.undo_label(), Some("Duplicate Layers"));
+        assert_eq!(doc.stamps.len(), 2, "the stamp layer duplicated its stamp");
+        assert_eq!(doc.sets[0].active, Some(copies[2]), "the active layer's copy is active");
+        let duplicated = doc_state(&mut doc);
+        assert!(doc.undo().is_some());
+        assert_eq!(doc_state(&mut doc), before, "one undo restores everything");
+        assert!(doc.undo().is_none());
+        assert!(doc.redo().is_some());
+        assert_eq!(doc_state(&mut doc), duplicated, "one redo repeats everything");
+        assert!(doc.undo().is_some());
+
+        // Delete two paint layers and the stamp layer (which removes its stamp in both sets); a locked layer stays.
+        doc.set_layer_locked(extra, true).unwrap();
+        doc.history.clear();
+        let locked_before = doc_state(&mut doc);
+        let removed = doc.remove_layers(&[LayerId(1), LayerId(101), extra, LayerId(3)]).unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(doc.history.undo_len(), 1);
+        assert_eq!(doc.undo_label(), Some("Delete Layers"));
+        assert!(doc.stamps.is_empty() && doc.find_layer(LayerId(102)).is_none(), "the stamp went with its layer");
+        assert_eq!(ids(&doc, S0), [extra.0]);
+        let deleted = doc_state(&mut doc);
+        assert!(doc.undo().is_some());
+        assert_eq!(doc_state(&mut doc), locked_before);
+        assert!(doc.redo().is_some());
+        assert_eq!(doc_state(&mut doc), deleted);
+        assert_rasters_unpinned(&doc, "after redo");
+        // Only locked or unknown layers: an error and no entry.
+        let entries = doc.history.undo_len();
+        assert!(matches!(doc.remove_layers(&[extra]), Err(EditError::LayerLocked)));
+        assert!(doc.remove_layers(&[LayerId(9_999)]).is_err());
+        assert!(doc.duplicate_layers(&[LayerId(9_999)]).is_err());
+        assert_eq!(doc.history.undo_len(), entries);
+        // One layer: an ordinary single entry under the group's name.
+        doc.set_layer_locked(extra, false).unwrap();
+        let entries = doc.history.undo_len();
+        doc.duplicate_layers(&[extra]).unwrap();
+        assert_eq!(doc.history.undo_len(), entries + 1);
+        assert!(matches!(doc.history.undo.last().unwrap().edit, Edit::Structure(_)));
+    }
+
+    /// The group keeps its entries even when the history is at its entry limit: older entries are evicted after it.
+    #[test]
+    fn a_group_at_the_entry_limit_evicts_older_entries_only() {
+        let mut doc = doc_with_stamp();
+        doc.history.clear();
+        doc.history.max_entries = 2;
+        let a = doc.add_raster_layer(S0, Some("A")).unwrap();
+        let b = doc.add_raster_layer(S0, Some("B")).unwrap();
+        let before = doc_state(&mut doc);
+        doc.remove_layers(&[a, b, LayerId(3)]).unwrap();
+        assert_eq!(doc.history.undo_len(), 2);
+        assert_eq!(doc.undo_label(), Some("Delete Layers"));
+        assert!(doc.undo().is_some());
+        assert_eq!(doc_state(&mut doc), before);
     }
 
     #[test]

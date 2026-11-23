@@ -2,6 +2,8 @@
 // and the run that writes them (flattened textures, per-layer PNGs, OpenRaster, PSD).
 
 use std::io::{BufWriter, Write};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -11,7 +13,7 @@ use rayon::prelude::*;
 use crate::composite::flatten_layers;
 use crate::document::{DocumentSnapshot, SetSnapshot};
 use crate::error::{ExportError, ImageIoError};
-use crate::ids::{LayerId, TextureSetId};
+use crate::ids::{LayerId, StampId, TextureSetId};
 use crate::image_io::{FlatFormat, PngLevel, encode_flat, encode_png};
 use crate::layer::{BlendMode, Layer, LayerKind};
 use crate::pixel::{CroppedBuf, PixelBuf, PixelView};
@@ -25,7 +27,7 @@ pub mod ora;
 pub mod packbits;
 pub mod psd;
 
-pub use naming::{flat_name, layer_name, layered_name, package_name, sanitize_file_stem};
+pub use naming::{flat_name, layer_name, layered_name, package_name, sanitize_file_stem, selection_package_name};
 pub use ora::write_ora;
 pub use psd::{PsdDoc, PsdLayer, read_psd, write_psd};
 
@@ -115,6 +117,52 @@ struct PlanItem {
     output: Output,
 }
 
+/// A design (stamp or text) that spans several texture sets has one layer per set, all linked to the same `StampId`
+/// (`LayerKind::Stamp { stamp, .. }` / `LayerKind::Text { stamp, .. }`, `Document::stamp_layers`). The selection
+/// `ids` completed by those linked layers: the ids as given, then the linked layers of their stamps in the other sets
+/// (set order), without duplicates. Ids that do not exist stay (they are ignored later). The export dialog shows the
+/// count of the added layers.
+pub fn linked_selection(snapshot: &DocumentSnapshot, ids: &[LayerId]) -> Vec<LayerId> {
+    let stamps: Vec<StampId> = snapshot
+        .sets
+        .iter()
+        .flat_map(|set| &set.layers)
+        .filter(|layer| ids.contains(&layer.id))
+        .filter_map(Layer::stamp_id)
+        .collect();
+    let mut out: Vec<LayerId> = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !out.contains(id) {
+            out.push(*id);
+        }
+    }
+    if stamps.is_empty() {
+        return out;
+    }
+    for layer in snapshot.sets.iter().flat_map(|set| &set.layers) {
+        if layer.stamp_id().is_some_and(|s| stamps.contains(&s)) && !out.contains(&layer.id) {
+            out.push(layer.id);
+        }
+    }
+    out
+}
+
+/// `opts` with its layer selection completed by the linked layers of its designs (`linked_selection`), so "Export
+/// this layer" on a stamp across two materials writes that stamp's layer of both sets. Borrowed when nothing changes.
+fn resolved<'a>(snapshot: &DocumentSnapshot, opts: &'a ExportOptions) -> Cow<'a, ExportOptions> {
+    match &opts.layers {
+        Some(ids) => {
+            let linked = linked_selection(snapshot, ids);
+            if linked.as_slice() == ids.as_slice() {
+                Cow::Borrowed(opts)
+            } else {
+                Cow::Owned(ExportOptions { layers: Some(linked), ..opts.clone() })
+            }
+        }
+        None => Cow::Borrowed(opts),
+    }
+}
+
 /// Indices of the sets to export: all, or the requested ones that exist, ascending and without duplicates. With a
 /// layer selection (`opts.layers`), the sets that hold none of the selected layers are left out.
 ///
@@ -149,35 +197,83 @@ fn exported_layers<'a>(set: &'a SetSnapshot, opts: &'a ExportOptions) -> impl It
     })
 }
 
+/// What a planned file holds, as the key of the name map (`reference_names`).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+enum NameKey {
+    Flat,
+    Layer(usize),
+    Ora,
+    Psd,
+}
+
+/// The file names of one export, the same for every narrower export of the document (fix_export item 4): the names
+/// are handed out (`NameDeduper`, `_2`, `_3`, ...) over the *reference plan*, not over the files of this export. The
+/// reference plan is every file the full export could write: per set (all sets when names carry the set name, else
+/// the selected ones) the flattened texture (`opts.flat`'s extension, PNG when off), every layer of the stack (hidden
+/// ones too), ORA and PSD, in plan order. So a selection of the second of two sets whose names collide (`Body` /
+/// `body`, `Mat:1` / `Mat_1`, two long names that share their first 64 characters) gets the `_2` name the full export
+/// gives that file, and an export with fewer formats or without hidden layers keeps every other name.
+fn reference_names(
+    snapshot: &DocumentSnapshot,
+    opts: &ExportOptions,
+    sets: &[usize],
+    multi: bool,
+) -> HashMap<(usize, NameKey), String> {
+    let base = opts.base_name.as_str();
+    let reference: Vec<usize> = if multi { (0..snapshot.sets.len()).collect() } else { sets.to_vec() };
+    let flat_ext = opts.flat.map_or("png", |format| format.extension());
+    let mut names = naming::NameDeduper::default();
+    let mut map = HashMap::new();
+    for index in reference {
+        let set = &snapshot.sets[index];
+        let mut give = |key: NameKey, name: String| {
+            map.insert((index, key), names.unique("", &name, |_| false));
+        };
+        give(NameKey::Flat, flat_name(base, &set.name, multi, flat_ext));
+        for (i, layer) in set.layers.iter().enumerate() {
+            give(NameKey::Layer(i), layer_name(base, &set.name, multi, i, layer.kind_name(), &layer.name));
+        }
+        give(NameKey::Ora, layered_name(base, &set.name, multi, "ora"));
+        give(NameKey::Psd, layered_name(base, &set.name, multi, "psd"));
+    }
+    map
+}
+
 /// The ordered list of output files: per set the flattened texture, the per-layer PNGs bottom to top, ORA, PSD.
-/// Colliding names get `_2`, `_3`, ... (section 7.5).
+/// Names come from `reference_names` (colliding names get `_2`, `_3`, ..., section 7.5).
 fn build_plan(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<PlanItem> {
     let (sets, multi) = selected_sets(snapshot, opts);
-    let base = opts.base_name.as_str();
-    let mut names = naming::NameDeduper::default();
+    let names = reference_names(snapshot, opts, &sets, multi);
     let mut items = Vec::new();
-    let mut push = |name: String, set: usize, output: Output| {
-        let unique = names.unique("", &name, |_| false);
-        items.push(PlanItem { path: opts.dir.join(unique), set, output });
+    let mut push = |key: NameKey, set: usize, output: Output| {
+        let name = names.get(&(set, key)).cloned().unwrap_or_default();
+        items.push(PlanItem { path: opts.dir.join(name), set, output });
     };
     for index in sets {
         let set = &snapshot.sets[index];
         if let Some(format) = opts.flat {
-            push(flat_name(base, &set.name, multi, format.extension()), index, Output::Flat(format));
+            push(NameKey::Flat, index, Output::Flat(format));
         }
         if opts.per_layer_png {
-            for (i, layer) in exported_layers(set, opts) {
-                push(layer_name(base, &set.name, multi, i, layer.kind_name(), &layer.name), index, Output::Layer(i));
+            for (i, _) in exported_layers(set, opts) {
+                push(NameKey::Layer(i), index, Output::Layer(i));
             }
         }
         if opts.ora {
-            push(layered_name(base, &set.name, multi, "ora"), index, Output::Ora);
+            push(NameKey::Ora, index, Output::Ora);
         }
         if opts.psd {
-            push(layered_name(base, &set.name, multi, "psd"), index, Output::Psd);
+            push(NameKey::Psd, index, Output::Psd);
         }
     }
     items
+}
+
+/// The name of the zip of a zip export (`ExportPackage::Zip`): `<base>.zip` for an export of the layers (Visible /
+/// All), `<base>_selection.zip` for a layer selection ("Export this layer", "Export selected layers"), so a selection
+/// never replaces the full package in the same folder. Section 7.5.
+pub fn package_name_for(opts: &ExportOptions) -> String {
+    if opts.layers.is_some() { selection_package_name(&opts.base_name) } else { package_name(&opts.base_name) }
 }
 
 /// The exact list of files `run` would write for these options (same naming and de-duplication, same order), without
@@ -186,21 +282,24 @@ fn build_plan(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<PlanItem
 /// Per selected set (ascending id; ids that do not exist are ignored): the flattened texture, the per-layer PNGs
 /// bottom to top (index = position in the full layer stack), the ORA file, the PSD file.
 ///
-/// `Files`: these are the files written. `Zip`: the one `<base>.zip` (`package_name`), or nothing when there is
-/// nothing to pack; `plan_contents` lists what goes inside.
+/// A layer selection is completed by the linked layers of its designs in the other sets (`linked_selection`).
+///
+/// `Files`: these are the files written. `Zip`: the one `<base>.zip` or `<base>_selection.zip` (`package_name_for`),
+/// or nothing when there is nothing to pack; `plan_contents` lists what goes inside.
 pub fn plan(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<PathBuf> {
-    let items = build_plan(snapshot, opts);
+    let opts = resolved(snapshot, opts);
+    let items = build_plan(snapshot, &opts);
     match opts.package {
         ExportPackage::Files => items.into_iter().map(|item| item.path).collect(),
         ExportPackage::Zip if items.is_empty() => Vec::new(),
-        ExportPackage::Zip => vec![opts.dir.join(package_name(&opts.base_name))],
+        ExportPackage::Zip => vec![opts.dir.join(package_name_for(&opts))],
     }
 }
 
 /// The files of the export in plan order, whatever the package: for `Files` the names of `plan`, for `Zip` the
 /// entries of the zip (same names). Touches no disk.
 pub fn plan_contents(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<PlannedFile> {
-    build_plan(snapshot, opts)
+    build_plan(snapshot, &resolved(snapshot, opts))
         .into_iter()
         .map(|item| {
             let set = &snapshot.sets[item.set];
@@ -513,9 +612,10 @@ fn run_in_lanes(
     progress: &dyn Progress,
     max_lanes: usize,
 ) -> Result<ExportReport, ExportError> {
+    let opts = resolved(snapshot, opts);
     match opts.package {
-        ExportPackage::Files => run_files(snapshot, opts, progress, max_lanes, true),
-        ExportPackage::Zip => run_zip(snapshot, opts, progress, max_lanes),
+        ExportPackage::Files => run_files(snapshot, &opts, progress, max_lanes, true),
+        ExportPackage::Zip => run_zip(snapshot, &opts, progress, max_lanes),
     }
 }
 
@@ -536,6 +636,7 @@ fn run_files(
     run.check_cancelled()?;
     progress.report(0.0, "Exporting");
     std::fs::create_dir_all(&opts.dir)?;
+    preflight(&opts.dir, items.iter().map(|item| item.path.as_path()))?;
 
     let mut groups: Vec<SetGroup> = Vec::new();
     let mut start = 0;
@@ -610,6 +711,23 @@ fn run_files(
     }
 }
 
+/// Checks, before anything is written (fix_export item 9), that the output folder takes files (a probe file is
+/// created and removed again) and that no planned file is a folder. A read-only or blocked folder then fails before a
+/// single file of the export replaces an old one, so no mix of new and old files is left. A failure while writing
+/// (a full disk, a file held open by another program) still leaves the files written before it, as documented.
+fn preflight<'a>(dir: &Path, planned: impl Iterator<Item = &'a Path>) -> Result<(), ExportError> {
+    for path in planned {
+        if path.is_dir() {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return Err(ExportError::Io(std::io::Error::other(format!("\"{name}\" in the export folder is a folder"))));
+        }
+    }
+    let probe = temp_path_for(&dir.join(".wte-export-probe"));
+    std::fs::File::create(&probe)?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
 /// Share of the progress bar for writing the files into the stage folder of a zip export; packing takes it up to
 /// `PACK_END`, the final flush and rename the rest.
 const STAGE_SHARE: f32 = 0.6;
@@ -682,9 +800,11 @@ fn zip_io(e: zip::result::ZipError) -> ExportError {
 /// The zip export (section 7.4, "Package"): the unchanged loose-file exporter writes into a stage folder next to the
 /// zip (`<zip name>.tmp-<pid>.d`, sets in parallel as usual, no flush), then the staged files are packed in plan
 /// order into `<zip name>.tmp-<pid>` (each staged file deleted once packed), the archive is flushed and renamed to
-/// `<base>.zip`. Until that rename nothing named `<base>.zip` changes; a failure or a cancellation leaves no zip, no
-/// temp file and no stage folder (and removes the output folder again when this export created it and it is empty).
-/// Entry names are the loose file names; the entries are byte-identical to the loose files.
+/// the zip (`package_name_for`: `<base>.zip`, or `<base>_selection.zip` for a layer selection). Until that rename
+/// nothing named like the zip changes; a failure or a cancellation leaves no zip, no temp file and no stage folder
+/// (and removes the output folder again when this export created it and it is empty). Entry names are the loose file
+/// names; the entries are byte-identical to the loose files. What a crashed export of another process left behind is
+/// removed by `remove_stale_temps`, which the app runs before every export.
 fn run_zip(
     snapshot: &DocumentSnapshot,
     opts: &ExportOptions,
@@ -701,7 +821,8 @@ fn run_zip(
     progress.report(0.0, "Exporting");
     let created = CreatedDir((!opts.dir.exists()).then(|| opts.dir.clone()));
     std::fs::create_dir_all(&opts.dir)?;
-    let zip_path = opts.dir.join(package_name(&opts.base_name));
+    let zip_path = opts.dir.join(package_name_for(opts));
+    preflight(&opts.dir, std::iter::once(zip_path.as_path()))?;
     let tmp_zip = temp_path_for(&zip_path);
     let mut stage_name = tmp_zip.file_name().unwrap_or_default().to_os_string();
     stage_name.push(".d");
@@ -764,6 +885,61 @@ pub fn read_package(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         entries.push((name, data));
     }
     Ok(entries)
+}
+
+/// Extensions of the files an export writes (flattened formats, per-layer PNGs, ORA, PSD, the zip): only temp files
+/// of these are ever removed by `remove_stale_temps`.
+const EXPORT_EXTENSIONS: [&str; 11] = ["png", "jpg", "jpeg", "tga", "bmp", "tif", "tiff", "webp", "ora", "psd", "zip"];
+
+/// The process id of an export's temp name, when `name` is one: `<file>.tmp-<pid>` (a temp file of `Run::write` or
+/// of the zip) or `<zip>.tmp-<pid>.d` (the stage folder of a zip export), `<file>` having an export extension (a
+/// stage folder: `.zip`). The second value says whether it is a stage folder name.
+fn temp_pid(name: &str) -> Option<(u32, bool)> {
+    let (stem, folder) = match name.strip_suffix(".d") {
+        Some(stem) => (stem, true),
+        None => (name, false),
+    };
+    let at = stem.rfind(".tmp-")?;
+    let (file, pid) = (&stem[..at], &stem[at + ".tmp-".len()..]);
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let pid: u32 = pid.parse().ok()?;
+    let (_, ext) = naming::split_extension(file);
+    let ext = ext.to_ascii_lowercase();
+    let known = if folder { ext == "zip" } else { EXPORT_EXTENSIONS.contains(&ext.as_str()) };
+    known.then_some((pid, folder))
+}
+
+/// Removes what an export that did not finish left in `dir` (fix_export item 7): temp files `<file>.tmp-<pid>` and
+/// stage folders `<zip>.tmp-<pid>.d` (`temp_pid`) whose process is not running (`is_running(pid)` false) and is not
+/// this one. A crashed (killed) zip export leaves its stage folder and temp zip; a crashed loose-file export one temp
+/// file per set in flight. Returns what was removed (nothing when `dir` cannot be read). The app runs this in the
+/// export job before `run`; `is_running` asks the system (on Windows `OpenProcess` + `GetExitCodeProcess`).
+pub fn remove_stale_temps(dir: &Path, is_running: &dyn Fn(u32) -> bool) -> Vec<PathBuf> {
+    let own = std::process::id();
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some((pid, folder)) = name.to_str().and_then(temp_pid) else { continue };
+        if pid == own || is_running(pid) {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        let gone = match (folder, is_dir) {
+            (true, true) => std::fs::remove_dir_all(&path).is_ok(),
+            (false, false) => std::fs::remove_file(&path).is_ok(),
+            _ => false,
+        };
+        if gone {
+            log::info!("export: removed {} left by process {pid}, which is not running", path.display());
+            removed.push(path);
+        }
+    }
+    removed.sort();
+    removed
 }
 
 /// One layer handed to the layered-format writers (ORA, PSD).
@@ -1411,9 +1587,9 @@ mod tests {
         let kinds: Vec<PlannedKind> = plan_contents(&snapshot, &all_kinds).into_iter().map(|f| f.kind).collect();
         assert_eq!(kinds.len(), 5);
         assert_eq!((kinds[0], kinds[3], kinds[4]), (PlannedKind::Flat, PlannedKind::Ora, PlannedKind::Psd));
-        // A zip package plans one file and holds the same contents.
+        // A zip package plans one file (a selection's own name, fix_export item 2) and holds the same contents.
         let zipped = ExportOptions { package: ExportPackage::Zip, ..opts.clone() };
-        assert_eq!(plan(&snapshot, &zipped), [Path::new("out").join("model.zip")]);
+        assert_eq!(plan(&snapshot, &zipped), [Path::new("out").join("model_selection.zip")]);
         assert_eq!(plan_contents(&snapshot, &zipped), contents);
     }
 
@@ -1872,5 +2048,313 @@ mod tests {
         if keep.is_none() {
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    // ---- fix_export (stable gate critic): names, linked layers, the selection zip, stale temps, non-ASCII ----
+
+    /// Item 4: a selection uses the names of the full export, `_2` included, for every kind of collision the
+    /// deduper resolves: letter case (`Body` / `body`), sanitizing (`Mat:1` / `Mat_1`) and long names that share
+    /// their first 64 characters.
+    #[test]
+    fn a_selection_has_the_full_exports_names_when_set_names_collide() {
+        let long_a = format!("{}_alpha", "x".repeat(64));
+        let long_b = format!("{}_beta", "x".repeat(64));
+        for (a, b) in [("Body", "body"), ("Mat:1", "Mat_1"), (long_a.as_str(), long_b.as_str())] {
+            let mut doc = painted_two_set_doc();
+            doc.sets[0].name = a.to_owned();
+            doc.sets[1].name = b.to_owned();
+            let snapshot = doc.snapshot();
+            for format in [Some(FlatFormat::Png(PngLevel::Balanced)), Some(FlatFormat::Tga), None] {
+                let full = ExportOptions { flat: format, per_layer_png: true, ..every_format(Path::new("out")) };
+                let full_names = file_names(&plan(&snapshot, &full));
+                let unique: std::collections::BTreeSet<String> = full_names.iter().map(|n| n.to_lowercase()).collect();
+                assert_eq!(unique.len(), full_names.len(), "{a} / {b}: {full_names:?}");
+                assert!(full_names.iter().any(|n| n.contains("_2")), "{a} / {b}: the names collide: {full_names:?}");
+                for set in 0..2 {
+                    for layer in snapshot.sets[set].layers.iter().map(|l| l.id) {
+                        let one = ExportOptions { layers: Some(vec![layer]), ..full.clone() };
+                        for name in file_names(&plan(&snapshot, &one)) {
+                            assert!(full_names.contains(&name), "{a} / {b}: {name} is not a name of the full export {full_names:?}");
+                        }
+                        // The per-layer file of that layer is exactly the full export's file of that layer.
+                        let contents = plan_contents(&snapshot, &one);
+                        let full_contents = plan_contents(&snapshot, &full);
+                        for file in contents.iter().filter(|f| matches!(f.kind, PlannedKind::Layer { .. })) {
+                            let same = full_contents.iter().find(|f| f.kind == file.kind && f.set == file.set).unwrap();
+                            assert_eq!(file.name, same.name, "{a} / {b}");
+                        }
+                    }
+                }
+                // Fewer formats or no hidden layers never rename the other files.
+                let fewer = ExportOptions { ora: false, psd: false, include_hidden: false, ..full.clone() };
+                for name in file_names(&plan(&snapshot, &fewer)) {
+                    assert!(full_names.contains(&name), "{a} / {b}: {name}");
+                }
+            }
+        }
+    }
+
+    /// Item 4 on disk: the second set's layer exported alone is byte-identical to the full export's file of the same
+    /// name (the `_2` one), so two exports into one folder pair the right files.
+    #[test]
+    fn a_selection_of_a_colliding_set_writes_the_full_exports_file() {
+        let mut doc = painted_two_set_doc();
+        doc.sets[0].name = "Body".to_owned();
+        doc.sets[1].name = "body".to_owned();
+        let snapshot = doc.snapshot();
+        let root = temp_dir("export-collide-selection");
+        let full = ExportOptions { per_layer_png: true, ..options(&root.join("full")) };
+        run(&snapshot, &full, &NoProgress).unwrap();
+        let second = snapshot.sets[1].layers[1].id;
+        let one = ExportOptions { dir: root.join("one"), layers: Some(vec![second]), ..full.clone() };
+        let report = run(&snapshot, &one, &NoProgress).unwrap();
+        let names = file_names(&report.files);
+        assert_eq!(names, ["model_body_L01_paint_Paint 1_2.png"]);
+        assert!(std::fs::read(&report.files[0]).unwrap() == std::fs::read(root.join("full").join(&names[0])).unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A snapshot of the two-set document with one stamp whose design spans both sets: one stamp layer per set, linked
+    /// by the same `StampId` (as `Document::stamp_layers` reports them), with different pixels.
+    fn snapshot_with_a_two_set_stamp() -> (DocumentSnapshot, [LayerId; 2]) {
+        let doc = painted_two_set_doc();
+        let mut snapshot = doc.snapshot();
+        let stamp = StampId(7_000);
+        let mut ids = [LayerId(0); 2];
+        for (set, color) in [(0usize, [250u8, 10, 10, 255]), (1, [10u8, 250, 10, 255])] {
+            let rect = IRect::new(4, 4, 12, 10);
+            let data: Vec<u8> = std::iter::repeat_n(color, rect.area() as usize).flatten().collect();
+            let cache = std::sync::Arc::new(crate::pixel::SparseBuf::from_parts(vec![CroppedBuf { rect, data }]));
+            let id = LayerId(7_001 + set as u64);
+            snapshot.sets[set].layers.push(Layer::new(id, "Logo", LayerKind::Stamp { stamp, cache }));
+            ids[set] = id;
+        }
+        (snapshot, ids)
+    }
+
+    /// Item 3: "Export this layer" on one layer of a design that spans two sets writes that design's layer of every
+    /// set it touches (the flattened texture of both sets too), and the selection zip holds both.
+    #[test]
+    fn a_design_across_two_sets_exports_its_layer_of_every_set() {
+        let (snapshot, [in_body, in_head]) = snapshot_with_a_two_set_stamp();
+        assert_eq!(linked_selection(&snapshot, &[in_head]), [in_head, in_body]);
+        assert_eq!(linked_selection(&snapshot, &[in_body, in_head, in_body]), [in_body, in_head]);
+        let paint = snapshot.sets[0].layers[1].id;
+        assert_eq!(linked_selection(&snapshot, &[paint]), [paint], "a paint layer has no linked layers");
+        let root = temp_dir("export-linked");
+        for clicked in [in_body, in_head] {
+            let one = ExportOptions { layers: Some(vec![clicked]), per_layer_png: true, ..options(&root.join("one")) };
+            let contents = plan_contents(&snapshot, &one);
+            let layers: Vec<LayerId> = contents
+                .iter()
+                .filter_map(|f| match f.kind {
+                    PlannedKind::Layer { layer, .. } => Some(layer),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(layers, [in_body, in_head], "both sets' layers of the design, in set order");
+            let full = ExportOptions { per_layer_png: true, ..options(&root.join("full")) };
+            let full_names: Vec<String> = plan_contents(&snapshot, &full).into_iter().map(|f| f.name).collect();
+            assert!(contents.iter().all(|f| full_names.contains(&f.name)));
+            let report = run(&snapshot, &one, &NoProgress).unwrap();
+            assert_eq!(report.files.len(), 2);
+            for (path, set) in report.files.iter().zip([0usize, 1]) {
+                let image = decode(path);
+                let want = encode_full_canvas(snapshot.sets[set].layers.last().unwrap(), image.width, image.height).unwrap();
+                assert!(std::fs::read(path).unwrap() == want, "{}", path.display());
+            }
+            std::fs::remove_dir_all(root.join("one")).unwrap();
+        }
+        // The flattened texture under that selection: both sets get one.
+        let flat = ExportOptions { layers: Some(vec![in_head]), flat: Some(FlatFormat::Png(PngLevel::Fast)), ..options(&root) };
+        assert_eq!(plan(&snapshot, &flat).len(), 2);
+        // Zipped: one `_selection` zip with both files.
+        let zip = ExportOptions { layers: Some(vec![in_head]), per_layer_png: true, package: ExportPackage::Zip, ..options(&root) };
+        let report = run(&snapshot, &zip, &NoProgress).unwrap();
+        assert_eq!(file_names(&report.files), ["model_selection.zip"]);
+        assert_eq!(zip_entries(&report.files[0]).len(), 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Item 2: a zip of a selection is `<base>_selection.zip`; the full package `<base>.zip` next to it stays as it
+    /// was, and a Visible / All zip is still `<base>.zip`.
+    #[test]
+    fn a_selection_zip_never_replaces_the_full_package() {
+        let doc = painted_two_set_doc();
+        let snapshot = doc.snapshot();
+        let root = temp_dir("export-selection-zip-name");
+        let full = ExportOptions { package: ExportPackage::Zip, ..every_format(&root) };
+        assert_eq!(package_name_for(&full), "model.zip");
+        let full_report = run(&snapshot, &full, &NoProgress).unwrap();
+        let before = std::fs::read(&full_report.files[0]).unwrap();
+        let paint = snapshot.sets[1].layers[1].id;
+        let one = ExportOptions { layers: Some(vec![paint]), ..full.clone() };
+        assert_eq!(package_name_for(&one), "model_selection.zip");
+        assert_eq!(plan(&snapshot, &one), [root.join("model_selection.zip")]);
+        run(&snapshot, &one, &NoProgress).unwrap();
+        assert_eq!(dir_listing(&root), ["model.zip", "model_selection.zip"]);
+        assert!(std::fs::read(root.join("model.zip")).unwrap() == before, "the full package is unchanged");
+        assert_eq!(selection_package_name("a:b"), "a_b_selection.zip");
+        let all = ExportOptions { include_hidden: true, ..full.clone() };
+        assert_eq!(package_name_for(&all), "model.zip");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Item 7: temp files and stage folders of an export whose process is gone are removed; those of a running
+    /// process, of this one, and anything that is not an export temp stay.
+    #[test]
+    fn stale_temps_of_processes_that_are_not_running_are_removed() {
+        let root = temp_dir("export-stale-temps");
+        let own = std::process::id();
+        let dead = own.wrapping_add(1_000_003);
+        let alive = own.wrapping_add(2_000_003);
+        let stage = root.join(format!("model.zip.tmp-{dead}.d"));
+        std::fs::create_dir_all(stage.join("inner")).unwrap();
+        std::fs::write(stage.join("inner").join("model.png"), b"x").unwrap();
+        for name in [
+            format!("model.zip.tmp-{dead}"),
+            format!("model_L01_paint_Paint 1.png.tmp-{dead}"),
+            format!("model.psd.tmp-{dead}"),
+            format!("model.zip.tmp-{alive}"),
+            format!("model.png.tmp-{own}"),
+            format!("notes.txt.tmp-{dead}"),
+            format!("model.png.tmp-{dead}x"),
+            "model.zip".to_owned(),
+            "model.png".to_owned(),
+        ] {
+            std::fs::write(root.join(name), b"x").unwrap();
+        }
+        // A stage-like folder of a running process, and a file named like a stage folder.
+        std::fs::create_dir(root.join(format!("model.zip.tmp-{alive}.d"))).unwrap();
+        std::fs::write(root.join(format!("other.zip.tmp-{dead}.d")), b"x").unwrap();
+        let removed = remove_stale_temps(&root, &|pid| pid == alive);
+        assert_eq!(
+            file_names(&removed),
+            [format!("model.psd.tmp-{dead}"), format!("model.zip.tmp-{dead}"), format!("model.zip.tmp-{dead}.d"), format!("model_L01_paint_Paint 1.png.tmp-{dead}")]
+        );
+        let mut left = dir_listing(&root);
+        left.sort();
+        let mut want = vec![
+            format!("model.png.tmp-{dead}x"),
+            format!("model.png.tmp-{own}"),
+            format!("model.zip.tmp-{alive}"),
+            format!("model.zip.tmp-{alive}.d"),
+            format!("notes.txt.tmp-{dead}"),
+            format!("other.zip.tmp-{dead}.d"),
+            "model.png".to_owned(),
+            "model.zip".to_owned(),
+        ];
+        want.sort();
+        assert_eq!(left, want);
+        assert!(remove_stale_temps(&root.join("missing"), &|_| false).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Item 9 (L1): a folder that cannot take the export fails before anything is written: a planned file that is a
+    /// folder, a folder path that is a file. Files and Zip alike; the old files stay as they were.
+    #[test]
+    fn a_blocked_export_folder_fails_before_writing_anything() {
+        let doc = painted_two_set_doc();
+        let snapshot = doc.snapshot();
+        let root = temp_dir("export-blocked");
+        let dir = root.join("out");
+        let opts = every_format(&dir);
+        let planned = plan(&snapshot, &opts);
+        std::fs::create_dir_all(&dir).unwrap();
+        // An old export's file, and a folder in the way of the last planned file.
+        std::fs::write(&planned[0], b"old").unwrap();
+        std::fs::create_dir(planned.last().unwrap()).unwrap();
+        let result = run(&snapshot, &opts, &NoProgress);
+        assert!(matches!(&result, Err(ExportError::Io(e)) if e.to_string().contains("is a folder")), "{:?}", result.map(|r| r.files));
+        assert_eq!(std::fs::read(&planned[0]).unwrap(), b"old", "the old file was not replaced");
+        let mut want = vec![file_names(&planned[..1])[0].clone(), file_names(&planned[planned.len() - 1..])[0].clone()];
+        want.sort();
+        assert_eq!(dir_listing(&dir), want, "nothing else was written, no temp file");
+        // A zip whose name is taken by a folder: no stage folder, no temp zip.
+        let zip = ExportOptions { package: ExportPackage::Zip, ..opts.clone() };
+        std::fs::create_dir(dir.join("model.zip")).unwrap();
+        assert!(run(&snapshot, &zip, &NoProgress).is_err());
+        assert!(dir_listing(&dir).iter().all(|n| !n.contains(".tmp-")));
+        // The folder path is a file.
+        let file = root.join("a file");
+        std::fs::write(&file, b"x").unwrap();
+        for package in [ExportPackage::Files, ExportPackage::Zip] {
+            let blocked = ExportOptions { dir: file.join("out"), package, ..opts.clone() };
+            assert!(matches!(run(&snapshot, &blocked, &NoProgress), Err(ExportError::Io(_))));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Item 9 (L2): non-ASCII model, set and layer names go into a zip under their names (UTF-8) and read back
+    /// byte-identical to the loose files.
+    #[test]
+    fn non_ascii_names_round_trip_through_a_zip() {
+        let mut doc = painted_two_set_doc();
+        doc.sets[0].name = "\u{8eab}\u{4f53}".to_owned();
+        doc.sets[1].name = "T\u{ea}te".to_owned();
+        let layer = doc.sets[0].layers[1].id;
+        doc.rename_layer(layer, "Gl\u{fc}hen \u{2728} \u{30ed}\u{30b4}").unwrap();
+        let snapshot = doc.snapshot();
+        let root = temp_dir("export-non-ascii");
+        let base = "\u{30e2}\u{30c7}\u{30eb}".to_owned();
+        let loose = ExportOptions { base_name: base.clone(), ..every_format(&root.join("loose")) };
+        let loose_report = run(&snapshot, &loose, &NoProgress).unwrap();
+        let zip = ExportOptions { dir: root.join("zip"), package: ExportPackage::Zip, ..loose.clone() };
+        let report = run(&snapshot, &zip, &NoProgress).unwrap();
+        assert_eq!(file_names(&report.files), [format!("{base}.zip")]);
+        let entries = zip_entries(&report.files[0]);
+        let names: Vec<String> = entries.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(names, file_names(&loose_report.files));
+        assert!(names.iter().any(|n| n.contains("\u{8eab}\u{4f53}") && n.contains("\u{2728}")), "{names:?}");
+        for (name, bytes) in &entries {
+            assert!(*bytes == std::fs::read(root.join("loose").join(name)).unwrap(), "{name}");
+        }
+        // The UTF-8 flag is set on the non-ASCII entries (bit 11), so other tools read the same names.
+        let mut archive = zip::ZipArchive::new(Cursor::new(std::fs::read(&report.files[0]).unwrap())).unwrap();
+        let raw = archive.by_index(1).unwrap().name_raw().to_vec();
+        assert_eq!(String::from_utf8(raw).unwrap(), names[1]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Item 9 (M4): a 4096 export of two sets with four paint layers each and every format, as one zip. Records the
+    /// time (stderr); peak memory is read by `tools/stable/peak_mem.py` around this test. Needs about 2 GB.
+    #[test]
+    #[ignore = "large: run with --ignored export_at_4096 (and tools/stable/peak_mem.py for the peak memory)"]
+    fn export_at_4096_with_several_sets_and_layers() {
+        let body = noise_texture(4096, 4096, 31);
+        let head = noise_texture(4096, 4096, 32);
+        let mut doc = crate::project::save::testkit::doc_from_bundle(&crate::project::save::testkit::obj_bundle(
+            "big",
+            &crate::samples::two_material_model(),
+            &[("body.png", &body), ("head.png", &head)],
+        ));
+        for set in 0..2u32 {
+            for k in 0..3 {
+                let id = doc.add_raster_layer(TextureSetId(set), None).unwrap();
+                let o = 200 * k;
+                paint_block(&mut doc, id, IRect::new(o, o, 3000 + o, 2500 + o), [40 + 60 * k as u8, 90, 200 - 50 * k as u8, 180]);
+            }
+        }
+        doc.recomposite_all();
+        let snapshot = doc.snapshot();
+        let root = temp_dir("export-4096");
+        for package in [ExportPackage::Files, ExportPackage::Zip] {
+            let opts = ExportOptions { base_name: "big".to_owned(), package, ..every_format(&root.join(format!("{package:?}"))) };
+            let t = std::time::Instant::now();
+            let report = run(&snapshot, &opts, &NoProgress).unwrap();
+            eprintln!(
+                "export_at_4096 {package:?}: {} file(s), {} packaged, {} bytes in {:.2} s",
+                report.files.len(),
+                report.packaged,
+                report.bytes_written,
+                t.elapsed().as_secs_f64()
+            );
+            assert_eq!(report.files.len().max(report.packaged), 2 * (1 + 5 + 2), "flat, Base, Paint 1, three more, ORA, PSD per set");
+        }
+        let entries = zip_entries(&root.join("Zip").join("big.zip"));
+        for (name, bytes) in &entries {
+            assert!(*bytes == std::fs::read(root.join("Files").join(name)).unwrap(), "{name}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

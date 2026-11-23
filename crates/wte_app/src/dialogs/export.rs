@@ -104,7 +104,7 @@ pub(super) fn export_blocker(opts: &ExportOptions, plan_len: usize) -> Option<&'
 
 /// The dialog's Layers choice (8.8).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(super) enum LayerScope {
+pub(crate) enum LayerScope {
     /// The visible layers (`include_hidden: false`).
     Visible,
     /// Hidden layers too (`include_hidden: true`).
@@ -114,7 +114,7 @@ pub(super) enum LayerScope {
 }
 
 /// The Layers choice the options express.
-pub(super) fn scope_of(opts: &ExportOptions) -> LayerScope {
+pub(crate) fn scope_of(opts: &ExportOptions) -> LayerScope {
     match (&opts.layers, opts.include_hidden) {
         (Some(_), _) => LayerScope::Selected,
         (None, true) => LayerScope::All,
@@ -137,6 +137,33 @@ pub(super) fn apply_scope(opts: &mut ExportOptions, scope: LayerScope, selected:
             opts.layers = Some(selected.to_vec());
         }
     }
+}
+
+/// A change of the dialog's Layers choice (fix_export item 1): `apply_scope`, and when the dialog was opened for
+/// layers and the choice moves between Selected and Visible / All, the texture sets and file kinds of the two sides
+/// swap (`ExportDialogState::other_ticks`). So "Export this layer..." then Visible / All exports every set with the
+/// flattened texture and the formats the normal dialog had; back on Selected the layer preset (per-layer PNGs only)
+/// returns. The format fields follow the restored flattened format.
+pub(crate) fn switch_scope(st: &mut ExportDialogState, scope: LayerScope) {
+    let was_selected = scope_of(&st.options) == LayerScope::Selected;
+    if was_selected != (scope == LayerScope::Selected)
+        && let Some(other) = st.other_ticks.take()
+    {
+        st.other_ticks = Some(crate::state::ExportTicks::of(&st.options));
+        other.apply(&mut st.options);
+        sync_from_options(st);
+    }
+    let selected = st.selected_layers.clone();
+    apply_scope(&mut st.options, scope, &selected);
+}
+
+/// How many layers a selection gains from its designs in other sets (`export::linked_selection`): one more per other
+/// set a selected stamp or text layer's design spans (fix_export item 3).
+pub(super) fn linked_extra(doc: &wte_core::Document, layers: &[LayerId]) -> usize {
+    let mut stamps: Vec<wte_core::StampId> = layers.iter().filter_map(|id| doc.stamp_of_layer(*id)).collect();
+    stamps.sort_unstable_by_key(|s| s.0);
+    stamps.dedup();
+    stamps.iter().map(|s| doc.stamp_layers(*s).iter().filter(|(_, l)| !layers.contains(l)).count()).sum()
 }
 
 /// The names of the selected layers for the line under the Layers choice: "A, B, C" or "A, B, C and 2 more".
@@ -439,7 +466,7 @@ fn options_ui(
                         .on_disabled_hover_text("Select layers in the Layers list first");
                 });
                 if scope != before {
-                    apply_scope(&mut st.options, scope, &st.selected_layers);
+                    switch_scope(st, scope);
                 }
             });
             if scope_of(&st.options) == LayerScope::Selected {
@@ -450,7 +477,17 @@ fn options_ui(
                     .flatten()
                     .filter_map(|id| cx.state.doc().and_then(|d| d.layer(*id)).map(|l| l.name.clone()))
                     .collect();
-                ui.add(egui::Label::new(egui::RichText::new(selection_names(&names)).small().weak()).truncate());
+                let extra = cx.state.doc().map_or(0, |d| linked_extra(d, st.options.layers.as_deref().unwrap_or(&[])));
+                let mut line = selection_names(&names);
+                if extra > 0 {
+                    // A design across several texture sets has one layer per set: all of them are exported.
+                    line.push_str(&if extra == 1 {
+                        " + its layer in 1 other texture set".to_owned()
+                    } else {
+                        format!(" + their layers in {extra} other texture sets")
+                    });
+                }
+                ui.add(egui::Label::new(egui::RichText::new(line).small().weak()).truncate());
             }
         });
         ui.end_row();
@@ -503,13 +540,21 @@ fn options_ui(
     ui.checkbox(&mut st.options.ora, "OpenRaster (.ora)");
     ui.checkbox(&mut st.options.psd, "Photoshop (.psd)");
     let mut zip = st.options.package == ExportPackage::Zip;
-    if ui
-        .checkbox(&mut zip, "Pack into one .zip file")
-        .on_hover_text("One <base name>.zip in the folder, holding the files listed below")
-        .changed()
-    {
-        st.options.package = if zip { ExportPackage::Zip } else { ExportPackage::Files };
-    }
+    // fix_export item 2: the zip's name is shown next to the box (a selection gets its own name).
+    let zip_name = wte_core::export::package_name_for(&st.options);
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(&mut zip, "Pack into one .zip file")
+            .on_hover_text(
+                "One zip in the folder, holding the files listed below: <base name>.zip for Visible / All, \
+                 <base name>_selection.zip for selected layers (it never replaces the full package)",
+            )
+            .changed()
+        {
+            st.options.package = if zip { ExportPackage::Zip } else { ExportPackage::Files };
+        }
+        ui.add(egui::Label::new(egui::RichText::new(zip_name).small().weak()).truncate());
+    });
     ui.horizontal(|ui| {
         ui.label("Seam padding");
         ui.add(egui::DragValue::new(&mut st.options.dilate_px).range(0..=MAX_SEAM_PADDING).suffix(" px"));
@@ -662,6 +707,7 @@ mod tests {
             show_preview: true,
             confirm_replace: None,
             selected_layers: Vec::new(),
+            other_ticks: None,
         }
     }
 
@@ -827,7 +873,7 @@ mod tests {
         // Packed: one file on disk, the same names inside.
         opts.package = ExportPackage::Zip;
         let cache = PlanCache::build(&snap, &opts, 0, 0.0);
-        assert_eq!(cache.plan, [PathBuf::from(r"E:\out").join("model.zip")]);
+        assert_eq!(cache.plan, [PathBuf::from(r"E:\out").join("model_selection.zip")]);
         assert_eq!(cache.names, ["model_L02_stamp_Logo.png", "model_L03_text_Title.png"]);
         assert_eq!(cache.exists, [false]);
         // A selection of nothing that exists: nothing to write, not even the zip.
@@ -875,6 +921,66 @@ mod tests {
         assert!(preview_caption(&opts).contains("only the selected layers"));
         opts.flat = None;
         assert!(preview_caption(&opts).starts_with("Shows the flattened texture"));
+    }
+
+    /// fix_export item 1: a dialog opened for layers, switched to Visible / All, exports every set with the normal
+    /// ticks (flattened format included); back on Selected the layer preset returns. A dialog opened with Export...
+    /// keeps its ticks.
+    #[test]
+    fn switching_from_the_layer_preset_to_visible_restores_the_normal_ticks() {
+        let mut normal = options(r"E:\out");
+        normal.flat = Some(FlatFormat::Tga);
+        normal.ora = true;
+        let mut st = dialog(normal.clone());
+        st.selected_layers = vec![LayerId(5)];
+        // What `dispatch::export_for_layers` makes of it.
+        st.other_ticks = Some(crate::state::ExportTicks::of(&st.options));
+        st.options.layers = Some(vec![LayerId(5)]);
+        st.options.sets = None;
+        st.options.flat = None;
+        st.options.ora = false;
+        sync_from_options(&mut st);
+        assert_eq!(scope_of(&st.options), LayerScope::Selected);
+        for scope in [LayerScope::Visible, LayerScope::All] {
+            let mut st = st.clone();
+            st.options.sets = Some(vec![TextureSetId(1)]);
+            switch_scope(&mut st, scope);
+            assert_eq!(scope_of(&st.options), scope);
+            assert_eq!(st.options.sets, None, "every texture set");
+            assert_eq!((st.options.flat, st.options.per_layer_png, st.options.ora, st.options.psd), (Some(FlatFormat::Tga), true, true, false));
+            // The format field follows: the flattened format survives the end-of-frame `apply_flat`.
+            assert_eq!(st.format_index, 2);
+            apply_flat(&mut st, true);
+            assert_eq!(st.options.flat, Some(FlatFormat::Tga));
+            // Back to the selection: the preset again.
+            switch_scope(&mut st, LayerScope::Selected);
+            assert_eq!(st.options.layers, Some(vec![LayerId(5)]));
+            assert_eq!((st.options.flat, st.options.ora), (None, false));
+            // Visible <-> All keeps the ticks.
+            switch_scope(&mut st, LayerScope::All);
+            st.options.psd = true;
+            switch_scope(&mut st, LayerScope::Visible);
+            assert!(st.options.psd && st.options.flat.is_some());
+        }
+        // Opened with Export...: no swap, as before.
+        let mut plain = dialog(normal);
+        plain.selected_layers = vec![LayerId(5)];
+        switch_scope(&mut plain, LayerScope::Selected);
+        assert_eq!((plain.options.flat, plain.options.ora), (Some(FlatFormat::Tga), true));
+        switch_scope(&mut plain, LayerScope::Visible);
+        assert_eq!((plain.options.flat, plain.options.ora, plain.options.layers.clone()), (Some(FlatFormat::Tga), true, None));
+    }
+
+    /// fix_export item 2: the zip's name in the dialog's list follows the Layers choice.
+    #[test]
+    fn the_zip_name_follows_the_layers_choice() {
+        let snap = snapshot_with_decals();
+        let mut opts = options(r"E:\out");
+        opts.package = ExportPackage::Zip;
+        assert_eq!(file_name(&PlanCache::build(&snap, &opts, 0, 0.0).plan[0]), "model.zip");
+        opts.layers = Some(vec![LayerId(900)]);
+        assert_eq!(file_name(&PlanCache::build(&snap, &opts, 0, 0.0).plan[0]), "model_selection.zip");
+        assert_eq!(wte_core::export::package_name_for(&opts), "model_selection.zip");
     }
 
     #[test]

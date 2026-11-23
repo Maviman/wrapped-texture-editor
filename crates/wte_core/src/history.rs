@@ -774,6 +774,34 @@ impl Document {
         self.history.cost(&self.live_buffers())
     }
 
+    /// Runs `f`, several commands, as one undo step (fix_export item 5: Delete and Duplicate on a multi-selection):
+    /// the history entries the commands push are merged into one entry named `label` (`Edit::Multi` in push order;
+    /// one entry is only renamed, none stays none). Its "before" state is the state before the first command, so one
+    /// undo restores the document as it was and one redo repeats every command. The budget and the entry limit are
+    /// applied once at the end (not in between, where they could evict entries of the group).
+    pub(crate) fn group_edits<R>(&mut self, label: &str, f: impl FnOnce(&mut Document) -> R) -> R {
+        self.flush_pending_edit();
+        let (max, budget) = (self.history.max_entries, self.history.budget_bytes);
+        self.history.max_entries = usize::MAX;
+        self.history.budget_bytes = usize::MAX;
+        let start = self.history.undo.len();
+        let result = f(self);
+        self.history.max_entries = max;
+        self.history.budget_bytes = budget;
+        let mut added = self.history.undo.split_off(start.min(self.history.undo.len()));
+        if added.len() > 1 {
+            let state = added[0].state;
+            let edits: Vec<Edit> = added.into_iter().map(|e| e.edit).collect();
+            self.history.undo.push(Entry { label: label.to_owned(), edit: Edit::Multi(edits), state });
+        } else if let Some(mut entry) = added.pop() {
+            entry.label = label.to_owned();
+            self.history.undo.push(entry);
+        }
+        let live = self.live_buffers();
+        self.history.evict(&live);
+        result
+    }
+
     /// `history.push` + `touch()` + `debug_check_structure`.
     pub(crate) fn push_structure_edit(&mut self, label: &str, before: StructureSnapshot) {
         self.push_edit(label, Edit::Structure(Box::new(before)));

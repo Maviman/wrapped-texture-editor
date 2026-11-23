@@ -1964,6 +1964,32 @@ pub(crate) struct OwnerGrid {
     pairs: Vec<[u16; 2]>,
     /// Stable (w1, item 4): per cell the owner's part (`NONE` without an owner).
     part: Vec<u32>,
+    /// Stable (fix-wrap, item 2): per cell the owner's index in the triangles the grid was built from (`NONE` without
+    /// an owner), for `classify_bare`.
+    owner: Vec<u32>,
+    /// Stable (fix-wrap, item 2): some cell is marked `MARK_GAP` / `MARK_AT_PART` (`bare_cells` skips the work else).
+    any_gap: bool,
+    any_at_part: bool,
+}
+
+/// Stable (fix-wrap, item 2): `OwnerGrid::mark` bit of an uncovered cell next to a covered cell whose owner has the
+/// surface of another part within the jump gap (`classify_bare`): where the picture stops at a neighbouring part.
+const MARK_AT_PART: u8 = 4;
+/// Stable (fix-wrap, item 2): `OwnerGrid::mark` bit of an uncovered cell in a gap between two parts: a run of uncovered
+/// cells along a row or column, at most the jump gap long, between covered cells owned by two different parts.
+const MARK_GAP: u8 = 8;
+
+/// Stable (fix-wrap, item 2): the picture's cells by what became of them (`OwnerGrid::bare_cells`): each cell of the
+/// picture is owned (shown), beyond a closure, lost inside the laid outline (`lost_cut`), in a gap between two parts,
+/// at a neighbouring part, or none of these (beyond an edge, a hole or the end of the part, or where the front
+/// stopped).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct BareCells {
+    pub(crate) lost: usize,
+    pub(crate) beyond: usize,
+    pub(crate) gaps: usize,
+    pub(crate) at_part: usize,
+    pub(crate) total: usize,
 }
 
 /// The barycentric weights of `c` in the layout triangle `q` when it lies inside (edges included), else `None`.
@@ -2018,7 +2044,7 @@ impl OwnerTri {
 impl OwnerGrid {
     /// The grid over `|x| <= half[0], |y| <= half[1]` with cells of at least `min_cell` (at most `OWNER_MAX_CELLS` on
     /// the long side) from the stored triangles `tris` (ascending triangle id). `buried` is asked only in cells whose
-    /// candidates come from two or more parts. Stable (w1, item 3): `rejected_pairs` and `lost_cells` measure the
+    /// candidates come from two or more parts. Stable (w1, item 3): `rejected_pairs` and `lost_flags` measure the
     /// statistics for a picture from what it stores.
     pub(crate) fn build(tris: &[OwnerTri], half: [f64; 2], min_cell: f64, buried: &Burial<'_>) -> OwnerGrid {
         let long = 2.0 * half[0].max(half[1]);
@@ -2233,9 +2259,24 @@ impl OwnerGrid {
             g.chunks_mut(rows).zip(pos.chunks_mut(rows)).zip(scale.chunks_mut(rows)).zip(mark.chunks_mut(rows)).enumerate().for_each(out);
         }
         let part: Vec<u32> = cells.iter().map(|s| if s.best == NONE { NONE } else { tris[s.best as usize].part }).collect();
+        let owner: Vec<u32> = cells.iter().map(|s| s.best).collect();
         drop(cells);
-        let mut grid =
-            OwnerGrid { lo: [lo[0] as f32, lo[1] as f32], cell: cell as f32, dims, g, pos, scale, lo64: lo, cell64: cell, mark: Vec::new(), pairs: Vec::new(), part };
+        let mut grid = OwnerGrid {
+            lo: [lo[0] as f32, lo[1] as f32],
+            cell: cell as f32,
+            dims,
+            g,
+            pos,
+            scale,
+            lo64: lo,
+            cell64: cell,
+            mark: Vec::new(),
+            pairs: Vec::new(),
+            part,
+            owner,
+            any_gap: false,
+            any_at_part: false,
+        };
         if debug {
             eprintln!("owner: grid out {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
@@ -2322,8 +2363,10 @@ impl OwnerGrid {
     /// 3): from the stored marks, for any picture; the work is over the picture's cells (and the scans from its sides
     /// to the nearest covered cell). Stable (fix_wrap_1): returns (lost, beyond a closure, picture cells): the
     /// uncovered cells left out as beyond a closure are the picture the meeting ends did not lay (`WrapStats::beyond`).
-    pub(crate) fn lost_cells(&self, picture: [f64; 2]) -> (usize, usize, usize) {
-        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return (0, 0, 0) };
+    /// Stable (fix-wrap): returns (lost, beyond, per picture cell (row-major over the picture's rectangle) 1 when lost,
+    /// 2 when beyond a closure, else 0), for `bare_cells`.
+    fn lost_flags(&self, picture: [f64; 2]) -> (usize, usize, Vec<u8>) {
+        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return (0, 0, Vec::new()) };
         let [width, height] = self.dims;
         let (rw, rh) = (i1 - i0 + 1, j1 - j0 + 1);
         let mark = &self.mark;
@@ -2400,8 +2443,16 @@ impl OwnerGrid {
         // Rows: the same runs; a run's cells are lost unless beyond a closure, when the run is enclosed in its row or
         // the cell in its column.
         let mut lost = 0usize;
-        let count = |j: usize, from: usize, to: usize, in_row: bool| {
-            (from..to).filter(|&i| !beyond[at(i, j)] && (in_row || enclosed[at(i, j)])).count()
+        let mut lost_at = vec![false; rw * rh];
+        let mut count = |j: usize, from: usize, to: usize, in_row: bool| {
+            let mut n = 0;
+            for i in from..to {
+                if !beyond[at(i, j)] && (in_row || enclosed[at(i, j)]) {
+                    lost_at[at(i, j)] = true;
+                    n += 1;
+                }
+            }
+            n
         };
         for j in j0..=j1 {
             let row = j * width;
@@ -2423,7 +2474,123 @@ impl OwnerGrid {
                 lost += count(j, from, i1 + 1, same(left, right));
             }
         }
-        (lost, beyond.iter().filter(|&&b| b).count(), rw * rh)
+        let flags: Vec<u8> = beyond.iter().zip(&lost_at).map(|(&b, &l)| if b { 2 } else { u8::from(l) }).collect();
+        (lost, beyond.iter().filter(|&&b| b).count(), flags)
+    }
+
+    /// Stable (fix-wrap, item 2): marks the uncovered cells in a gap between two parts (`MARK_GAP`: runs along a row or
+    /// column of at most `gap` (layout units, the jump gap) plus one cell between covered cells of two different
+    /// parts) and, of the others, those next to a covered cell (4-neighbours) whose owner `at_part(triangle index,
+    /// point, part)` says stops at a neighbouring part (`MARK_AT_PART`). Over the whole grid, serially, so a statistic
+    /// of any picture inside it reads the same marks (stable w1, item 3).
+    pub(crate) fn classify_bare(&mut self, gap: f64, at_part: &mut dyn FnMut(usize, Vec3, u32) -> bool) {
+        let [width, height] = self.dims;
+        if self.mark.len() != width * height || !(gap.is_finite() && gap >= 0.0) {
+            return;
+        }
+        let max_run = ((gap / self.cell64).ceil() as usize).saturating_add(1);
+        let covered = |mark: &[u8], k: usize| mark[k] & 1 != 0;
+        // Runs between covered cells of two parts: rows (stride 1), then columns (stride `width`).
+        for (lines, n, first, stride) in [(height, width, width, 1), (width, height, 1, width)] {
+            for line in 0..lines {
+                let base = line * first;
+                let mut last: Option<usize> = None;
+                for i in 0..n {
+                    let k = base + i * stride;
+                    if !covered(&self.mark, k) {
+                        continue;
+                    }
+                    if let Some(a) = last {
+                        let run = i - a - 1;
+                        if run > 0 && run <= max_run && self.part[base + a * stride] != self.part[k] {
+                            for r in a + 1..i {
+                                self.mark[base + r * stride] |= MARK_GAP;
+                            }
+                            self.any_gap = true;
+                        }
+                    }
+                    last = Some(i);
+                }
+            }
+        }
+        // Cells next to an owner at a neighbouring part (each covered cell asked once).
+        let mut asked: Vec<u8> = vec![0; width * height];
+        for j in 0..height {
+            for i in 0..width {
+                let k = j * width + i;
+                if self.mark[k] & (1 | MARK_GAP) != 0 {
+                    continue;
+                }
+                let around = [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < height).then(|| k + width)];
+                for c in around.into_iter().flatten() {
+                    if !covered(&self.mark, c) {
+                        continue;
+                    }
+                    if asked[c] == 0 {
+                        asked[c] = if at_part(self.owner[c] as usize, Vec3::from(self.pos[c]), self.part[c]) { 2 } else { 1 };
+                    }
+                    if asked[c] == 2 {
+                        self.mark[k] |= MARK_AT_PART;
+                        self.any_at_part = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stable (fix-wrap, item 2): the picture's cells by what became of them (`BareCells`): `lost_flags`' lost and
+    /// beyond; of the other uncovered cells those in a gap between two parts (`MARK_GAP`); the rest go with the nearest
+    /// laid cell (4-connected steps through such cells inside the picture, from those next to a covered cell): at a
+    /// neighbouring part when that cell is marked `MARK_AT_PART`.
+    pub(crate) fn bare_cells(&self, picture: [f64; 2]) -> BareCells {
+        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return BareCells::default() };
+        let (rw, rh) = (i1 - i0 + 1, j1 - j0 + 1);
+        let (lost, beyond, flags) = self.lost_flags(picture);
+        let [width, height] = self.dims;
+        let mut out = BareCells { lost, beyond, total: rw * rh, ..BareCells::default() };
+        if !self.any_gap && !self.any_at_part {
+            return out;
+        }
+        let at = |i: usize, j: usize| (j - j0) * rw + (i - i0);
+        let bare = |i: usize, j: usize| self.mark[j * width + i] & 1 == 0 && flags[at(i, j)] == 0;
+        // 0 not reached, 1 at a part, 2 the rest; sources first (row-major), then breadth first.
+        let mut label = vec![0u8; rw * rh];
+        let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                if !bare(i, j) {
+                    continue;
+                }
+                let k = j * width + i;
+                if self.mark[k] & MARK_GAP != 0 {
+                    out.gaps += 1;
+                    continue;
+                }
+                if !self.any_at_part {
+                    continue;
+                }
+                let next_to_laid = [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < height).then(|| k + width)]
+                    .into_iter()
+                    .flatten()
+                    .any(|c| self.mark[c] & 1 != 0);
+                if next_to_laid {
+                    label[at(i, j)] = if self.mark[k] & MARK_AT_PART != 0 { 1 } else { 2 };
+                    queue.push_back((i, j));
+                }
+            }
+        }
+        while let Some((i, j)) = queue.pop_front() {
+            let l = label[at(i, j)];
+            for (a, b) in [(i.wrapping_sub(1), j), (i + 1, j), (i, j.wrapping_sub(1)), (i, j + 1)] {
+                if (i0..=i1).contains(&a) && (j0..=j1).contains(&b) && label[at(a, b)] == 0 && bare(a, b) && self.mark[b * width + a] & MARK_GAP == 0 {
+                    label[at(a, b)] = l;
+                    queue.push_back((a, b));
+                }
+            }
+        }
+        out.at_part = label.iter().filter(|&&l| l == 1).count();
+        out
     }
 
     /// The owner test at cell index `k`: a fragment at 3D point `p` of a triangle with stretch `s` is kept when the
@@ -2618,6 +2785,50 @@ mod tests {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
             let par = pool.install(|| run(&sys));
             assert!(par.iter().zip(&serial).all(|(a, b)| a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()), "{threads} threads differ from the serial kernels");
+        }
+    }
+
+    /// Stable (fix-wrap, item 2): the owner grid's bare cells by cause. Three squares laid in a 10 x 4 picture: part 0
+    /// at x -5..-1, part 1 at x -0.8..3 (a gap of 0.2 between two parts), part 2 at x 3.5..5 (a gap of 0.5, wider
+    /// than the jump gap 0.25: no gap), each y -1..1. The rows y 1..2 and -2..-1 are bare: next to parts 0 and 1
+    /// they meet a neighbouring part (`near_other` says so for owner points with x < 3), next to part 2 they are
+    /// beyond its edge (each bare cell goes with its nearest laid cell). With `near_other` always false nothing is at a
+    /// part; the gap is the same.
+    #[test]
+    fn fix_bare_cells_by_cause() {
+        let sq = |x0: f64, x1: f64, part: u32| -> [OwnerTri; 2] {
+            let tri = |q: [DVec2; 3]| OwnerTri {
+                q,
+                g: [0.0; 3],
+                p3: q.map(|c| Vec3::new(c.x as f32, c.y as f32, 0.0)),
+                s: 1.0,
+                part,
+                sheet: part,
+                normal: DVec3::Z,
+                laid: true,
+                closure: false,
+            };
+            let (a, b, c, d) = (DVec2::new(x0, -1.0), DVec2::new(x1, -1.0), DVec2::new(x1, 1.0), DVec2::new(x0, 1.0));
+            [tri([a, b, c]), tri([a, c, d])]
+        };
+        let tris: Vec<OwnerTri> = [sq(-5.0, -1.0, 0), sq(-0.8, 3.0, 1), sq(3.5, 5.0, 2)].into_iter().flatten().collect();
+        let never = |_: usize| false;
+        let no = |_: usize, _: DVec3| false;
+        let half = [5.0, 2.0];
+        for (what, near) in [("neighbour", true), ("edge", false)] {
+            let mut grid = OwnerGrid::build(&tris, half, 0.05, &Burial { may: &never, at: &no });
+            grid.classify_bare(0.25, &mut |_, p, _| near && p.x < 3.0);
+            let b = grid.bare_cells(half);
+            let (owned, total) = grid.owned_cells(half);
+            let share = |n: usize| n as f64 / total as f64;
+            println!("FIX bare cells {what}: {b:?}, owned {:.4}, gaps {:.4}, at a part {:.4}", share(owned), share(b.gaps), share(b.at_part));
+            assert_eq!(b.total, total);
+            // The gap of 0.2 between parts 0 and 1 (2 of 100 columns over the laid rows); the 0.5 gap is no gap.
+            assert!((share(b.gaps) - 0.2 / 10.0 * 0.5).abs() < 0.004, "{b:?}");
+            assert_eq!((b.lost, b.beyond), (0, 0), "{b:?}");
+            // At a part: the bare rows above and below parts 0 and 1 and the wide gap's cells next to part 1.
+            let want = if near { (8.0 + 0.25) / 10.0 * 0.5 } else { 0.0 };
+            assert!((share(b.at_part) - want).abs() < 0.02, "{what}: at a part {:.4}, want {want:.4}", share(b.at_part));
         }
     }
 

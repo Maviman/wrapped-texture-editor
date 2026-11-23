@@ -163,6 +163,15 @@ pub struct WrapStats {
     /// picture the meeting ends did not lay. 0 when the spine's closure leaves no bare picture next to it (a spine
     /// that looped round a pawn on a board that holds the picture).
     pub beyond: f32,
+    /// Stable (fix-wrap, item 2): the share of the picture's cells without an owner that lie in a gap between two
+    /// separate parts the picture continues across (Jump small gaps: an uncovered run along a row or column of the
+    /// owner grid, at most the jump gap long, between cells owned by two different parts; tiles, kit-bashed pieces).
+    pub gaps: f32,
+    /// Stable (fix-wrap, item 2): the share of the picture's cells without an owner (not beyond a closure, not lost to
+    /// a cut, not in a gap) that lie next to the laid picture where its surface meets another part (another part's
+    /// surface within the jump gap of the owner's point), and the bare cells joined to them: where the picture stops
+    /// at a neighbouring part (ABeautifulGame Jump on: the board slab's edge at the flush marble frame).
+    pub at_part: f32,
 }
 
 /// Round 8 (plan 3.3): how once and how whole the picture of a wrapped stamp lies on the model, measured from its
@@ -2415,6 +2424,8 @@ fn wrap_param_from(
         wraps_closed: false,
         shown: 1.0,
         beyond: 0.0,
+        gaps: 0.0,
+        at_part: 0.0,
     };
     // The turns to lay: turn 0 (the Ends-meet spine), then with Overlap every later turn that starts inside the
     // picture, each with its along range (4.3b).
@@ -2460,6 +2471,8 @@ fn wrap_param_from(
         let mut turn_jumper = if opts.jump_gaps { Jumper::new(mesh, bvh, &patch) } else { None };
         layout.footprint = footprint;
         layout.run(stop, &mut turn_jumper);
+        // Stable (fix-wrap, item 2): the parts' neighbour lists for the owner grid's bare cells (`OwnerCtx::part_near`).
+        let part_near = turn_jumper.take().map(|j| j.neighbours).unwrap_or_default();
         phase_times::add(1, front_started.elapsed().as_micros() as u64);
         let clip = multi.then_some((axis, lo, hi));
         let closed = period.filter(|t| *t > 0.0);
@@ -2557,6 +2570,8 @@ fn wrap_param_from(
             closure: &closure_tris,
             bury_index: OnceLock::new(),
             out,
+            part_near,
+            anchor_part: patch.part[patch.tv[anchor_l as usize][0] as usize],
         };
         let owner_started = Instant::now();
         let mut layer = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint);
@@ -3087,6 +3102,11 @@ struct OwnerCtx<'c> {
     /// Stable (w2, item 4): the projector's `out` (towards the viewer the stamp faces): a place another entered
     /// surface hides along it loses a mixed cell to one that is not hidden (`hidden_at`).
     out: DVec3,
+    /// Stable (fix-wrap, item 2): per part of the patch, the other parts whose box lies within the jump gap of its box
+    /// (`Jumper::neighbours` of the turn; empty with Jump small gaps off, where the patch is one part).
+    part_near: Vec<Vec<u32>>,
+    /// Stable (fix-wrap, item 2): the part of the anchor triangle (where the picture was placed).
+    anchor_part: u32,
 }
 
 /// check:B (round 9, speed): the triangles of the entered parts of a patch, per part a box and a uniform grid of the
@@ -3234,6 +3254,50 @@ impl BuryIndex {
 }
 
 impl OwnerCtx<'_> {
+    /// Stable (fix-wrap, item 2): the jump gap (`GAP_JUMP` of the patch diagonal, as Jump small gaps).
+    fn gap(&self) -> f64 {
+        GAP_JUMP * self.patch.diag
+    }
+
+    /// Stable (fix-wrap, item 2): whether the picture, laid on local triangle `t` (part `own`) at point `p` next to bare
+    /// picture, stops there at a neighbouring part: `t` lies on a part other than the anchor's (one the picture
+    /// continued onto across a gap), none of its corners is on a boundary edge and a triangle at one of its corners is
+    /// not laid (that part goes on where the picture's front stopped on it; a small closed part laid whole does not), or
+    /// another part's surface lies within the jump gap of `p` (`near_other_part`).
+    fn at_part(&self, t: u32, p: Vec3, own: u32) -> bool {
+        let corners = self.patch.tv[t as usize];
+        let goes_on = || {
+            corners.iter().all(|&v| !self.patch.on_boundary[v as usize])
+                && corners.iter().any(|&v| self.patch.vtris(v).iter().any(|&u| !self.laid.get(u as usize).copied().unwrap_or(false)))
+        };
+        (own != self.anchor_part && goes_on()) || self.near_other_part(p, own)
+    }
+
+    /// Stable (fix-wrap, item 2): true when the surface of a part of the patch other than `own`, not laid there (the
+    /// picture did not continue onto it there: many_islands' second cube, laid whole, does not count), lies within the jump
+    /// gap of `p` (`OwnerGrid::classify_bare`). Only a point within the gap of the box of a part whose box lies within
+    /// the gap of `own`'s (`part_near`) asks the BVH; a triangle outside the patch is the same surface beyond the
+    /// patch's sphere.
+    fn near_other_part(&self, p: Vec3, own: u32) -> bool {
+        let gap = self.gap();
+        let boxes = &self.patch.part_box;
+        let pd = dvec(p);
+        let Some(list) = self.part_near.get(own as usize) else { return false };
+        if !list.iter().any(|&o| {
+            let (lo, hi) = boxes[o as usize];
+            (lo - pd).max(pd - hi).max(DVec3::ZERO).length() <= gap
+        }) {
+            return false;
+        }
+        let mut found: Vec<(TriId, f32)> = Vec::new();
+        self.bvh.query_sphere_dist(self.mesh, p, gap as f32, &mut found);
+        found.iter().any(|&(tri, _)| {
+            self.patch.tris.binary_search(&tri).is_ok_and(|t| {
+                !self.patch.degenerate(t as u32) && self.patch.part[self.patch.tv[t][0] as usize] != own && !self.laid.get(t).copied().unwrap_or(false)
+            })
+        })
+    }
+
     /// The local triangle of mesh triangle `tri` when it belongs to an entered part other than `own`.
     fn other(&self, tri: TriId, own: u32) -> Option<u32> {
         let patch = self.patch;
@@ -3386,7 +3450,9 @@ fn make_layer(
         let hidden_on = relax::knob("WTE_TEST_OWNER_VISIBLE", true);
         let may = |i: usize| hidden_on || ctx.may_bury(stored[i].p3, stored[i].normal, stored[i].part);
         let at = |i: usize, p: DVec3| ctx.buried_at(p, stored[i].normal, stored[i].part) || (hidden_on && ctx.hidden_at(p));
-        let grid = OwnerGrid::build(&stored, reach, 0.0, &relax::Burial { may: &may, at: &at });
+        let mut grid = OwnerGrid::build(&stored, reach, 0.0, &relax::Burial { may: &may, at: &at });
+        // Stable (fix-wrap, item 2): what became of the picture's bare cells (gaps between parts, a neighbouring part).
+        grid.classify_bare(ctx.gap(), &mut |k, p, part| ctx.at_part(tris[k].0, p, part));
         Some(grid)
     } else {
         None
@@ -3562,6 +3628,7 @@ impl WrapParam {
         let (mut flipped, mut seams, mut by_rule, mut cut) = (0u32, 0u32, [0u32; 5], 0u32);
         let mut stretches: Vec<f32> = Vec::new();
         let (mut rejected, mut lost, mut owned, mut beyond) = ((0usize, 0usize), (0usize, 0usize), (0usize, 0usize), 0usize);
+        let (mut gaps, mut at_part) = (0usize, 0usize);
         let mut edge = false;
         for layer in &self.layers {
             let clip = layer.clip.map(|[lo, hi]| (layer.axis, lo as f64, hi as f64));
@@ -3610,10 +3677,12 @@ impl WrapParam {
             cut += ls.cut_fixed + cut_tris.len() as u32;
             edge |= ls.edge_pts.iter().any(|e| e[0] <= hw && e[1] <= hh);
             if let Some(grid) = &layer.owner {
-                let (a, b, c) = (grid.rejected_pairs(picture), grid.lost_cells(picture), grid.owned_cells(picture));
+                let (a, b, c) = (grid.rejected_pairs(picture), grid.bare_cells(picture), grid.owned_cells(picture));
                 rejected = (rejected.0 + a.0, rejected.1 + a.1);
-                lost = (lost.0 + b.0, lost.1 + b.2);
-                beyond += b.1;
+                lost = (lost.0 + b.lost, lost.1 + b.total);
+                beyond += b.beyond;
+                gaps += b.gaps;
+                at_part += b.at_part;
                 owned = (owned.0 + c.0, owned.1 + c.1);
             }
         }
@@ -3636,6 +3705,8 @@ impl WrapParam {
         st.lost_cut = if lost.1 == 0 { 0.0 } else { (lost.0 as f64 / lost.1 as f64) as f32 };
         st.shown = if owned.1 == 0 { st.covered } else { (owned.0 as f64 / owned.1 as f64) as f32 };
         st.beyond = if lost.1 == 0 { 0.0 } else { (beyond as f64 / lost.1 as f64) as f32 };
+        st.gaps = if lost.1 == 0 { 0.0 } else { (gaps as f64 / lost.1 as f64) as f32 };
+        st.at_part = if lost.1 == 0 { 0.0 } else { (at_part as f64 / lost.1 as f64) as f32 };
         let across = 2.0 * if self.spine_y { hw } else { hh };
         st.room = if across > 0.0 { (self.part_across / across).clamp(0.0, 1.0) as f32 } else { 1.0 };
         st

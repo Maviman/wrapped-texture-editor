@@ -219,6 +219,9 @@ fn w1_the_chess_board_keeps_the_rows_under_a_pawn() {
     println!("W1 chess board: shown {:.4}, beyond {:.4}, ends_share {:.4}, met_itself {}", s.shown, s.beyond, s.ends_share, s.met_itself);
     assert!(s.beyond < 0.02, "{:.4} of the picture bare beyond the closure: {s:?}", s.beyond);
     assert!(s.shown as f64 >= share, "shown {:.4} below the board's share {share:.4}", s.shown);
+    // Stable (fix-wrap, item 2): the bare picture is where the board slab meets the flush marble frame (the picture
+    // stops at a neighbouring part; fix_wrap_1's panel said "runs off the surface: an edge ...").
+    assert!(s.at_part >= 0.9 * (1.0 - s.shown), "at a neighbouring part {:.4} of the {:.4} bare: {s:?}", s.at_part, 1.0 - s.shown);
 }
 
 /// Stable (w1), item 3: a parameterization reused for another size in its reach bucket bakes byte for byte like a
@@ -290,6 +293,9 @@ fn w1_lost_cut_does_not_count_the_gaps_between_parts() {
     println!("W1 tiles 40 x 40, Jump on: {s:?}");
     assert!(s.jumps > 100 && s.seams == 0, "{s:?}");
     assert!(s.lost_cut <= 0.01, "lost_cut {:.4} counts the gaps between the tiles: {s:?}", s.lost_cut);
+    // Stable (fix-wrap, item 2): the bare picture is the gaps between the tiles (1 - 0.81 inside the field, less at the
+    // picture's border; parts200's panel said "28 % runs off the surface").
+    assert!(s.gaps >= 0.15 && s.at_part < 0.01 && 1.0 - s.shown - s.gaps < 0.02, "{s:?}");
 }
 
 // ----- stable (w2) -----
@@ -361,4 +367,176 @@ fn w2_the_developed_region_stays_off_curved_surface() {
     assert_eq!(with_pins, without_pins);
     let bits = |l: Vec<testkit::Layer>| l.into_iter().map(|(t, c)| (t, c.iter().flatten().flatten().map(|v| v.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
     assert!(bits(testkit::layers(&with)) == bits(testkit::layers(&without)), "the developed region changed a curved plate");
+}
+
+// ----- stable (fix-wrap) -----
+
+/// Two flush coplanar plates in the XY plane (facing +Z) that touch along `y = 0` without sharing a vertex (gap 0,
+/// two parts): A `x` in -1..1, `y` in -1..0 (16 x 8 quads), B `x` in -1.03..0.97, `y` in 0..1 (13 x 8 quads, so
+/// no seam vertex welds to A's). Each plate its own UV island.
+pub(super) fn flush_plates() -> RawMesh {
+    let mut t = Vec::new();
+    a9_grid(&mut t, 16, 8, a9_island(0, 2, 1), &|i, j| Vec3::new(-1.0 + 2.0 * i as f32 / 16.0, -1.0 + j as f32 / 8.0, 0.0));
+    a9_grid(&mut t, 13, 8, a9_island(1, 2, 1), &|i, j| Vec3::new(-1.03 + 2.0 * i as f32 / 13.0, j as f32 / 8.0, 0.0));
+    textured("Flush", t)
+}
+
+/// Stable (fix-wrap, item 1): Jump small gaps should continue the picture onto a flush, touching coplanar part along
+/// the whole seam. The picture's long axis (its spine) runs parallel to the seam on plate A, and its upper quarter lies
+/// on plate B. A part is entered once, at the first seam vertex the front reaches, and laid within the front's stop of
+/// that one landing: plate B gets 33.6 % of its texels right, the rest bare. **Known limit, ignored:** entering a
+/// touching part again where its own front has not reached (fix-wrap attempt 2) passes this test, but changed
+/// ABeautifulGame Jump on (seams 2,147 -> 2,269 and rejected +0.2 points from 5 landings between a chess piece's
+/// touching ring parts), so it was not kept (`docs/notes/stable/fix_wrap_2.md`).
+#[test]
+#[ignore = "known limit: a flush touching part is entered once (fix-wrap attempt 2 not kept, docs/notes/stable/fix_wrap_2.md)"]
+fn fix_jump_continues_across_flush_coplanar_plates() {
+    let src = cells();
+    let model = Model::new(flush_plates(), SIDE);
+    let anchor = Vec3::new(0.0, -0.2, 0.0);
+    let net = |q: Vec3, tri: u32| -> Option<Vec2> { (model.mesh.geo_normal(tri).z > 0.9).then(|| Vec2::new(q.x - anchor.x, q.y - anchor.y)) };
+    let on_b = |q: Vec3, tri: u32| -> Option<Vec2> { if tri >= 16 * 8 * 2 { net(q, tri) } else { None } };
+    for (what, half) in [("picture", Vec2::new(0.8, 0.4)), ("long strip", Vec2::new(0.9, 0.3))] {
+        let p = with_options(wrapped(anchor, Vec3::Z, Vec3::Y, half), true, false);
+        let param = model.param(&src, &p).expect("a parameterization");
+        let s = param.stats();
+        let image = &model.bake(&param, &src, &p, BakeQuality::Full)[0];
+        let errors = compare_net(&model, image, &src, &p, &net);
+        let b = compare_net(&model, image, &src, &p, &on_b);
+        println!("FIX flush plates {what}: both {errors:?} share {:.5}; plate B {b:?} share {:.5}; {s:?}", errors.share(), b.share());
+        assert_eq!(s.jumps, 1, "{what}: a part entered again is no new jump: {s:?}");
+        assert!(s.shown >= 0.99, "{what}: only {:.4} of the picture shown: {s:?}", s.shown);
+        b.assert_wa1(&format!("{what} on plate B"));
+        errors.assert_wa1(what);
+    }
+}
+
+/// Stable (fix-wrap, item 3): the shared-texel numbers of DamagedHelmet (`DamagedHelmet.glb`, skipped without it).
+/// The gate saw "100 %" for the `wrap_surface` step-10 stamp and the checkers "86.7 %": two measures. 86.7 % is the
+/// mesh's share (`UvShare::mesh_share`, the warm-up's log line: the whole helmet's surface on triangles whose texels
+/// other triangles use too); 100 % is the stamp's share (`Document::stamp_shared_texels`, 16 x 16 picture points on
+/// such triangles), which decides the panel's line (shown from 5 %; the line has no number). The visor under the
+/// picture is mirrored, so every point is on a shared texel. Checked here against an independent count: per picture
+/// point, whether the texel under it (UV at the point, 4,096 raster) is covered by another triangle's footprint too.
+#[test]
+fn fix_damaged_helmet_shared_texels_are_two_measures() {
+    use crate::doc_build::TextureChoice;
+    let Some(path) = sample_model("DamagedHelmet.glb") else {
+        println!("FIX helmet: DamagedHelmet.glb not found, skipped");
+        return;
+    };
+    let model = crate::import::import_from_path(&path, &Default::default(), &crate::progress::NoProgress).unwrap();
+    let n = model.mesh.sets.len();
+    let mut doc = Document::from_import(model, vec![TextureChoice::Detected; n], &crate::progress::NoProgress).unwrap();
+    let bits = |b: &[u32]| b.iter().map(|&v| f32::from_bits(v)).collect::<Vec<_>>();
+    let (o, r, h) = (bits(&[1053759962, 1049015932, 1053868208]), bits(&[3188339059, 1053299897, 1016271181, 1063849291]), bits(&[1059612818, 1051224210]));
+    let mut p = wrapped(Vec3::new(o[0], o[1], o[2]), Vec3::Y, Vec3::X, Vec2::new(h[0], h[1]));
+    p.rotation = Quat::from_xyzw(r[0], r[1], r[2], r[3]);
+    p.wrap = WrapOptions { jump_gaps: true, ..WrapOptions::default() };
+    let blob = doc.add_image_blob("cells.png", png_of(&samples::cells_picture(PIC[0], PIC[1]))).unwrap();
+    let id = doc.add_stamp("Cells", StampSource::Image { blob }, Placement::Projected(p), TextureSetId(0)).unwrap();
+    doc.ensure_wrap_param(id).expect("a parameterization");
+    if let Some(w) = doc.wrap_mesh_warmup(true) {
+        w.run();
+    }
+    let stamp_share = doc.stamp_shared_texels(id).expect("the stamp's share");
+    let mesh = Arc::clone(&doc.mesh);
+    let mesh_share = doc.wrap_mesh_cell().uv_built().expect("built").mesh_share();
+    // Independent: a 4,096 count raster of every footprint of the set (texel centres inside, wrapped).
+    const R: usize = 4096;
+    let mut count = vec![0u8; R * R];
+    let set = |t: TriId| mesh.tri_set(t);
+    for t in 0..mesh.tri_count() {
+        if set(t) != Some(TextureSetId(0)) {
+            continue;
+        }
+        let uv = mesh.tri_uvs(t).map(|q| glam::DVec2::new(q.x as f64 * R as f64, q.y as f64 * R as f64));
+        let area = (uv[1] - uv[0]).perp_dot(uv[2] - uv[0]);
+        if area == 0.0 || !area.is_finite() {
+            continue;
+        }
+        let (lo, hi) = (uv[0].min(uv[1]).min(uv[2]), uv[0].max(uv[1]).max(uv[2]));
+        for j in (lo.y - 0.5).ceil() as i64..=(hi.y - 0.5).floor() as i64 {
+            for i in (lo.x - 0.5).ceil() as i64..=(hi.x - 0.5).floor() as i64 {
+                let c = glam::DVec2::new(i as f64 + 0.5, j as f64 + 0.5);
+                let inside = (0..3).all(|k| area.signum() * (uv[(k + 1) % 3] - uv[k]).perp_dot(c - uv[k]) >= 0.0);
+                if inside {
+                    let k = j.rem_euclid(R as i64) as usize * R + i.rem_euclid(R as i64) as usize;
+                    count[k] = count[k].saturating_add(1);
+                }
+            }
+        }
+    }
+    let w = doc.wrap_cache_probe(id).0.expect("a cached parameterization");
+    const N: usize = 16;
+    let (hw, hh) = (p.half_size.x.abs(), p.half_size.y.abs());
+    let (mut hit, mut twice) = (0usize, 0usize);
+    for j in 0..N {
+        for i in 0..N {
+            let l = Vec2::new(hw * ((i as f32 + 0.5) / N as f32 * 2.0 - 1.0), hh * ((j as f32 + 0.5) / N as f32 * 2.0 - 1.0));
+            let Some(sp) = w.surface_of(&mesh, l) else { continue };
+            hit += 1;
+            let uv = mesh.tri_uvs(sp.tri);
+            let q = uv[0] * sp.bary[0] + uv[1] * sp.bary[1] + uv[2] * sp.bary[2];
+            let (x, y) = ((q.x as f64 * R as f64).floor() as i64, (q.y as f64 * R as f64).floor() as i64);
+            twice += usize::from(count[y.rem_euclid(R as i64) as usize * R + x.rem_euclid(R as i64) as usize] >= 2);
+        }
+    }
+    let independent = twice as f64 / hit as f64;
+    println!("FIX helmet: stamp share {stamp_share:.4} ({hit} points; independent texel check {independent:.4}), mesh share {mesh_share:.4}");
+    assert!((stamp_share as f64 - independent).abs() <= 0.03, "stamp share {stamp_share} vs independent {independent}");
+    assert!(stamp_share >= crate::uv_share::UV_SHARE_WARN, "the panel line must show: {stamp_share}");
+    assert!((0.8..0.95).contains(&mesh_share), "mesh share {mesh_share}");
+}
+
+/// Stable (fix-wrap, item 5): the WaterBottle label (`WaterBottle.glb`, skipped without it; `wrap_surface` step 10's
+/// placement) lies exactly on the bottle's cylindrical body: every laid triangle of the body (all corners' normals
+/// perpendicular to the bottle's axis within 0.05) with a corner inside the picture keeps its 3D edge lengths in the layout to a
+/// hundredth of a texel. The round-9 gate's tint check (a round-6 project's label re-baked after a tint change: 68 % of
+/// the body texels within 2/255, now 67.8 %) compares with round 6's bake, not with the exact unrolling: the drift is
+/// round 6's layout against this one, not a fault of this one.
+#[test]
+fn fix_the_water_bottle_label_is_exact_on_the_body() {
+    use crate::doc_build::TextureChoice;
+    let Some(path) = sample_model("WaterBottle.glb") else {
+        println!("FIX bottle: WaterBottle.glb not found, skipped");
+        return;
+    };
+    let model = crate::import::import_from_path(&path, &Default::default(), &crate::progress::NoProgress).unwrap();
+    let n = model.mesh.sets.len();
+    let doc = Document::from_import(model, vec![TextureChoice::Detected; n], &crate::progress::NoProgress).unwrap();
+    let mut p = wrapped(Vec3::ZERO, Vec3::Y, Vec3::X, Vec2::ONE);
+    p.origin = Vec3::from_array([1021762344u32, 1016413762, 1026078840].map(f32::from_bits));
+    p.rotation = Quat::from_array([3117221769u32, 1050103388, 956174582, 1064603888].map(f32::from_bits));
+    p.half_size = Vec2::from_array([1031265599u32, 1022876991].map(f32::from_bits));
+    let src = cells();
+    let maps = doc.texel_maps();
+    let param = crate::wrap_param::wrap_param(&doc.mesh, &doc.bvh, &maps, src.size(), &p).expect("a parameterization");
+    let texel = param.texel_world() as f64;
+    let mesh = &doc.mesh;
+    let layer = param.layers.last().unwrap();
+    let (hw, hh) = (p.half_size.x.abs(), p.half_size.y.abs());
+    let (mut tris, mut worst, mut sum) = (0usize, 0.0f64, 0.0f64);
+    for (k, &t) in layer.tris.iter().enumerate() {
+        let q = layer.corners[k];
+        if !q.iter().any(|c| c[0].abs() <= hw && c[1].abs() <= hh) {
+            continue;
+        }
+        if !mesh.tri_normals(t).iter().all(|n| n.y.abs() < 0.05) {
+            continue;
+        }
+        let pos = mesh.tri_positions(t);
+        tris += 1;
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            let d3 = pos[i].distance(pos[j]) as f64;
+            let d2 = Vec2::from(q[i]).distance(Vec2::from(q[j])) as f64;
+            let e = (d2 - d3).abs() / texel;
+            worst = worst.max(e);
+            sum += e;
+        }
+    }
+    println!("FIX bottle: {tris} body triangles meeting the picture, edge length error mean {:.5} max {worst:.5} texels (texel {texel:.6}), {:?}", sum / (3 * tris.max(1)) as f64, param.stats());
+    assert!(tris > 20, "{tris} body triangles");
+    assert!(worst <= 0.01, "the body is not laid exactly: an edge {worst:.4} texels off");
 }

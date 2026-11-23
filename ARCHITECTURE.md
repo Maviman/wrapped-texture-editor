@@ -153,6 +153,14 @@ closed part. Details 6.5a "Stable (w2)".
 left no picture bare (the chess board under a pawn), "runs off" and "Only P %" from `shown` instead of the summed
 `covered`, and the overlap line says each spot is shown once. Details 6.5a "Stable (fix_wrap_1)".
 
+`docs/notes/stable/fix_wrap_2.md` (branch `stable-fix-wrap`). `WrapStats::gaps` (picture bare in the gaps between separate parts it
+continued across) and `at_part` (bare where it stops at a neighbouring part) give the panel two more causes: "falls into
+the gaps between separate parts" (parts200: 28 %), "stops where it meets a neighbouring part" (ABeautifulGame Jump on:
+the board slab at the flush marble frame, 9 %), and "runs off the surface" says only the rest. Details 6.5a "Stable
+(fix-wrap)"; the wall-clock limits of WA7 / check:A moved to serial perf tests (9). Entering a flush, touching part
+again (so a long flush seam is laid along its whole length) was tried and not kept (it changed ABeautifulGame's seams);
+the chess board's cut at the marble frame is the front's stop, not a gap (6.5a).
+
 ### 1.7 Round 7 (brush speed)
 
 Round 7 (`target\round7_design\ROUND7_PLAN.md`) makes 3D dabs on very heavy models cheaper and properly parallel,
@@ -1364,7 +1372,12 @@ pub struct WrapStats { pub verts: u32, pub tris: u32, pub cut_tris: u32, pub cov
     pub room: f32, pub wraps_closed: bool,
     // Stable (fix_wrap_1): the share of the picture's cells with an owner (each once; `covered` sums laid areas, so
     // two places at one picture point count twice); the share of its cells bare beyond a closure (where the ends met).
-    pub shown: f32, pub beyond: f32 }
+    pub shown: f32, pub beyond: f32,
+    // Stable (fix-wrap): the share of the picture's cells bare in a gap between two separate parts it continued across
+    // (an uncovered run of at most the jump gap between cells owned by two parts); the share bare where it stops at a
+    // neighbouring part (next to a laid cell on a continued part that goes on, or with another part's surface within
+    // the jump gap, and the bare cells nearest to such a cell).
+    pub gaps: f32, pub at_part: f32 }
 /// Round 8 (`Document::stamp_wrap_quality`): ink area, the share of picture bins found in two places (`dup`, > 6 bins
 /// apart), the share of neighbouring bin pairs lying apart (`scatter`), the inked bins.
 pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub bins: u32 }
@@ -3312,6 +3325,19 @@ triangle's plane, its arc length grown by the gap's part along the direction. A 
 again by the front. Exact across coplanar or parallel-offset gaps; a part met at a steep angle takes its placement from
 the landing point.
 
+**Stable (fix-wrap): a flush, touching part, and the chess board's cut** (`docs/notes/stable/fix_wrap_2.md`). A part is
+entered once (a), so its depth is measured from its first landing: two plates touching along a seam parallel to the
+spine get the second plate laid only near that landing (`fix_jump_continues_across_flush_coplanar_plates`, ignored as a
+known limit: plate B 33.6 % right). Entering a touching part again (boxes face to face within 1e-4 x patch diag, a
+landing within that distance facing the same way, on a triangle the part's own front had not reached) fixed it, but
+changed ABeautifulGame Jump on (5 landings between a chess piece's touching ring parts: seams 2,147 -> 2,269, rejected
++0.2 points, flipped -1,694, ink / dup / scatter within 0.3 %), so under the no-regression rule it was not kept (a first
+attempt that counted every box touching, chess pieces on the board included, made the front 200 x slower). The board's
+cut at the marble frame is not that case: the frame (4 parts) is entered across the 1-2 mm inlay ridge, but the spine
+closed round the pawn under the anchor, so the depth at the board's edge is already 0.16-0.18 against the front's stop
+of 0.185 (1.7 x the across reach) and the frame strip lies beyond the reach (with the touching re-entry `shown` moved
+from 0.9127 to 0.9132). The panel says the picture stops at a neighbouring part (`WrapStats::at_part`, below).
+
 **Overlap** (`overlap`; only when the spine meets itself, otherwise byte-identical to Ends meet): a trace that meets turn
 0 does not stop but starts its turn 1, and a later turn that re-enters itself starts the next one, at most
 `WRAP_MAX_TURNS` in all (`limited`); turns starting beyond the picture are dropped (`serves` then also compares the exact
@@ -3603,6 +3629,24 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   (WA32: `shown + beyond + lost_cut = 1` within 1 %); on ABeautifulGame Jump on the spine met its own path round a pawn
   (`ends_share` 0.738) but `beyond` is 0: the closure cost no picture.
 - Both are size-dependent and come from `size_stats` (a reused parameterization reports them for its own size).
+
+**Stable (fix-wrap): what became of the bare cells** (`OwnerGrid::classify_bare`, `bare_cells`; `fix_wrap_2.md`).
+After the owner grid is built (`make_layer`), `classify_bare(gap = GAP_JUMP x patch diag, at_part)` marks, over the
+whole grid and serially: `MARK_GAP` on each run of uncovered cells along a row or column of at most `gap / cell + 1`
+cells between covered cells owned by two different parts; then `MARK_AT_PART` on each other uncovered cell with a
+4-neighbour covered cell whose owner (`OwnerGrid::owner`, its triangle) stops at a neighbouring part
+(`OwnerCtx::at_part`, asked once per covered cell): the owner's triangle lies on a part other than the anchor's, none
+of its corners is on a boundary edge and a triangle at one of its corners is not laid (the part goes on where the front
+stopped on it; a small closed part laid whole, many_islands' cubes, does not), or another part's surface, not laid
+there, lies within the gap of the owner's point (`near_other_part`: only a point within the gap of the box of a part in the turn's
+`Jumper::neighbours` asks the BVH; empty with Jump off, where the patch is one part). `bare_cells(picture)` (from
+`size_stats`, any picture size: stable w1 item 3) counts per picture cell: owned; lost / beyond (`lost_flags`, as
+`lost_cells` was); `gaps` (`MARK_GAP`); the rest go with the nearest laid cell (breadth first from the uncovered cells
+next to a covered one, 4-connected through such cells inside the picture): `at_part` when that cell is marked. Shares
+over the picture's cells: `WrapStats::gaps`, `at_part`; `1 - shown - beyond - lost_cut - gaps - at_part` is the rest
+(an edge, a hole, the end of the part, or where the front stopped on the anchor's own part). Cost (alternating runs on an idle machine, release): tiles300 Jump on param
+1,834 / 1,856 ms against 1,820 / 1,819 (+1 %; the neighbour lists are the jumper's), Jump off 16.4 / 16.9 against
+12.2 / 12.6 ms (the grid's passes on a small wrap, about 4 ms); high_poly_sphere and ABeautifulGame within 2 %.
 
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 
@@ -5668,6 +5712,17 @@ surface overlaps another part or folds over itself: each spot of the picture is 
 place's cell always has an owner, so it is shown elsewhere (Avocado Jump on 35 % with ink 0.996; the old wording "...
 and is not shown there" read like a loss).
 
+Stable (fix-wrap, `docs/notes/stable/fix_wrap_2.md`): with less than 98 % shown, `gaps >= 2 %` (`GAP_LINE_MIN`) adds the
+help line "P % of the picture falls into the gaps between separate parts" (P = `gaps`; parts200 Jump on 28 %, where
+fix_wrap_1 said "28 % ... runs off the surface" while the picture looks whole) and `at_part >= 2 %` the warning "P % of
+the picture stops where it meets a neighbouring part" (P = `at_part`; ABeautifulGame Jump on 9 %, where it said "9 %
+... runs off the surface: an edge, a hole or the end of the part": the bare strip lies on the flush marble frame next to
+the board slab). Both come after the ends line; "runs off" says only the rest (`1 - shown - beyond - lost_cut - gaps - at_part`,
+whether or not their lines show) and shows only when that rest is 2 % or more (DamagedHelmet Jump on: of 2.6 % bare,
+2.0 % lost to cuts and 0.5 % in gaps: fix_wrap_1's "3 % ... runs off" becomes "Only 97 % of the picture lies on the
+surface"); the "Only P %" / "narrower" line's expected share also drops the gaps and neighbouring-part shares when their
+lines show.
+
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
 ```rust
@@ -6857,6 +6912,34 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   `beyond < 2 %` and `shown >=` the board's share; WA32 asks `beyond >= 2 %` and `shown + beyond + lost_cut = 1`
   within 1 %; `tool_options::the_wrap_lines_name_the_right_cause_and_never_contradict` has the chess-board case (no ends
   line, "9 % ... runs off") and a grid over `beyond`.
+- Stable (fix-wrap; `docs/notes/stable/fix_wrap_2.md`), `wrap_stable_tests.rs` unless named:
+  `fix_jump_continues_across_flush_coplanar_plates` (ignored, a known limit: two coplanar plates touching along a seam
+  without a shared vertex, the spine parallel to the seam, Jump on: the bake on both plates and on plate B alone should
+  be the flat picture within WA1's limits, `shown >= 0.99`, `jumps == 1`; plate B is 33.6 % within 2/255; the fix that
+  passed it was not kept, 6.5a); `relax::tests::fix_bare_cells_by_cause`
+  (a hand-built owner grid: a 0.2 gap between two parts is `gaps`, a 0.5 gap is not; bare rows next to parts a
+  neighbouring part is near are `at_part`, nearest-laid-cell attribution, none with `near_other` false);
+  `fix_damaged_helmet_shared_texels_are_two_measures` (skipped without the sample: the stamp's share
+  `stamp_shared_texels` 100 % equals an independent 4,096 count raster of the texels under the 16 x 16 picture points;
+  the mesh's share 86.7 % is `UvShare::mesh_share`); `fix_the_water_bottle_label_is_exact_on_the_body` (skipped without
+  the sample: the body triangles meeting the picture keep their edge lengths within 0.01 texel); the chess board test
+  also asks `at_part >= 0.9 x (1 - shown)`, `w1_lost_cut_does_not_count_the_gaps_between_parts` also `gaps >= 0.15`,
+  `at_part < 0.01`, and the rest below 2 %; `tool_options::the_wrap_lines_name_the_right_cause_and_never_contradict`'s
+  chess case now reads "9 % of the picture stops where it meets a neighbouring part", plus a parts200 case and a mixed
+  case (gaps, neighbouring part and edge each with its own share).
+- Stable (fix-wrap), wall-clock limits: `wa7_bad_meshes_and_bad_pictures_never_fail` and
+  `check_a_own_bad_meshes_never_fail` keep every functional assert and print their slowest parameterization; the
+  200 ms limit (best of up to five runs, `best_param_ms`) is asserted by the ignored perf tests
+  `perf_wa7_parameterizations_within_200_ms` and `perf_check_a_own_meshes_within_200_ms`, which run the same cases
+  serially on an otherwise idle machine: `cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1` (gate step).
+  In the parallel run the wall clock depended on the other tests (197.7 of 200 ms idle, 276.5 / 366.5 ms under load);
+  the parameterization's own CPU time (one-thread pool, `GetThreadTimes`) was tried and rejected: its parallel parts on
+  one thread take 3-5 x the wall time (doubled_cube 500 ms CPU against 115 ms wall), so the same bound could not stay.
+- Stable (fix-wrap), `wrap_surface` step 10: the panel lines are logged before the step's asserts (nonmanifold,
+  noisy400 and tiles300 fail the ink / dup assert and now log them too); the `coverage:` line adds `gaps` and
+  `at_part`, `panel lines:` adds both and says "shared texels under the picture" (the stamp's share; the whole mesh's
+  is the warm-up's "shared texels found ... (N % of the surface)"); a `composite hash` line per Jump setting (every
+  set's composite) for byte-equality checks across runs.
 
 **Export-select app tests** (EXPORT_SELECT_PLAN 6.2): `panels::layers::tests::row_clicks_select_toggle_or_extend` (the
 `row_click_action` table); `dispatch::tests::{ctrl_and_shift_select_layers_without_touching_the_document` (toggle add /

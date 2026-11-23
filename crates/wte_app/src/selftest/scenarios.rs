@@ -7442,6 +7442,10 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
         }),
         Step::WaitIdle,
         Step::WaitFrames(3),
+        // Round 9 (package B, plan 7.2): the third log state (the panel's lines: shared texels, the part of a picture
+        // longer than the way round). Stable (fix-wrap, item 2): logged before the asserts, so a model that fails
+        // one of them (nonmanifold, noisy400, tiles300) still logs what its panel says.
+        Step::Setup("(10) log the panel lines (Jump small gaps on)", ws_log_panel_lines),
         Step::Assert("(10) ink <= 1.3, dup <= 3 %, scatter <= 5 % with Jump small gaps off and on", |_, sc| {
             let mut bad = Vec::new();
             for (jump, keys) in [("off", WS_Q_OFF), ("on", WS_Q_ON)] {
@@ -7453,9 +7457,7 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
             }
             if bad.is_empty() { Ok(()) } else { Err(bad.join("; ")) }
         }),
-        // Round 9 (package B, plan 7.2): the third log state (the panel's lines: shared texels, the part of a picture
-        // longer than the way round) and the new asserts.
-        Step::Setup("(10) log the panel lines (Jump small gaps on)", ws_log_panel_lines),
+        // Round 9 (package B, plan 7.2): the new asserts.
         // Stable (w2, item 2): the coverage is asked of the room the surface has: `room` (the largest extent across
         // the picture of the parts it lies on, over the picture's height; 1 for a part as large as the picture). A
         // pawn under a picture as wide as the board can hold only `room` of its height (ABeautifulGame Jump off,
@@ -7489,15 +7491,16 @@ const WS_S_OFF: [&str; 6] = ["ws_cov_off", "ws_ends_off", "ws_edge_off", "ws_los
 const WS_S_ON: [&str; 6] = ["ws_cov_on", "ws_ends_on", "ws_edge_on", "ws_lost_on", "ws_room_on", "ws_closed_on"];
 
 /// Round 9 (package B, plan 7.2): logs what the panel says under stamp S besides the stats line: the share of its
-/// picture on shared texels (`Document::stamp_shared_texels`, the T9 line from 5 %) and the part of a picture longer
-/// than the way round (`ends_share`).
+/// picture on shared texels (`Document::stamp_shared_texels`, the T9 line from 5 %; stable fix-wrap: "under the
+/// picture", as against the whole model's share the warm-up logs as "shared texels found ... (N % of the surface)")
+/// and the part of a picture longer than the way round (`ends_share`).
 fn ws_log_panel_lines(state: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
     let (id, _) = ws_s(state, sc)?;
     let doc = doc_of(state)?;
     let share = doc.stamp_shared_texels(id);
     let stats = doc.stamp_wrap_stats(id);
     log::info!(
-        "wrap_surface (10) panel lines: shared texels {} ({}), ends_share {} ({}), passed {}, lost_cut {}",
+        "wrap_surface (10) panel lines: shared texels under the picture {} ({}), ends_share {} ({}), passed {}, lost_cut {}, gaps {}, at a neighbouring part {}",
         share.map_or("-".to_owned(), |v| format!("{:.1} %", v * 100.0)),
         if share.is_some_and(|v| v >= wte_core::uv_share::UV_SHARE_WARN) { "line shown" } else { "no line" },
         stats.map_or("-".to_owned(), |s| format!("{:.1} %", s.ends_share * 100.0)),
@@ -7505,6 +7508,8 @@ fn ws_log_panel_lines(state: &mut AppState, sc: &mut Scratch) -> Result<(), Stri
         if stats.is_some_and(|s| crate::panels::tool_options::ends_cut_shown(&s)) { "line shown" } else { "no line" },
         stats.is_some_and(|s| s.passed),
         stats.map_or("-".to_owned(), |s| format!("{:.2} %", s.lost_cut * 100.0)),
+        stats.map_or("-".to_owned(), |s| format!("{:.2} %", s.gaps * 100.0)),
+        stats.map_or("-".to_owned(), |s| format!("{:.2} %", s.at_part * 100.0)),
     );
     // Stable (w1): the lines the panel shows under "Wrapped over N triangles".
     if let (Some(s), Some(Placement::Projected(p))) = (stats, doc.stamp(id).map(|st| st.placement)) {
@@ -7840,6 +7845,9 @@ fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Resu
         p.mode,
         p.wrap,
     );
+    // Stable (fix-wrap, item 4): the composites' hash (every texture set, the wrapped stamp baked in), for
+    // byte-equality checks across runs (`WTE_SYNC_FINAL_BAKES=1`, `RAYON_NUM_THREADS=1` against the default).
+    log::info!("wrap_surface (10) Jump small gaps {jump} composite hash {:016x}", composite_hash(doc));
     log::info!(
         "wrap_surface (10) Jump small gaps {jump} quality: ink / picture {ratio:.4} (plan <= 1.3), dup {} (plan <= 3 %), scatter {} (plan <= 5 %), bins {}; param {} ms, relaxed {}, seams {} {:?}, stretch {}, rejected {}, jumps {}; Final applied after {} ms",
         quality.map_or("-".to_owned(), |q| format!("{:.3} %", q.dup * 100.0)),
@@ -7873,12 +7881,12 @@ fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Resu
     let measures = stats.map_or([f32::NAN; 6], |s| {
         [s.covered, s.ends_share, if s.reached_edge { 1.0 } else { 0.0 }, s.lost_cut, s.room, if s.wraps_closed { 1.0 } else { 0.0 }]
     });
-    let (shown, beyond) = stats.map_or((f32::NAN, f32::NAN), |s| (s.shown, s.beyond));
+    let (shown, beyond, gaps, at_part) = stats.map_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN), |s| (s.shown, s.beyond, s.gaps, s.at_part));
     for (key, v) in keys.into_iter().zip(measures) {
         sc.values.insert(key, u64::from(v.to_bits()));
     }
     log::info!(
-        "wrap_surface (10) Jump small gaps {jump} coverage: covered {:.4}, ends_share {:.4}, reached_edge {}, lost_cut {:.2} %, passed {}, room {:.4}, wraps_closed {}, shown {:.4}, beyond {:.4}",
+        "wrap_surface (10) Jump small gaps {jump} coverage: covered {:.4}, ends_share {:.4}, reached_edge {}, lost_cut {:.2} %, passed {}, room {:.4}, wraps_closed {}, shown {:.4}, beyond {:.4}, gaps {:.4}, at_part {:.4}",
         measures[0],
         measures[1],
         measures[2] != 0.0,
@@ -7887,7 +7895,9 @@ fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Resu
         measures[4],
         measures[5] != 0.0,
         shown,
-        beyond
+        beyond,
+        gaps,
+        at_part
     );
     if p.mode != SurfaceMode::Wrap {
         return Err("the stamp is not wrapped".to_owned());

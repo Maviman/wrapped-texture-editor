@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use wte_core::{DocumentSnapshot, ExportOptions, FlatFormat, PngLevel, TextureSetId};
+use wte_core::{DocumentSnapshot, ExportOptions, ExportPackage, FlatFormat, LayerId, PlannedKind, PngLevel, TextureSetId};
 
 use crate::action::AppAction;
 use crate::dialogs::DialogsState;
@@ -91,12 +91,61 @@ pub(super) fn export_blocker(opts: &ExportOptions, plan_len: usize) -> Option<&'
     if plan_len > 0 {
         return None;
     }
-    if opts.sets.as_ref().is_some_and(Vec::is_empty) {
-        Some("Choose at least one texture set")
-    } else if opts.flat.is_none() && !opts.per_layer_png && !opts.ora && !opts.psd {
+    if opts.flat.is_none() && !opts.per_layer_png && !opts.ora && !opts.psd {
         Some("Choose at least one kind of file")
+    } else if opts.layers.is_some() {
+        Some("Select at least one layer")
+    } else if opts.sets.as_ref().is_some_and(Vec::is_empty) {
+        Some("Choose at least one texture set")
     } else {
         Some("Nothing to export")
+    }
+}
+
+/// The dialog's Layers choice (8.8).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(super) enum LayerScope {
+    /// The visible layers (`include_hidden: false`).
+    Visible,
+    /// Hidden layers too (`include_hidden: true`).
+    All,
+    /// Exactly the layers selected in the Layers list (`layers: Some(..)`).
+    Selected,
+}
+
+/// The Layers choice the options express.
+pub(super) fn scope_of(opts: &ExportOptions) -> LayerScope {
+    match (&opts.layers, opts.include_hidden) {
+        (Some(_), _) => LayerScope::Selected,
+        (None, true) => LayerScope::All,
+        (None, false) => LayerScope::Visible,
+    }
+}
+
+/// Writes a Layers choice into the options: Visible / All = `include_hidden` false / true and no layer list; Selected
+/// = these layers (their set decides the texture set, so the set filter is cleared).
+pub(super) fn apply_scope(opts: &mut ExportOptions, scope: LayerScope, selected: &[LayerId]) {
+    match scope {
+        LayerScope::Visible | LayerScope::All => {
+            opts.layers = None;
+            opts.include_hidden = scope == LayerScope::All;
+        }
+        LayerScope::Selected => {
+            if opts.layers.as_deref() != Some(selected) {
+                opts.sets = None;
+            }
+            opts.layers = Some(selected.to_vec());
+        }
+    }
+}
+
+/// The names of the selected layers for the line under the Layers choice: "A, B, C" or "A, B, C and 2 more".
+pub(super) fn selection_names(names: &[String]) -> String {
+    const SHOWN: usize = 3;
+    if names.len() <= SHOWN {
+        names.join(", ")
+    } else {
+        format!("{} and {} more", names[..SHOWN].join(", "), names.len() - SHOWN)
     }
 }
 
@@ -126,58 +175,13 @@ pub(super) enum FileKind {
     Layered,
 }
 
-/// The kind of every file of `export::plan(snapshot, opts)`, in plan order (per selected set: flattened texture,
-/// the exported layers bottom to top, ORA, PSD — section 7.4).
-pub(super) fn classify_plan(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<FileKind> {
-    let mut sets: Vec<usize> = match &opts.sets {
-        None => (0..snapshot.sets.len()).collect(),
-        Some(ids) => ids.iter().map(|id| id.index()).filter(|&i| i < snapshot.sets.len()).collect(),
-    };
-    sets.sort_unstable();
-    sets.dedup();
-    let mut kinds = Vec::new();
-    for index in sets {
-        let set = &snapshot.sets[index];
-        if opts.flat.is_some() {
-            kinds.push(FileKind::Flat);
-        }
-        if opts.per_layer_png {
-            for layer in set.layers.iter().filter(|l| opts.include_hidden || l.visible) {
-                kinds.push(FileKind::Layer { separate: !layer.is_raster() });
-            }
-        }
-        if opts.ora {
-            kinds.push(FileKind::Layered);
-        }
-        if opts.psd {
-            kinds.push(FileKind::Layered);
-        }
+/// The list marker kind of a planned file (`export::plan_contents`, the core's own classification).
+pub(super) fn file_kind(kind: PlannedKind) -> FileKind {
+    match kind {
+        PlannedKind::Flat => FileKind::Flat,
+        PlannedKind::Layer { raster, .. } => FileKind::Layer { separate: !raster },
+        PlannedKind::Ora | PlannedKind::Psd => FileKind::Layered,
     }
-    kinds
-}
-
-/// The kind of a planned file from its name alone (used only if the classification above disagrees with the plan).
-fn kind_from_name(path: &Path) -> FileKind {
-    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    if name.ends_with(".ora") || name.ends_with(".psd") {
-        return FileKind::Layered;
-    }
-    // Per-layer files are named `<base>[_<set>]_L<index:02>_<kind>_<layer>.png` (7.5).
-    let bytes = name.as_bytes();
-    for (i, _) in name.match_indices("_l") {
-        let digits = bytes.get(i + 2..i + 4).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
-        if !digits {
-            continue;
-        }
-        let rest = &name[i + 4..];
-        if rest.starts_with("_paint_") {
-            return FileKind::Layer { separate: false };
-        }
-        if rest.starts_with("_stamp_") || rest.starts_with("_text_") {
-            return FileKind::Layer { separate: true };
-        }
-    }
-    FileKind::Flat
 }
 
 /// The planned files that already exist on disk (nothing while the folder is empty: relative paths would point at
@@ -194,26 +198,27 @@ pub(super) struct PlanCache {
     options: ExportOptions,
     revision: u64,
     generation: u64,
-    plan: Vec<PathBuf>,
-    kinds: Vec<FileKind>,
-    exists: Vec<bool>,
+    /// What is written to disk (`export::plan`): the loose files, or the one zip.
+    pub(super) plan: Vec<PathBuf>,
+    /// The files of the export (`export::plan_contents`): the loose files, or the zip's entries.
+    pub(super) names: Vec<String>,
+    pub(super) kinds: Vec<FileKind>,
+    /// Per `plan` path: whether it exists on disk.
+    pub(super) exists: Vec<bool>,
     checked_at: f64,
 }
 
 impl PlanCache {
-    fn build(snapshot: &DocumentSnapshot, options: &ExportOptions, generation: u64, now: f64) -> PlanCache {
+    pub(super) fn build(snapshot: &DocumentSnapshot, options: &ExportOptions, generation: u64, now: f64) -> PlanCache {
         let plan = wte_core::export::plan(snapshot, options);
-        let mut kinds = classify_plan(snapshot, options);
-        if kinds.len() != plan.len() {
-            log::warn!("export file classification disagrees with the plan; using file names");
-            kinds = plan.iter().map(|p| kind_from_name(p)).collect();
-        }
+        let contents = wte_core::export::plan_contents(snapshot, options);
         let mut cache = PlanCache {
             options: options.clone(),
             revision: snapshot.revision,
             generation,
             plan,
-            kinds,
+            names: contents.iter().map(|f| f.name.clone()).collect(),
+            kinds: contents.iter().map(|f| file_kind(f.kind)).collect(),
             exists: Vec::new(),
             checked_at: now,
         };
@@ -420,7 +425,37 @@ fn options_ui(
         ui.add(egui::TextEdit::singleline(&mut st.options.base_name).desired_width(LEFT_WIDTH - 110.0));
         ui.end_row();
 
-        if set_names.len() > 1 {
+        ui.label("Layers");
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                let mut scope = scope_of(&st.options);
+                let before = scope;
+                ui.selectable_value(&mut scope, LayerScope::Visible, "Visible").on_hover_text("The visible layers");
+                ui.selectable_value(&mut scope, LayerScope::All, "All").on_hover_text("Hidden layers too");
+                let n = st.selected_layers.len();
+                ui.add_enabled_ui(n > 0, |ui| {
+                    ui.selectable_value(&mut scope, LayerScope::Selected, format!("Selected ({n})"))
+                        .on_hover_text("Only the layers selected in the Layers list (Ctrl / Shift-click), hidden ones too")
+                        .on_disabled_hover_text("Select layers in the Layers list first");
+                });
+                if scope != before {
+                    apply_scope(&mut st.options, scope, &st.selected_layers);
+                }
+            });
+            if scope_of(&st.options) == LayerScope::Selected {
+                let names: Vec<String> = st
+                    .options
+                    .layers
+                    .iter()
+                    .flatten()
+                    .filter_map(|id| cx.state.doc().and_then(|d| d.layer(*id)).map(|l| l.name.clone()))
+                    .collect();
+                ui.add(egui::Label::new(egui::RichText::new(selection_names(&names)).small().weak()).truncate());
+            }
+        });
+        ui.end_row();
+
+        if set_names.len() > 1 && scope_of(&st.options) != LayerScope::Selected {
             ui.label("Texture sets");
             ui.vertical(|ui| {
                 let all: Vec<TextureSetId> = set_names.iter().map(|(id, _)| *id).collect();
@@ -467,7 +502,14 @@ fn options_ui(
     ui.checkbox(&mut st.options.per_layer_png, "Per-layer PNGs (stamps and text as separate files)");
     ui.checkbox(&mut st.options.ora, "OpenRaster (.ora)");
     ui.checkbox(&mut st.options.psd, "Photoshop (.psd)");
-    ui.checkbox(&mut st.options.include_hidden, "Include hidden layers");
+    let mut zip = st.options.package == ExportPackage::Zip;
+    if ui
+        .checkbox(&mut zip, "Pack into one .zip file")
+        .on_hover_text("One <base name>.zip in the folder, holding the files listed below")
+        .changed()
+    {
+        st.options.package = if zip { ExportPackage::Zip } else { ExportPackage::Files };
+    }
     ui.horizontal(|ui| {
         ui.label("Seam padding");
         ui.add(egui::DragValue::new(&mut st.options.dilate_px).range(0..=MAX_SEAM_PADDING).suffix(" px"));
@@ -481,28 +523,40 @@ fn options_ui(
 
     ui.add_space(6.0);
     let Some(cache) = ds.export_plan.as_ref() else { return };
-    let replaced = cache.exists.iter().filter(|e| **e).count();
-    let header = match (cache.plan.len(), replaced) {
-        (1, 0) => "1 file will be written".to_owned(),
-        (n, 0) => format!("{n} files will be written"),
-        (n, r) => format!("{n} files will be written, {r} replaced"),
-    };
-    ui.strong(header);
+    let packed = st.options.package == ExportPackage::Zip && !cache.plan.is_empty();
+    if packed {
+        ui.horizontal(|ui| {
+            let n = cache.names.len();
+            let inside = if n == 1 { "1 file inside".to_owned() } else { format!("{n} files inside") };
+            ui.strong(format!("1 file will be written: {} ({inside})", file_name(&cache.plan[0])));
+            if cache.exists.first().copied().unwrap_or(false) {
+                ui.colored_label(super::warn_color(ui), "will be replaced");
+            }
+        });
+    } else {
+        let replaced = cache.exists.iter().filter(|e| **e).count();
+        let header = match (cache.plan.len(), replaced) {
+            (1, 0) => "1 file will be written".to_owned(),
+            (n, 0) => format!("{n} files will be written"),
+            (n, r) => format!("{n} files will be written, {r} replaced"),
+        };
+        ui.strong(header);
+    }
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::ScrollArea::vertical().id_salt("wte_export_files").max_height(150.0).auto_shrink([false, true]).show(
             ui,
             |ui| {
-                if cache.plan.is_empty() {
+                if cache.names.is_empty() {
                     ui.weak("No files");
                 }
-                for (i, path) in cache.plan.iter().enumerate() {
+                for (i, name) in cache.names.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(file_name(path)).monospace()).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(name).monospace()).truncate());
                         if cache.kinds.get(i) == Some(&FileKind::Layer { separate: true }) {
                             ui.colored_label(crate::theme::ACCENT, "separate layer");
                         }
-                        if cache.exists.get(i).copied().unwrap_or(false) {
+                        if !packed && cache.exists.get(i).copied().unwrap_or(false) {
                             ui.colored_label(super::warn_color(ui), "will be replaced");
                         }
                     });
@@ -524,16 +578,17 @@ fn preview_ui(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, st: &ExportDialogState, si
         ui.selectable_value(&mut cx.state.preview.lit, false, "Unlit");
         ui.weak("Drag to orbit, wheel to zoom");
     });
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(
-                "Shows the flattened texture exactly as exported (seam padding and JPEG compression not shown)",
-            )
-            .small()
-            .weak(),
-        )
-        .wrap(),
-    );
+    ui.add(egui::Label::new(egui::RichText::new(preview_caption(&st.options)).small().weak()).wrap());
+}
+
+/// The caption under the preview: under a layer selection with a flattened texture, the preview (the whole texture)
+/// is not what the flattened file holds.
+pub(super) fn preview_caption(opts: &ExportOptions) -> &'static str {
+    if opts.layers.is_some() && opts.flat.is_some() {
+        "The preview shows the whole texture; the flattened file holds only the selected layers"
+    } else {
+        "Shows the flattened texture exactly as exported (seam padding and JPEG compression not shown)"
+    }
 }
 
 /// The confirm step: "N files will be replaced" + list, Replace / Cancel.
@@ -606,6 +661,7 @@ mod tests {
             jpeg_matte: [255, 255, 255],
             show_preview: true,
             confirm_replace: None,
+            selected_layers: Vec::new(),
         }
     }
 
@@ -684,6 +740,12 @@ mod tests {
         assert_eq!(export_blocker(&opts, 0), Some("Choose at least one kind of file"));
         opts.per_layer_png = true;
         assert_eq!(export_blocker(&opts, 0), Some("Nothing to export"));
+        // A layer selection that matches nothing.
+        opts.layers = Some(Vec::new());
+        assert_eq!(export_blocker(&opts, 0), Some("Select at least one layer"));
+        assert_eq!(export_blocker(&opts, 2), None);
+        opts.per_layer_png = false;
+        assert_eq!(export_blocker(&opts, 0), Some("Choose at least one kind of file"));
     }
 
     #[test]
@@ -706,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn classification_matches_the_core_plan() {
+    fn the_list_kinds_come_from_the_core_plan() {
         let snap = snapshot_with_decals();
         let mut opts = options(r"E:\out");
         for (per_layer, ora, psd, hidden, flat) in [
@@ -720,18 +782,17 @@ mod tests {
             opts.psd = psd;
             opts.include_hidden = hidden;
             opts.flat = flat.then_some(FlatFormat::Tga);
+            let cache = PlanCache::build(&snap, &opts, 0, 0.0);
             let plan = wte_core::export::plan(&snap, &opts);
-            let kinds = classify_plan(&snap, &opts);
-            assert_eq!(plan.len(), kinds.len());
-            for (path, kind) in plan.iter().zip(&kinds) {
-                assert_eq!(kind_from_name(path), *kind, "{}", path.display());
-            }
+            assert_eq!(cache.plan, plan);
+            assert_eq!(cache.names, plan.iter().map(|p| file_name(p)).collect::<Vec<_>>());
+            assert_eq!(cache.kinds.len(), plan.len());
         }
 
         opts = options(r"E:\out");
         opts.include_hidden = true;
-        let kinds = classify_plan(&snap, &opts);
         // Flat, Base, Paint 1, Logo (stamp), Title (hidden text).
+        let kinds = PlanCache::build(&snap, &opts, 0, 0.0).kinds;
         assert_eq!(
             kinds,
             vec![
@@ -743,21 +804,90 @@ mod tests {
             ]
         );
         opts.include_hidden = false;
-        assert_eq!(classify_plan(&snap, &opts).len(), 4);
+        assert_eq!(PlanCache::build(&snap, &opts, 0, 0.0).kinds.len(), 4);
         opts.sets = Some(vec![TextureSetId(7)]);
-        assert!(classify_plan(&snap, &opts).is_empty());
-        assert!(wte_core::export::plan(&snap, &opts).is_empty());
+        assert!(PlanCache::build(&snap, &opts, 0, 0.0).kinds.is_empty());
+        // ORA and PSD are layered files.
+        assert_eq!(file_kind(PlannedKind::Ora), FileKind::Layered);
+        assert_eq!(file_kind(PlannedKind::Psd), FileKind::Layered);
+        assert_eq!(file_kind(PlannedKind::Layer { layer: LayerId(1), index: 0, raster: false }), FileKind::Layer { separate: true });
     }
 
     #[test]
-    fn classification_matches_for_several_sets() {
+    fn the_list_for_a_selection_and_for_a_zip_package() {
+        let snap = snapshot_with_decals();
+        // The stamp and the hidden text layer, selected: two separate-layer files.
+        let mut opts = options(r"E:\out");
+        opts.flat = None;
+        opts.layers = Some(vec![LayerId(902), LayerId(900)]);
+        let cache = PlanCache::build(&snap, &opts, 0, 0.0);
+        assert_eq!(cache.names, ["model_L02_stamp_Logo.png", "model_L03_text_Title.png"]);
+        assert_eq!(cache.kinds, [FileKind::Layer { separate: true }; 2]);
+        assert_eq!(cache.plan.len(), 2);
+        // Packed: one file on disk, the same names inside.
+        opts.package = ExportPackage::Zip;
+        let cache = PlanCache::build(&snap, &opts, 0, 0.0);
+        assert_eq!(cache.plan, [PathBuf::from(r"E:\out").join("model.zip")]);
+        assert_eq!(cache.names, ["model_L02_stamp_Logo.png", "model_L03_text_Title.png"]);
+        assert_eq!(cache.exists, [false]);
+        // A selection of nothing that exists: nothing to write, not even the zip.
+        opts.layers = Some(vec![LayerId(4242)]);
+        let cache = PlanCache::build(&snap, &opts, 0, 0.0);
+        assert!(cache.plan.is_empty() && cache.names.is_empty());
+        assert_eq!(export_blocker(&opts, 0), Some("Select at least one layer"));
+    }
+
+    #[test]
+    fn the_layers_choice_round_trips() {
+        let selected = [LayerId(5), LayerId(7)];
+        let mut opts = options(r"E:\out");
+        assert_eq!(scope_of(&opts), LayerScope::Visible);
+        for scope in [LayerScope::All, LayerScope::Selected, LayerScope::Visible, LayerScope::Selected, LayerScope::All] {
+            apply_scope(&mut opts, scope, &selected);
+            assert_eq!(scope_of(&opts), scope);
+        }
+        assert_eq!((opts.layers.clone(), opts.include_hidden), (None, true));
+        apply_scope(&mut opts, LayerScope::Visible, &selected);
+        assert_eq!((opts.layers.clone(), opts.include_hidden), (None, false));
+        // Choosing Selected clears the set filter (the layers decide the set) and lists the layers.
+        opts.sets = Some(vec![TextureSetId(1)]);
+        apply_scope(&mut opts, LayerScope::Selected, &selected);
+        assert_eq!(opts.layers.as_deref(), Some(&selected[..]));
+        assert_eq!(opts.sets, None);
+        // Choosing it again with the same layers keeps a set filter that came with them (ShowExportLayers).
+        opts.sets = Some(vec![TextureSetId(1)]);
+        apply_scope(&mut opts, LayerScope::Selected, &selected);
+        assert_eq!(opts.sets, Some(vec![TextureSetId(1)]));
+        // Leaving Selected keeps include_hidden as it was before.
+        apply_scope(&mut opts, LayerScope::All, &selected);
+        assert_eq!(opts.layers, None);
+        assert_eq!(
+            selection_names(&["Logo".to_owned(), "WTE".to_owned()]),
+            "Logo, WTE"
+        );
+        let many: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(selection_names(&many), "a, b, c and 2 more");
+        assert_eq!(selection_names(&[]), "");
+        // The preview caption names what the flattened file holds under a selection.
+        let mut opts = options(r"E:\out");
+        assert!(preview_caption(&opts).starts_with("Shows the flattened texture"));
+        opts.layers = Some(selected.to_vec());
+        assert!(preview_caption(&opts).contains("only the selected layers"));
+        opts.flat = None;
+        assert!(preview_caption(&opts).starts_with("Shows the flattened texture"));
+    }
+
+    #[test]
+    fn the_list_matches_for_several_sets() {
         let snap = Document::sample(SampleKind::TwoMaterial).snapshot();
         assert!(snap.sets.len() >= 2);
         let mut opts = options(r"E:\out");
         opts.ora = true;
         for sets in [None, Some(vec![TextureSetId(1)]), Some(vec![TextureSetId(1), TextureSetId(0), TextureSetId(1)])] {
             opts.sets = sets;
-            assert_eq!(classify_plan(&snap, &opts).len(), wte_core::export::plan(&snap, &opts).len());
+            let cache = PlanCache::build(&snap, &opts, 0, 0.0);
+            assert_eq!(cache.names.len(), wte_core::export::plan(&snap, &opts).len());
+            assert_eq!(cache.kinds.len(), cache.names.len());
         }
     }
 

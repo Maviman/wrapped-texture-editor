@@ -601,6 +601,7 @@ pub(crate) mod test_support {
             uv_view: UvViewState::default(),
             scene_generation: 1,
             text_gap: None,
+            selected_layers: Vec::new(),
         });
         state
     }

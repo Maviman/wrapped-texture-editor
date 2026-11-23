@@ -61,6 +61,7 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
         | A::Save
         | A::SaveAs(_)
         | A::ShowExport
+        | A::ShowExportLayers(_)
         | A::RunExport(_)
         | A::ExtractSources(_)
         | A::Quit
@@ -103,7 +104,76 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
 /// The guarded actions that commit a running stroke or gizmo drag (`ToolController::finish`) instead of cancelling it:
 /// Save, Save As and Export write what is on screen at that moment.
 fn finishes_interaction(action: &AppAction) -> bool {
-    matches!(action, AppAction::Save | AppAction::SaveAs(_) | AppAction::SaveThen(_) | AppAction::ShowExport | AppAction::RunExport(_))
+    matches!(
+        action,
+        AppAction::Save
+            | AppAction::SaveAs(_)
+            | AppAction::SaveThen(_)
+            | AppAction::ShowExport
+            | AppAction::ShowExportLayers(_)
+            | AppAction::RunExport(_)
+    )
+}
+
+/// Makes `layer` the active layer of its set (and its set the active set) and the only selected layer; the stamp
+/// selection follows the layer (8.2). No history entry, no revision change.
+fn activate_layer(state: &mut AppState, layer: LayerId) {
+    let Some(session) = state.session.as_mut() else { return };
+    let Some((set, _)) = session.doc.find_layer(layer) else { return };
+    session.active_set = set;
+    let r = session.doc.set_active_layer(set, Some(layer));
+    session.selected_stamp = session.doc.stamp_of_layer(layer);
+    session.selected_layers = vec![layer];
+    edited(state, r);
+}
+
+/// Ctrl-click on a layer row (8.7): a layer of another set (or no active layer) is simply activated; otherwise the
+/// layer is added to the selection, or taken out of it. The last selected layer cannot be taken out; taking out the
+/// active layer makes the top-most remaining selected layer the active one.
+fn toggle_layer_selected(state: &mut AppState, layer: LayerId) {
+    let Some(session) = state.session.as_mut() else { return };
+    let Some((set, _)) = session.doc.find_layer(layer) else { return };
+    let mut selection = session.layer_selection();
+    let active = session.doc.set(set).and_then(|s| s.active);
+    if set != session.active_set || selection.is_empty() {
+        activate_layer(state, layer);
+        return;
+    }
+    if !selection.contains(&layer) {
+        selection.push(layer);
+        session.selected_layers = selection;
+        return;
+    }
+    if selection.len() == 1 {
+        return;
+    }
+    selection.retain(|id| *id != layer);
+    if active == Some(layer) {
+        // Bottom to top: the last one is the top-most.
+        let Some(&top) = selection.last() else { return };
+        let r = session.doc.set_active_layer(set, Some(top));
+        session.selected_stamp = session.doc.stamp_of_layer(top);
+        session.selected_layers = selection;
+        edited(state, r);
+    } else {
+        session.selected_layers = selection;
+    }
+}
+
+/// Shift-click on a layer row (8.7): selects every layer between the active layer and `layer` (both included); the
+/// active layer stays. A layer of another set (or no active layer) is simply activated.
+fn select_layer_range(state: &mut AppState, layer: LayerId) {
+    let Some(session) = state.session.as_mut() else { return };
+    let Some((set_id, _)) = session.doc.find_layer(layer) else { return };
+    let range = session.doc.set(set_id).and_then(|set| {
+        let active = set.active?;
+        let (a, b) = (set.layer_index(active)?, set.layer_index(layer)?);
+        Some(set.layers[a.min(b)..=a.max(b)].iter().map(|l| l.id).collect::<Vec<LayerId>>())
+    });
+    match range {
+        Some(ids) if set_id == session.active_set => session.selected_layers = ids,
+        _ => activate_layer(state, layer),
+    }
 }
 
 /// Duplicates a layer; the selection follows the copy, which the core makes the active layer: a stamp or text copy
@@ -310,7 +380,37 @@ fn close_dialog(app: &mut WteApp) {
     }
 }
 
-/// The defaults of a freshly opened Export dialog (8.8).
+/// What opening the Export dialog does first: cancel the tool, flush a pending edit and settle the stamp bakes (round
+/// 5: the dialog's plan and preview read the final stamp pixels).
+fn prepare_export(app: &mut WteApp) {
+    cancel_tool(app);
+    if let Some(doc) = app.state.doc_mut() {
+        doc.flush_pending_edit();
+    }
+    crate::stamp_bakes::settle(app);
+}
+
+/// The Export dialog opened for `layers` (the row menu's "Export this layer..." / "Export selected layers...", the
+/// Layer menu): the Layers choice "Selected" with these layers in stack order (only those of the set of the first
+/// existing one), that set, per-layer PNGs only. Without an existing layer the plain defaults stay.
+fn export_for_layers(state: &AppState, mut st: ExportDialogState, layers: &[LayerId]) -> ExportDialogState {
+    let Some(session) = state.session.as_ref() else { return st };
+    let doc = &session.doc;
+    let Some((set_id, _)) = layers.iter().find_map(|id| doc.find_layer(*id)) else { return st };
+    let Some(set) = doc.set(set_id) else { return st };
+    let ordered: Vec<LayerId> = set.layers.iter().map(|l| l.id).filter(|id| layers.contains(id)).collect();
+    st.options.layers = Some(ordered.clone());
+    st.options.sets = Some(vec![set_id]);
+    st.options.flat = None;
+    st.options.per_layer_png = true;
+    st.options.ora = false;
+    st.options.psd = false;
+    st.selected_layers = ordered;
+    st
+}
+
+/// The defaults of a freshly opened Export dialog (8.8). `selected_layers` = the Layers list's selection, for the
+/// Layers choice "Selected (N)".
 fn export_defaults(state: &AppState) -> Option<ExportDialogState> {
     let session = state.session.as_ref()?;
     let doc = &session.doc;
@@ -342,6 +442,7 @@ fn export_defaults(state: &AppState) -> Option<ExportDialogState> {
         jpeg_matte: [255, 255, 255],
         show_preview: true,
         confirm_replace: None,
+        selected_layers: session.layer_selection(),
     })
 }
 
@@ -469,13 +570,15 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
             save(app, frame, explicit, true, None);
         }
         A::ShowExport => {
-            cancel_tool(app);
-            if let Some(doc) = app.state.doc_mut() {
-                doc.flush_pending_edit();
-            }
-            // Round 5: the dialog's plan and preview read the final stamp pixels.
-            crate::stamp_bakes::settle(app);
+            prepare_export(app);
             if let Some(st) = export_defaults(&app.state) {
+                app.export_stash = None;
+                app.state.dialog = Dialog::Export(Box::new(st));
+            }
+        }
+        A::ShowExportLayers(layers) => {
+            prepare_export(app);
+            if let Some(st) = export_defaults(&app.state).map(|st| export_for_layers(&app.state, st, &layers)) {
                 app.export_stash = None;
                 app.state.dialog = Dialog::Export(Box::new(st));
             }
@@ -716,14 +819,9 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
                 session.active_set = set;
             }
         }
-        A::SelectLayer(layer) => {
-            let Some(session) = app.state.session.as_mut() else { return };
-            let Some((set, _)) = session.doc.find_layer(layer) else { return };
-            session.active_set = set;
-            let r = session.doc.set_active_layer(set, Some(layer));
-            session.selected_stamp = session.doc.stamp_of_layer(layer);
-            edited(&mut app.state, r);
-        }
+        A::SelectLayer(layer) => activate_layer(&mut app.state, layer),
+        A::ToggleLayerSelected(layer) => toggle_layer_selected(&mut app.state, layer),
+        A::SelectLayerRange(layer) => select_layer_range(&mut app.state, layer),
         A::AddPaintLayer => {
             let Some(session) = app.state.session.as_mut() else { return };
             let r = session.doc.add_raster_layer(session.active_set, None);
@@ -898,6 +996,125 @@ mod tests {
         assert!(!needs_interaction_guard(&AppAction::ReloadBrushShape));
         assert!(!needs_interaction_guard(&AppAction::RemoveBrushShape));
         assert!(!needs_interaction_guard(&AppAction::LoadFontSamples));
+    }
+
+    /// The Sphere sample with two more paint layers: [Base, Paint 1, A, B] bottom to top, B active.
+    fn four_layer_state() -> (AppState, [LayerId; 4]) {
+        let mut state = crate::tools::test_support::state_with(wte_core::SampleKind::Sphere);
+        let doc = state.doc_mut().unwrap();
+        doc.add_raster_layer(TextureSetId(0), Some("A")).unwrap();
+        doc.add_raster_layer(TextureSetId(0), Some("B")).unwrap();
+        let ids: Vec<LayerId> = doc.sets[0].layers.iter().map(|l| l.id).collect();
+        assert_eq!(doc.sets[0].active, Some(ids[3]));
+        (state, [ids[0], ids[1], ids[2], ids[3]])
+    }
+
+    fn selection(state: &AppState) -> Vec<LayerId> {
+        state.session.as_ref().unwrap().layer_selection()
+    }
+
+    fn active(state: &AppState) -> Option<LayerId> {
+        state.doc().unwrap().sets[0].active
+    }
+
+    #[test]
+    fn ctrl_and_shift_select_layers_without_touching_the_document() {
+        let (mut state, [base, paint, a, b]) = four_layer_state();
+        let doc = state.doc().unwrap();
+        let (undo, revision, modified) = (doc.history.undo_len(), doc.revision(), doc.is_modified());
+        assert_eq!(selection(&state), [b]);
+
+        // Toggle adds and removes; the active layer stays.
+        toggle_layer_selected(&mut state, paint);
+        assert_eq!(selection(&state), [paint, b]);
+        toggle_layer_selected(&mut state, base);
+        assert_eq!(selection(&state), [base, paint, b]);
+        toggle_layer_selected(&mut state, paint);
+        assert_eq!(selection(&state), [base, b]);
+        assert_eq!(active(&state), Some(b));
+        // Toggling the active layer off makes the top-most remaining one active.
+        toggle_layer_selected(&mut state, b);
+        assert_eq!(selection(&state), [base]);
+        assert_eq!(active(&state), Some(base));
+        // The last selected layer stays.
+        toggle_layer_selected(&mut state, base);
+        assert_eq!(selection(&state), [base]);
+        assert_eq!(active(&state), Some(base));
+
+        // Range up from the active layer, then down from a new active layer.
+        select_layer_range(&mut state, a);
+        assert_eq!(selection(&state), [base, paint, a]);
+        assert_eq!(active(&state), Some(base));
+        activate_layer(&mut state, b);
+        assert_eq!(selection(&state), [b]);
+        select_layer_range(&mut state, paint);
+        assert_eq!(selection(&state), [paint, a, b]);
+        assert_eq!(active(&state), Some(b));
+        // A plain select collapses the selection.
+        activate_layer(&mut state, a);
+        assert_eq!(selection(&state), [a]);
+
+        // None of this is a document edit.
+        let doc = state.doc().unwrap();
+        assert_eq!((doc.history.undo_len(), doc.revision(), doc.is_modified()), (undo, revision, modified));
+        for action in [AppAction::ToggleLayerSelected(a), AppAction::SelectLayerRange(a)] {
+            assert!(!needs_interaction_guard(&action), "{action:?}");
+        }
+        assert!(needs_interaction_guard(&AppAction::ShowExportLayers(vec![a])));
+        assert!(finishes_interaction(&AppAction::ShowExportLayers(vec![a])));
+    }
+
+    #[test]
+    fn the_selection_stays_valid_when_layers_go_away() {
+        let (mut state, [_, paint, a, b]) = four_layer_state();
+        select_layer_range(&mut state, paint);
+        assert_eq!(selection(&state), [paint, a, b]);
+        // Deleting the active layer: the core picks another active layer; the selection keeps the selected layers that
+        // still exist, and always holds the active one.
+        let valid = |state: &AppState| {
+            let sel = selection(state);
+            let set = &state.doc().unwrap().sets[0];
+            !sel.is_empty() && sel.iter().all(|id| set.layer_index(*id).is_some()) && sel.contains(&set.active.unwrap())
+        };
+        state.doc_mut().unwrap().remove_layer(b).unwrap();
+        assert!(valid(&state), "{:?}", selection(&state));
+        assert!(!selection(&state).contains(&b));
+        assert_eq!(selection(&state), [paint, a], "a is now active and was selected");
+        // Undo brings B back as the active layer: still a valid selection.
+        state.doc_mut().unwrap().undo().unwrap();
+        assert!(valid(&state), "{:?}", selection(&state));
+        // A new paint layer becomes the active layer, which is not selected: the selection collapses to it.
+        let new = state.doc_mut().unwrap().add_raster_layer(TextureSetId(0), None).unwrap();
+        assert_eq!(selection(&state), [new]);
+        // A stale raw list and a layer of another set are ignored.
+        let session = state.session.as_mut().unwrap();
+        let active_now = session.doc.sets[0].active.unwrap();
+        session.selected_layers = vec![LayerId(9_999), active_now, paint];
+        let mut want = vec![paint, active_now];
+        want.sort_by_key(|id| session.doc.sets[0].layer_index(*id));
+        assert_eq!(session.layer_selection(), want);
+    }
+
+    #[test]
+    fn export_for_layers_opens_the_dialog_on_the_selection() {
+        let (mut state, [base, paint, _, b]) = four_layer_state();
+        select_layer_range(&mut state, paint);
+        let st = export_defaults(&state).unwrap();
+        // The plain defaults: today's options, the selection captured for "Selected (N)".
+        assert_eq!(st.options.layers, None);
+        assert_eq!(st.options.package, wte_core::ExportPackage::Files);
+        assert!(st.options.flat.is_some() && st.options.per_layer_png && !st.options.include_hidden);
+        assert_eq!(st.selected_layers.len(), 3);
+        // Opened for layers (any order, an unknown id ignored): stack order, per-layer PNGs only, that set.
+        let st = export_for_layers(&state, st, &[b, LayerId(9_999), base]);
+        assert_eq!(st.options.layers, Some(vec![base, b]));
+        assert_eq!(st.selected_layers, [base, b]);
+        assert_eq!(st.options.sets, Some(vec![TextureSetId(0)]));
+        assert!(st.options.flat.is_none() && st.options.per_layer_png && !st.options.ora && !st.options.psd);
+        // Nothing that exists: the plain defaults stay.
+        let st = export_for_layers(&state, export_defaults(&state).unwrap(), &[LayerId(9_999)]);
+        assert_eq!(st.options.layers, None);
+        assert!(st.options.flat.is_some());
     }
 
     #[test]

@@ -232,4 +232,11 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     if item(ui, "Move Down", "Move Layer Down", can_down, false) {
         actions.push(AppAction::MoveActiveLayer(-1));
     }
+    ui.separator();
+    // The Layers list's selection (Ctrl / Shift-click): one layer or several.
+    let selection = session.map(|s| s.layer_selection()).unwrap_or_default();
+    let label = if selection.len() > 1 { format!("Export Selected Layers... ({})", selection.len()) } else { "Export Layer...".to_owned() };
+    if item(ui, &label, "", has_active && !selection.is_empty(), false) {
+        actions.push(AppAction::ShowExportLayers(selection));
+    }
 }

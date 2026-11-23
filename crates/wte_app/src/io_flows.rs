@@ -203,7 +203,12 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                 }
                 app.export_stash = None;
                 // The folder name only; the full path is the toast's hover text (R3-7).
-                let text = format!("Exported {} files to {}", report.files.len(), folder_name(&dir));
+                let text = if report.packaged == 0 {
+                    format!("Exported {} files to {}", report.files.len(), folder_name(&dir))
+                } else {
+                    let zip = report.files.first().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    format!("Exported {zip} ({} files) to {}", report.packaged, folder_name(&dir))
+                };
                 app.state.toasts.push_with_detail(crate::action::ToastLevel::Info, text, dir.display().to_string());
             }
             Err(e) => {
@@ -567,6 +572,7 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         uv_view: UvViewState::default(),
         scene_generation: next_scene_generation(),
         text_gap: None,
+        selected_layers: Vec::new(),
     };
     if let Some(ui) = restored {
         if let Some(c) = ui.camera.filter(camera_is_sane) {
@@ -710,6 +716,7 @@ mod tests {
             uv_view: UvViewState { center_uv: glam::Vec2::new(0.3, 0.6), zoom: 2.0 },
             scene_generation: 1,
             text_gap: None,
+            selected_layers: Vec::new(),
         };
         let ui = UiState::capture(&state, &session);
         let value = serde_json::to_value(&ui).unwrap();
@@ -734,6 +741,7 @@ mod tests {
             uv_view: UvViewState::default(),
             scene_generation: 1,
             text_gap: None,
+            selected_layers: Vec::new(),
         }
     }
 
@@ -800,6 +808,7 @@ mod tests {
             uv_view: UvViewState::default(),
             scene_generation: 1,
             text_gap: None,
+            selected_layers: Vec::new(),
         });
         assert_eq!(title_text(&state), "ball - Wrapped Texture Editor");
         let doc = state.doc_mut().unwrap();

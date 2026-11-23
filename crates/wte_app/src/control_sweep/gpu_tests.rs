@@ -271,12 +271,13 @@ fn export_dialog_controls_and_export() {
     a.idle(1);
     assert_ne!(a.export_state().jpeg_matte, [255, 255, 255], "matte picked");
 
-    // Checkboxes.
-    for label in ["OpenRaster (.ora)", "Photoshop (.psd)", "Include hidden layers"] {
+    // Checkboxes, and the Layers choice "All" (hidden layers too).
+    for label in ["OpenRaster (.ora)", "Photoshop (.psd)", "All"] {
         a.click(label);
     }
     let o = &a.export_state().options;
-    assert!(o.ora && o.psd && o.include_hidden);
+    assert!(o.ora && o.psd && o.include_hidden && o.layers.is_none());
+    assert!(a.h.get("Selected (1)").toggled != Some(true), "one layer selected, not chosen");
     a.click("Per-layer PNGs (stamps and text as separate files)");
     assert!(!a.export_state().options.per_layer_png);
     // Seam padding: drag.
@@ -299,13 +300,34 @@ fn export_dialog_controls_and_export() {
     assert!(!a.export_state().show_preview);
     a.click("Show preview");
 
-    // Export writes the files; a second Export asks before replacing.
+    // Export writes exactly the planned files; a second Export asks before replacing.
+    let options = a.export_state().options.clone();
+    let snapshot = a.state().doc().unwrap().snapshot();
+    let mut planned: Vec<String> =
+        wte_core::export::plan_contents(&snapshot, &options).into_iter().map(|f| f.name).collect();
     a.click("Export");
     a.wait_jobs();
-    let written: Vec<_> = std::fs::read_dir(&dir).expect("export folder").filter_map(Result::ok).map(|e| e.file_name()).collect();
-    assert!(written.iter().any(|n| n.to_string_lossy().ends_with(".jpg")), "{written:?}");
-    assert!(written.iter().any(|n| n.to_string_lossy().ends_with(".ora")), "{written:?}");
-    assert!(written.iter().any(|n| n.to_string_lossy().ends_with(".psd")), "{written:?}");
+    let mut written: Vec<String> = std::fs::read_dir(&dir)
+        .expect("export folder")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    written.sort();
+    planned.sort();
+    assert_eq!(written, planned, "exactly the planned files");
+    assert!(written.iter().any(|n| n.ends_with(".jpg")), "{written:?}");
+    // The PSD holds every layer of the set (hidden ones too) and the per-layer PNGs are the layers' pixels.
+    let set = &snapshot.sets[0];
+    let psd_name = written.iter().find(|n| n.ends_with(".psd")).unwrap();
+    let psd = wte_core::export::read_psd(&std::fs::read(dir.join(psd_name)).unwrap()).unwrap();
+    assert_eq!(psd.layers.len(), set.layers.len());
+    for (i, layer) in set.layers.iter().enumerate() {
+        let name = wte_core::export::layer_name("ball", &set.name, false, i, layer.kind_name(), &layer.name);
+        let png = wte_core::image_io::decode_image(&std::fs::read(dir.join(&name)).unwrap(), Some(&name), 16384).unwrap().pixels;
+        let wte_core::LayerKind::Raster(buf) = &layer.kind else { panic!("the sample has paint layers only") };
+        let dense = if buf.width == set.width { (**buf).clone() } else { wte_core::PixelBuf::new(set.width, set.height) };
+        assert!(png == dense, "{name}: the layer's pixels");
+    }
     assert_eq!(a.dialog_name(), "None", "a finished export closes the dialog");
     // Reopened, the dialog keeps the last folder; the other options start from the defaults again. Export those
     // twice: the second time the files exist and the confirm step comes first.
@@ -331,6 +353,84 @@ fn export_dialog_controls_and_export() {
     a.idle(1);
     assert_eq!(a.dialog_name(), "None");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The zip package and the layer selection through the dialog (EXPORT_SELECT_PLAN 6.2): "Pack into one .zip file"
+/// + Export writes one zip whose entries are the listed files; Export again lists the zip in the confirm step; the
+/// dialog opened for two layers chooses "Selected (2)", lists two files and exports exactly those.
+#[test]
+#[ignore = "needs a GPU"]
+fn export_dialog_zip_package_and_selected_layers() {
+    let mut a = FullApp::new(Some(SampleKind::Sphere));
+    let dir = scratch("export_zip");
+    a.menu(&["File", "Export..."]);
+    if let Dialog::Export(st) = &mut a.app.state.dialog {
+        st.options.dir = dir.clone();
+        st.options.base_name = "ball".to_owned();
+    }
+    a.idle(1);
+    a.click("Pack into one .zip file");
+    a.idle(1);
+    assert_eq!(a.export_state().options.package, wte_core::ExportPackage::Zip);
+    let header = a.h.nodes.iter().find(|n| n.text().starts_with("1 file will be written: ball.zip")).cloned();
+    assert!(header.is_some(), "the list names the zip");
+    let snapshot = a.state().doc().unwrap().snapshot();
+    let entries: Vec<String> =
+        wte_core::export::plan_contents(&snapshot, &a.export_state().options).into_iter().map(|f| f.name).collect();
+    for name in &entries {
+        assert!(a.h.has(name), "{name} listed");
+    }
+    a.click("Export");
+    a.wait_jobs();
+    assert_eq!(a.dialog_name(), "None");
+    let listing: Vec<String> =
+        std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(listing, ["ball.zip"]);
+    let package = wte_core::export::read_package(&std::fs::read(dir.join("ball.zip")).unwrap()).unwrap();
+    assert_eq!(package.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), entries);
+    let flat = wte_core::image_io::decode_image(&package[0].1, Some("ball.png"), 16384).unwrap().pixels;
+    assert!(&flat == a.state().doc().unwrap().composite(TextureSetId(0)).unwrap(), "the flattened entry is the composite");
+    assert!(a.state().toasts.visible_labels().iter().any(|l| l.starts_with("Exported ball.zip (")), "{:?}", a.state().toasts.visible_labels());
+    // Again: the zip exists, so the confirm step lists it.
+    a.menu(&["File", "Export..."]);
+    if let Dialog::Export(st) = &mut a.app.state.dialog {
+        st.options.base_name = "ball".to_owned();
+    }
+    a.idle(1);
+    a.click("Pack into one .zip file");
+    a.idle(2);
+    assert!(a.h.has("will be replaced"));
+    a.click("Export");
+    a.idle(2);
+    assert_eq!(a.export_state().confirm_replace.as_deref(), Some(&[dir.join("ball.zip")][..]));
+    a.click("Cancel");
+    a.idle(1);
+    a.click("Cancel");
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "None");
+
+    // Opened for two layers: "Selected (2)" is chosen and two files are listed.
+    let layers: Vec<wte_core::LayerId> = a.state().doc().unwrap().sets[0].layers.iter().map(|l| l.id).collect();
+    a.app.state.push(AppAction::ShowExportLayers(layers.clone()));
+    a.idle(3);
+    assert_eq!(a.export_state().options.layers.as_deref(), Some(&layers[..]));
+    assert_eq!(a.h.get("Selected (2)").toggled, Some(true));
+    assert!(a.h.nodes.iter().any(|n| n.text() == "2 files will be written"), "two files listed");
+    let sel_dir = scratch("export_selected");
+    if let Dialog::Export(st) = &mut a.app.state.dialog {
+        st.options.dir = sel_dir.clone();
+    }
+    a.idle(1);
+    a.click("Export");
+    a.wait_jobs();
+    let mut listing: Vec<String> =
+        std::fs::read_dir(&sel_dir).unwrap().filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    listing.sort();
+    let name = a.state().doc().unwrap().name.clone();
+    let base = wte_core::export::sanitize_file_stem(&name);
+    assert_eq!(listing, [format!("{base}_L00_paint_Base.png"), format!("{base}_L01_paint_Paint 1.png")]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&sel_dir);
 }
 
 /// Regression test of finding `esc-in-popup-cancels`, Export dialog: Esc pressed to close the format drop-down closes
@@ -533,7 +633,7 @@ fn export_dialog_at_the_smallest_window_and_with_several_sets() {
     a.menu(&["File", "Export..."]);
     a.idle(3);
     let screen = Rect::from_min_size(Pos2::ZERO, a.h.size);
-    for label in ["Export", "Cancel", "Show preview", "Include hidden layers", "Lit", "Unlit"] {
+    for label in ["Export", "Cancel", "Show preview", "Visible", "All", "Pack into one .zip file", "Lit", "Unlit"] {
         let node = a.h.get(label);
         assert!(screen.contains_rect(node.rect), "{label} at {:?} is off screen", node.rect);
     }

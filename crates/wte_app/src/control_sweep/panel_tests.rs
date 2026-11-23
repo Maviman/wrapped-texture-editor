@@ -146,6 +146,7 @@ fn every_menu_entry_queues_its_action() {
         (&["Layer", "Duplicate"], |a, _| matches!(a, [A::DuplicateActiveLayer])),
         (&["Layer", "Delete"], |a, p| matches!(a, [A::DeleteLayer(id)] if *id == p)),
         (&["Layer", "Move Down"], |a, _| matches!(a, [A::MoveActiveLayer(-1)])),
+        (&["Layer", "Export Layer..."], |a, p| matches!(a, [A::ShowExportLayers(ids)] if ids.as_slice() == [p])),
         (&["Help", "Shortcuts"], |a, _| matches!(a, [A::ShowDialog(Dialog::Shortcuts)])),
         (&["Help", "About"], |a, _| matches!(a, [A::ShowDialog(Dialog::About)])),
     ];
@@ -160,6 +161,77 @@ fn every_menu_entry_queues_its_action() {
         assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(app.state.flags.backdrop, backdrop);
     }
+}
+
+/// Multi-select in the Layers list (EXPORT_SELECT_PLAN 5.4): Ctrl-click toggles, Shift-click selects a range, a
+/// right-click opens the row menu with "Export this layer..." and, for a row of a selection of several layers,
+/// "Export selected layers... (N)"; the Layer menu names the selection too.
+#[test]
+fn layer_rows_take_ctrl_shift_and_right_clicks() {
+    use AppAction as A;
+    let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+    let (paint, base) = paint_and_base(&app.state);
+    let name = |app: &PanelApp, id| app.state.panel_rects[&PanelHit::LayerName(id)].center();
+    let thumb = |app: &PanelApp, id| app.state.panel_rects[&PanelHit::LayerThumb(id)].center();
+
+    // Ctrl-click and Shift-click on the name, the thumbnail and the empty part of the row.
+    for (mods, check) in [
+        (Modifiers::COMMAND, (|a: &[AppAction], l| matches!(a, [A::ToggleLayerSelected(id)] if *id == l)) as LayerCheck),
+        (Modifiers::SHIFT, |a, l| matches!(a, [A::SelectLayerRange(id)] if *id == l)),
+    ] {
+        for at in [name(&app, base), thumb(&app, base)] {
+            app.take();
+            app.h.mods = mods;
+            app.click_at(at);
+            app.h.mods = Modifiers::NONE;
+            app.idle(1);
+            let actions = app.take();
+            assert!(check(&actions, base), "{mods:?}: {actions:?}");
+        }
+        let row = app.state.panel_rects[&PanelHit::LayerRow(base)];
+        let empty = pos2(app.state.panel_rects[&PanelHit::LayerName(base)].left() + 4.0, row.bottom() - 2.0);
+        app.h.mods = mods;
+        app.click_at(empty);
+        app.h.mods = Modifiers::NONE;
+        app.idle(1);
+        let actions = app.take();
+        assert!(check(&actions, base), "{mods:?} on the row: {actions:?}");
+    }
+
+    // A right-click on a row opens its menu without selecting anything; one layer selected: only "Export this layer".
+    app.take();
+    app.right_click_at(name(&app, base));
+    app.idle(1);
+    assert!(app.take().is_empty(), "a right-click selects nothing");
+    assert!(app.state.panel_rects.contains_key(&PanelHit::LayerMenuExportThis));
+    assert!(!app.state.panel_rects.contains_key(&PanelHit::LayerMenuExportSelected));
+    assert!(app.h.has("Export this layer..."));
+    let item = app.state.panel_rects[&PanelHit::LayerMenuExportThis].center();
+    app.click_at(item);
+    app.idle(1);
+    let actions = app.take();
+    assert!(matches!(&actions[..], [A::ShowExportLayers(ids)] if ids.as_slice() == [base]), "{actions:?}");
+    assert!(!egui::Popup::is_any_open(&app.h.ctx), "the menu closed");
+
+    // Two layers selected: the row menu offers the selection, and the Layer menu names it.
+    app.state.session.as_mut().unwrap().selected_layers = vec![base, paint];
+    app.idle(2);
+    assert!(app.h.has("2 layers selected \u{b7} tools paint on Paint 1"), "the footer names the selection");
+    app.right_click_at(thumb(&app, paint));
+    app.idle(1);
+    assert!(app.h.has("Export selected layers... (2)"), "the selection item is shown");
+    let item = app.state.panel_rects[&PanelHit::LayerMenuExportSelected].center();
+    app.click_at(item);
+    app.idle(1);
+    let actions = app.take();
+    assert!(matches!(&actions[..], [A::ShowExportLayers(ids)] if *ids == vec![base, paint]), "{actions:?}");
+    let actions = app.menu(&["Layer", "Export Selected Layers... (2)"]);
+    assert!(matches!(&actions[..], [A::ShowExportLayers(ids)] if *ids == vec![base, paint]), "{actions:?}");
+    // A plain click on the active row of a multi-selection collapses it.
+    app.click_at(name(&app, paint));
+    app.idle(1);
+    let actions = app.take();
+    assert!(matches!(&actions[..], [A::SelectLayer(id)] if *id == paint), "{actions:?}");
 }
 
 #[test]

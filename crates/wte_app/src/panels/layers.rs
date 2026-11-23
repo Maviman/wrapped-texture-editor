@@ -24,6 +24,42 @@ pub(crate) fn drop_index(from: usize, target: usize, above: bool) -> usize {
     if gap > from { gap - 1 } else { gap }
 }
 
+/// What a primary click on a layer row (its empty part, thumbnail or name) does (8.7): Ctrl toggles the layer in the
+/// selection, Shift selects the range from the active layer, a plain click makes it the active and only selected
+/// layer — nothing for a plain click on the active layer when it is the only selected one (`multi` = several layers
+/// are selected).
+pub(crate) fn row_click_action(mods: egui::Modifiers, layer: LayerId, active: bool, multi: bool) -> Option<AppAction> {
+    if mods.command {
+        Some(AppAction::ToggleLayerSelected(layer))
+    } else if mods.shift {
+        Some(AppAction::SelectLayerRange(layer))
+    } else if !active || multi {
+        Some(AppAction::SelectLayer(layer))
+    } else {
+        None
+    }
+}
+
+/// The context menu of a layer row (right-click on the row, its thumbnail or its name): "Export selected layers... (N)"
+/// when the row is part of a selection of several layers, and "Export this layer...". Opening it changes neither the
+/// selection nor the active layer. The items' rects go to `hits` for the self-test.
+fn row_menu(ui: &mut egui::Ui, selection: &[LayerId], layer: LayerId, actions: &mut Vec<AppAction>, hits: &mut Vec<(PanelHit, Rect)>) {
+    if selection.len() > 1 && selection.contains(&layer) {
+        let resp = ui.button(format!("Export selected layers... ({})", selection.len()));
+        hits.push((PanelHit::LayerMenuExportSelected, resp.rect));
+        if resp.clicked() {
+            actions.push(AppAction::ShowExportLayers(selection.to_vec()));
+            ui.close();
+        }
+    }
+    let resp = ui.button("Export this layer...");
+    hits.push((PanelHit::LayerMenuExportThis, resp.rect));
+    if resp.clicked() {
+        actions.push(AppAction::ShowExportLayers(vec![layer]));
+        ui.close();
+    }
+}
+
 /// Whether a stamp / text layer belongs to a projected (3D) or a UV-placed (2D) stamp: `Some(true)` = 3D,
 /// `Some(false)` = 2D, `None` for paint layers (and a link to a missing stamp).
 pub(crate) fn stamp_is_3d(doc: &Document, layer: &Layer) -> Option<bool> {
@@ -171,6 +207,7 @@ fn layer_list(
     hits: &mut Vec<(PanelHit, Rect)>,
 ) {
     let Some(session) = state.session.as_ref() else { return };
+    let selection = session.layer_selection();
     let mut rows: Vec<(usize, Rect)> = Vec::with_capacity(set.layers.len());
     let frame = egui::Frame::new().inner_margin(egui::Margin::same(2)).corner_radius(4.0);
     let (zone, dropped) = ui.dnd_drop_zone::<LayerId, ()>(frame, |ui| {
@@ -179,7 +216,7 @@ fn layer_list(
         for (index, layer) in set.layers.iter().enumerate().rev() {
             let active = set.active == Some(layer.id);
             let drag_id = egui::Id::unique(("wte_layer_row", session.scene_generation, layer.id.0));
-            let rect = drag_row(ui, drag_id, ps, state, layer, active, actions, hits);
+            let rect = drag_row(ui, drag_id, ps, state, layer, active, &selection, actions, hits);
             rows.push((index, rect));
         }
     });
@@ -234,12 +271,14 @@ fn drag_row(
     state: &AppState,
     layer: &Layer,
     active: bool,
+    selection: &[LayerId],
     actions: &mut Vec<AppAction>,
     hits: &mut Vec<(PanelHit, Rect)>,
 ) -> Rect {
     let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), ROW_HEIGHT));
     let row_resp = ui.interact(rect, drag_id, Sense::click_and_drag());
-    let dragging = row_resp.dragged();
+    // Only the primary button reorders: a right-button press that moves a little opens the menu instead.
+    let dragging = row_resp.dragged_by(egui::PointerButton::Primary);
     if dragging {
         egui::DragAndDrop::set_payload(ui.ctx(), layer.id);
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -253,7 +292,7 @@ fn drag_row(
         builder = builder.layer_id(float_layer);
     }
     let mut child = ui.new_child(builder);
-    row(&mut child, ps, state, layer, active, actions, hits);
+    row(&mut child, ps, state, layer, active, selection, actions, hits);
     ui.advance_cursor_after_rect(rect);
     if dragging && let Some(pointer) = ui.ctx().pointer_interact_pos() {
         ui.ctx().transform_layer_shapes(float_layer, egui::emath::TSTransform::from_translation(pointer - rect.center()));
@@ -261,24 +300,33 @@ fn drag_row(
 
     if row_resp.double_clicked() && ps.rename.is_none() {
         ps.rename = Some(Rename { layer: layer.id, text: layer.name.clone(), focus: true });
-    } else if row_resp.clicked() && !active {
-        actions.push(AppAction::SelectLayer(layer.id));
+    } else if row_resp.clicked()
+        && let Some(action) = row_click_action(ui.input(|i| i.modifiers), layer.id, active, selection.len() > 1)
+    {
+        actions.push(action);
     }
+    row_resp.context_menu(|ui| row_menu(ui, selection, layer.id, actions, hits));
     hits.push((PanelHit::LayerRow(layer.id), rect));
     rect
 }
 
-/// One layer row: eye, thumbnail, kind badge + name (double-click renames), lock, alpha lock.
+/// One layer row: eye, thumbnail, kind badge + name (double-click renames), lock, alpha lock. The active layer's row
+/// is highlighted and its name bold; a row that is selected but not active gets a lighter highlight and an accent bar
+/// at its left edge.
+#[expect(clippy::too_many_arguments, reason = "one row of the list, drawn from drag_row")]
 fn row(
     ui: &mut egui::Ui,
     ps: &mut PanelState,
     state: &AppState,
     layer: &Layer,
     active: bool,
+    selection: &[LayerId],
     actions: &mut Vec<AppAction>,
     hits: &mut Vec<(PanelHit, Rect)>,
 ) {
     let Some(doc) = state.doc() else { return };
+    let multi = selection.len() > 1;
+    let mods = ui.input(|i| i.modifiers);
     let width = ui.available_width();
     // Background placeholder, filled once the row's rect is known.
     let bg = ui.painter().add(egui::Shape::Noop);
@@ -308,9 +356,12 @@ fn row(
         if let Some(is_3d) = stamp_is_3d(doc, layer) {
             paint_dim_tag(ui.painter(), rect, is_3d, badge_color(layer));
         }
-        if resp.clicked() && !active {
-            actions.push(AppAction::SelectLayer(layer.id));
+        if resp.clicked()
+            && let Some(action) = row_click_action(mods, layer.id, active, multi)
+        {
+            actions.push(action);
         }
+        resp.context_menu(|ui| row_menu(ui, selection, layer.id, actions, hits));
 
         // Badge + name (or the rename field).
         let right_width = 2.0 * ICON_SIDE + 8.0;
@@ -328,10 +379,15 @@ fn row(
                 hits.push((PanelHit::LayerName(layer.id), resp.rect));
                 if resp.double_clicked() {
                     ps.rename = Some(Rename { layer: layer.id, text: layer.name.clone(), focus: true });
-                } else if resp.clicked() && !active {
-                    actions.push(AppAction::SelectLayer(layer.id));
+                } else if resp.clicked()
+                    && let Some(action) = row_click_action(mods, layer.id, active, multi)
+                {
+                    actions.push(action);
                 }
-                resp.on_hover_text("Click: select  |  Double-click: rename  |  Drag: reorder");
+                resp.context_menu(|ui| row_menu(ui, selection, layer.id, actions, hits));
+                resp.on_hover_text(
+                    "Click: select  |  Ctrl / Shift-click: select more  |  Right-click: export  |  Double-click: rename  |  Drag: reorder",
+                );
             }
             let badge = egui::RichText::new(kind_badge(doc, layer)).small().color(badge_color(layer));
             let mut extra = String::new();
@@ -384,8 +440,21 @@ fn row(
     });
     let rect = inner.response.rect;
     let visuals = ui.visuals();
-    let fill = if active { visuals.selection.bg_fill.linear_multiply(0.6) } else { visuals.extreme_bg_color };
-    ui.painter().set(bg, egui::Shape::rect_filled(rect, 3.0, fill));
+    let selected = !active && selection.contains(&layer.id);
+    let fill = if active {
+        visuals.selection.bg_fill.linear_multiply(0.6)
+    } else if selected {
+        visuals.selection.bg_fill.linear_multiply(0.3)
+    } else {
+        visuals.extreme_bg_color
+    };
+    if selected {
+        let bar = Rect::from_min_size(rect.min, vec2(2.0, rect.height()));
+        let shapes = vec![egui::Shape::rect_filled(rect, 3.0, fill), egui::Shape::rect_filled(bar, 0.0, crate::theme::ACCENT)];
+        ui.painter().set(bg, egui::Shape::Vec(shapes));
+    } else {
+        ui.painter().set(bg, egui::Shape::rect_filled(rect, 3.0, fill));
+    }
 }
 
 /// The in-place rename field: Enter, a click elsewhere or Esc commit; an empty name keeps the old one.
@@ -462,6 +531,17 @@ fn footer(ui: &mut egui::Ui, state: &AppState, actions: &mut Vec<AppAction>, hit
     let active = set.and_then(|s| s.active_layer());
     let top = ui.cursor().min.y;
     ui.add_space(2.0);
+    let selection = session.layer_selection();
+    if selection.len() > 1
+        && let Some(layer) = active
+    {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("{} layers selected \u{b7} tools paint on {}", selection.len(), layer.name)).small().weak(),
+            )
+            .truncate(),
+        );
+    }
     let row = ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
         if ui.button("New").on_hover_text("New paint layer above the active layer").clicked() {
@@ -597,6 +677,26 @@ mod tests {
         assert_eq!(drop_index(1, 1, false), 1);
         assert_eq!(drop_index(1, 2, false), 1);
         assert_eq!(drop_index(1, 0, true), 1);
+    }
+
+    #[test]
+    fn row_clicks_select_toggle_or_extend() {
+        use egui::Modifiers as M;
+        let l = LayerId(4);
+        let act = |mods, active, multi| row_click_action(mods, l, active, multi);
+        for (active, multi) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert!(matches!(act(M::COMMAND, active, multi), Some(AppAction::ToggleLayerSelected(id)) if id == l));
+            assert!(matches!(act(M::SHIFT, active, multi), Some(AppAction::SelectLayerRange(id)) if id == l));
+            // Ctrl wins over Shift.
+            assert!(matches!(act(M::COMMAND | M::SHIFT, active, multi), Some(AppAction::ToggleLayerSelected(_))));
+        }
+        assert!(matches!(act(M::NONE, false, false), Some(AppAction::SelectLayer(id)) if id == l));
+        assert!(matches!(act(M::NONE, false, true), Some(AppAction::SelectLayer(id)) if id == l));
+        // A plain click on the active row collapses a multi-selection and does nothing otherwise.
+        assert!(matches!(act(M::NONE, true, true), Some(AppAction::SelectLayer(id)) if id == l));
+        assert!(act(M::NONE, true, false).is_none());
+        // Alt alone is a plain click.
+        assert!(matches!(act(M::ALT, false, false), Some(AppAction::SelectLayer(_))));
     }
 
     #[test]

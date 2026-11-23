@@ -251,3 +251,160 @@ which are on this machine. Each run ends with "the document survived the fuzz ru
 
 Nothing of this crashes, writes garbage files or shows a wrong panel line. No assert or limit was weakened in this gate
 (I changed no product code: the only edit is the conflict resolution in `ARCHITECTURE.md`).
+
+## Fix pass 2
+
+Gate: Opus, 2026-11-23. Branch `stable` at **f889d69**: `stable-fix-wrap` (251ebcb + check b2c5a14, merge a1346a2),
+`stable-fix-export` (867d920 + check c077314, merge 5c5f2ef) and `stable-bg` (1728708, merge f889d69). I did not merge
+again and changed no Rust code. Raw outputs (git-ignored) are under `target\stable\gate3\`: `logs\`, `runs\` (all
+scenarios), `flow\`, `fuzz\`, `sweep\`, `focus\`, scripts in `tools\`, exes in `bin\`. Notes:
+`docs/notes/stable/gate_fix2.md`. `target\stable\gate2\` is a stopped earlier attempt built before f889d69: stale, not
+used.
+
+### Verdict in plain words
+
+**The workflow works and the build is stable.** Every scenario ran green on the f889d69 exe. That covers importing a
+model, painting, image stamps, text and wrapped stamps, and exporting one layer, a selection, or everything as one .zip
+(or as loose files). My own Python checks found every exported file correct. The only red test is the known WA20.
+
+**A run of the app no longer takes the focus.** While I ran the gate, the user was in a fullscreen game. A probe run
+sampled the foreground window every 25 ms: the game kept it for the whole run, and the app was never in front (see
+below). One caveat: an earlier, stopped attempt of this step had already started a batch of runs with an **older exe
+that still takes the focus**. That batch kept going until 09:27 (open item 1).
+
+### Build and tests (f889d69)
+
+| Check | Result |
+|---|---|
+| `cargo test --workspace --no-fail-fast` (`test.log`, again at the end `test_final.log`) | wte_app 377 / 0 / 19 ignored; wte_core lib **801 / 1 failed** / 24 ignored; brush_tips 15, end_to_end 9, project_roundtrip 23. **Total 1,225 passed, 1 failed, 43 ignored**, the same both times. |
+| The failure | `wa20_a_bumpy_ball_receives_the_picture_once_whole_and_smooth`: `cells 0.689751..1.986138`. These are the same numbers as before (known red). |
+| Serial perf tests `cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1` (`perf.log`) | 2 / 2 pass. WA7 slowest 132.9 ms, check:A 100.1 ms, against 200 ms. |
+| GPU app tests `cargo test -p wte_app -- --ignored` | First run (`test_gpu.log`): 18 / 19. `text_ops::tests::sample_job_for_the_machine_fonts` took 649 ms against 0.5 s while a game and a second app copy were running. Alone it passed 3 of 3 (340, 360, 424 ms; `test_gpu_fonts_alone.log`). The full rerun (`test_gpu2.log`): **19 / 19**. |
+| `cargo clippy --workspace --all-targets` | **0 warnings** (both runs) |
+| `cargo build --release -p wte_app` | OK. `target\stable\gate3\bin\wte_stable2.exe`, **SHA-256 21CA9303AFD2C89541D1271F247D5127B2D348185A75AEDD977993BB56DE4B98**. The final rebuild gives the same hash. |
+
+`Cargo.toml` and `Cargo.lock` are unchanged. No test limit was changed.
+
+### Focus (the user's request)
+
+`tools/stable/focus_probe.ps1` starts one `--screenshot` run and samples `GetForegroundWindow` every 25 ms. It only
+reads; it sends no input. I ran it on a `smoke` run while the user's game (BlackOps3) was in front: 50 samples, the
+app in front 0 times, the foreground changed 0 times, and the game was still in front afterwards (`focus_probe.txt`).
+Every scenario, flow, fuzz and sweep run of this pass used a copy of the 21CA9303 exe.
+
+### All scenarios
+
+All 46 runs were `"ok": true` (`logs\scen.txt`). That is the 45 names in `NAMES`, with `export_unsettled` run twice
+(sphere and ABeautifulGame). I ran no old exe, so I compared against stored outputs instead (`cmp_*.txt`):
+
+- **Against the stable gate's `runs_st`:** 33 scenarios are identical file for file. Four runs are new since the gate
+  (export_errors, export_nouv, and export_unsettled twice). The other 9 (brush_shape, export, export_flow,
+  export_selected, export_zip, fuzz_path, multi, text_fonts, workflow_path) differ for reasons the fix branches
+  intended:
+  - export_flow, multi and fuzz_path now write more files (loose export, selection zip, both sets' layers of a design,
+    fuzz exports);
+  - the export dialog changed;
+  - toast timing;
+  - the text_fonts focus outline, from stable-bg.
+- **Against check_exp2's runs (exe 9c953770):** default, smoke, export_errors, export_nouv, export_run,
+  export_selected, export_zip, layers, multi, roundtrip and undo are all identical. export_flow on the cubes is
+  identical in all 59 files. `export` differs only in the export folder's path text. `final_bake_async` differs only
+  in the toast box.
+- **Against stable-bg's runs:** text_fonts, workflow_path, brush_types_path and wrap_surface are identical.
+  brush_shape differs only in a toast's fade. fuzz_path differs because the fuzz now has more kinds of action.
+
+### Export (`export_flow`)
+
+| Model | Result | Zip |
+|---|---|---|
+| generated cube: OBJ+MTL+PNG, glTF, GLB, ASCII FBX | ok | 8 entries each, selection zip 2 entries |
+| WaterBottle.glb | ok | 8 entries |
+| DamagedHelmet.glb | ok | 8 entries |
+| ABeautifulGame.glb (15 sets) | ok, 49 s | 84 entries, 227.0 MB; selection zip 8 entries, 1.2 MB |
+| cube without UVs (`models\nouv_cube.obj`, 12 triangles without UVs, generated layout) | ok | 8 entries, 336 KB |
+
+- `tools/stable/verify_zip_vs_loose.py`: **ALL OK**. Each full zip equals the loose files byte for byte, each selection
+  zip uses the full export's names and bytes, and no `.tmp-` file was left.
+- `tools/stable/check_exp2_verify.py`: **ALL OK**. Each set's flattened PNG matches a re-composite of its per-layer
+  PNGs within **1.33 / 255** at worst (ABeautifulGame); the one-layer and selection files equal their zip entries; the
+  ORA and PSD files check out.
+- **ABeautifulGame is identical in all 96 files** to check_exp2's run. On DamagedHelmet and ABeautifulGame, every file
+  that also exists in check_wrap2's export_flow (exe 97A70242) is byte-identical to it.
+- The toasts now read "Exported 1 file" and "Exported 2 files".
+- `export_unsettled` on ABeautifulGame: the Final landed after 3,072 ms. The longest frame was 21 ms. Both exports
+  were byte-identical and hold the Final's pixels.
+
+### Fuzz (Wrap mode, 1,000 steps, `WTE_FRAME_LOG=1`)
+
+| Run | Result | Errors / panics | Frames (interval > 500 / > 300 ms) | export / save+reopen / Ctrl- or Shift-click / selection Dup-Del | Undo all / redo all |
+|---|---|---|---|---|---|
+| ngons_tiling, seed 7 | ok | 0 / 0 | 13,229 (0 / 0) | 15 / 8 / 16 / 10 | 80 / 81 |
+| WaterBottle, seed 7 | ok | 0 / 0 | 12,534 (0 / 0) | 15 / 7 / 15 / 9 | 60 / 62 |
+| ngons_tiling, seed 11 | ok | 0 / 0 | 14,465 (1 / 2) | 12 / 14 / 12 / 3 | 3 / 3 |
+| WaterBottle, seed 11 | ok | 0 / 0 | 13,605 (0 / 0) | 14 / 16 / 10 / 5 | 8 / 8 |
+
+- The fuzz now exercises the new features: export, save and reopen, multi-select and selection Duplicate / Delete.
+  Each run asserts that no temp file was left and ends with "the document survived the fuzz run".
+- The undo counts are lower than in the gate because a save and reopen starts a new history.
+- The two slow frames on ngons seed 11 are the scenario's own window resizes (542 ms and 399 ms between frames). The
+  UI's CPU time was 2.8 ms and 124 ms. These are not app work.
+
+### Wrap sweep (wrap_surface; ABeautifulGame, parts200, high_poly_sphere, torus_knot)
+
+All four runs were ok.
+
+- **The step-10 table equals fix-wrap's final sweep (`fixwrap\sweep_fw7`, exe wte_fw7) field for field, times
+  aside.** That includes `gaps`, `at_part` and the panel lines. 27 of the 28 shots are pixel-identical. parts200's
+  `shot.png` differs only in the toast box.
+- The panel lines:
+  - ABeautifulGame Jump on: "9 % of the picture stops where it meets a neighbouring part", stretched 92 %, cut, 50 %
+    overlap, 30 parts, and the shared-texel line (10.7 %).
+  - parts200: "28 % of the picture falls into the gaps between separate parts".
+  - torus_knot: "Longer than the way round: 43 % shown, the ends meet at the back".
+  - high_poly_sphere: stretched 27 %.
+
+  Each line matches its numbers (ABeautifulGame `at_part` 8.60 %, parts200 `gaps` 27.69 %, torus_knot `ends_share`
+  43.0 %).
+- **Not a speed result.** The user was playing a game during the sweep, with CPU load at 65-76 %. The param times
+  were 1.3-3.7 x the idle gate's: ABeautifulGame Jump off 1,904 against 517 ms, Jump on 6,912 against 3,411 ms;
+  high_poly_sphere 6,911 against 3,050 ms. I could not separate the game's load from any effect of the window now
+  running in the background (Windows may throttle a process with no window in front). Timing is therefore unmeasured
+  in this pass.
+
+### Open items
+
+1. **Old exe runs during this step.** The stopped earlier attempt of this step left its driver script running. From
+   09:15 to 09:27 it ran `target\stable\gate2\bin\wte_g2_flow.exe` (SHA-256 1B0C7255…, built before f889d69). That
+   covered export_flow ABeautifulGame and nouv_cube, the four fuzz runs and the four sweeps, while the user was in a
+   game. That exe can take the focus. I tried to stop the script, but the permission system refused, so it ran until
+   it finished on its own. Nothing of this pass used its outputs.
+2. **WA20** is red: cells 0.690..1.986 against 0.70..1.40.
+3. **The wrap_surface step-10 reds on nonmanifold, noisy400 and tiles300** (model-caused) were not re-run in this pass.
+   Fix-wrap's sweep shows them unchanged, now with panel lines.
+4. **DamagedHelmet Jump on reads "Only 97 % of the picture lies on the surface" and names no cause** (check_wrap2 m1).
+   Cuts take 1.96 %, just under the 2 % threshold for their own line.
+5. **ABeautifulGame flush-frame cut.** The picture still stops at the marble frame. The panel now names it correctly.
+   fix-wrap's attempt 2 was reverted because it added 5.7 % seams. The flush-plates test stays `#[ignore]` as a known
+   limit.
+6. **The export dialog's "+ their layers in N other texture sets" note** (`dialogs/export.rs::linked_extra`) counts
+   layers, not sets, when two selected designs span the same sets. The file list is right, and the note has no unit
+   test.
+7. **Test strength.** export_flow takes its expected linked layers from `export::plan_contents`, which is the code
+   under test. The `multi` scenario, the core test and the Python checks are the independent ones.
+8. With several layers selected, the footer's Rasterize acts on the active layer without saying so (nit).
+9. **Save right after a wrapped stamp** still waits on the UI thread for the Final. Export no longer does.
+10. **Wall-clock tests depend on load.** `sample_job_for_the_machine_fonts` (0.5 s) failed once under load. WA7 and
+    check:A now run only as serial perf tests.
+11. **Speed** was not measured on an idle machine in this pass (see the sweep), and I compared it against no old exe.
+
+### User decisions
+
+1. Land `stable` on `main` with WA20 as a known red, or try a third approach.
+2. Should the DamagedHelmet line ("Only 97 % ...") name its largest cause even below 2 %?
+3. ABeautifulGame flush frame: keep the cut, which the panel now explains, or take fix-wrap's attempt 2 at +5.7 %
+   seams?
+4. Keep the three model-caused wrap_surface reds as known reds?
+5. Should Save, like Export, wait for a pending Final off the UI thread?
+6. Keep wall-clock tests in the default run (the font sample job), or move them to serial perf tests like WA7?
+7. A real binary FBX from Blender as a test asset (critic H1, still open).
+8. Accept the wrap slowdown against r9 on small and medium wraps (section 6). It was not re-measured here.

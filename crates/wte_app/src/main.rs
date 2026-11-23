@@ -83,7 +83,17 @@ fn main() {
         .with_icon(theme::app_icon())
         .with_drag_and_drop(true);
     viewport = if selftest {
-        viewport.with_inner_size([args.size[0] as f32, args.size[1] as f32])
+        // A self-test run opens in the background: shown without taking the focus, outside every monitor and without
+        // a taskbar button, so a batch of runs never covers or pulls the user out of what they are doing. The window
+        // still renders and captures (only a hidden or minimized window stops drawing; the capture reads the GPU
+        // frame, and the runner fixes the zoom at 1 physical pixel per point), and `selftest::Runner::raw_input_hook`
+        // reports the window as focused, so a run gives the same result as in the foreground.
+        let size = [args.size[0] as f32, args.size[1] as f32];
+        viewport
+            .with_inner_size(size)
+            .with_position(offscreen_position(size))
+            .with_active(false)
+            .with_taskbar(false)
     } else {
         // The remembered window size (default 1280x800), never below the minimum, and the maximized state. The first
         // frame fits a window that is larger than its monitor (`app::fit_to_monitor`).
@@ -186,6 +196,33 @@ fn wgpu_options(mut options: egui_wgpu::WgpuConfiguration) -> egui_wgpu::WgpuCon
         });
     }
     options
+}
+
+/// The outer position (points) of a self-test window: up and to the left of the whole virtual screen (all monitors),
+/// with a margin larger than the window and its frame, so no part of it shows on any monitor. egui-winit passes it as
+/// a logical position; a scale factor of 1 or more only moves it further out.
+fn offscreen_position(size: [f32; 2]) -> [f32; 2] {
+    let (left, top) = virtual_screen_origin();
+    [left as f32 - 2.0 * size[0] - 1000.0, top as f32 - 2.0 * size[1] - 1000.0]
+}
+
+/// Top-left corner of the virtual screen in physical pixels (negative when a monitor lies left of or above the
+/// primary one).
+#[cfg(windows)]
+fn virtual_screen_origin() -> (i32, i32) {
+    #[link(name = "user32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    const SM_XVIRTUALSCREEN: i32 = 76;
+    const SM_YVIRTUALSCREEN: i32 = 77;
+    // SAFETY: GetSystemMetrics takes an integer and reads no memory of ours.
+    unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)) }
+}
+
+#[cfg(not(windows))]
+fn virtual_screen_origin() -> (i32, i32) {
+    (0, 0)
 }
 
 /// `path` + `suffix` (e.g. `E:\out\shot` + `.log`).

@@ -4683,7 +4683,13 @@ Notes:
   .with_drag_and_drop(true)`; `multisampling: 0`, `depth_buffer: 0`, `persist_window: false`, `system_font_fallback: false`,
   `dithering: false` in self-test mode, `wgpu_options` from `main::wgpu_options` (below); everything else
   `..Default::default()` (renderer defaults to wgpu, the only compiled backend). In self-test mode the initial inner size is
-  `args.size`, there is no minimum size and no prefs are read.
+  `args.size`, there is no minimum size and no prefs are read, and the window opens in the background (stable):
+  `with_active(false)` (shown with `SW_SHOWNOACTIVATE`, the user's window keeps the focus), `with_taskbar(false)` and
+  `with_position(main::offscreen_position)`: up-left of the virtual screen (`GetSystemMetrics(SM_X/YVIRTUALSCREEN)`)
+  by twice the window size + 1000, so nothing shows on any monitor. (`WindowLevel::AlwaysOnBottom` does not work for
+  this: winit applies `HWND_BOTTOM` while the window is still hidden, and eframe's first-frame show puts it on top.) It
+  still renders and captures (eframe only stops drawing a hidden or minimized window; `request_screenshot` reads the GPU
+  frame; the runner fixes the zoom at 1 px per point); `raw_input_hook` sets `RawInput::focused = true`.
 - `main::wgpu_options`: the backends of `WGPU_BACKEND` (else egui-wgpu's primary + GL); a `native_adapter_selector` that picks,
   among the adapters that can present to the window, by (software last, Vulkan < DX12 < Metal < GL, discrete < integrated <
   virtual); a `device_descriptor` that requests the adapter's own `max_texture_dimension_2d` and `max_buffer_size` (egui-wgpu
@@ -6303,7 +6309,8 @@ pub fn scenario_names() -> &'static [&'static str];
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)>;
 ```
 - **Determinism** (`raw_input_hook`): drop every real `PointerMoved`, `PointerButton`, `MouseMoved`, `PointerGone`, `MouseWheel`,
-  `Key`, `Text`, `Zoom`, `WindowFocused` event and clear `hovered_files` / `dropped_files`; then append the runner's own events,
+  `Key`, `Text`, `Zoom`, `WindowFocused` event and clear `hovered_files` / `dropped_files`; set `focused = true` (the
+  window runs in the background, 8.3, and real focus changes must not change a run); then append the runner's own events,
   so strokes go through real egui hit-testing and the real tool code. Exact shapes (egui 0.37, 8.1):
   - pointer: `Event::PointerMoved(pos)`; `Event::PointerButton { pos, button, pressed, modifiers }`;
   - key (`Step::Key`): `Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }` in one frame and the same

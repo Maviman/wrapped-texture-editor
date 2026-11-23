@@ -1181,6 +1181,107 @@ mod tests {
         assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
     }
 
+    // ----- check:B (round 9): the warm-up thread against the wrap jobs, a new document and a close -----
+
+    /// Waits for the warm-up thread (if one runs) to end and joins it.
+    fn join_warm_up(state: &mut AppState) {
+        if let Some(handle) = state.wrap_jobs.warm_thread.take() {
+            handle.join().expect("the warm-up thread panicked");
+        }
+    }
+
+    /// check:B (round 9): the warm-up started by the selection and the first wrap Final in the same frame share one
+    /// graph (built once, by whichever comes first; the other waits in the cell); the Final equals the synchronous one;
+    /// the shared texels are known afterwards and nothing more is warmed up.
+    #[test]
+    fn the_warm_up_and_the_first_wrap_final_build_one_graph() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut sync = wrap_state(false);
+        place(&mut sync);
+        let mut state = wrap_state(true);
+        let id = place(&mut state);
+        let cell = state.doc_mut().unwrap().wrap_mesh_cell();
+        assert!(!cell.is_built() && cell.uv_built().is_none(), "nothing built before the first wrap");
+        let mut tools = ToolController::new();
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.counters.warmups_started, 1);
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert!(state.final_bakes.in_flight(), "the Final starts while the warm-up runs");
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Final);
+        join_warm_up(&mut state);
+        assert_eq!(cell.builds(), 1, "one graph for the warm-up and the job");
+        assert!(Arc::ptr_eq(&cell, &state.doc_mut().unwrap().wrap_mesh_cell()));
+        assert_eq!(stamp_pixels(&state), stamp_pixels(&sync));
+        assert_eq!(state.doc().unwrap().stamp_shared_texels(id), Some(0.0), "the sphere reuses no texels");
+        for _ in 0..3 {
+            assert!(!tools.ensure_wrap_param(&mut state));
+            after_tools(&mut state, &mut jobs, &ctx);
+        }
+        assert!(state.wrap_jobs.warm_thread.is_none() && state.wrap_jobs.counters.warmups_started == 1, "nothing left to warm up");
+        drain(&mut state, &mut jobs, &ctx, 4);
+    }
+
+    /// check:B (round 9): a document opened while the previous one's warm-up runs gets its own warm-up (once the old
+    /// thread ended; the Transform tool asks every frame) and its own graph; a document closed during a warm-up leaves
+    /// nothing behind (the thread ends on its own and is joined; no new one starts without a document).
+    #[test]
+    fn a_new_document_or_a_close_during_the_warm_up_is_safe() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let old_cell = state.doc_mut().unwrap().wrap_mesh_cell();
+        assert!(old_cell.is_built() && old_cell.uv_built().is_none(), "the Final built the graph; the shared texels wait for the warm-up");
+        let mut tools = ToolController::new();
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.counters.warmups_started, 1);
+        // New / Open while it may still run (as `install_document` sets it up).
+        let mut next = wrap_state(true);
+        let other = placed_wrapped(&mut next, &mut Jobs::new(), &ctx);
+        assert_eq!(other, id);
+        let mut session = next.session.take().unwrap();
+        session.scene_generation = 2;
+        state.session = Some(session);
+        reset_for_new_document(&mut state);
+        let start = Instant::now();
+        while state.wrap_jobs.counters.warmups_started < 2 {
+            assert!(!tools.ensure_wrap_param(&mut state));
+            after_tools(&mut state, &mut jobs, &ctx);
+            assert!(start.elapsed() < Duration::from_secs(60), "the new document's warm-up never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        join_warm_up(&mut state);
+        let new_cell = state.doc_mut().unwrap().wrap_mesh_cell();
+        assert!(!Arc::ptr_eq(&new_cell, &old_cell), "the new document has its own cell");
+        assert!(old_cell.uv_built().is_some() && new_cell.uv_built().is_some() && new_cell.builds() == 1);
+        assert_eq!(state.doc().unwrap().stamp_shared_texels(other), Some(0.0));
+        // A third document whose warm-up builds the graph, closed while it runs.
+        let mut third = wrap_state(true);
+        place(&mut third);
+        let mut session = third.session.take().unwrap();
+        session.scene_generation = 3;
+        state.session = Some(session);
+        reset_for_new_document(&mut state);
+        let third_cell = state.doc_mut().unwrap().wrap_mesh_cell();
+        assert!(!tools.ensure_wrap_param(&mut state));
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert_eq!(state.wrap_jobs.counters.warmups_started, 3);
+        state.session = None;
+        reset_for_new_document(&mut state);
+        for _ in 0..3 {
+            assert!(!tools.ensure_wrap_param(&mut state));
+            after_tools(&mut state, &mut jobs, &ctx);
+        }
+        join_warm_up(&mut state);
+        after_tools(&mut state, &mut jobs, &ctx);
+        assert!(state.wrap_jobs.warm_thread.is_none() && state.wrap_jobs.counters.warmups_started == 3, "no warm-up without a document");
+        assert!(third_cell.is_built() && third_cell.builds() == 1, "the closed document's warm-up finished on its own");
+        assert!(!jobs.any_running());
+    }
+
     // ----- check:B (ROUND8_PLAN 6 row 4): the races of the wrap Preview jobs -----
 
     /// Hands over job outputs and pumps until nothing runs and nothing waits (at most `n` outputs).

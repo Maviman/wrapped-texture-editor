@@ -59,3 +59,14 @@ Release probe (`check_b_probe`, idle machine, this machine's 8 threads), before 
 | ABeautifulGame Jump off | 1,255 ms (relax 1,165) | 615-756 ms (relax 523-660) | `7497da3c18a487b4` both |
 | high_poly_sphere | 6.0-6.4 s (exe) | 4.66-4.94 s (relax 4.2-4.5: one component solved twice, the exact region of 2 wedges falls back) | stats equal |
 | Avocado off / on | 32 / 65 ms (owner 31 / 63) | 17 / 43 ms (owner 16 / 40) | `34dd04da03ee66ad` / `ea75788a41fd9ef0` both |
+
+## 3. Races at app level (break list, part 1)
+
+New app tests (`stamp_bakes.rs`), both green:
+- `the_warm_up_and_the_first_wrap_final_build_one_graph`: the selection's warm-up thread and the first wrap Final start
+  in the same frame on a fresh document; one graph (`builds() == 1`, the job waits in the cell or the warm-up does),
+  Final pixels = the synchronous Final, shared texels known afterwards, no second warm-up.
+- `a_new_document_or_a_close_during_the_warm_up_is_safe`: New / Open while the old document's warm-up runs (the new
+  document's warm-up starts once the old thread ended, the tool asks every frame; its own cell, built once, shared
+  texels known); a third document closed during its warm-up (the thread finishes on its own, is joined, nothing new
+  starts without a document).

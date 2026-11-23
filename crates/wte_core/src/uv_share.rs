@@ -22,10 +22,12 @@ pub const UV_SHARE_PX: f64 = 8.0;
 pub const UV_SHARE_WORK: f64 = 64e6;
 /// Least share of a selected stamp's area on triangles that share texels for which the panel warns.
 pub const UV_SHARE_WARN: f32 = 0.05;
-/// Stable (w1, item 5): a footprint whose UV box spans more than one texture (a tiled trim strip, u 0..12) is
-/// rasterized wrapped into the unit square up to this many textures of box area; beyond, it counts everywhere when it
-/// holds a whole texture (an inscribed circle of diameter sqrt 2), else only itself is marked.
-pub const UV_SHARE_TILED_MAX: f64 = 64.0;
+/// Stable (w1, item 5): a footprint whose UV box spans more than one texture (a tiled trim strip, u 0..12 x v 0.1:
+/// 1.2 textures) is rasterized wrapped into the unit square up to this many textures of box area (the raster work
+/// grows with it: 64 made `ngons_tiling.obj`'s set, UVs tiled up to 4 x 4, take seconds); beyond, it counts everywhere
+/// when it holds a whole texture (an inscribed circle of diameter sqrt 2, as round 9 did for every box over one
+/// texture), else only itself is marked.
+pub const UV_SHARE_TILED_MAX: f64 = 4.0;
 
 /// The shared-texel triangles of one mesh.
 #[derive(Debug)]
@@ -306,5 +308,14 @@ mod tests {
         quad(&mut sliver, [2.0, 3.0], [0.0, 10000.0], [0.9, 0.91]);
         let s = UvShare::build(&mesh_of(RawMesh { triangles: sliver, materials: samples::mirrored_quads().materials }));
         assert!(!s.shares(0) && !s.shares(1) && s.shares(2), "a huge sliver marks only itself: {s:?}");
+        // A tiled model (as ngons_tiling.obj, UVs up to 4 x 4): 2,000 triangles each over 16 textures share, and the
+        // build stays cheap (with 64 textures rasterized it took seconds in the app).
+        let mut tiled = Vec::new();
+        for k in 0..1000 {
+            quad(&mut tiled, [k as f32, k as f32 + 1.0], [0.0, 4.0], [0.0, 4.0]);
+        }
+        let s = UvShare::build(&mesh_of(RawMesh { triangles: tiled, materials: samples::mirrored_quads().materials }));
+        println!("W1 tiled model: share {:.4} ({:.1} ms)", s.mesh_share(), s.build_ms);
+        assert!((s.mesh_share() - 1.0).abs() < 1e-6, "{}", s.mesh_share());
     }
 }

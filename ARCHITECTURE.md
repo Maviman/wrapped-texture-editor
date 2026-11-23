@@ -3492,7 +3492,7 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   cells at both ends of a run, inside the picture or beyond it): the same counts, 2.7 ms instead of 13 ms per
   statistics pass on a 1,024 x 525 grid (WaterBottle).
 - **Tiled UV footprints (item 5, `uv_share.rs`).** A triangle whose UV box spans more than one texture but at most
-  `UV_SHARE_TILED_MAX` (64) is rasterized wrapped into the unit square, each texel once (it shares when it covers a
+  `UV_SHARE_TILED_MAX` (4; 64 made a set tiled up to 4 x 4 take seconds) is rasterized wrapped into the unit square, each texel once (it shares when it covers a
   texel twice by itself, or as any other footprint when more than half of its texels are counted twice); beyond that,
   one that holds a whole texture (inscribed circle of diameter sqrt 2) counts everywhere as before and a huge sliver
   marks only itself. Round 9 counted every footprint whose box exceeded one texture everywhere: one trim strip (u

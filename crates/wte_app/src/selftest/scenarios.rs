@@ -1768,6 +1768,30 @@ fn flow_steps() -> Vec<Step> {
             log::info!("export_flow {}: {zip} {} bytes; {summary}", flow_tag(sc)?, bytes.len());
             Ok(())
         }),
+        // fix_export item 10: the same export as loose files into <out>_<model>_loose: the zip's entries byte for byte
+        // (checked here and by tools/stable/verify_zip_vs_loose.py).
+        Step::Dyn("export everything as loose files too", |s, sc| {
+            let dir = flow_dir(sc, "loose")?;
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+            }
+            Ok(vec![Step::Do(AppAction::RunExport(ExportOptions { dir, package: wte_core::ExportPackage::Files, ..flow_all_options(s, sc)? }))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the loose files are the zip's entries, byte for byte", |s, sc| {
+            let doc = doc_of(s)?;
+            let zip = flow_all_options(s, sc)?.dir.join(wte_core::export::package_name(&doc.name));
+            let mut entries = wte_core::export::read_package(&std::fs::read(&zip).map_err(|e| e.to_string())?)?;
+            entries.sort();
+            let loose = dir_bytes(&flow_dir(sc, "loose")?)?;
+            if entries.len() != loose.len() || entries.iter().zip(&loose).any(|(a, b)| a.0 != b.0) {
+                return Err(format!("{} entries, {} loose files", entries.len(), loose.len()));
+            }
+            if let Some((name, _)) = entries.iter().zip(&loose).find(|(a, b)| a.1 != b.1).map(|(a, _)| a) {
+                return Err(format!("{name} differs between the zip and the loose file"));
+            }
+            Ok(())
+        }),
         // fix_export item 2: the selection as a zip into the same folder: its own name, the full package unchanged.
         Step::Setup("remember the full package", |s, sc| {
             let opts = flow_all_options(s, sc)?;
@@ -1825,7 +1849,7 @@ fn flow_steps() -> Vec<Step> {
                 return Err(format!("the revision changed during the exports ({} -> {})", remembered(sc, "flow_rev")?, doc.revision()));
             }
             undo_since(s, sc, 0)?;
-            for what in ["one", "sel", "all"] {
+            for what in ["one", "sel", "all", "loose"] {
                 let names = dir_names(&flow_dir(sc, what)?)?;
                 if names.iter().any(|n| n.contains(".tmp-")) {
                     return Err(format!("a temp file or folder is left in {what}: {names:?}"));
@@ -5061,7 +5085,7 @@ fn fuzz_export(state: &AppState, sc: &Scratch) -> Result<Vec<Step>, String> {
             if all.is_empty() { None } else { Some(vec![f.pick(&all)]) }
         }
     };
-    let opts = ExportOptions {
+    let mut opts = ExportOptions {
         dir: with_suffix(&sc.out_stem, "_fuzz_export"),
         base_name: doc.name.clone(),
         sets: None,
@@ -5074,6 +5098,10 @@ fn fuzz_export(state: &AppState, sc: &Scratch) -> Result<Vec<Step>, String> {
         layers,
         package: if f.chance(0.5) { wte_core::ExportPackage::Zip } else { wte_core::ExportPackage::Files },
     };
+    // At least one kind of file, as the dialog demands ("Choose at least one kind of file").
+    if opts.flat.is_none() && !opts.per_layer_png && !opts.ora && !opts.psd {
+        opts.per_layer_png = true;
+    }
     log::info!("fuzz: export {:?} layers {:?} flat {:?} per-layer {} ora {} psd {}", opts.package, opts.layers, opts.flat, opts.per_layer_png, opts.ora, opts.psd);
     Ok(vec![
         Step::Do(AppAction::RunExport(opts)),

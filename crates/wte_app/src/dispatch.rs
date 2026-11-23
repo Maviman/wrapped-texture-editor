@@ -1070,6 +1070,42 @@ mod tests {
         state.doc().unwrap().sets[0].active
     }
 
+    /// fix_export item 5: Duplicate and Delete on a multi-selection act on every selected layer, one undo step each;
+    /// the copies become the selection; after Delete the selection collapses; a locked layer stays with a warning.
+    #[test]
+    fn duplicate_and_delete_act_on_every_selected_layer_in_one_undo_step() {
+        let (mut state, [base, paint, a, b]) = four_layer_state();
+        select_layer_range(&mut state, paint);
+        assert_eq!(selection(&state), [paint, a, b]);
+        let undo = state.doc().unwrap().history.undo_len();
+        duplicate_layers(&mut state, &[paint, a, b]);
+        let doc = state.doc().unwrap();
+        assert_eq!(doc.history.undo_len(), undo + 1, "one undo step");
+        assert_eq!(doc.sets[0].layers.len(), 7);
+        let copies = selection(&state);
+        assert_eq!(copies.len(), 3);
+        assert!(copies.iter().all(|c| ![base, paint, a, b].contains(c)), "the copies are selected");
+        assert!(copies.contains(&active(&state).unwrap()), "the active layer's copy is active");
+        assert!(state.doc_mut().unwrap().undo().is_some());
+        assert_eq!(state.doc().unwrap().sets[0].layers.len(), 4, "one undo removes every copy");
+
+        // Delete: Paint 1, A and B selected, B locked.
+        state.doc_mut().unwrap().set_layer_locked(b, true).unwrap();
+        state.doc_mut().unwrap().set_active_layer(TextureSetId(0), Some(b)).unwrap();
+        state.session.as_mut().unwrap().selected_layers = vec![paint, a, b];
+        let undo = state.doc().unwrap().history.undo_len();
+        let warnings = state.toasts.visible_labels().len();
+        delete_layers(&mut state, &[paint, a, b]);
+        let doc = state.doc().unwrap();
+        assert_eq!(doc.history.undo_len(), undo + 1);
+        assert_eq!(doc.sets[0].layers.iter().map(|l| l.id).collect::<Vec<_>>(), [base, b], "the locked layer stays");
+        assert_eq!(selection(&state).len(), 1, "the selection collapses");
+        assert!(state.toasts.visible_labels().len() > warnings, "a warning names the kept layer");
+        assert!(state.toasts.visible_labels().iter().any(|l| l.contains("1 locked layer was kept")));
+        assert!(state.doc_mut().unwrap().undo().is_some());
+        assert_eq!(state.doc().unwrap().sets[0].layers.len(), 4, "one undo brings both back");
+    }
+
     #[test]
     fn ctrl_and_shift_select_layers_without_touching_the_document() {
         let (mut state, [base, paint, a, b]) = four_layer_state();

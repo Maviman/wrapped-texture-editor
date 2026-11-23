@@ -143,7 +143,8 @@ const HIDDEN_LINE_MIN: f32 = 0.05;
 /// - the picture reaches a boundary edge (`reached_edge`) and less than 98 % lies on the surface: "runs off the
 ///   surface: an edge, a hole or the end of the part";
 /// - picture lost inside the laid outline to cuts (`lost_cut` >= 2 %): a cut line;
-/// - laid picture dropped because it lies on surface under or behind another part (`rejected` >= 5 %): a hidden line;
+/// - laid picture dropped because another place owns its picture points (`rejected` >= 5 %: surface under another part
+///   with Jump small gaps, or a layout folded over itself, the Lantern's and nonmanifold's single parts): a hidden line;
 /// - less than 98 % on the surface and none of the above explains it: the covered share, without a cause;
 /// - then the round-6 lines (turns, parts, limit).
 pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
@@ -176,7 +177,7 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
     }
     if s.rejected >= HIDDEN_LINE_MIN {
         out.push(WrapLine::Warn(format!(
-            "{:.0} % of the laid picture falls on surface hidden under or behind another part and is not shown there",
+            "{:.0} % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there",
             pct(s.rejected)
         )));
     }
@@ -822,7 +823,7 @@ mod tests {
             lines,
             vec![
                 "The ends meet at the back: 33 % of the picture's length shown".to_owned(),
-                "6 % of the laid picture falls on surface hidden under or behind another part and is not shown there".to_owned(),
+                "6 % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there".to_owned(),
                 "Only 3 % of the picture lies on the surface".to_owned(),
                 "Continued onto 2 separate parts".to_owned()
             ]
@@ -833,7 +834,7 @@ mod tests {
         assert_eq!(
             texts(helmet),
             vec![
-                "17 % of the laid picture falls on surface hidden under or behind another part and is not shown there".to_owned(),
+                "17 % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there".to_owned(),
                 "Continued onto 9 separate parts".to_owned()
             ]
         );
@@ -843,7 +844,7 @@ mod tests {
             texts(book),
             vec![
                 "37 % of the picture runs off the surface: an edge, a hole or the end of the part".to_owned(),
-                "70 % of the laid picture falls on surface hidden under or behind another part and is not shown there".to_owned()
+                "70 % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there".to_owned()
             ]
         );
         // An open noisy field (no edge, no closure, little cut): the covered share alone, no cause invented.

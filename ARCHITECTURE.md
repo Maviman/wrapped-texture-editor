@@ -5458,8 +5458,8 @@ ends met (`met_itself` or `passed`) one line, "Longer than the way round: P % sh
 helix (`passed`, P = `ends_share` < 95 %), "The ends meet at the back: P % of the picture's length shown" for a closure
 (`met_itself`), else "The ends meet at the back"; "P % of the picture runs off the surface: an edge, a hole or the end
 of the part" only when `reached_edge` and `covered < 0.98`; "P % of the picture is lost where the surface had to be
-cut" when `lost_cut >= 2 %`; "P % of the laid picture falls on surface hidden under or behind another part and is not
-shown there" when `rejected >= 5 %` (DamagedHelmet Jump on, nonmanifold); "Only P % of the picture lies on the surface"
+cut" when `lost_cut >= 2 %`; "P % of the laid picture lies on surface hidden under another part or folded over itself, and
+is not shown there" when `rejected >= 5 %` (DamagedHelmet Jump on; nonmanifold's and the Lantern's single parts); "Only P % of the picture lies on the surface"
 when `covered < 0.98` and neither an edge nor the ends and cuts explain it (`covered` more than 2 % below
 `ends_share` (when cut) minus `lost_cut` (when shown)). The shared-texel line also shows for Project-mode stamps (the
 texture reuse is the model's, in any mode): an intended difference from the main build's panel (round 9's, kept).

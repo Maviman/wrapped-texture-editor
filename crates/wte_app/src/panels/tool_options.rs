@@ -133,18 +133,32 @@ const LOST_CUT_LINE_MIN: f32 = 0.02;
 /// Least `WrapStats::rejected` (share of the laid picture the owner test drops: it lies on surface under or behind
 /// another part) that gets a line.
 const HIDDEN_LINE_MIN: f32 = 0.05;
+/// Stable (fix_wrap_1): least `WrapStats::beyond` (share of the picture's cells left bare beyond where the ends met)
+/// for which the ends line gives the share of the picture's length shown. Below it the spine's closure cut nothing.
+pub(crate) const ENDS_BEYOND_MIN: f32 = 0.02;
+
+/// Stable (fix_wrap_1): whether the ends line gives a share (`ends_share` below 95 % and picture left bare beyond the
+/// closure), for the panel and step 10's log.
+pub(crate) fn ends_cut_shown(s: &WrapStats) -> bool {
+    s.ends_share < 0.95 && s.beyond >= ENDS_BEYOND_MIN
+}
 
 /// The lines under "Wrapped over N triangles" of `wrap_stats_lines`, in order. Round 8 (R8-1, plan 4.1): a relaxed wrap
 /// that stretched by 5 % or more says so (help text: it is the intended behaviour on a curved surface), and seams
 /// inside the picture are named. Stable (w1, item 6): each loss has one line that names its own cause, and no two lines
 /// contradict each other:
 /// - the ends met (`met_itself` / `passed`, Ends meet): "The ends meet at the back" (with the share of the picture's
-///   length shown when below 95 %); only a helix (`passed`) says "Longer than the way round";
+///   length shown when below 95 %); only a helix (`passed`) says "Longer than the way round"; stable (fix_wrap_1):
+///   nothing when the ends share is below 95 % but no picture is left bare beyond the closure (`beyond` < 2 %: the
+///   spine looped round a part standing on a surface that holds the picture: ABeautifulGame Jump on);
 /// - the picture reaches a boundary edge (`reached_edge`) and less than 98 % lies on the surface: "runs off the
-///   surface: an edge, a hole or the end of the part";
+///   surface: an edge, a hole or the end of the part"; stable (fix_wrap_1): "on the surface" is `shown` (each picture
+///   cell once) where it was `covered` (laid areas summed: two places laid at one picture point counted twice, so
+///   ABeautifulGame Jump on reported 100 % with 9 % of its cells bare past the board's front edge);
 /// - picture lost inside the laid outline to cuts (`lost_cut` >= 2 %): a cut line;
 /// - laid picture dropped because another place owns its picture points (`rejected` >= 5 %: surface under another part
-///   with Jump small gaps, or a layout folded over itself, the Lantern's and nonmanifold's single parts): a hidden line;
+///   with Jump small gaps, or a layout folded over itself, the Lantern's and nonmanifold's single parts): an overlap
+///   line (stable fix_wrap_1: it says each spot is shown once, as it is: no loss);
 /// - less than 98 % on the surface and none of the above explains it: the covered share, without a cause;
 /// - then the round-6 lines (turns, parts, limit).
 pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
@@ -156,9 +170,13 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
     if s.seams > 0 {
         out.push(WrapLine::Help("Cut where it cannot lie flat (a corner, a handle, or where its edges meet)".to_owned()));
     }
-    // The ends met (Ends meet; Overlap winds the rest on: "Wound N times").
-    let ends = !opts.overlap && (s.met_itself || s.passed);
-    let ends_cut = ends && s.ends_share < 0.95;
+    // The ends met (Ends meet; Overlap winds the rest on: "Wound N times"). Stable (fix_wrap_1): the spine's ends
+    // sum (`ends_share`) says how much of the picture's length the spine laid before it closed; it costs picture only
+    // where the cells beyond the closure are bare (`beyond`). A spine that looped round a part standing on a plane
+    // meets itself while the plane holds the picture (ABeautifulGame Jump on: ends 74 %, beyond 0): no ends line.
+    let ends_cut = ends_cut_shown(s);
+    let ends = !opts.overlap && (s.met_itself || s.passed) && (ends_cut || s.ends_share >= 0.95);
+    let ends_cut = ends && ends_cut;
     if ends {
         let shown = (s.ends_share * 100.0).round();
         out.push(WrapLine::Warn(match (s.passed, ends_cut) {
@@ -167,9 +185,9 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
             _ => "The ends meet at the back".to_owned(),
         }));
     }
-    let edge = s.reached_edge && s.covered < 0.98;
+    let edge = s.reached_edge && s.shown < 0.98;
     if edge {
-        out.push(WrapLine::Warn(format!("{:.0} % of the picture runs off the surface: an edge, a hole or the end of the part", pct(1.0 - s.covered))));
+        out.push(WrapLine::Warn(format!("{:.0} % of the picture runs off the surface: an edge, a hole or the end of the part", pct(1.0 - s.shown))));
     }
     let cut = s.lost_cut >= LOST_CUT_LINE_MIN;
     if cut {
@@ -181,19 +199,23 @@ pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine
         }));
     }
     if s.rejected >= HIDDEN_LINE_MIN {
+        // Stable (fix_wrap_1): `rejected` counts the places the owner test drops in cells that have an owner, so each
+        // dropped spot is shown at another place: no loss (Avocado Jump on: 35 % dropped, ink 0.996; round 9 / w1 said
+        // "... and is not shown there", which read like a loss).
         out.push(WrapLine::Warn(format!(
-            "{:.0} % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there",
+            "{:.0} % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only",
             pct(s.rejected)
         )));
     }
-    // Less on the surface than the ends and the cuts explain, and no edge reached: the covered share alone.
-    let expected = if ends_cut { s.ends_share } else { 1.0 } - if cut { s.lost_cut } else { 0.0 };
-    if !edge && s.covered < 0.98 && s.covered < expected - 0.02 {
+    // Less on the surface than the ends and the cuts explain, and no edge reached: the shown share alone.
+    // Stable (fix_wrap_1): with any ends line (also the plain one at 95 % and more) the ends explain `ends_share`.
+    let expected = if ends { s.ends_share } else { 1.0 } - if cut { s.lost_cut } else { 0.0 };
+    if !edge && s.shown < 0.98 && s.shown < expected - 0.02 {
         // Stable (w2): the part is narrower than the picture (`room`): that explains the share.
         out.push(WrapLine::Warn(if s.room < 0.95 {
-            format!("The part is narrower than the picture: only {:.0} % of the picture lies on it", (s.covered * 100.0).round())
+            format!("The part is narrower than the picture: only {:.0} % of the picture lies on it", (s.shown * 100.0).round())
         } else {
-            format!("Only {:.0} % of the picture lies on the surface", (s.covered * 100.0).round())
+            format!("Only {:.0} % of the picture lies on the surface", (s.shown * 100.0).round())
         }));
     }
     if s.turns > 1 {
@@ -763,6 +785,8 @@ mod tests {
             lost_cut: 0.0,
             room: 1.0,
             wraps_closed: false,
+            shown: 1.0,
+            beyond: 0.0,
         };
         let opts = WrapOptions::default();
         assert!(wrap_stats_texts(&base, opts).is_empty(), "an exact (seed) wrap adds no line");
@@ -783,7 +807,7 @@ mod tests {
             ]
         );
         // The round-6 warnings stay as they were, after the new lines; stable (w1): "runs off" only at an edge.
-        let off = wte_core::WrapStats { covered: 0.5, reached_edge: true, jumps: 2, ..base };
+        let off = wte_core::WrapStats { covered: 0.5, shown: 0.5, reached_edge: true, jumps: 2, ..base };
         assert_eq!(
             wrap_stats_texts(&off, opts),
             vec![
@@ -820,65 +844,134 @@ mod tests {
             lost_cut: 0.0,
             room: 1.0,
             wraps_closed: false,
+            shown: 1.0,
+            beyond: 0.0,
         };
         let opts = WrapOptions::default();
         let texts = |s: wte_core::WrapStats| wrap_stats_line_texts(&s, opts);
         // The Lantern: no edge, the loss is cut wedges (round 9 said "runs off the surface: an edge ..."); stable w2:
-        // the picture covers the whole closed base block, cut open at its corners.
-        let lantern = wte_core::WrapStats { covered: 0.8849, lost_cut: 0.1123, room: 0.9091, wraps_closed: true, ..base };
-        assert_eq!(texts(lantern), vec!["11 % of the picture is lost where it is cut open round the closed part's corners".to_owned()]);
-        let open_cut = wte_core::WrapStats { covered: 0.8849, lost_cut: 0.1123, ..base };
+        // the picture covers the whole closed base block, cut open at its corners. Stable (fix_wrap_1, the sweep's
+        // numbers): `shown` 0.731 where `covered` said 0.903 (the folded layout's areas summed): the rest of the
+        // picture finds no surface on the block (`room` 0.91), which the covered line now says.
+        let lantern = wte_core::WrapStats { covered: 0.9029, shown: 0.7311, lost_cut: 0.1211, rejected: 0.1837, room: 0.9091, wraps_closed: true, ..base };
+        assert_eq!(
+            texts(lantern),
+            vec![
+                "12 % of the picture is lost where it is cut open round the closed part's corners".to_owned(),
+                "18 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned(),
+                "The part is narrower than the picture: only 73 % of the picture lies on it".to_owned()
+            ]
+        );
+        let open_cut = wte_core::WrapStats { covered: 0.8849, shown: 0.8849, lost_cut: 0.1123, ..base };
         assert_eq!(texts(open_cut), vec!["11 % of the picture is lost where the surface had to be cut".to_owned()]);
-        // The torus knot: a helix, its ends met; nothing ran off an edge.
-        let knot = wte_core::WrapStats { covered: 0.44, passed: true, ends_share: 0.43, ..base };
+        // The torus knot: a helix, its ends met; nothing ran off an edge (sweep: beyond 0.558).
+        let knot = wte_core::WrapStats { covered: 0.4441, shown: 0.4422, beyond: 0.5578, passed: true, ends_share: 0.43, ..base };
         assert_eq!(texts(knot), vec!["Longer than the way round: 43 % shown, the ends meet at the back".to_owned()]);
-        // many_islands with Jump on: one closure line (round 9 stacked "runs off", "The ends meet", "Longer than the
-        // way round" and the parts line), the small covered share named without a cause, the parts.
-        // Stable w2: the islands are a tenth of the picture's height across (`room` 0.1029): the covered line says so.
-        let islands = wte_core::WrapStats { covered: 0.0333, met_itself: true, ends_share: 0.3318, jumps: 2, rejected: 0.0625, lost_cut: 0.0051, room: 0.1029, ..base };
+        // many_islands with Jump off: the spine met itself round an island and the picture past the S1 closure seams
+        // is bare (beyond 0.99): the ends line with its share, and the islands' room.
+        let islands_off = wte_core::WrapStats { covered: 0.0177, shown: 0.0125, beyond: 0.9875, met_itself: true, ends_share: 0.184, rejected: 0.2749, room: 0.091, ..base };
+        assert_eq!(
+            texts(islands_off),
+            vec![
+                "The ends meet at the back: 18 % of the picture's length shown".to_owned(),
+                "27 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned(),
+                "The part is narrower than the picture: only 1 % of the picture lies on it".to_owned()
+            ]
+        );
+        // many_islands with Jump on: round 9 stacked "runs off", "The ends meet", "Longer than the way round" and the
+        // parts line; stable w2: the islands are a tenth of the picture's height across (`room` 0.1029): the covered
+        // line says so. Stable (fix_wrap_1): the spine met itself without a closure seam (S4 / S5 only), so no
+        // picture is bare beyond a closure (`beyond` 0): the islands' room explains the share, no ends line (w1 / w2:
+        // "The ends meet at the back: 37 % ...").
+        let islands = wte_core::WrapStats { covered: 0.0338, shown: 0.0310, beyond: 0.0, met_itself: true, ends_share: 0.369, jumps: 2, rejected: 0.0642, lost_cut: 0.0050, room: 0.1029, ..base };
         let lines = texts(islands);
         assert_eq!(
             lines,
             vec![
-                "The ends meet at the back: 33 % of the picture's length shown".to_owned(),
-                "6 % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there".to_owned(),
+                "6 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned(),
                 "The part is narrower than the picture: only 3 % of the picture lies on it".to_owned(),
                 "Continued onto 2 separate parts".to_owned()
             ]
         );
         assert!(!lines.iter().any(|l| l.contains("runs off") || l.contains("Longer than the way round")), "{lines:?}");
-        // DamagedHelmet with Jump on: all of it on the surface, 17 % of it on hidden surface (round 9: no line).
-        let helmet = wte_core::WrapStats { covered: 1.0, reached_edge: true, rejected: 0.1695, jumps: 9, ..base };
+        // DamagedHelmet with Jump on: 18 % of the laid picture on overlapping plates (round 9: no line); stable
+        // (fix_wrap_1): 2.6 % of the cells bare at the helmet's rim (`shown` 0.974, `covered` 1.0).
+        let helmet = wte_core::WrapStats { covered: 1.0, shown: 0.9737, reached_edge: true, rejected: 0.1795, jumps: 9, ..base };
         assert_eq!(
             texts(helmet),
             vec![
-                "17 % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there".to_owned(),
+                "3 % of the picture runs off the surface: an edge, a hole or the end of the part".to_owned(),
+                "18 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned(),
                 "Continued onto 9 separate parts".to_owned()
             ]
         );
-        // nonmanifold: an edge and hidden surface, both true.
-        let book = wte_core::WrapStats { covered: 0.63, reached_edge: true, rejected: 0.70, ..base };
+        // nonmanifold: an edge and overlapping pages, both true; stable (fix_wrap_1): `shown` 0.178 (ink 0.188) where
+        // `covered` summed the seven pages' areas (0.63).
+        let book = wte_core::WrapStats { covered: 0.6303, shown: 0.1781, reached_edge: true, rejected: 0.7027, ..base };
         assert_eq!(
             texts(book),
             vec![
-                "37 % of the picture runs off the surface: an edge, a hole or the end of the part".to_owned(),
-                "70 % of the laid picture lies on surface hidden under another part or folded over itself, and is not shown there".to_owned()
+                "82 % of the picture runs off the surface: an edge, a hole or the end of the part".to_owned(),
+                "70 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned()
             ]
         );
-        // An open noisy field (no edge, no closure, little cut): the covered share alone, no cause invented.
-        let noisy = wte_core::WrapStats { covered: 0.87, lost_cut: 0.024, ..base };
-        assert_eq!(texts(noisy), vec!["2 % of the picture is lost where the surface had to be cut".to_owned(), "Only 87 % of the picture lies on the surface".to_owned()]);
+        // An open noisy field (no edge, no closure, little cut): the shown share alone, no cause invented; stable
+        // (fix_wrap_1): noisy400's `shown` 0.473 (ink 0.472), where `covered` 0.862 made the line say 86 %.
+        let noisy = wte_core::WrapStats { covered: 0.862, shown: 0.473, beyond: 0.5016, lost_cut: 0.0254, rejected: 0.4498, ..base };
+        assert_eq!(
+            texts(noisy),
+            vec![
+                "3 % of the picture is lost where the surface had to be cut".to_owned(),
+                "45 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned(),
+                "Only 47 % of the picture lies on the surface".to_owned()
+            ]
+        );
         // Overlap winds the rest on: no ends line.
         let wound = wte_core::WrapStats { met_itself: true, turns: 3, ..base };
         assert_eq!(wrap_stats_line_texts(&wound, WrapOptions { jump_gaps: false, overlap: true }), vec!["Wound 3 times".to_owned()]);
-        // Never "runs off" without an edge, never "Longer than the way round" without a pass.
+        // Stable (fix_wrap_1): ABeautifulGame with Jump on (step 10's log): the spine looped round a pawn and met its
+        // own path (ends 73.8 %), but no picture cell is bare beyond that closure (`beyond` 0): the board holds the
+        // picture, so no ends line (w1 / w2 said "The ends meet at the back: 74 % of the picture's length shown").
+        // 8.7 % of the cells are bare past the board's front edge (the frame's corner): `shown` says so, where
+        // `covered` (1.0: the board and the pawns laid over the same picture points, summed) hid it.
+        let chess = wte_core::WrapStats {
+            covered: 1.0,
+            shown: 0.9127,
+            beyond: 0.0,
+            met_itself: true,
+            ends_share: 0.738,
+            reached_edge: true,
+            relaxed: true,
+            stretch: 0.9246,
+            seams: 2147,
+            rejected: 0.5033,
+            lost_cut: 0.0012,
+            jumps: 30,
+            ..base
+        };
+        assert_eq!(
+            texts(chess),
+            vec![
+                "Fitted to the curved surface: stretched up to 92 %".to_owned(),
+                "Cut where it cannot lie flat (a corner, a handle, or where its edges meet)".to_owned(),
+                "9 % of the picture runs off the surface: an edge, a hole or the end of the part".to_owned(),
+                "50 % of the laid picture fell where the surface overlaps another part or folds over itself: each spot of the picture is shown in one place only".to_owned(),
+                "Continued onto 30 separate parts".to_owned()
+            ]
+        );
+        // Never "runs off" without an edge, never "Longer than the way round" without a pass; stable (fix_wrap_1): a
+        // share of the picture's length only when picture is left bare beyond the closure.
         for covered in [0.3f32, 0.9, 0.99] {
-            for (met, passed, edge) in [(false, false, false), (true, false, false), (false, true, false), (true, false, true), (false, false, true)] {
-                let s = wte_core::WrapStats { covered, met_itself: met, passed, reached_edge: edge, ends_share: 0.5, ..base };
-                let lines = texts(s);
-                assert_eq!(lines.iter().any(|l| l.contains("runs off")), edge && covered < 0.98, "{s:?}: {lines:?}");
-                assert_eq!(lines.iter().any(|l| l.contains("Longer than the way round")), passed, "{s:?}: {lines:?}");
-                assert!(lines.iter().filter(|l| l.contains("ends meet")).count() <= 1, "{lines:?}");
+            for beyond in [0.0f32, 1.0 - covered] {
+                for (met, passed, edge) in [(false, false, false), (true, false, false), (false, true, false), (true, false, true), (false, false, true)] {
+                    let s = wte_core::WrapStats { covered, shown: covered, beyond, met_itself: met, passed, reached_edge: edge, ends_share: 0.5, ..base };
+                    let lines = texts(s);
+                    let cut_ends = beyond >= ENDS_BEYOND_MIN;
+                    assert_eq!(lines.iter().any(|l| l.contains("runs off")), edge && covered < 0.98, "{s:?}: {lines:?}");
+                    assert_eq!(lines.iter().any(|l| l.contains("Longer than the way round")), passed && cut_ends, "{s:?}: {lines:?}");
+                    assert_eq!(lines.iter().any(|l| l.contains("ends meet")), (met || passed) && cut_ends, "{s:?}: {lines:?}");
+                    assert!(lines.iter().filter(|l| l.contains("ends meet")).count() <= 1, "{lines:?}");
+                }
             }
         }
     }
@@ -909,10 +1002,14 @@ mod tests {
             lost_cut: 0.0,
             room: 1.0,
             wraps_closed: false,
+            shown: 0.43,
+            beyond: 0.57,
         };
         let opts = WrapOptions::default();
         assert_eq!(wrap_stats_texts(&base, opts), vec![WrapLine::Warn("Longer than the way round: 43 % shown, the ends meet at the back".to_owned())]);
-        assert_eq!(wrap_stats_texts(&wte_core::WrapStats { ends_share: 0.95, ..base }, opts), vec![WrapLine::Warn("The ends meet at the back".to_owned())]);
+        // Stable (fix_wrap_1): the plain line at 95 %, the 5 % past the meeting line bare beyond it, no other line.
+        let fits = wte_core::WrapStats { ends_share: 0.95, shown: 0.95, beyond: 0.05, ..base };
+        assert_eq!(wrap_stats_texts(&fits, opts), vec![WrapLine::Warn("The ends meet at the back".to_owned())]);
     }
 
     /// Round 9 (package B, T9): the shared-texel line shows for a stamp on mirrored halves (once the warm-up found the

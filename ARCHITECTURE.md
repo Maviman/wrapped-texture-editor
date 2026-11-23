@@ -148,6 +148,11 @@ cell with candidates on two sheets prefers a place the stamp faces over one hidd
 page); `WrapStats::room` and `wraps_closed` say when the part is narrower than the picture or the picture covers a whole
 closed part. Details 6.5a "Stable (w2)".
 
+`docs/notes/stable/fix_wrap_1.md`. `WrapStats::shown` (the picture's cells shown somewhere, each once) and `beyond`
+(cells left bare beyond where the ends met) make the panel's wrap lines honest: no ends line when the spine's closure
+left no picture bare (the chess board under a pawn), "runs off" and "Only P %" from `shown` instead of the summed
+`covered`, and the overlap line says each spot is shown once. Details 6.5a "Stable (fix_wrap_1)".
+
 ### 1.7 Round 7 (brush speed)
 
 Round 7 (`target\round7_design\ROUND7_PLAN.md`) makes 3D dabs on very heavy models cheaper and properly parallel,
@@ -1342,7 +1347,10 @@ pub struct WrapStats { pub verts: u32, pub tris: u32, pub cut_tris: u32, pub cov
     pub passed: bool, pub ends_share: f32, pub lost_cut: f32,
     // Stable (w2): the largest 3D extent across the picture of the parts it lies on over the picture's height (<= 1);
     // a whole closed part (no boundary edge) was laid on the first turn.
-    pub room: f32, pub wraps_closed: bool }
+    pub room: f32, pub wraps_closed: bool,
+    // Stable (fix_wrap_1): the share of the picture's cells with an owner (each once; `covered` sums laid areas, so
+    // two places at one picture point count twice); the share of its cells bare beyond a closure (where the ends met).
+    pub shown: f32, pub beyond: f32 }
 /// Round 8 (`Document::stamp_wrap_quality`): ink area, the share of picture bins found in two places (`dup`, > 6 bins
 /// apart), the share of neighbouring bin pairs lying apart (`scatter`), the inked bins.
 pub struct WrapQuality { pub ink_area: f32, pub dup: f32, pub scatter: f32, pub bins: u32 }
@@ -3547,6 +3555,18 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   flat: the picture is cut open at its corners and loses the part's total curvature to the gaps there (`lost_cut`; the
   Lantern's 52-vertex base block: 11.2 %).
 
+**Stable (fix_wrap_1): what the panel's lines are measured from** (`docs/notes/stable/fix_wrap_1.md`).
+- `WrapStats::shown`: of the owner grid's cells whose centres lie inside the picture (with its one-texel border), the
+  share with an owner (`OwnerGrid::owned_cells`); summed over the layers that have an owner grid, `covered` when none
+  has. `covered` stays (the clipped laid areas summed, clamped to 1): with Jump small gaps the board and the pawns are
+  laid over the same picture points, so it read 1.0 on ABeautifulGame Jump on where 8.7 % of the cells are bare (the
+  frame's corner past the board's front edge).
+- `WrapStats::beyond`: the share of the picture's cells without an owner that `lost_cells` leaves out as beyond a
+  closure (4-connected through bare cells to a cell a closure triangle covers). On a helix every bare cell is beyond
+  (WA32: `shown + beyond + lost_cut = 1` within 1 %); on ABeautifulGame Jump on the spine met its own path round a pawn
+  (`ends_share` 0.738) but `beyond` is 0: the closure cost no picture.
+- Both are size-dependent and come from `size_stats` (a reused parameterization reports them for its own size).
+
 **Measuring aid** `Document::stamp_wrap_quality(id) -> Option<WrapQuality { ink_area, dup, scatter, bins }>` (5.20).
 
 **Round 8 jobs** (`stamp_job.rs`, `doc_stamps.rs`; plan 3.4). `StampJobKind { Full, Preview, ParamOnly }` on
@@ -5515,6 +5535,16 @@ texture reuse is the model's, in any mode): an intended difference from the main
 Stable (w2): the cut line reads "P % of the picture is lost where it is cut open round the closed part's corners" when
 `wraps_closed`; the covered line reads "The part is narrower than the picture: only P % of the picture lies on it"
 when `room < 0.95`.
+Stable (fix_wrap_1): the ends line with a share ("Longer than the way round: P % shown ..." / "The ends meet at the
+back: P % ...", P = `ends_share`) needs `ends_share < 0.95` **and** `beyond >= 2 %` (`ENDS_BEYOND_MIN`,
+`tool_options::ends_cut_shown`); with `ends_share < 0.95` and nothing bare beyond the closure there is no ends line
+(ABeautifulGame Jump on: w1 / w2 said "The ends meet at the back: 74 % ..." with the board holding the picture); the
+plain "The ends meet at the back" stays for `ends_share >= 0.95`. The "runs off" and "Only P %" lines use `shown`
+instead of `covered` (P = 1 - `shown`, `shown`); the "Only P %" line's expected share is `ends_share` whenever an
+ends line shows (also the plain one). The `rejected` line reads "P % of the laid picture fell where the
+surface overlaps another part or folds over itself: each spot of the picture is shown in one place only": a dropped
+place's cell always has an owner, so it is shown elsewhere (Avocado Jump on 35 % with ink 0.996; the old wording "...
+and is not shown there" read like a loss).
 
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
@@ -6125,7 +6155,12 @@ shows); and the asserts of ROUND9_PLAN 7.2: `covered >= 0.85 x ends_share` unles
 both settings. Stable (w2): `covered >= 0.85 x ends_share x room` (`WrapStats::room`: a part narrower than the picture
 across holds only that share of its height: ABeautifulGame Jump off on a pawn, many_islands' islands) and `lost_cut <=
 10 %` unless `wraps_closed` (a picture covering a whole closed part loses the part's total curvature at its corners:
-the Lantern's 52-vertex base block); the `coverage:` line also logs `room` and `wraps_closed`.
+the Lantern's 52-vertex base block); the `coverage:` line also logs `room` and `wraps_closed`. Stable (fix_wrap_1):
+`lost_cut <= 15 %` when `wraps_closed` (w2 left it unbounded; the Lantern 12.11 %, round 8's cone rule there 14.7 %);
+the `coverage:` line also logs `shown` and `beyond`, and `panel lines:` says "line shown" for the ends share by the
+panel's rule (`ends_cut_shown`). `room` is the parts' 3D extent across, a lower bound of the surface's room on a
+curved part, so the room factor makes the coverage assert more lenient than the surface requires, not stricter (w2's
+notes said the opposite).
 
 ### 8.12 Theme and icon (`theme.rs`) [A1]
 
@@ -6657,6 +6692,10 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   `w2_room_and_a_whole_closed_part`, `w2_the_developed_region_stays_off_curved_surface`. Turned green by w2's changes:
   WA35 (the developed exact region), WA4 (the area push); WA17 / WA24 with their picture centred at z = 0.95 instead
   of 1.2 (from 1.2 at most 0.90 of the picture could lie once: check:A of round 9 section 2).
+- Stable (fix_wrap_1; `docs/notes/stable/fix_wrap_1.md`): `w1_the_chess_board_keeps_the_rows_under_a_pawn` also asks
+  `beyond < 2 %` and `shown >=` the board's share; WA32 asks `beyond >= 2 %` and `shown + beyond + lost_cut = 1`
+  within 1 %; `tool_options::the_wrap_lines_name_the_right_cause_and_never_contradict` has the chess-board case (no ends
+  line, "9 % ... runs off") and a grid over `beyond`.
 
 ## 10. Work packages
 

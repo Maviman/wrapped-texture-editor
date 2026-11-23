@@ -152,6 +152,17 @@ pub struct WrapStats {
     /// laid on the first turn): a closed surface cannot lie flat, so the picture is cut open at its corners and loses
     /// the surface's total curvature (4 pi on a box) to the gaps there (`lost_cut`; the Lantern's base block).
     pub wraps_closed: bool,
+    /// Stable (fix_wrap_1): the share of the picture's cells that are shown somewhere (have an owner on a layer with
+    /// an owner grid; `covered` for layers without one). Unlike `covered` (a sum of laid areas, so two places laid
+    /// at one picture point count twice) each cell counts once. A spine that met itself after looping round a part
+    /// standing on a plane leaves `ends_share` below 1 while the plane holds the whole picture (ABeautifulGame Jump
+    /// on: ends 73.8 %, shown 100 %): the ends then cost nothing and the panel says nothing about them.
+    pub shown: f32,
+    /// Stable (fix_wrap_1): the share of the picture's cells without an owner that lie beyond a closure (4-connected
+    /// through bare cells to a cell a closure triangle covers: where the ends met, `lost_cut`'s exclusion): the
+    /// picture the meeting ends did not lay. 0 when the spine's closure leaves no bare picture next to it (a spine
+    /// that looped round a pawn on a board that holds the picture).
+    pub beyond: f32,
 }
 
 /// Round 8 (plan 3.3): how once and how whole the picture of a wrapped stamp lies on the model, measured from its
@@ -2402,6 +2413,8 @@ fn wrap_param_from(
         lost_cut: 0.0,
         room: 1.0,
         wraps_closed: false,
+        shown: 1.0,
+        beyond: 0.0,
     };
     // The turns to lay: turn 0 (the Ends-meet spine), then with Overlap every later turn that starts inside the
     // picture, each with its along range (4.3b).
@@ -3515,7 +3528,7 @@ impl WrapParam {
     /// parameterization is reused for a scale inside its reach bucket (4.4); stable (w1, item 3): every
     /// size-dependent field is measured for `p`'s size (`size_stats`, the function a fresh build uses): `covered`,
     /// `reached_edge`, `ends_share`, `flipped`, `seams`, `seams_by_rule`, `cut_tris`, `stretch`, `rejected`,
-    /// `lost_cut`. Round 9 refreshed only `covered`.
+    /// `lost_cut`, `shown`, `beyond`. Round 9 refreshed only `covered`.
     pub fn stats_for_src(&self, p: &Projector, src_size: [u32; 2]) -> WrapStats {
         let key = [p.half_size.x.abs().to_bits(), p.half_size.y.abs().to_bits(), src_size[0], src_size[1]];
         if key[..2] == self.half_bits && src_size == self.src_size {
@@ -3537,8 +3550,9 @@ impl WrapParam {
     /// Stable (w1, item 3): `stats` with every size-dependent field measured for the picture of `p` (`src_size` source
     /// pixels: its one-texel border) from the stored layers: `covered` (clipped stored corners over the picture),
     /// `reached_edge` (the spine's, or a final boundary vertex inside the picture), `ends_share`, `flipped`, `seams`,
-    /// `seams_by_rule`, `cut_tris`, `stretch` (95th percentile), `rejected` and `lost_cut` (the owner grid). A size
-    /// without a reach keeps the stored stats.
+    /// `seams_by_rule`, `cut_tris`, `stretch` (95th percentile), `rejected`, `lost_cut`, `shown` and `beyond` (the owner
+    /// grid).
+    /// A size without a reach keeps the stored stats.
     fn size_stats(&self, p: &Projector, src_size: [u32; 2]) -> WrapStats {
         let Some(r) = reach_of(p, src_size, self.diag) else { return self.stats };
         let (hw, hh) = (r.hw, r.hh);
@@ -3547,7 +3561,7 @@ impl WrapParam {
         let mut area = 0.0;
         let (mut flipped, mut seams, mut by_rule, mut cut) = (0u32, 0u32, [0u32; 5], 0u32);
         let mut stretches: Vec<f32> = Vec::new();
-        let (mut rejected, mut lost) = ((0usize, 0usize), (0usize, 0usize));
+        let (mut rejected, mut lost, mut owned, mut beyond) = ((0usize, 0usize), (0usize, 0usize), (0usize, 0usize), 0usize);
         let mut edge = false;
         for layer in &self.layers {
             let clip = layer.clip.map(|[lo, hi]| (layer.axis, lo as f64, hi as f64));
@@ -3596,9 +3610,11 @@ impl WrapParam {
             cut += ls.cut_fixed + cut_tris.len() as u32;
             edge |= ls.edge_pts.iter().any(|e| e[0] <= hw && e[1] <= hh);
             if let Some(grid) = &layer.owner {
-                let (a, b) = (grid.rejected_pairs(picture), grid.lost_cells(picture));
+                let (a, b, c) = (grid.rejected_pairs(picture), grid.lost_cells(picture), grid.owned_cells(picture));
                 rejected = (rejected.0 + a.0, rejected.1 + a.1);
-                lost = (lost.0 + b.0, lost.1 + b.1);
+                lost = (lost.0 + b.0, lost.1 + b.2);
+                beyond += b.1;
+                owned = (owned.0 + c.0, owned.1 + c.1);
             }
         }
         st.covered = (area / (4.0 * hw * hh)).clamp(0.0, 1.0) as f32;
@@ -3618,6 +3634,8 @@ impl WrapParam {
         st.stretch = stretches.get(((stretches.len() as f64 * 0.95) as usize).min(stretches.len().saturating_sub(1))).copied().unwrap_or(0.0);
         st.rejected = if rejected.1 == 0 { 0.0 } else { (rejected.0 as f64 / rejected.1 as f64) as f32 };
         st.lost_cut = if lost.1 == 0 { 0.0 } else { (lost.0 as f64 / lost.1 as f64) as f32 };
+        st.shown = if owned.1 == 0 { st.covered } else { (owned.0 as f64 / owned.1 as f64) as f32 };
+        st.beyond = if lost.1 == 0 { 0.0 } else { (beyond as f64 / lost.1 as f64) as f32 };
         let across = 2.0 * if self.spine_y { hw } else { hh };
         st.room = if across > 0.0 { (self.part_across / across).clamp(0.0, 1.0) as f32 } else { 1.0 };
         st

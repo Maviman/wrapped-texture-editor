@@ -2304,6 +2304,15 @@ impl OwnerGrid {
         (rejected, total)
     }
 
+    /// Stable (fix_wrap_1): of the cells whose centres lie inside `picture`, those with an owner (shown somewhere) and
+    /// all.
+    pub(crate) fn owned_cells(&self, picture: [f64; 2]) -> (usize, usize) {
+        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return (0, 0) };
+        let w = self.dims[0];
+        let owned = (j0..=j1).map(|j| self.mark[j * w + i0..=j * w + i1].iter().filter(|&&m| m & 1 != 0).count()).sum();
+        (owned, (i1 - i0 + 1) * (j1 - j0 + 1))
+    }
+
     /// Round 9 (A7): `lost_cut`, the picture's cells without an owner inside the laid set's outline: an uncovered cell
     /// with covered cells on both sides in its row or in its column (a cut wedge, a shrunk seam, a hole), as against
     /// picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways). Stable (w1, item 4):
@@ -2311,9 +2320,10 @@ impl OwnerGrid {
     /// gaps: tiles, kit-bashed pieces) is no surface lost to a cut (round 9 counted it: tiles300 16.85 % with no cut).
     /// For one part the same cells as round 9's row and column spans. Returns (lost, picture cells). Stable (w1, item
     /// 3): from the stored marks, for any picture; the work is over the picture's cells (and the scans from its sides
-    /// to the nearest covered cell).
-    pub(crate) fn lost_cells(&self, picture: [f64; 2]) -> (usize, usize) {
-        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return (0, 0) };
+    /// to the nearest covered cell). Stable (fix_wrap_1): returns (lost, beyond a closure, picture cells): the
+    /// uncovered cells left out as beyond a closure are the picture the meeting ends did not lay (`WrapStats::beyond`).
+    pub(crate) fn lost_cells(&self, picture: [f64; 2]) -> (usize, usize, usize) {
+        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return (0, 0, 0) };
         let [width, height] = self.dims;
         let (rw, rh) = (i1 - i0 + 1, j1 - j0 + 1);
         let mark = &self.mark;
@@ -2413,7 +2423,7 @@ impl OwnerGrid {
                 lost += count(j, from, i1 + 1, same(left, right));
             }
         }
-        (lost, rw * rh)
+        (lost, beyond.iter().filter(|&&b| b).count(), rw * rh)
     }
 
     /// The owner test at cell index `k`: a fragment at 3D point `p` of a triangle with stretch `s` is kept when the

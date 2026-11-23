@@ -2656,11 +2656,13 @@ fn wa32_a_helix_round_a_tube_has_its_ends_meet() {
     for (what, raw, p, want) in wa32_cases() {
         let (q, s, ink, _, _) = r8_measure(raw.clone(), SIDE, p);
         println!(
-            "WA32 {}, passed {}, met_itself {}, ends_share {:.4} (analytic {want:.4}), seams {:?}, relaxed {}",
+            "WA32 {}, passed {}, met_itself {}, ends_share {:.4} (analytic {want:.4}), shown {:.4}, beyond {:.4}, seams {:?}, relaxed {}",
             r8_line(what, &q, &s, ink),
             s.passed,
             s.met_itself,
             s.ends_share,
+            s.shown,
+            s.beyond,
             s.seams_by_rule,
             s.relaxed
         );
@@ -2668,6 +2670,10 @@ fn wa32_a_helix_round_a_tube_has_its_ends_meet() {
         assert!(s.passed || (what.starts_with("cylinder sample") && s.met_itself), "{what}: the traces did not pass: {s:?}");
         assert!((s.ends_share as f64 - want).abs() <= 0.05 * want, "{what}: ends_share {} (analytic {want})", s.ends_share);
         assert!(s.covered as f64 >= 0.9 * s.ends_share as f64, "{what}: covered {} of ends_share {}", s.covered, s.ends_share);
+        // Stable (fix_wrap_1): the picture past the way round is bare beyond the meeting line (the panel's ends line
+        // needs `beyond` >= 2 %), and every bare cell is accounted for (shown + beyond + lost_cut = 1).
+        assert!(s.beyond >= 0.02, "{what}: beyond {}", s.beyond);
+        assert!((s.shown + s.beyond + s.lost_cut - 1.0).abs() <= 0.01, "{what}: shown {} beyond {} lost_cut {}", s.shown, s.beyond, s.lost_cut);
         assert!(q.dup <= 0.01 && q.scatter <= 0.03, "{what}: {q:?}");
         // Overlap: the traces start their next turns.
         let (q, s, ink, _, _) = r8_measure(raw, SIDE, with_options(p, false, true));

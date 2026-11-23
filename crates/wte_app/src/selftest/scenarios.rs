@@ -6512,7 +6512,7 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
         // the picture of the parts it lies on, over the picture's height; 1 for a part as large as the picture). A
         // pawn under a picture as wide as the board can hold only `room` of its height (ABeautifulGame Jump off,
         // many_islands' small islands).
-        Step::Assert("(10) covered >= 0.85 x ends_share x room unless reached_edge, lost_cut <= 10 % unless wraps_closed, with Jump small gaps off and on", |_, sc| {
+        Step::Assert("(10) covered >= 0.85 x ends_share x room unless reached_edge, lost_cut <= 10 % (15 % when wraps_closed), with Jump small gaps off and on", |_, sc| {
             let mut bad = Vec::new();
             for (jump, keys) in [("off", WS_S_OFF), ("on", WS_S_ON)] {
                 let [covered, ends, edge, lost, room, closed] = keys.map(|k| remembered(sc, k).map(|v| f32::from_bits(v as u32)));
@@ -6521,10 +6521,12 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
                     bad.push(format!("Jump {jump}: covered {covered:.4} < 0.85 x ends_share {ends:.4} x room {room:.4}"));
                 }
                 // Stable (w2, item 2): a picture covering a whole closed part (the Lantern's 52-vertex base block)
-                // loses the part's total curvature to the gaps where it is cut open at the corners; `lost_cut` is
-                // then no defect measure.
-                if lost.is_nan() || (lost > 0.10 && !closed) {
-                    bad.push(format!("Jump {jump}: lost_cut {:.2} % > 10 %", lost * 100.0));
+                // loses the part's total curvature to the gaps where it is cut open at the corners. Stable
+                // (fix_wrap_1): bounded all the same, at 15 % (the Lantern 12.11 %; round 8's cone rule there
+                // 14.7 %; w2 left closed parts unbounded).
+                let limit = if closed { 0.15 } else { 0.10 };
+                if lost.is_nan() || lost > limit {
+                    bad.push(format!("Jump {jump}: lost_cut {:.2} % > {:.0} %", lost * 100.0, limit * 100.0));
                 }
             }
             if bad.is_empty() { Ok(()) } else { Err(bad.join("; ")) }
@@ -6551,7 +6553,8 @@ fn ws_log_panel_lines(state: &mut AppState, sc: &mut Scratch) -> Result<(), Stri
         share.map_or("-".to_owned(), |v| format!("{:.1} %", v * 100.0)),
         if share.is_some_and(|v| v >= wte_core::uv_share::UV_SHARE_WARN) { "line shown" } else { "no line" },
         stats.map_or("-".to_owned(), |s| format!("{:.1} %", s.ends_share * 100.0)),
-        if stats.is_some_and(|s| s.ends_share < 0.95) { "line shown" } else { "no line" },
+        // Stable (fix_wrap_1): the panel's rule (a whole picture on the surface has no ends line).
+        if stats.is_some_and(|s| crate::panels::tool_options::ends_cut_shown(&s)) { "line shown" } else { "no line" },
         stats.is_some_and(|s| s.passed),
         stats.map_or("-".to_owned(), |s| format!("{:.2} %", s.lost_cut * 100.0)),
     );
@@ -6922,18 +6925,21 @@ fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Resu
     let measures = stats.map_or([f32::NAN; 6], |s| {
         [s.covered, s.ends_share, if s.reached_edge { 1.0 } else { 0.0 }, s.lost_cut, s.room, if s.wraps_closed { 1.0 } else { 0.0 }]
     });
+    let (shown, beyond) = stats.map_or((f32::NAN, f32::NAN), |s| (s.shown, s.beyond));
     for (key, v) in keys.into_iter().zip(measures) {
         sc.values.insert(key, u64::from(v.to_bits()));
     }
     log::info!(
-        "wrap_surface (10) Jump small gaps {jump} coverage: covered {:.4}, ends_share {:.4}, reached_edge {}, lost_cut {:.2} %, passed {}, room {:.4}, wraps_closed {}",
+        "wrap_surface (10) Jump small gaps {jump} coverage: covered {:.4}, ends_share {:.4}, reached_edge {}, lost_cut {:.2} %, passed {}, room {:.4}, wraps_closed {}, shown {:.4}, beyond {:.4}",
         measures[0],
         measures[1],
         measures[2] != 0.0,
         measures[3] * 100.0,
         stats.is_some_and(|s| s.passed),
         measures[4],
-        measures[5] != 0.0
+        measures[5] != 0.0,
+        shown,
+        beyond
     );
     if p.mode != SurfaceMode::Wrap {
         return Err("the stamp is not wrapped".to_owned());

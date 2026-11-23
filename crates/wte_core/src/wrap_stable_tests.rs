@@ -213,6 +213,12 @@ fn w1_the_chess_board_keeps_the_rows_under_a_pawn() {
     assert!(angle.abs() <= 5.0, "the picture is turned by {angle:.2} degrees on the board");
     assert!(share >= 0.7, "the board receives only {share:.4} of the picture");
     assert!(!s.passed, "{s:?}");
+    // Stable (fix_wrap_1): the spine met its own path round a pawn (`ends_share` 0.74), but no picture cell is left
+    // bare beyond that closure (`beyond`): the board holds the picture, so the panel shows no ends line (w1 / w2: "The
+    // ends meet at the back: 74 % ..."). The cells shown are at least the board's share.
+    println!("W1 chess board: shown {:.4}, beyond {:.4}, ends_share {:.4}, met_itself {}", s.shown, s.beyond, s.ends_share, s.met_itself);
+    assert!(s.beyond < 0.02, "{:.4} of the picture bare beyond the closure: {s:?}", s.beyond);
+    assert!(s.shown as f64 >= share, "shown {:.4} below the board's share {share:.4}", s.shown);
 }
 
 /// Stable (w1), item 3: a parameterization reused for another size in its reach bucket bakes byte for byte like a

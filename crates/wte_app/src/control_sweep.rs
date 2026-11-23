@@ -251,6 +251,10 @@ pub(crate) trait Drive {
         self.click_at_with(pos, egui::PointerButton::Secondary);
     }
 
+    fn right_click_at(&mut self, pos: Pos2) {
+        self.click_at_with(pos, egui::PointerButton::Secondary);
+    }
+
     /// Press at the first point, move through the others (one per frame), release at the last one.
     fn drag(&mut self, points: &[Pos2]) {
         let mods = self.h().mods;
@@ -301,6 +305,7 @@ pub(crate) fn sample_state(kind: SampleKind) -> AppState {
         uv_view: UvViewState::default(),
         scene_generation: 7,
         text_gap: None,
+        selected_layers: Vec::new(),
     });
     state
 }

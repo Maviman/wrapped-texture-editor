@@ -89,7 +89,7 @@ pub use tip_field::*;
 pub use wrap_bake::*;
 pub use wrap_param::*;
 
-pub use export::{ExportLayer, ExportOptions, ExportReport, ExportSet};
+pub use export::{ExportLayer, ExportOptions, ExportPackage, ExportReport, ExportSet, PlannedFile, PlannedKind};
 pub use import::{
     AssetResolver, DiskResolver, IMPORTER_VERSION, ImportOptions, ImportedModel, ImportedTexture, MemoryResolver,
     ModelFormat, RecordingResolver, SourceBundle, SourceFile,

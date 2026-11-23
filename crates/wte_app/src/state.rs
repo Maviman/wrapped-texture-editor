@@ -83,6 +83,10 @@ pub enum PanelHit {
     /// Round 4 (gate): the font button of the Text block (row 2), which opens the font picker (written by
     /// `font_picker::button`, for the self-test).
     FontButton,
+    /// The items of an open layer row context menu: "Export this layer..." and "Export selected layers... (N)"
+    /// (for the self-test).
+    LayerMenuExportThis,
+    LayerMenuExportSelected,
 }
 
 /// What the 3D view shows on the surface. The discriminant is the value handed to the shaders.
@@ -736,6 +740,9 @@ pub struct Session {
     /// document, and a new session clears it.
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
     pub text_gap: Option<TextGapSel>,
+    /// The layers selected in the Layers list (Ctrl / Shift-click), raw and possibly stale: read it through
+    /// `layer_selection`, which normalises it. App state only: not in the document, not in history, not saved.
+    pub selected_layers: Vec<LayerId>,
 }
 
 impl Session {
@@ -751,6 +758,19 @@ impl Session {
         if self.active_set.index() >= set_count {
             self.active_set = TextureSetId(set_count.saturating_sub(1) as u32);
         }
+    }
+
+    /// The selected layers of the active set, bottom to top. Normalised on every read: ids that are gone or belong to
+    /// another set are dropped; when the active layer is not among them the selection is just the active layer; no
+    /// active layer => empty. So whatever changes the active layer (a click on a stamp, New, Delete, Undo, another
+    /// set) collapses a multi-selection by itself.
+    pub fn layer_selection(&self) -> Vec<LayerId> {
+        let Some(set) = self.doc.set(self.active_set) else { return Vec::new() };
+        let Some(active) = set.active.filter(|id| set.layer_index(*id).is_some()) else { return Vec::new() };
+        if !self.selected_layers.contains(&active) {
+            return vec![active];
+        }
+        set.layers.iter().map(|l| l.id).filter(|id| self.selected_layers.contains(id)).collect()
     }
 }
 
@@ -798,6 +818,9 @@ pub struct ExportDialogState {
     pub show_preview: bool,
     /// `Some` = the "N files will be replaced" step is showing.
     pub confirm_replace: Option<Vec<PathBuf>>,
+    /// The layer selection captured when the dialog opened, bottom to top: what the Layers choice "Selected (N)"
+    /// exports.
+    pub selected_layers: Vec<LayerId>,
 }
 
 /// The modal dialog that is open, if any.
@@ -1431,6 +1454,7 @@ mod tests {
             uv_view: UvViewState::default(),
             scene_generation: 1,
             text_gap: None,
+            selected_layers: Vec::new(),
         };
 
         // Nothing to fix.

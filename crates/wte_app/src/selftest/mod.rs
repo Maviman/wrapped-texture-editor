@@ -53,6 +53,9 @@ pub enum Step {
     /// Primary-button press at the first point, moves through the others, release at the last one; positions in
     /// screen points (for panel controls, e.g. the Layers rows of `AppState::panel_rects`). One point = a click.
     ScreenPointer { path: Vec<egui::Pos2> },
+    /// One click at a screen position (points) with any button and modifiers: Ctrl / Shift-click and the right-click
+    /// on a Layers row, a click on an item of the row's context menu.
+    ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
     Scroll { view: ViewId, at: [f32; 2], notches: f32, mods: egui::Modifiers },
     /// The pointer moves to `at` (normalized 0..1 in the view rect) without a button: one hover frame (round 4, for the
     /// Text tool's picture under the pointer and the brush cursor).
@@ -95,6 +98,7 @@ impl Step {
             Step::Pointer { view, path, button, .. } => format!("Pointer({view:?}, {} points, {button:?})", path.len()),
             Step::Click { view, at, button, .. } => format!("Click({view:?}, {at:?}, {button:?})"),
             Step::ScreenPointer { path } => format!("ScreenPointer({} points from {:?})", path.len(), path.first()),
+            Step::ScreenClick { at, button, mods } => format!("ScreenClick({at:?}, {button:?}, {mods:?})"),
             Step::Scroll { view, at, notches, .. } => format!("Scroll({view:?}, {at:?}, {notches})"),
             Step::Hover { view, at } => format!("Hover({view:?}, {at:?})"),
             Step::Key(mods, key) => format!("Key({mods:?}, {key:?})"),
@@ -418,6 +422,10 @@ impl Runner {
             }
             Step::ScreenPointer { path } => {
                 self.inject.extend(pointer_frames(&path, egui::PointerButton::Primary, egui::Modifiers::NONE, 1));
+                self.active = Some((Active::Input, name));
+            }
+            Step::ScreenClick { at, button, mods } => {
+                self.inject.extend(click_frames(at, button, mods));
                 self.active = Some((Active::Input, name));
             }
             Step::Scroll { view, at, notches, mods } => {

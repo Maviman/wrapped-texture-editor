@@ -675,6 +675,7 @@ mod tests {
             uv_view: UvViewState::default(),
             scene_generation: 7,
             text_gap: None,
+            selected_layers: Vec::new(),
         });
         state
     }

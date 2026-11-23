@@ -28,6 +28,8 @@ pub enum AppAction {
     Save,
     SaveAs(Option<PathBuf>),
     ShowExport,
+    /// Open the Export dialog for these layers (the Layers choice "Selected", per-layer PNGs only).
+    ShowExportLayers(Vec<LayerId>),
     RunExport(ExportOptions),
     ExportPickFolder(Option<PathBuf>),
     /// Extract the original model files; the path is the destination folder.
@@ -77,7 +79,12 @@ pub enum AppAction {
 
     // ---- sets and layers ----
     SetActiveSet(TextureSetId),
+    /// A plain click on a layer row: the layer becomes the active layer and the only selected one.
     SelectLayer(LayerId),
+    /// Ctrl-click on a layer row: add it to the selection or take it out (the last selected layer stays).
+    ToggleLayerSelected(LayerId),
+    /// Shift-click on a layer row: select the range from the active layer to this one; the active layer stays.
+    SelectLayerRange(LayerId),
     AddPaintLayer,
     DuplicateLayer(LayerId),
     DeleteLayer(LayerId),

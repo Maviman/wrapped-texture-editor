@@ -164,6 +164,20 @@ on the dab. (A3) A large shared query runs its two passes and its sort on the po
 of each row whose mask the dab raised. The stroke probe has five more slots (5.19). The test seam `RASTER_R5` keeps
 round 5's rasterizer and commit as the reference of the equality tests and of the bench's "... r5" rows.
 
+### 1.8 Export scope and package (branch `export-select`, `docs/plans/EXPORT_SELECT_PLAN.md`)
+
+The user's workflow is "import a model -> layer designs onto the material -> export one layer, a selection of layers, or
+everything in one package". (1) **Multi-select in the Layers list** (8.7): a plain click makes a layer the active and only
+selected one, Ctrl-click toggles, Shift-click selects the range from the active layer; the active layer (the one tools paint
+on) is always part of the selection; every layer command (Delete, Duplicate, Merge Down, Rasterize, opacity, blend, move) still
+acts on the active layer only. The selection is app state (`Session::selected_layers`, 8.2): not in the document, not in
+history, no revision change, not saved. (2) **Layer scope in the exporter**: `ExportOptions::layers = Some(ids)` exports exactly
+those layers (hidden ones included); the flattened texture is then the selected *visible* layers flattened on their own, ORA /
+PSD hold the selected layers only (7.4). (3) **One package**: `ExportOptions::package = Zip` writes `<base>.zip` holding the same
+files under the same names; deterministic, atomic, nothing left behind on failure or cancellation (7.4). With default options
+(`layers: None, package: Files`) the exporter writes byte for byte what it wrote before. The project format (7.1-7.3) is
+untouched: `FORMAT_VERSION` stays 3.
+
 ---
 
 ## 2. Workspace layout
@@ -253,7 +267,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `project/load.rs` | C6 | `project::load`, `read_manifest`, `extract_bundle`, `extract_sources` |
 | `project/migrate.rs` | C6 | manifest version migration chain |
 | `project/atomic.rs` | C6 | `write_atomic` (temp + fsync + rename, `.bak` rotation) |
-| `export/mod.rs` | C6 | `export::plan`, `export::run`, `ExportOptions`, `ExportReport` |
+| `export/mod.rs` | C6 | `export::plan`, `export::plan_contents`, `export::run` (loose files or one zip, 7.4), `ExportOptions` (layer scope, package), `ExportPackage`, `ExportReport`, `PlannedFile` |
 | `export/naming.rs` | C6 | `sanitize_file_stem`, output file naming, de-duplication |
 | `export/ora.rs` | C6 | OpenRaster writer |
 | `export/psd.rs` | C6 | PSD writer + strict verification reader |
@@ -308,7 +322,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `tools/transform.rs` | A3; round 4 T7 | select / move / scale / rotate stamps |
 | `tools/text_path.rs` | T7 (round 4) | the round points of a text on a Curve (drag in the view) |
 | `panels/mod.rs` | A4; round 4 S2, B4 | `panels::show_*` entry points; the side panel's tab strip Layers / Brush / Text and `side_rects` |
-| `panels/menu_bar.rs`, `toolbar.rs`, `tool_options.rs`, `layers.rs`, `texture_sets.rs`, `color.rs`, `status_bar.rs` | A4; round 4 B4 | one panel each |
+| `panels/menu_bar.rs`, `toolbar.rs`, `tool_options.rs`, `layers.rs`, `texture_sets.rs`, `color.rs`, `status_bar.rs` | A4; round 4 B4 | one panel each (`layers.rs`: multi-select and the row menu "Export this layer..." / "Export selected layers... (N)", 8.7) |
 | `panels/brush_tab.rs` | B4 (round 4) | the Brush tab |
 | `panels/text_block.rs` | T6 (round 4) | the Text block of the tool options: `target`, `show` (four rows), the spec helpers `current_spec` / `draft_spec` / `write_draft` / `live_edit` / `click_edit`, the font rules `candidates` / `resolve_face` / `resolve_font` / `style_click`, `TextPanelState`, `GapBuffer` with its history |
 | `panels/text_tab.rs` | T6 (round 4) | the Text tab: pages Character (with the gap strip), Warp, Path |
@@ -2540,12 +2554,33 @@ pub struct ExportOptions {
     pub psd: bool,
     pub include_hidden: bool,                    // hidden layers in per-layer/ORA/PSD output (flattened always = visible only)
     pub dilate_px: u32,                          // extra seam padding on the flattened texture; 0 = byte-identical to the composite
+    /// Layer scope (1.8): None = every layer `include_hidden` lets through; Some(ids) = exactly these layers, hidden ones
+    /// included, `include_hidden` ignored, unknown ids ignored, sets without a selected layer left out.
+    pub layers: Option<Vec<LayerId>>,
+    pub package: ExportPackage,                  // Files (default) | Zip
 }
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ExportPackage { #[default] Files, Zip }
 #[derive(Clone, Debug, Default)]
-pub struct ExportReport { pub files: Vec<PathBuf>, pub bytes_written: u64 }
-/// The exact list of files `run` would write for these options (same naming and de-duplication, same order), without
-/// touching the disk. The export dialog shows it and checks it for existing files before starting.
+pub struct ExportReport {
+    pub files: Vec<PathBuf>,                     // Files: the written files in plan order; Zip: the one zip
+    pub bytes_written: u64,                      // Zip: the size of the zip
+    pub packaged: usize,                         // Zip: number of entries; Files: 0
+}
+/// One file of the export as the dialog lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedFile { pub name: String, pub set: TextureSetId, pub kind: PlannedKind }
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PlannedKind { Flat, Layer { layer: LayerId, index: usize, raster: bool }, Ora, Psd }
+/// The paths `run` writes, without touching the disk: `Files` = the exact list of files (same naming and
+/// de-duplication, same order); `Zip` = `[dir.join(package_name(base))]`, or nothing when there is nothing to pack. The
+/// export dialog shows it and checks it for existing files before starting.
 pub fn plan(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<PathBuf>;
+/// The files of the export in plan order whatever the package (for `Zip`: the entries), with what each one holds. The
+/// dialog's list and its "separate layer" markers come from here (no second classification in the app).
+pub fn plan_contents(snapshot: &DocumentSnapshot, opts: &ExportOptions) -> Vec<PlannedFile>;
+/// The entries of a zip in archive order (tests and self-test).
+#[doc(hidden)] pub fn read_package(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String>;
 /// Creates `opts.dir` (create_dir_all), then writes every file of `plan` (each one atomically, replacing an existing
 /// file of the same name). Flattened pixels come from flatten_layers(.., false). Several sets at a time, report in
 /// plan order, each file renamed from its temp file once written, all flushed at the end (7.4).
@@ -2553,10 +2588,12 @@ pub fn run(snapshot: &DocumentSnapshot, opts: &ExportOptions, progress: &dyn Pro
 
 // export/naming.rs
 pub fn sanitize_file_stem(s: &str) -> String;
-/// File names for one set; `multi` = more than one set is exported. See section 7.5.
+/// File names for one set; `multi` = the set name goes into the names (section 7.4, `selected_sets`). See section 7.5.
 pub fn flat_name(base: &str, set_name: &str, multi: bool, ext: &str) -> String;
 pub fn layer_name(base: &str, set_name: &str, multi: bool, index: usize, kind: &str, layer_name: &str) -> String;
 pub fn layered_name(base: &str, set_name: &str, multi: bool, ext: &str) -> String;
+/// `<base>.zip` (base sanitized) of `ExportPackage::Zip`.
+pub fn package_name(base: &str) -> String;
 
 // export/ora.rs, export/psd.rs
 pub struct ExportLayer<'a> { pub name: &'a str, pub kind: &'static str, pub visible: bool, pub opacity: f32,
@@ -4029,7 +4066,7 @@ manifest like any malformed field.
 
 ### 7.4 Export [C6]
 
-`export::run` per selected set (`multi` = more than one set selected):
+`export::run` per selected set (`multi` = more than one set selected; under a layer selection: the model has more than one set):
 1. `flat = flatten_layers(layers, w, h, false)`; if `dilate_px > 0`, `dilate_islands(&mut flat, &texel_map, dilate_px)`.
 2. `opts.flat`: `encode_flat(&flat, fmt)` -> `flat_name(..)`.
 3. `per_layer_png`: every layer (visible ones, or all with `include_hidden`) as a **full-canvas** RGBA PNG (`Balanced`), so the files
@@ -4069,6 +4106,47 @@ Run of the files (fix round 3, R3-5):
 - The output is byte-identical to the round-2 exporter (SHA-256 of all 85 ABeautifulGame files and of the `export_run` scenario
   files); PNG levels and the PSD / ORA layout are unchanged.
 
+Layer scope (1.8; `ExportOptions::layers`):
+- `exported_layers(set, opts)` is the one filter of per-layer files, ORA and PSD: `None` => `include_hidden || visible`;
+  `Some(ids)` => `ids.contains(id)` (hidden ones too). The index in a per-layer name stays the position in the full stack, so
+  a selected layer's file has the same name as in a full export.
+- `selected_sets` drops, under a selection, the sets in which no layer is selected; `multi` (the `_<set>` name part) counts
+  the sets that remain **without** a selection (unchanged) and, **under** a selection, the sets of the model
+  (`snapshot.sets.len() > 1`), whatever `opts.sets` (the dialog opened from a layer row sets it to that layer's set) and the
+  selection narrow it to (fix_exp_1, check_exp_1 D4). So on a multi-set model a selected layer keeps its set name and the
+  name a full export gives it, and two sets' layers with the same index and name (ABeautifulGame's `Knight_Black` /
+  `Pawn_Body_Black` `L02_stamp_Logo`) never share a file name. A set filter of one set without a layer selection still
+  drops the set name, as before.
+- Flattened texture under a selection = `flatten_layers(<clones of the selected layers>, w, h, false)`: the selected
+  **visible** layers bottom to top with their own opacity and blend (a selected hidden layer is in the per-layer files and in
+  ORA / PSD flagged hidden, not in the flattened picture). A blend mode with nothing below composites over transparent, as
+  `flatten_layers` defines it. ORA's `mergedimage.png` and the PSD's merged image are that picture, so each layered file
+  agrees with its own stack. With `None` the original line (`flatten_layers(&set.layers, ..)`) runs unchanged.
+
+Package (`ExportPackage::Zip`, `run_zip`):
+1. `plan_contents`; empty => `NothingToExport` (nothing created). Cancelled before the start => `Cancelled`, nothing created.
+2. `create_dir_all(dir)` (remembered when this export created the folder), then the stage folder
+   `<zip name>.tmp-<pid>.d` next to the zip (a leftover of the same pid is removed first); a `StageDir` guard removes it on
+   every exit (success, failure, cancellation, panic).
+3. The unchanged loose-file exporter writes into the stage (`run_files(.., flush = false)`: sets in parallel as usual, no
+   `finish` pass, since the staged files are thrown away). Its progress is scaled to 0..0.6, stage "Exporting".
+4. Packing in plan order into `<zip name>.tmp-<pid>` (`TempFile` guard; `ZipWriter` over a 1 MiB `BufWriter`): per staged
+   file one entry named like the file (flat, no folders), PNG / JPEG / WebP / ORA **stored**, PSD / TGA / BMP / TIFF
+   **deflated** at level 6, time stamp fixed at 1980-01-01 00:00:00 (`last_modified_time(DateTime::default())`), ZIP64 sizes
+   (`large_file`) only for a staged file of at least 0xFFFF0000 bytes; `std::io::copy`, then the staged file is deleted
+   (extra disk use near one file). Cancellation between entries; progress 0.6..0.95, stage "Packing".
+5. `finish()`, flush, `sync_all`, rename to `<base>.zip`, guards released, progress 1.0 "Finishing". Report: `files =
+   [zip]`, `bytes_written` = its size, `packaged` = entry count.
+- Atomic as a whole: until the rename no `<base>.zip` changes; an existing one is replaced only by a complete new one. A
+  failure or cancellation leaves no zip, no temp file, no stage folder, and removes the output folder again when this export
+  created it and it is empty (stricter than loose export, where finished files stay).
+- Deterministic: fixed time stamps, no comment or extra fields, entry order = plan order, deterministic encoders; two exports
+  of the same document are byte-identical, with one lane or several (tested). Entries are byte-identical to the loose files:
+  they are the loose files.
+- Cost: the export is written twice (stage, then zip), both in the output folder (same drive). Rejected: writing entries
+  straight into one `ZipWriter` from the lanes (one stream forces one lane or a reorder buffer holding whole PSDs; the ORA
+  writer needs `Seek`).
+
 `encode_flat` (`REG\image-0.25.10`): PNG through the `png` crate (`png::Encoder::new(w, width, height)`, `set_color(ColorType::Rgba)`,
 `set_depth(BitDepth::Eight)`, `set_compression(Compression::Fast | Balanced | High)`, `write_header()`, `write_image_data(..)`;
 `REG\png-0.18.1\src\encoder.rs:165-742`). JPEG: matte RGB over `matte` (`c' = (c*a + m*(255 - a) + 127) / 255`), then
@@ -4083,9 +4161,11 @@ ExtendedColorType::Rgba8, ImageFormat::Tga | Bmp | Tiff | WebP)` (`REG\image-0.2
 
 ### 7.5 Export file naming [C6]
 
-- Flattened: `<base>.<ext>` (single set) or `<base>_<set>.<ext>`.
+- Flattened: `<base>.<ext>` (single set) or `<base>_<set>.<ext>`. "Single set" = one set exported; under a layer selection
+  = the model has one set (7.4).
 - Per layer: `<base>[_<set>]_L<index:02>_<kind>_<layer-name>.png`; index 00 = bottom; kind = `paint` | `stamp` | `text`.
 - Layered: `<base>[_<set>].ora`, `<base>[_<set>].psd`.
+- Package (`ExportPackage::Zip`): `<base>.zip`; its entries carry exactly the loose names above (flat list, no folders).
 - `sanitize_file_stem`: replaces `<>:"/\|?*` and control characters with `_`, trims trailing dots and spaces, prefixes `_` to
   reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9, case-insensitive), caps at 64 chars, empty => `untitled`.
   The exporter de-duplicates colliding names within one run with `_2`, `_3`.
@@ -4272,11 +4352,19 @@ pub struct Session {
     pub camera: OrbitCamera, pub preview_camera: OrbitCamera, pub uv_view: UvViewState,
     pub scene_generation: u64,                 // process-wide unique; changes whenever the document object is replaced
                                                // => GpuScene rebuild; also identifies the session a Save job belongs to
+    pub selected_layers: Vec<LayerId>,         // export-select (1.8): the Layers list's selection, raw (may be stale)
 }
 impl Session {
     /// Re-validates app-side selection after any document change (called by dispatch, section 8.3): clears
     /// `selected_stamp` if `doc.stamp(id)` is None, clamps `active_set` to an existing set.
     pub fn validate(&mut self);
+    /// The selected layers of the active set, bottom to top, normalised on every read: ids that are gone or belong to
+    /// another set are dropped; when the active layer is not among them the selection is the active layer alone; no
+    /// active layer => empty. Whatever makes another, unselected layer active (a click on a stamp, New, Undo, another
+    /// set) collapses a multi-selection by itself; deleting a selected layer keeps the others selected. All readers use
+    /// this; only dispatch writes `selected_layers`. Not in the document, not in history, not saved (`UiState` and
+    /// `Prefs` do not hold it).
+    pub fn layer_selection(&self) -> Vec<LayerId>;
 }
 
 #[derive(Clone, Debug)] pub enum Pending { NewFromModel(Option<PathBuf>), OpenProject(Option<PathBuf>), OpenSample(SampleKind), Quit }
@@ -4386,6 +4474,7 @@ pub enum AppAction {
     SetPrimaryColor([u8; 4]),
     // sets and layers
     SetActiveSet(TextureSetId), SelectLayer(LayerId), AddPaintLayer, DuplicateLayer(LayerId), DeleteLayer(LayerId),
+    ToggleLayerSelected(LayerId) /* Ctrl-click */, SelectLayerRange(LayerId) /* Shift-click */,
     MergeDown(LayerId), RasterizeLayer(LayerId), MoveLayer { layer: LayerId, to_index: usize },
     SetLayerVisible(LayerId, bool), SetLayerLocked(LayerId, bool), SetLayerAlphaLock(LayerId, bool),
     SetLayerOpacity(LayerId, f32, Commit), SetLayerBlend(LayerId, BlendMode), RenameLayer(LayerId, String),
@@ -4412,6 +4501,11 @@ Rules:
   dialogs read modifiers and "Space is held" only (text fields receive their typing from egui as usual). There is no second
   owner of Esc or Delete.
 - `SelectLayer` on a stamp/text layer also selects its stamp; selecting a stamp also makes its `home_set` layer active.
+
+Export-select (1.8): `ShowExportLayers(Vec<LayerId>)` (file group) opens the Export dialog for these layers;
+`ExportDialogState::selected_layers: Vec<LayerId>` is the selection captured when the dialog opened (what "Selected (N)"
+exports while the user switches the Layers choice back and forth). `PanelHit::LayerMenuExportThis` /
+`LayerMenuExportSelected` are the rects of the open row menu's two items (self-test).
 
 Round 4 (scaffold S2):
 - `TextSettings` gains `bold_em`, `slant_deg`, `warp: Option<Warp>`, `path: Option<TextPath>` (defaults 0 / None).
@@ -4596,7 +4690,8 @@ Notes:
   (`ImportStampImage` shows the toast "Open a model first").
 - **Interaction guard**: before every document-changing action of the groups *file*, *edit*, *sets and layers* and *stamps*
   (everything except `SetActiveSet`, `SelectLayer`, `SelectStamp` and the `Commit::Preview` variants):
-  `if app.tools.is_busy() { finish or cancel }`. `Save`, `SaveAs`, `SaveThen`, `ShowExport` and `RunExport` call
+  `if app.tools.is_busy() { finish or cancel }`. `Save`, `SaveAs`, `SaveThen`, `ShowExport`, `ShowExportLayers` and
+  `RunExport` call
   `app.tools.finish(&mut app.state)` (`finishes_interaction`): the running stroke is `stroke_end`ed, a gizmo drag gets its
   `Commit::Final`, as on release, so the file contains what the user sees (Ctrl+S with the mouse button still held keeps the
   stroke). So a command can never meet an open stroke
@@ -4619,6 +4714,18 @@ Notes:
 - `DeleteSelection`: `selected_stamp` => `doc.remove_stamp(id)`; else the active layer of the active set =>
   `doc.remove_layer(id)`. `DeleteStamp(id)` / `DeleteLayer(id)` are the explicit forms. Exactly one of them runs per key press
   (the Transform tool does not handle Delete itself).
+- Layer selection (export-select, 1.8; none of these is guarded, none edits the document beyond `set_active_layer`: no
+  history entry, no revision change, the modified mark stays): `SelectLayer(l)` = `activate_layer`: active set and
+  active layer = `l`'s, `selected_stamp = doc.stamp_of_layer(l)`, `selected_layers = [l]`. `ToggleLayerSelected(l)`: a
+  layer of another set (or no active layer) is activated; else not selected => added; the only selected layer => nothing;
+  the active layer => removed and the top-most remaining selected layer becomes active (and its stamp selected); else
+  removed. `SelectLayerRange(l)`: the layers between the active one and `l` (both included) in stack order; the active
+  layer stays; another set => activate. `ShowExportLayers(ids)`: what `ShowExport` does first (cancel the tool, flush a
+  pending edit, settle stamp bakes), then the dialog defaults changed by `export_for_layers`: `layers = Some(ids of the
+  set of the first existing id, in stack order)`, `sets = Some([that set])`, flattened off, per-layer PNGs on, ORA / PSD
+  off, `selected_layers` = those ids (no existing id => the plain defaults). `ShowExport`: today's defaults (`layers:
+  None, package: Files`), `selected_layers = session.layer_selection()`. Every other layer command acts on the active
+  layer only.
 - `DuplicateActiveLayer` / `MergeActiveDown` / `RasterizeActiveLayer` / `MoveActiveLayer(d)`: resolve the active layer of
   `session.active_set`, then behave like the id-based action (`MoveActiveLayer(d)`: `to_index = index + d`, clamped).
 - `DuplicateLayer(id)`: `doc.duplicate_layer(id)`; the selection follows the copy, which the core made the active layer:
@@ -5244,7 +5351,9 @@ carries a catalog face).
   Extract Original Files... (`ExtractSources(None)`; enabled with any open document, saved or not), Exit. Edit: Undo / Redo with
   the entry label, Delete (`DeleteSelection`). View: 3D / 2D / Split / Preview, Texture on Model (T), Shading > (Textured, Clay,
   UV Checker), Wireframe (W), UV Seams, UV Wireframe in 2D, Alpha Checker, Lit, Frame Model (F), Reset Camera, camera presets.
-  Layer: New Paint Layer, Duplicate, Merge Down, Delete, Rasterize, Move Up / Down (the `*Active*` actions). Help: Shortcuts,
+  Layer: New Paint Layer, Duplicate, Merge Down, Delete, Rasterize, Move Up / Down (the `*Active*` actions); below a
+  separator "Export Layer..." (one layer selected) or "Export Selected Layers... (N)" (several), enabled with an active
+  layer, => `ShowExportLayers(session.layer_selection())` (export-select, 1.8). Help: Shortcuts,
   About. Shortcut texts come from `shortcuts::shortcut_text`. Entries are enabled exactly when they can act (review round 2,
   finding merge-down-enabled-onto-locked-base): Merge Down (menu and Layers footer alike) = `panels::layers::can_merge_down`
   (the active layer is unlocked and directly above an unlocked paint layer: the checks of `Document::merge_down`, so on a new
@@ -5365,6 +5474,19 @@ carries a catalog face).
     (`panels::layers::locked_elsewhere`) shows a dimmed closed padlock with a tooltip naming that set; its Delete is disabled
     with the same explanation (the lock icon still toggles the row's own lock).
     A freshly imported document shows "Base" with its lock closed and "Paint 1" active above it.
+    **Multi-select (export-select, 1.8).** A primary click on the row, its thumbnail or its name goes through
+    `layers::row_click_action(modifiers, layer, active, multi)`: Ctrl (`Modifiers::command`) => `ToggleLayerSelected`,
+    Shift => `SelectLayerRange`, plain => `SelectLayer` (on the active row only when several layers are selected: it
+    collapses the selection; else nothing). The active row keeps its look (selection fill x0.6, bold name); a selected
+    row that is not active gets the selection fill x0.3 and a 2 pt accent bar at its left edge, so with one layer
+    selected the list looks as before. A right-click on the row, its thumbnail or its name opens the row menu (egui
+    `Response::context_menu`; it changes neither the selection nor the active layer): "Export selected layers... (N)" when
+    the row belongs to a selection of N > 1 => `ShowExportLayers(selection)`, and "Export this layer..." =>
+    `ShowExportLayers([layer])`; their rects go to `panel_rects` (`LayerMenuExportSelected`, `LayerMenuExportThis`). Only a
+    primary drag reorders (`dragged_by(Primary)`). With N > 1 the footer starts with the weak line "N layers selected ·
+    tools paint on <active name>". The name's hover text: "Click: select | Ctrl / Shift-click: select more | Right-click:
+    export | Double-click: rename | Drag: reorder". Every layer command (footer, Layer menu, shortcuts, the Delete key)
+    still acts on the active layer only.
   - **Thumbnail policy** (performance at 4K/8K): a layer thumbnail (`doc.layer_thumbnail` ->
     `ColorImage::from_rgba_unmultiplied` -> `ctx.load_texture`) is cached per layer under the key `(LayerId, Layer::version())`
     and regenerated only when that layer's version changed — never because `doc.revision()` changed. At most 2 thumbnails are
@@ -5582,19 +5704,32 @@ them as `AppAction::Cancel` (`ModalResponse::should_close()` may be used for the
 - **Unsaved changes**. Save / Don't Save / Cancel before New, Open, Open Sample and Quit (`SaveThen(p)` / `ConfirmPending(p)`).
 - **Export (R4, R5)**. Defaults when opened (`ShowExport`): `dir` = `prefs.last_export_dir`, else `<folder of the .wtep>\export`,
   else `<folder of doc.source.original_path>\export`, else empty; `base_name` = document name; flattened PNG on; per-layer PNGs
-  on; ORA and PSD off; hidden layers off; seam padding 0. The default folder is a sub-folder on purpose, so the first export can
-  never land on top of the user's original texture file.
+  on; ORA and PSD off; Layers "Visible"; zip off; seam padding 0. The default folder is a sub-folder on purpose, so the first
+  export can never land on top of the user's original texture file. Opened for layers (`ShowExportLayers`, 8.3): Layers
+  "Selected", the layers' set, per-layer PNGs only.
   Left column: output folder (text + "Browse..." => `ExportPickFolder(None)`; while the field is not being edited it shows
   the end of the path with the middle elided, `dialogs::export::elide_middle`, e.g. `E:\…\round3\shot_export`, and the full
   path on hover; a click or Tab edits the full path with the cursor at its end — R3-10, finding F9), base name, sets to export, flattened format (PNG /
   JPEG + quality + matte colour with the note "JPEG has no transparency" / TGA / BMP / TIFF / WebP lossless), per-layer PNGs,
-  ORA, PSD, include hidden layers, seam padding (px), and **the list of files that will be written**: `export::plan(&doc.snapshot(),
-  &options)` (cached in `DialogsState`, recomputed when the options change), file names only, stamp and text layer files marked
-  "separate layer", files that already exist marked "will be replaced".
+  ORA, PSD, "Pack into one .zip file" (`options.package`), seam padding (px), and **the list of files that will be written**:
+  `export::plan(&doc.snapshot(), &options)` (what goes to disk) and `export::plan_contents` (names and kinds; cached in
+  `DialogsState::export_plan` as `PlanCache { plan, names, kinds, exists }`, recomputed when the options or the document
+  change), file names only, stamp and text layer files marked "separate layer" (from `PlannedKind::Layer { raster: false }`;
+  the app no longer classifies files itself), files that already exist marked "will be replaced". With the zip: the header
+  "1 file will be written: <base>.zip (N files inside)" carries the "will be replaced" marker, the rows list the entries.
+  **Layers** row (export-select; replaces the round-1 checkbox "Include hidden layers") in the options grid after the base
+  name: `Visible` | `All` | `Selected (N)` (selectable labels; `scope_of` / `apply_scope`): Visible / All = `layers: None`
+  with `include_hidden` false / true; Selected = `layers: Some(st.selected_layers)` (and clears the set filter when the
+  layers change: their set decides), disabled with N = 0 (hover "Select layers in the Layers list first"). Under Selected a
+  weak line names the layers ("Logo, WTE", after three "... and 2 more", `selection_names`) and the texture-set
+  checkboxes are hidden.
   Right column: the embedded live `preview_widget(.., ViewId::ExportPreview, .., matte)` with Lit/Unlit — orbitable inside the
   modal (8.5); `matte = Some(jpeg_matte)` for JPEG, else `None` (alpha checker). Caption under it: "Shows the flattened texture
-  exactly as exported (seam padding and JPEG compression not shown)".
-  *Export* is disabled while `dir` is empty or the plan is empty. On click: if any planned path exists, the dialog switches to
+  exactly as exported (seam padding and JPEG compression not shown)"; under a layer selection with the flattened texture on:
+  "The preview shows the whole texture; the flattened file holds only the selected layers" (`preview_caption`).
+  *Export* is disabled while `dir` is empty or the plan is empty, with the reason next to it (`export_blocker`: "Choose an
+  output folder", "Choose at least one kind of file", "Select at least one layer" (a selection that matches nothing),
+  "Choose at least one texture set", "Nothing to export"). On click: if any planned path exists, the dialog switches to
   the confirm step (`confirm_replace = Some(existing paths)`: "N files will be replaced" + list, *Replace* / *Cancel*); otherwise,
   and on *Replace*, it pushes `RunExport(options)`.
 - **Progress**. Title, stage, bar, Cancel (=> `CancelJob`) for modal jobs.
@@ -5791,7 +5926,9 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
     `doc.mark_saved(snapshot.history_state)`, `session.path = path`, add to the recent files, then continue with `then`; on error an error
     toast + `Dialog::Message`, and `then` is dropped.
   - *Export* (`RunExport` already flushed the pending edit, 8.3): `doc.snapshot()` -> `export::run` job -> `Exported`: success =>
-    close the Export dialog, info toast "Exported N files to <folder name>" with the full path as its hover text
+    close the Export dialog, info toast "Exported N files to <folder name>" (a zip package, `report.packaged > 0`:
+    "Exported <base>.zip (N files) to <folder name>"; both start with "Exported " and end with " to <folder>") with the full
+    path as its hover text
     (`push_with_detail`, R3-7); error => `Dialog::Message` with the details (the Export
     dialog stays open underneath for a retry).
   - *Extract Original Files*: job running `project::extract_bundle(&doc.source, &doc.blobs, &dir, false)` on `Arc`/cheap clones
@@ -5999,6 +6136,9 @@ pub enum Step {
     /// Primary button: press at the first point, one move per frame, release at the last; screen points (panel controls,
     /// e.g. the Layers rows of `state.panel_rects`). One point = a click.
     ScreenPointer { path: Vec<egui::Pos2> },
+    /// Export-select: one click at a screen position with any button and modifiers (`click_frames`): Ctrl / Shift-click
+    /// and the right-click on a Layers row, a click on an item of the row's context menu.
+    ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
     Scroll { view: ViewId, at: [f32; 2], notches: f32, mods: egui::Modifiers },
     /// Round 4 (S2): one `Event::PointerMoved` to the point (normalized in the view rect), no button.
     Hover { view: ViewId, at: [f32; 2] },
@@ -6107,7 +6247,7 @@ the import scenarios write their files with `samples::to_obj` and `encode_png` i
 | `clay` | Sphere; stroke; `ToggleTexture` | `flags.shading == Clay` |
 | `preview` | Default content; `SetViewMode(Preview)` | `view_mode == Preview`, no pending edit |
 | `export` | Default content; `ShowExport` | `Dialog::Export` open, `options.dir` ends in `export`, `export::plan` non-empty |
-| `export_run` | Default content; `RunExport(opts)` with `dir = <out_stem>_export`, flat PNG + per-layer PNGs + ORA + PSD; `WaitIdle` | every path of `export::plan` exists and is non-empty; the per-layer files contain exactly one `_stamp_` and one `_text_` file (R4: separate layers); no dialog open Round 4 (T7): the default text gets the same gaps and warp before the export (one `_text_` layer file as before). |
+| `export_run` | Default content; `RunExport(opts)` with `dir = <out_stem>_export`, flat PNG + per-layer PNGs + ORA + PSD; `WaitIdle` | every path of `export::plan` exists and is non-empty; the folder holds exactly the planned files and they pass `verify_export` (export-select: per-layer PNG = layer, flat / ORA merged = composite, PSD layer names, recomposition = composite); the per-layer files contain exactly one `_stamp_` and one `_text_` file (R4: separate layers); no dialog open Round 4 (T7): the default text gets the same gaps and warp before the export (one `_text_` layer file as before). |
 | `multi` | Two-material sample; image stamp placed across the material boundary (its home set now has the stamp layer active, i.e. no paintable active layer); then one 3D stroke that starts on the *other* material and crosses the boundary | the stamp has a layer in both sets; the stamp's home set got a new paint layer; paint pixels changed in **both** sets |
 | `roundtrip` | Default content; `SaveAs(Some(<out_stem>.wtep))`; `OpenProject(Some(..))` | composite hashes of all sets equal before/after; stamp and text layers still re-editable; Base still locked Round 4 (T7): the default text gets two gap values and an Arc warp before Save As; asserts added: the reopened TextSpec (every field) and its layer pixels equal the saved ones; one more Final changes the layer. |
 | `undo` | Default content; undo everything; redo everything | hash after undo-all == initial; after redo-all == final |
@@ -6136,9 +6276,13 @@ the import scenarios write their files with `samples::to_obj` and `encode_png` i
 | `final_bake_async` [PATH] | Round 5 (R5-1): Sphere (or the PATH model). With the bake wait on: an image stamp placed and dragged (composite H1), Undo. Then with `BakeWait(false)`, each next step starting while the bake runs: (a) the same drag, `Undo` in the frame after the release, `Redo`; (b) the drag, at once a second drag, `Undo`; (d) a `Final` scale and `MergeDown` of the stamp's home layer in the next frame, against the same two steps with the wait on; (c) a text stamp gets an Arc warp (`Final`) and `SaveAs(<out_stem>_fba.wtep)` in the next frame, then `OpenProject` of it; (f) a `Final` scale of the text and `RunExport` (flat PNG and per-layer PNGs) in the next frame, against the same two steps with the wait on (into `<out_stem>_fba_export_ref`); (e) a `Final` scale of the text and `DeleteStamp` in the next frame. A second image stamp, each pass against the same steps with the wait on: (g) a `Final` scale, then `SetViewMode(Preview)`, `SetTool(Brush)`, `FrameModel`, the earlier view mode and Transform at once; (i) a paint layer made active, Brush, a `Final` scale and a stroke across the model in the next frame; (k) a `Final` scale and `ShowExport` in the next frame, `CloseDialog`; (h) a `Final` scale and `RasterizeLayer` of the home layer in the next frame. A third image stamp: (j) a `Final` scale and `ConfirmPending(OpenSample(Sphere))` in the next frame; then an image stamp for the screenshot | (a), (b): composite == H1; (d): composite and paint layers equal the reference; (c): saved, not modified, no unbaked stamp; the reopened composite equals the in-memory one; (f): the files of `<out_stem>_fba_export` equal the reference byte for byte; (e): no text stamp and no text layer, nothing pending; (g): composite equals the reference; (i): two history entries (Final, stroke) and the composite equals the reference; (k): the export dialog is open in the next frame and no stamp waits; (h): no image stamp left, composite and paint layers equal the reference; (j): the new document has no stamp and nothing waits. In the asynchronous mode the log shows at least one `final bake: stamp N result dropped (stale)` (a), `result dropped (other document)` (j) and `final bake: settle waited T ms` (c, d, f, k, h); with `WTE_SYNC_FINAL_BAKES=1` the same hashes |
 | `brush_hover` | Gate 3 (measurement, FEATURE_BRUSH P11): Sphere, 3D view, Brush tool, Brush tab, Circular Size 64; 60 idle frames, 60 `Hover` frames across the model with Circular, then with Sphere + Cube, each stretch between `gate: ...` steps (read with `WTE_FRAME_LOG`) | the Brush tab is shown; the Cube cursor was drawn (`tool_probe.cursor_footprint` > 0) |
 | `wrap_surface` [PATH] | Round 6 (R6-2, ROUND6_PLAN 5.2): built-in Sphere, 3D view, the generated 512 x 256 `cells` picture (`samples::cells_picture`) as the stamp image. (1) Stamp tool 30 %, Project, click left of the centre: S, composite H0. (2) `UpdateStampPlacement(S, Projector { mode: Wrap, .. }, Final)`. (3) back to Project; `Undo`, `Undo`, `Redo` x2. (4) Wrap again; S stretched along its spine (width only) to 1.2 x the sphere's circumference: a band round the sphere (H2). (4b) Overlap (Final); `Undo`; Overlap, Project, Wrap; Ends meet. (4c) Jump small gaps (Final); `Undo`. (4d) Project (Final), 3 frames; `Undo`. (5) back to 30 % (Final); S moved onto the UV seam (the meridian of texel columns 0 and width-1 at the middle row) with its long axis across it (Final); `Undo`. (6) a body drag of a quarter of the view width. (7) Text tool in Wrap, "WRAP AROUND" at the tool's default size (6 %), placed below the centre, Arc warp bend 30 % (`UpdateStampSource`, Final). (8) `BakeWait(false)`: S to Project (Final) and `Undo` in the next frame. (9) S to Overlap + Jump small gaps (Final), S selected (`Shot("before_save")`), `SaveAs(<out_stem>_wrap.wtep)`, `OpenProject` of it. Without a PATH the screenshot shows S selected in the reopened project (the text selected first, then S; the Color section collapsed so the whole Transform options show). Named shots: `_wrapped` (after 2), `_band` (4), `_overlap` (4b), `_text` (7), `_before_save` (9). (10) with a PATH (accepted and left for the sphere at the start, opened again at the end): 3D view, the picture at 40 % in Wrap at the centre of the view (or the best `stamp_spots` hit when the centre misses), then Jump small gaps on (Final); the screenshot shows that model | (2) `stamp_ink_area` / picture area 0.93-1.07, `covered` >= 0.999, `cut_tris` 0, one entry, composite changed (H1); (3) Project = H0, then H1, H0, H0 in Project; (4) `met_itself`; of the texels whose `locate` point lies within 0.9 hh of the great circle of S's spine >= 99 % inked, smear (`cells` colour test of 4.7) <= 1 % of the opaque ones; (4b) `turns` 3, one entry; in the two overlap stretches (angle from the anchor 0.83 pi..0.97 pi on either side, inside the 0.8 pi..pi where two turns lie) >= 90 % of the opaque texels show a colour of the picture's right half (the later turn on top); `Undo` = H2; Overlap again = the Overlap state, also after Project and back (Overlap kept); Ends meet = H2; (4c) H2 byte for byte, `jumps` 0, one entry; after `Undo` off and H2; (4d) `tool_probe.wrap_controls == Some(false)` in Project, `Some(true)` after `Undo`; (5) seam score (mean largest channel difference of the composite over the texel pairs of columns 0 / width-1 opaque in S, surface points within 1.25 texel widths) <= 1.25 x the interior score + 2 levels, at least 20 pairs; after `Undo` the 30 % state; (6) the gizmo is `wrapped` without a depth box; the anchor moved >= 0.3 r along the surface, ink 0.93-1.07, one entry, still Wrap; (7) the text is wrapped with a warp, ink area > 0, `covered` >= 0.999 (`scenarios::WS_TEXT_COVERED`; steps 2 and 7 log a 32 x 16 map of the picture points without surface, `ws_holes`); (8) S wrapped, the composite of before the toggle; (9) the reopened composite equals the saved one, both stamps Wrap, S with both options, the text with none, `read_manifest`: `min_reader_version` 3, `mode` "wrap" on both and `wrap_gaps` / `wrap_overlap` only on S; (10) logs `wrap_surface (10) Jump small gaps off / on: ..., ink area, stats` (the bake times are the core's `wrap:` and the `final bake:` lines); ink area > 0 both times. Round 8 (ROUND8_PLAN 4.1): (2b) after (2): `relaxed`, `seams` 0, `stamp_wrap_quality` dup <= 1 %, scatter <= 2 % (logged with stretch, rejected, flipped, cg_iters); (6b) after (6), from `state.wrap_jobs.counters` since (6)'s Setup: asynchronous mode: the document defers wrapped Previews, the drag started >= 1 Preview job and >= 1 landed, `ui_params` unchanged (no parameterization on the UI thread by the app), nothing in flight or waiting afterwards; `WTE_SYNC_FINAL_BAKES=1`: no job used; the composite after the Final is logged in both (equal); (10) also logs `... quality:` ink / picture, dup, scatter, bins, the parameterization's ms, relaxed, seams per rule, stretch, rejected, jumps and the Final's "applied after" ms for Jump off and on, then one assert over both: ink / picture <= 1.3, dup <= 3 %, scatter <= 5 % (scenario count unchanged). Every assert logs its measured values as `wrap_surface (<step>) ...` |
+| `export_selected` | Export-select (EXPORT_SELECT_PLAN 6.3): default content; the text layer hidden; `ScreenClick`s on the Layers rows' names: plain on Logo, Ctrl on WTE, Shift on Paint 1, Ctrl on WTE, Ctrl on Paint 1; a right-click on Logo's name and a click on `PanelHit::LayerMenuExportSelected` (`Shot("dialog")`); the dialog's options run into `<out>_export_sel`; a right-click on Paint 1 and "Export this layer..." (`LayerMenuExportThis`) into `<out>_export_one`; `RunExport` of Paint 1 + Logo with a flattened PNG only into `<out>_export_selflat` | the selection after each click ({Logo}, {Logo, WTE}, {Paint 1, Logo}, all three, {Logo, WTE}) with Logo active and neither history nor revision changed; the right-click selects nothing and the menu shows both items (a row outside the selection only "Export this layer"); the dialog has `layers == [Logo, WTE]`, per-layer PNGs only, two `PlannedKind::Layer` stamp/text files; the folders hold **exactly** (directory listing) `<name>_L02_stamp_Logo.png` + `<name>_L03_text_WTE.png` (the hidden one included), then `<name>_L01_paint_Paint 1.png`, each equal to its layer's pixels (stamp file with ink, no stroke colours; Paint 1 with both stroke colours); the flattened selection equals `flatten_layers(Paint 1, Logo)` and is transparent where only the Base shows; no history entry from any of it |
+| `export_zip` | Export-select: the `export_run` content exported loose into `<out>_export_ref`, then as `ExportPackage::Zip` into `<out>_export_zip` and `<out>_export_zip2`; `ShowExport` with the zip and the first zip's folder (`Shot("replace")`), `CloseDialog` | the toast "Exported <name>.zip (N files) to <folder>"; each zip folder holds only `<name>.zip`; the two zips are byte-identical; entries = the loose files (names in plan order, bytes); one stamp and one text entry; `verify_export` on the entries (below); the dialog's plan is the one existing zip |
+| `export_flow` [PATH] | Export-select (EXPORT_SELECT_PLAN 7), the user's workflow end to end. Without PATH a `seam_cube` written as OBJ + MTL + checker PNG, glTF, GLB and ASCII FBX (`samples::to_obj/to_gltf/to_glb/to_fbx_ascii`), each opened (`ConfirmPending(NewFromModel)`, import accepted) and run through the flow; with PATH the flow once on it. Flow: 3D view; a red brush stroke on Paint 1 (`hit_stroke`); an image stamp (Project) and the text "WTE" (`stamp_spots`); a wrapped image stamp (`tools.stamp.mode = Wrap`, `third_spot`: the solid spot farthest from the two); `ShowExportLayers([wrapped])` + the dialog's options into `<out>_<model>_one`; `SelectLayer(stamp)` + `ToggleLayerSelected(text)` (another pair of one set when they lie in different sets) + `ShowExportLayers(selection)` into `<out>_<model>_sel`; every kind as one zip into `<out>_<model>_all` (`<model>` = obj, gltf, glb, fbx or path). Long timeouts | the OBJ cube's Base is the checker its MTL references; the stroke is one history entry and changes the composite; the wrapped stamp is `Projected` with `mode == Wrap`, covers texels, no Final bake pending; `_one` holds exactly the wrapped layer's PNG (its pixels, with ink); `_sel` exactly the two PNGs (each its layer, different from each other, stamp files without the stroke colour); `_all` exactly `<name>.zip` whose entries pass `verify_export`: names = `plan_contents`, flattened = the composite, per-layer = the layers, ORA merged = composite with the exported layer count, PSD layer names = the visible layers, and the per-layer PNGs re-composited with the document's order / visibility / opacity / blend = the composite exactly; afterwards the document key (composites, layers' properties and pixels), the revision and the history are unchanged and no `.tmp-` entry is left |
 
 Round 4: 37 scenarios (25 of round 3, the ten above and the gate's two measuring scenarios `text_preview_path` and
-`brush_hover`); round 5 adds `final_bake_async` (38); round 6 adds `wrap_surface` (39); `scenarios::tests` checks the count. Gate 3 added named mid-run captures (`Step::Shot`) for the report:
+`brush_hover`); round 5 adds `final_bake_async` (38); round 6 adds `wrap_surface` (39); export-select adds
+`export_selected`, `export_zip` and `export_flow` (42, rows below the table); `scenarios::tests` checks the count. Gate 3 added named mid-run captures (`Step::Shot`) for the report:
 `brush_shape` `_dialog` (the closing dialog), `text_tab` `_page_character` / `_page_warp` / `_page_path`, `text_fonts`
 `_picker`, `text_warp` `_warp3d`, `text_path` `_circle3d`, `text_gaps` `_gap3d`. The ten were written and
 first run by their author packages (ROUND4_PLAN 2.2 item 11) and pasted by the gate (sitting M2). `brush_tab` applies
@@ -6560,6 +6704,23 @@ families draw a sample; `style_name` table (300 => "Light", 400 italic =>
   degree bump, a 20 degree cone), `check_a9_*` (the plan's break list). Round 8's tests keep their asserts; the
   measured values outside them are in `docs/notes/round9/pkg_a.md` and `check_a.md`.
 
+**Export-select tests** (EXPORT_SELECT_PLAN 6.1): `export::tests::{default_options_plan_and_bytes_are_unchanged` (default
+`layers: None, package: Files` plans today's names; selecting every layer = "All layers" byte for byte),
+`plan_with_a_layer_selection` (full-stack indices, kinds and ids from `plan_contents`, id order irrelevant, unknown ids
+ignored, a zip plans one file with the same contents), `a_selected_hidden_layer_is_exported` (PNG = the layer; ORA
+`visibility="hidden"`, PSD `hidden`, empty merged image), `flattened_of_a_selection_is_the_selected_visible_layers` (flat =
+`flatten_layers` of the selection, differs from the composite, a selected hidden layer changes nothing, ORA / PSD hold exactly
+the selection and their merged image is that picture), `an_empty_or_stale_selection_is_nothing_to_export` (Files and Zip:
+empty plan, `NothingToExport`, no folder), `a_selection_leaves_out_sets_without_selected_layers`, `zip_entries_are_the_loose_files`
+(every format, TGA flat; names in plan order and bytes = the loose files; the folder holds only the zip; report),
+`zip_export_is_deterministic` (twice, and one lane against several), `zip_methods_and_timestamps` (PNG / ORA stored, PSD / TGA
+deflated, 1980-01-01 00:00:00, no folders), `zip_of_a_selection`, `a_cancelled_or_failed_zip_export_leaves_nothing` (cancel while
+staging and while packing, 1 lane and several; the stage folder blocked by a file; the temp zip blocked by a folder; a panic
+while staging; a cancelled export into a new folder removes it; the old `model.zip` stays byte for byte),
+`zip_replaces_an_existing_package_atomically}`; `export::naming::tests::package_names`; `tests/end_to_end.rs`
+`two_material_pipeline`: the same export as a zip (entries = the checked loose files) and a selection of the body set's stamp
+and text layers (exactly those two files, each = `dense(layer)`).
+
 - M1 (gate, between the waves): `tip_field::tests::a_part_cut_off_at_the_border_stays_inside_its_bound`; `tests/brush_tips.rs`: `a_baked_ball_dab_matches_the_ball` (C13 dab part), `unused_parts_do_not_change_the_printed_square` (F16 dab part, asserts the measured state and logs the miss).
 
 ### 9.2 `wte_app` tests
@@ -6696,6 +6857,26 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   `beyond < 2 %` and `shown >=` the board's share; WA32 asks `beyond >= 2 %` and `shown + beyond + lost_cut = 1`
   within 1 %; `tool_options::the_wrap_lines_name_the_right_cause_and_never_contradict` has the chess-board case (no ends
   line, "9 % ... runs off") and a grid over `beyond`.
+
+**Export-select app tests** (EXPORT_SELECT_PLAN 6.2): `panels::layers::tests::row_clicks_select_toggle_or_extend` (the
+`row_click_action` table); `dispatch::tests::{ctrl_and_shift_select_layers_without_touching_the_document` (toggle add /
+remove / last stays / the active one moves to the top-most remaining, ranges up and down, a plain select collapses; history,
+revision and the modified mark unchanged; the three are not guarded, `ShowExportLayers` is and finishes an interaction),
+`the_selection_stays_valid_when_layers_go_away` (delete of the active layer, undo, a new layer collapses it, stale and
+foreign ids ignored), `export_for_layers_opens_the_dialog_on_the_selection}`; `dialogs::export::tests::{the_list_kinds_come_from_the_core_plan,
+the_list_for_a_selection_and_for_a_zip_package, the_layers_choice_round_trips, the_list_matches_for_several_sets}` and
+`export_is_blocked_with_a_reason` ("Select at least one layer"); `control_sweep::panel_tests::layer_rows_take_ctrl_shift_and_right_clicks`
+(real Ctrl / Shift clicks on the name, thumbnail and empty row part; a right-click opens the menu without selecting; its
+items emit `ShowExportLayers` with the right ids; the footer line; the Layer menu's "Export Selected Layers... (2)") and the
+Layer menu's "Export Layer..." in `every_menu_entry_queues_its_action`; `control_sweep::gpu_tests` (ignored, need a GPU;
+run with `-- --ignored control_sweep`): `export_dialog_controls_and_export` (the Layers choice "All" replaces the checkbox;
+the folder holds exactly the planned files, the PSD every layer, each per-layer PNG its layer's pixels),
+`export_dialog_zip_package_and_selected_layers` (tick the zip, Export: one zip whose entries are the listed files and whose
+flat entry is the composite, the zip toast; again: the confirm step lists the zip; opened for two layers: "Selected (2)"
+chosen, two files listed and written), `export_dialog_at_the_smallest_window_and_with_several_sets` (the Layers choices and
+the zip checkbox on screen at 900 x 600). Scenarios `export_selected`, `export_zip`, `export_flow` (8.11); `export_run` and
+`workflow_path` now check their folder with `verify_export` (exact listing, pixels, recomposition) instead of "exists and is
+not empty".
 
 ## 10. Work packages
 

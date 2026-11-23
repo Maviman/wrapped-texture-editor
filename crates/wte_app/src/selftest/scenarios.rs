@@ -70,6 +70,9 @@ const NAMES: &[&str] = &[
     "brush_hover",
     "final_bake_async",
     "wrap_surface",
+    "export_selected",
+    "export_zip",
+    "export_flow",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -134,6 +137,9 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "brush_hover" => brush_hover(),
         "final_bake_async" => final_bake_async(args.path.is_some()),
         "wrap_surface" => wrap_surface(args.path.clone()),
+        "export_selected" => export_selected(),
+        "export_zip" => export_zip(),
+        "export_flow" => export_flow(args.path.is_some()),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -743,6 +749,935 @@ fn export_run() -> Vec<Step> {
         Step::WaitIdle,
         Step::Assert("every planned file exists, stamp and text are separate layer files", assert_exported),
     ]);
+    steps
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Export: layer selection, the zip package and the end-to-end export flow (EXPORT_SELECT_PLAN 6.3, 7)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Sorted names of everything in a folder.
+fn dir_names(dir: &Path) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot list {}: {e}", dir.display()))?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// `<out_stem><suffix>`, removed if it exists (the export creates it).
+fn fresh_out_dir(scratch: &Scratch, suffix: &str) -> Result<PathBuf, String> {
+    let dir = with_suffix(&scratch.out_stem, suffix);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("cannot clear {}: {e}", dir.display()))?;
+    }
+    Ok(dir)
+}
+
+/// A decoded image file.
+fn decode_named(name: &str, bytes: &[u8]) -> Result<PixelBuf, String> {
+    wte_core::image_io::decode_image(bytes, Some(name), 16384).map(|d| d.pixels).map_err(|e| format!("{name}: {e}"))
+}
+
+/// A layer's pixels on the whole canvas: what its per-layer PNG must hold.
+fn layer_canvas(layer: &Layer, width: u32, height: u32) -> PixelBuf {
+    match &layer.kind {
+        LayerKind::Raster(buf) if buf.width == width && buf.height == height => (**buf).clone(),
+        LayerKind::Raster(buf) => wte_core::CroppedBuf { rect: buf.rect(), data: buf.data.clone() }.to_dense(width, height),
+        LayerKind::Stamp { cache, .. } | LayerKind::Text { cache, .. } => cache.to_dense(width, height),
+    }
+}
+
+/// The layers of `set` an export with these options writes (per-layer PNGs, ORA, PSD), bottom to top.
+fn exported_layers_of<'a>(set: &'a wte_core::TextureSet, opts: &ExportOptions) -> Vec<&'a Layer> {
+    set.layers
+        .iter()
+        .filter(|l| match &opts.layers {
+            None => opts.include_hidden || l.visible,
+            Some(ids) => ids.contains(&l.id),
+        })
+        .collect()
+}
+
+/// The flattened picture of `set` such an export writes: the composite the app shows, or under a layer selection
+/// the selected visible layers flattened on their own.
+fn expected_flat(set: &wte_core::TextureSet, opts: &ExportOptions) -> PixelBuf {
+    match &opts.layers {
+        None => set.composite().clone(),
+        Some(_) => {
+            let selected: Vec<Layer> = exported_layers_of(set, opts).into_iter().cloned().collect();
+            wte_core::composite::flatten_layers(&selected, set.width, set.height, false)
+        }
+    }
+}
+
+/// Number of texels that differ between two images of the same size (`u64::MAX` for different sizes).
+fn differing(a: &PixelBuf, b: &PixelBuf) -> u64 {
+    if (a.width, a.height) != (b.width, b.height) {
+        return u64::MAX;
+    }
+    a.data.as_chunks::<4>().0.iter().zip(b.data.as_chunks::<4>().0).filter(|(x, y)| x != y).count() as u64
+}
+
+/// Checks exported files (read from a folder or from a zip, in plan order) against the document: exactly the files
+/// `plan_contents` names; every per-layer PNG holds its layer's pixels; the flattened texture is the composite (under a
+/// layer selection: the selected visible layers); the ORA's merged image is the same picture and its stack lists the
+/// exported layers; the PSD parses and holds the exported layers by name; and when every layer of a set is exported
+/// without a selection, the per-layer PNGs put back together with the document's order, visibility, opacity and blend
+/// give exactly the composite. Returns a line for the log.
+fn verify_export(doc: &Document, opts: &ExportOptions, files: &[(String, Vec<u8>)]) -> Result<String, String> {
+    if opts.dilate_px != 0 {
+        return Err("verify_export expects no seam padding".to_owned());
+    }
+    let contents = wte_core::export::plan_contents(&doc.snapshot(), opts);
+    let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+    let planned: Vec<&str> = contents.iter().map(|f| f.name.as_str()).collect();
+    if names != planned {
+        return Err(format!("the exported files are {names:?}, the plan is {planned:?}"));
+    }
+    let (mut layers, mut flats, mut layered) = (0, 0, 0);
+    let mut decoded: Vec<Option<PixelBuf>> = vec![None; files.len()];
+    for (k, (file, (name, bytes))) in contents.iter().zip(files).enumerate() {
+        let set = doc.set(file.set).ok_or_else(|| format!("{name}: no texture set {:?}", file.set))?;
+        let (w, h) = (set.width, set.height);
+        let exported = exported_layers_of(set, opts);
+        match file.kind {
+            wte_core::PlannedKind::Flat => {
+                let image = decode_named(name, bytes)?;
+                if matches!(opts.flat, Some(FlatFormat::Jpeg { .. })) {
+                    if (image.width, image.height) != (w, h) {
+                        return Err(format!("{name}: {}x{}, the set is {w}x{h}", image.width, image.height));
+                    }
+                } else {
+                    let n = differing(&image, &expected_flat(set, opts));
+                    if n != 0 {
+                        return Err(format!("{name}: {n} texels differ from the flattened layers the app shows"));
+                    }
+                }
+                flats += 1;
+            }
+            wte_core::PlannedKind::Layer { layer, .. } => {
+                let l = doc.layer(layer).ok_or_else(|| format!("{name}: no layer {layer:?}"))?;
+                let image = decode_named(name, bytes)?;
+                let n = differing(&image, &layer_canvas(l, w, h));
+                if n != 0 {
+                    return Err(format!("{name}: {n} texels differ from the pixels of layer {:?}", l.name));
+                }
+                decoded[k] = Some(image);
+                layers += 1;
+            }
+            wte_core::PlannedKind::Ora => {
+                let entries = wte_core::export::read_package(bytes).map_err(|e| format!("{name}: {e}"))?;
+                let entry = |n: &str| entries.iter().find(|(e, _)| e == n).map(|(_, b)| b.as_slice()).ok_or(format!("{name}: no {n}"));
+                let merged = decode_named("mergedimage.png", entry("mergedimage.png")?)?;
+                let n = differing(&merged, &expected_flat(set, opts));
+                if n != 0 {
+                    return Err(format!("{name}: {n} texels of the merged image differ from the flattened layers"));
+                }
+                let stack = String::from_utf8_lossy(entry("stack.xml")?).into_owned();
+                let count = stack.matches("<layer ").count();
+                if count != exported.len() {
+                    return Err(format!("{name}: {count} layers in stack.xml, {} exported", exported.len()));
+                }
+                layered += 1;
+            }
+            wte_core::PlannedKind::Psd => {
+                let psd = wte_core::export::read_psd(bytes).map_err(|e| format!("{name}: {e}"))?;
+                let got: Vec<&str> = psd.layers.iter().map(|l| l.unicode_name.as_str()).collect();
+                let want: Vec<&str> = exported.iter().map(|l| l.name.as_str()).collect();
+                if got != want || (psd.width, psd.height) != (w, h) {
+                    return Err(format!("{name}: {}x{} with layers {got:?}, expected {w}x{h} with {want:?}", psd.width, psd.height));
+                }
+                layered += 1;
+            }
+        }
+    }
+    // The per-layer files of a set add up to what the app shows.
+    let mut recomposed = 0;
+    if opts.layers.is_none() && opts.per_layer_png {
+        for set in &doc.sets {
+            let mut stack = Vec::new();
+            for (file, image) in contents.iter().zip(&decoded) {
+                let (wte_core::PlannedKind::Layer { layer, .. }, Some(image)) = (file.kind, image) else { continue };
+                if file.set != set.id {
+                    continue;
+                }
+                let l = doc.layer(layer).ok_or("a planned layer is gone")?;
+                let mut copy = Layer::new(l.id, &l.name, LayerKind::Raster(Arc::new(image.clone())));
+                copy.visible = l.visible;
+                copy.opacity = l.opacity;
+                copy.blend = l.blend;
+                stack.push(copy);
+            }
+            if stack.is_empty() {
+                continue;
+            }
+            let back = wte_core::composite::flatten_layers(&stack, set.width, set.height, false);
+            let n = differing(&back, set.composite());
+            if n != 0 {
+                return Err(format!("set {:?}: the per-layer PNGs put back together differ from the composite in {n} texels", set.name));
+            }
+            recomposed += 1;
+        }
+    }
+    Ok(format!(
+        "{} files verified: {flats} flattened, {layers} per-layer, {layered} layered, {recomposed} set(s) recomposed exactly",
+        files.len()
+    ))
+}
+
+/// The files of an export folder in plan order, after checking that the folder holds exactly those.
+fn read_export_dir(doc: &Document, opts: &ExportOptions) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let contents = wte_core::export::plan_contents(&doc.snapshot(), opts);
+    let mut planned: Vec<String> = contents.iter().map(|f| f.name.clone()).collect();
+    planned.sort();
+    let listing = dir_names(&opts.dir)?;
+    if listing != planned {
+        return Err(format!("{} holds {listing:?}, the plan is {planned:?}", opts.dir.display()));
+    }
+    contents
+        .iter()
+        .map(|f| std::fs::read(opts.dir.join(&f.name)).map(|b| (f.name.clone(), b)).map_err(|e| format!("{}: {e}", f.name)))
+        .collect()
+}
+
+/// A layer of the default content by role: "paint" = Paint 1, "stamp" = the image stamp's layer, "text" = the text
+/// stamp's layer (in the first set).
+fn content_layer(state: &AppState, role: &str) -> Result<LayerId, String> {
+    let set = doc_of(state)?.sets.first().ok_or("no texture set")?;
+    set.layers
+        .iter()
+        .find(|l| match role {
+            "paint" => l.name == "Paint 1",
+            "stamp" => matches!(l.kind, LayerKind::Stamp { .. }),
+            _ => matches!(l.kind, LayerKind::Text { .. }),
+        })
+        .map(|l| l.id)
+        .ok_or_else(|| format!("no {role} layer"))
+}
+
+/// A click on the name of a Layers row (any button and modifiers), at the position the panel recorded.
+fn name_click(state: &AppState, role: &str, button: egui::PointerButton, mods: egui::Modifiers) -> Result<Vec<Step>, String> {
+    let id = content_layer(state, role)?;
+    let rect = state.panel_rects.get(&PanelHit::LayerName(id)).ok_or_else(|| format!("the {role} row's name was not drawn"))?;
+    Ok(vec![Step::ScreenClick { at: rect.center(), button, mods }])
+}
+
+/// A click on an item of the open layer row menu.
+fn menu_click(state: &AppState, hit: PanelHit) -> Result<Vec<Step>, String> {
+    let rect = state.panel_rects.get(&hit).ok_or_else(|| format!("the row menu item {hit:?} is not shown"))?;
+    Ok(vec![Step::ScreenClick { at: rect.center(), button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }])
+}
+
+/// The selection is exactly these roles (bottom to top), `active` is the active layer, and neither the history nor
+/// the document revision changed since `remember_selection_base`.
+fn expect_selection(state: &AppState, sc: &Scratch, roles: &[&str], active: &str) -> Result<(), String> {
+    let session = session_of(state)?;
+    let want: Vec<LayerId> = roles.iter().map(|r| content_layer(state, r)).collect::<Result<_, _>>()?;
+    let got = session.layer_selection();
+    if got != want {
+        return Err(format!("the selection is {got:?}, expected {roles:?} = {want:?}"));
+    }
+    let active_id = content_layer(state, active)?;
+    if session.doc.sets[0].active != Some(active_id) {
+        return Err(format!("the active layer is {:?}, expected {active}", session.doc.sets[0].active));
+    }
+    undo_since(state, sc, 0)?;
+    if session.doc.revision() != remembered(sc, "sel_rev")? {
+        return Err("selecting layers changed the document revision".to_owned());
+    }
+    Ok(())
+}
+
+fn remember_selection_base(state: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
+    remember_undo(state, sc)?;
+    let rev = doc_of(state)?.revision();
+    sc.values.insert("sel_rev", rev);
+    Ok(())
+}
+
+/// Points the open Export dialog at `<out_stem><suffix>` (emptied).
+fn dialog_into(state: &mut AppState, sc: &Scratch, suffix: &str) -> Result<(), String> {
+    dialog_into_dir(state, fresh_out_dir(sc, suffix)?)
+}
+
+/// Points the open Export dialog at `dir` (emptied).
+fn dialog_into_dir(state: &mut AppState, dir: PathBuf) -> Result<(), String> {
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("cannot clear {}: {e}", dir.display()))?;
+    }
+    let Dialog::Export(st) = &mut state.dialog else { return Err(format!("the Export dialog is not open ({})", dialog_name(&state.dialog))) };
+    st.options.dir = dir;
+    Ok(())
+}
+
+/// The action the dialog's Export button pushes, with the dialog's options.
+fn run_dialog_export(state: &AppState, _sc: &Scratch) -> Result<Vec<Step>, String> {
+    let Dialog::Export(st) = &state.dialog else { return Err(format!("the Export dialog is not open ({})", dialog_name(&state.dialog))) };
+    log::info!("export with the dialog's options: {:?}", st.options);
+    Ok(vec![Step::Do(AppAction::RunExport(st.options.clone()))])
+}
+
+/// The per-layer file name of a layer exported under a layer selection (no set filter): with the set name when the
+/// model has more than one texture set, the same name the full export gives it.
+fn selection_layer_name(doc: &Document, layer: LayerId) -> Result<String, String> {
+    let (set, index) = doc.find_layer(layer).ok_or("no such layer")?;
+    let set = doc.set(set).ok_or("no such set")?;
+    let l = &set.layers[index];
+    Ok(wte_core::export::layer_name(&doc.name, &set.name, doc.sets.len() > 1, index, l.kind_name(), &l.name))
+}
+
+/// The folder holds exactly the per-layer PNGs of these layers, each with its layer's pixels; returns the images.
+fn expect_layer_files(state: &AppState, dir: &Path, layers: &[LayerId]) -> Result<Vec<PixelBuf>, String> {
+    let doc = doc_of(state)?;
+    let mut want: Vec<String> = layers.iter().map(|l| selection_layer_name(doc, *l)).collect::<Result<_, _>>()?;
+    want.sort();
+    let listing = dir_names(dir)?;
+    if listing != want {
+        return Err(format!("{} holds {listing:?}, expected exactly {want:?}", dir.display()));
+    }
+    let mut images = Vec::new();
+    for id in layers {
+        let name = selection_layer_name(doc, *id)?;
+        let image = decode_named(&name, &std::fs::read(dir.join(&name)).map_err(|e| format!("{name}: {e}"))?)?;
+        let (set, _) = doc.find_layer(*id).ok_or("no such layer")?;
+        let set = doc.set(set).ok_or("no such set")?;
+        let layer = doc.layer(*id).ok_or("no such layer")?;
+        let n = differing(&image, &layer_canvas(layer, set.width, set.height));
+        if n != 0 {
+            return Err(format!("{name}: {n} texels differ from the layer {:?}", layer.name));
+        }
+        images.push(image);
+    }
+    Ok(images)
+}
+
+/// Texels of an image that are exactly `color`.
+fn count_color(image: &PixelBuf, color: [u8; 4]) -> usize {
+    image.data.as_chunks::<4>().0.iter().filter(|p| **p == color).count()
+}
+
+/// Texels with any alpha.
+fn ink(image: &PixelBuf) -> usize {
+    image.data.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count()
+}
+
+/// `export_selected` (EXPORT_SELECT_PLAN 6.3): the default content with the text layer hidden; real clicks on the
+/// Layers rows (plain, Ctrl, Shift) select layers without touching the document; the row's right-click menu opens the
+/// Export dialog for the selection, which writes exactly the selected layers (the hidden one included); "Export this
+/// layer..." writes one; a selection with the flattened texture flattens the selected visible layers only.
+fn export_selected() -> Vec<Step> {
+    use egui::Modifiers as M;
+    use egui::PointerButton as B;
+    let mut steps = default_content();
+    steps.extend([
+        Step::Dyn("hide the text layer", |s, _| Ok(vec![Step::Do(AppAction::SetLayerVisible(content_layer(s, "text")?, false))])),
+        Step::WaitIdle,
+        Step::Setup("remember the history and the revision", remember_selection_base),
+        Step::Dyn("click Logo's name", |s, _| name_click(s, "stamp", B::Primary, M::NONE)),
+        Step::WaitIdle,
+        Step::Assert("Logo is active and the only selected layer", |s, sc| expect_selection(s, sc, &["stamp"], "stamp")),
+        Step::Dyn("Ctrl-click the text row", |s, _| name_click(s, "text", B::Primary, M::COMMAND)),
+        Step::WaitIdle,
+        Step::Assert("Logo and WTE are selected, Logo is still active", |s, sc| expect_selection(s, sc, &["stamp", "text"], "stamp")),
+        Step::Dyn("Shift-click Paint 1", |s, _| name_click(s, "paint", B::Primary, M::SHIFT)),
+        Step::WaitIdle,
+        Step::Assert("Shift selected Paint 1 to Logo", |s, sc| expect_selection(s, sc, &["paint", "stamp"], "stamp")),
+        Step::Dyn("Ctrl-click the text row", |s, _| name_click(s, "text", B::Primary, M::COMMAND)),
+        Step::WaitIdle,
+        Step::Assert("three selected", |s, sc| expect_selection(s, sc, &["paint", "stamp", "text"], "stamp")),
+        Step::Dyn("Ctrl-click Paint 1", |s, _| name_click(s, "paint", B::Primary, M::COMMAND)),
+        Step::WaitIdle,
+        Step::Assert("Logo and WTE selected again", |s, sc| expect_selection(s, sc, &["stamp", "text"], "stamp")),
+        Step::Dyn("right-click Logo's name", |s, _| name_click(s, "stamp", B::Secondary, M::NONE)),
+        Step::WaitFrames(3),
+        Step::Assert("the row menu offers the selection; the right-click selected nothing", |s, sc| {
+            if !s.panel_rects.contains_key(&PanelHit::LayerMenuExportSelected) || !s.panel_rects.contains_key(&PanelHit::LayerMenuExportThis) {
+                return Err("the row menu does not show both export items".to_owned());
+            }
+            expect_selection(s, sc, &["stamp", "text"], "stamp")
+        }),
+        Step::Dyn("click \"Export selected layers... (2)\"", |s, _| menu_click(s, PanelHit::LayerMenuExportSelected)),
+        Step::WaitIdle,
+        Step::Assert("the Export dialog is open for Logo and WTE, per-layer PNGs only", |s, _| {
+            let Dialog::Export(st) = &s.dialog else { return Err(format!("the Export dialog is not open ({})", dialog_name(&s.dialog))) };
+            let want = vec![content_layer(s, "stamp")?, content_layer(s, "text")?];
+            if st.options.layers.as_ref() != Some(&want) || st.selected_layers != want {
+                return Err(format!("layers {:?}, captured selection {:?}, expected {want:?}", st.options.layers, st.selected_layers));
+            }
+            if st.options.flat.is_some() || !st.options.per_layer_png || st.options.ora || st.options.psd {
+                return Err(format!("the dialog's kinds are {:?}", st.options));
+            }
+            let contents = wte_core::export::plan_contents(&doc_of(s)?.snapshot(), &st.options);
+            let kinds: Vec<_> = contents.iter().map(|f| f.kind).collect();
+            if !(kinds.len() == 2 && kinds.iter().all(|k| matches!(k, wte_core::PlannedKind::Layer { raster: false, .. }))) {
+                return Err(format!("the dialog plans {contents:?}"));
+            }
+            Ok(())
+        }),
+        Step::WaitFrames(3),
+        Step::Shot("dialog"),
+        Step::Setup("export into <out>_export_sel", |s, sc| dialog_into(s, sc, "_export_sel")),
+        Step::Dyn("Export (the dialog's options)", run_dialog_export),
+        Step::WaitIdle,
+        Step::Assert("exactly the Logo and WTE PNGs, each its layer's pixels; nothing else changed", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let (stamp, text) = (content_layer(s, "stamp")?, content_layer(s, "text")?);
+            let images = expect_layer_files(s, &with_suffix(&sc.out_stem, "_export_sel"), &[stamp, text])?;
+            if ink(&images[0]) == 0 || ink(&images[1]) == 0 {
+                return Err("an exported stamp or text file is empty".to_owned());
+            }
+            if count_color(&images[0], RED) + count_color(&images[0], BLUE) > 0 {
+                return Err("the stamp file holds the stroke colours".to_owned());
+            }
+            undo_since(s, sc, 0)
+        }),
+        Step::Dyn("right-click Paint 1's name", |s, _| name_click(s, "paint", B::Secondary, M::NONE)),
+        Step::WaitFrames(3),
+        Step::Assert("a row outside the selection offers only itself", |s, _| {
+            if s.panel_rects.contains_key(&PanelHit::LayerMenuExportSelected) {
+                return Err("the menu of a row outside the selection offers the selection".to_owned());
+            }
+            Ok(())
+        }),
+        Step::Dyn("click \"Export this layer...\"", |s, _| menu_click(s, PanelHit::LayerMenuExportThis)),
+        Step::WaitIdle,
+        Step::Setup("export into <out>_export_one", |s, sc| dialog_into(s, sc, "_export_one")),
+        Step::Dyn("Export (the dialog's options)", run_dialog_export),
+        Step::WaitIdle,
+        Step::Assert("exactly the Paint 1 PNG with both strokes", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let paint = content_layer(s, "paint")?;
+            let images = expect_layer_files(s, &with_suffix(&sc.out_stem, "_export_one"), &[paint])?;
+            let (red, blue) = (count_color(&images[0], RED), count_color(&images[0], BLUE));
+            if red == 0 || blue == 0 {
+                return Err(format!("the Paint 1 file has {red} red and {blue} blue texels"));
+            }
+            log::info!("export_selected: Paint 1 file with {red} red and {blue} blue texels");
+            undo_since(s, sc, 0)
+        }),
+        Step::Dyn("export Paint 1 and Logo with a flattened PNG", |s, sc| {
+            let dir = fresh_out_dir(sc, "_export_selflat")?;
+            let opts = ExportOptions {
+                dir,
+                flat: Some(FlatFormat::Png(PngLevel::Balanced)),
+                per_layer_png: false,
+                ora: false,
+                psd: false,
+                layers: Some(vec![content_layer(s, "paint")?, content_layer(s, "stamp")?]),
+                ..export_options(s, sc)?
+            };
+            Ok(vec![Step::Do(AppAction::RunExport(opts))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the flattened PNG is Paint 1 and Logo flattened, transparent where only the Base shows", |s, sc| {
+            let doc = doc_of(s)?;
+            let dir = with_suffix(&sc.out_stem, "_export_selflat");
+            let name = wte_core::export::flat_name(&doc.name, &doc.sets[0].name, false, "png");
+            if dir_names(&dir)? != [name.clone()] {
+                return Err(format!("{} holds {:?}", dir.display(), dir_names(&dir)?));
+            }
+            let image = decode_named(&name, &std::fs::read(dir.join(&name)).map_err(|e| e.to_string())?)?;
+            let set = &doc.sets[0];
+            let selected: Vec<Layer> = [content_layer(s, "paint")?, content_layer(s, "stamp")?]
+                .iter()
+                .filter_map(|id| doc.layer(*id).cloned())
+                .collect();
+            let want = wte_core::composite::flatten_layers(&selected, set.width, set.height, false);
+            let n = differing(&image, &want);
+            if n != 0 {
+                return Err(format!("{n} texels differ from Paint 1 + Logo flattened"));
+            }
+            let clear = image.data.as_chunks::<4>().0.iter().zip(set.composite().data.as_chunks::<4>().0).filter(|(a, c)| a[3] == 0 && c[3] == 255).count();
+            if clear == 0 {
+                return Err("the flattened selection is opaque where only the Base shows".to_owned());
+            }
+            log::info!("export_selected: flattened selection transparent in {clear} texels the Base covers");
+            undo_since(s, sc, 0)
+        }),
+        Step::WaitFrames(2),
+    ]);
+    steps
+}
+
+/// `export_options` into `<out_stem><suffix>` (emptied) with this package.
+fn options_into(state: &AppState, sc: &Scratch, suffix: &str, package: wte_core::ExportPackage) -> Result<ExportOptions, String> {
+    Ok(ExportOptions { dir: fresh_out_dir(sc, suffix)?, package, ..export_options(state, sc)? })
+}
+
+/// `export_zip` (EXPORT_SELECT_PLAN 6.3): the `export_run` content exported loose and twice as a zip: each zip folder
+/// holds only the zip, its entries are the loose files byte for byte in plan order, the two zips are identical, the
+/// entries match the document; the toast names the zip; the dialog sees an existing zip as "will be replaced".
+fn export_zip() -> Vec<Step> {
+    let mut steps = default_content();
+    steps.extend(t7_style_default_text());
+    steps.extend([
+        Step::Dyn("export everything loose", |s, sc| {
+            Ok(vec![Step::Do(AppAction::RunExport(options_into(s, sc, "_export_ref", wte_core::ExportPackage::Files)?))])
+        }),
+        Step::WaitIdle,
+        Step::Dyn("export everything as one zip", |s, sc| {
+            Ok(vec![Step::Do(AppAction::RunExport(options_into(s, sc, "_export_zip", wte_core::ExportPackage::Zip)?))])
+        }),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
+        Step::Assert("the toast names the zip and its file count", |s, sc| {
+            let doc = doc_of(s)?;
+            let zip = wte_core::export::package_name(&doc.name);
+            let n = wte_core::export::plan_contents(&doc.snapshot(), &export_options(s, sc)?).len();
+            let folder = with_suffix(&sc.out_stem, "_export_zip");
+            let folder = folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let want = format!("Exported {zip} ({n} files) to {folder}");
+            let labels = s.toasts.visible_labels();
+            if !labels.contains(&want) {
+                return Err(format!("no toast {want:?} in {labels:?}"));
+            }
+            Ok(())
+        }),
+        Step::Dyn("export the zip again into a second folder", |s, sc| {
+            Ok(vec![Step::Do(AppAction::RunExport(options_into(s, sc, "_export_zip2", wte_core::ExportPackage::Zip)?))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("each zip folder holds only the zip; entries = loose files; the zips are identical; entries = document", |s, sc| {
+            let doc = doc_of(s)?;
+            let zip = wte_core::export::package_name(&doc.name);
+            let mut packages = Vec::new();
+            for suffix in ["_export_zip", "_export_zip2"] {
+                let dir = with_suffix(&sc.out_stem, suffix);
+                if dir_names(&dir)? != [zip.clone()] {
+                    return Err(format!("{} holds {:?}", dir.display(), dir_names(&dir)?));
+                }
+                packages.push(std::fs::read(dir.join(&zip)).map_err(|e| e.to_string())?);
+            }
+            if packages[0] != packages[1] {
+                return Err("two zip exports of the same document differ".to_owned());
+            }
+            let entries = wte_core::export::read_package(&packages[0])?;
+            let loose_opts = ExportOptions { dir: with_suffix(&sc.out_stem, "_export_ref"), ..export_options(s, sc)? };
+            let loose = read_export_dir(doc, &loose_opts)?;
+            if entries.len() != loose.len() {
+                return Err(format!("{} entries, {} loose files", entries.len(), loose.len()));
+            }
+            for ((name, bytes), (loose_name, loose_bytes)) in entries.iter().zip(&loose) {
+                if name != loose_name || bytes != loose_bytes {
+                    return Err(format!("entry {name} differs from the loose file {loose_name}"));
+                }
+            }
+            let per_layer = |kind: &str| entries.iter().filter(|(n, _)| n.ends_with(".png") && n.contains(&format!("_{kind}_"))).count();
+            if per_layer("stamp") != 1 || per_layer("text") != 1 {
+                return Err("expected one stamp and one text entry".to_owned());
+            }
+            let summary = verify_export(doc, &export_options(s, sc)?, &entries)?;
+            log::info!("export_zip: {} entries, {} bytes; {summary}", entries.len(), packages[0].len());
+            Ok(())
+        }),
+        Step::Do(AppAction::ShowExport),
+        Step::WaitIdle,
+        Step::Setup("the dialog packs into the first zip's folder", |s, sc| {
+            let dir = with_suffix(&sc.out_stem, "_export_zip");
+            let Dialog::Export(st) = &mut s.dialog else { return Err("the Export dialog is not open".to_owned()) };
+            st.options.dir = dir;
+            st.options.package = wte_core::ExportPackage::Zip;
+            Ok(())
+        }),
+        Step::WaitFrames(3),
+        Step::Assert("the dialog plans the one zip, which exists (will be replaced)", |s, sc| {
+            let Dialog::Export(st) = &s.dialog else { return Err("the Export dialog is not open".to_owned()) };
+            let doc = doc_of(s)?;
+            let plan = wte_core::export::plan(&doc.snapshot(), &st.options);
+            let zip = with_suffix(&sc.out_stem, "_export_zip").join(wte_core::export::package_name(&doc.name));
+            if plan != [zip.clone()] || !zip.is_file() {
+                return Err(format!("the dialog plans {plan:?}"));
+            }
+            Ok(())
+        }),
+        Step::Shot("replace"),
+        Step::Do(AppAction::CloseDialog),
+        Step::WaitIdle,
+    ]);
+    steps
+}
+
+/// The generated models of `export_flow` without PATH, in run order (tags in `FLOW_TAGS`).
+const FLOW_FILES: [&str; 4] = ["flow_cube.obj", "flow_cube.gltf", "flow_cube.glb", "flow_cube.fbx"];
+/// Output folder tags of the models: `<out>_<tag>_one`, `_sel`, `_all`.
+const FLOW_TAGS: [&str; 5] = ["obj", "gltf", "glb", "fbx", "path"];
+/// The checker the OBJ cube's MTL references.
+fn flow_texture() -> PixelBuf {
+    samples::checker_texture(ASSET_TEXTURE_SIDE, ASSET_TEXTURE_SIDE, 8)
+}
+
+fn flow_write_assets(_state: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
+    let dir = fresh_assets_dir(sc)?;
+    let cube = samples::seam_cube(1.0);
+    let (obj, mtl) = samples::to_obj(&cube, "flow_cube.mtl", &["flow_cube.png".to_owned()]);
+    write(&dir.join("flow_cube.obj"), obj.as_bytes())?;
+    write(&dir.join("flow_cube.mtl"), mtl.as_bytes())?;
+    write(&dir.join("flow_cube.png"), &png_of(&flow_texture())?)?;
+    write(&dir.join("flow_cube.gltf"), samples::to_gltf(&cube, glam::Mat4::IDENTITY).as_bytes())?;
+    write(&dir.join("flow_cube.glb"), &samples::to_glb(&[(cube.clone(), glam::Mat4::IDENTITY)]))?;
+    write(&dir.join("flow_cube.fbx"), samples::to_fbx_ascii(&cube, 1.0, [1.0, 1.0, 1.0]).as_bytes())
+}
+
+/// The index of the model in work (`FLOW_TAGS`).
+fn flow_model(sc: &Scratch) -> Result<usize, String> {
+    remembered(sc, "flow_model").map(|i| i as usize)
+}
+
+fn flow_tag(sc: &Scratch) -> Result<&'static str, String> {
+    FLOW_TAGS.get(flow_model(sc)?).copied().ok_or_else(|| "no model in work".to_owned())
+}
+
+/// `<out_stem>_<tag>_<what>`.
+fn flow_dir(sc: &Scratch, what: &str) -> Result<PathBuf, String> {
+    Ok(with_suffix(&sc.out_stem, &format!("_{}_{what}", flow_tag(sc)?)))
+}
+
+/// A hash of the document's pixels: every composite and every layer (properties and pixels).
+fn flow_doc_key(doc: &Document) -> u64 {
+    let mut h = composite_hash(doc);
+    for set in &doc.sets {
+        for layer in &set.layers {
+            h = wte_core::fnv1a64(h, &layer.id.0.to_le_bytes());
+            h = wte_core::fnv1a64(h, &[layer.visible as u8, layer.locked as u8]);
+            h = wte_core::fnv1a64(h, &layer.opacity.to_le_bytes());
+            h = wte_core::fnv1a64(h, layer.blend.label().as_bytes());
+            match &layer.kind {
+                LayerKind::Raster(buf) => h = wte_core::fnv1a64(h, &wte_core::testutil::hash_pixels(buf).to_le_bytes()),
+                LayerKind::Stamp { cache, .. } | LayerKind::Text { cache, .. } => {
+                    for part in cache.parts() {
+                        h = wte_core::fnv1a64(h, &rect_key(&part.rect).to_le_bytes());
+                        h = wte_core::fnv1a64(h, &part.data);
+                    }
+                }
+            }
+        }
+    }
+    h
+}
+
+/// The layer of the selected stamp in its home set, remembered under `key`.
+fn remember_stamp_layer(state: &AppState, sc: &mut Scratch, text: bool, key: &'static str) -> Result<(), String> {
+    let (id, _) = placed_stamp(state, text)?;
+    let doc = doc_of(state)?;
+    let home = doc.stamp(id).ok_or("the stamp is gone")?.home_set;
+    let (_, layer) = doc.stamp_layers(id).into_iter().find(|(set, _)| *set == home).ok_or("the stamp has no layer in its home set")?;
+    sc.values.insert(key, layer.0);
+    Ok(())
+}
+
+/// A solid, well-facing spot as far as possible from the image stamp's and the text's spots.
+fn third_spot(state: &AppState) -> Result<(ViewXform, ScreenHit), String> {
+    let (xf, first, second) = stamp_spots(state)?;
+    let (_, hits) = model_hits(state)?;
+    let doc = doc_of(state)?;
+    let solid = |h: &ScreenHit| {
+        [egui::vec2(0.0, 0.0), egui::vec2(3.0, 0.0), egui::vec2(-3.0, 0.0), egui::vec2(0.0, 3.0), egui::vec2(0.0, -3.0)]
+            .iter()
+            .all(|d| matches!(xf.surface_at(doc, h.set, h.pos + *d), Surface::Model(hit) if hit.texture_set.is_some()))
+    };
+    let ranked = best_spots(&hits);
+    let good: Vec<ScreenHit> = ranked.iter().take(ranked.len().clamp(1, (ranked.len() / 3).max(8))).filter(|h| solid(h)).copied().collect();
+    let pool = if good.is_empty() { vec![first] } else { good };
+    let away = |h: &ScreenHit| (h.pos - first.pos).length().min((h.pos - second.pos).length());
+    let spot = pool.iter().max_by(|a, b| away(a).total_cmp(&away(b))).copied().ok_or("no hit")?;
+    Ok((xf, spot))
+}
+
+/// The two layers of the selection export: the image stamp and the text when they share a set, else the first pair
+/// of {stamp, text, wrapped stamp} that does (a selection lies in one set), else the stamp and its set's Paint 1.
+fn flow_pair(state: &AppState, sc: &Scratch) -> Result<(LayerId, LayerId), String> {
+    let doc = doc_of(state)?;
+    let ids = ["flow_stamp", "flow_text", "flow_wrap"].map(|k| remembered(sc, k).map(LayerId));
+    let [stamp, text, wrap] = [ids[0].clone()?, ids[1].clone()?, ids[2].clone()?];
+    let set_of = |l: LayerId| doc.find_layer(l).map(|(s, _)| s);
+    for (a, b) in [(stamp, text), (stamp, wrap), (text, wrap)] {
+        if set_of(a).is_some() && set_of(a) == set_of(b) {
+            return Ok((a, b));
+        }
+    }
+    let set = doc.set(set_of(stamp).ok_or("the stamp layer is gone")?).ok_or("no set")?;
+    let paint = set.layers.iter().find(|l| l.name == "Paint 1").ok_or("no Paint 1 in the stamp's set")?.id;
+    log::warn!("export_flow: the stamps lie in different sets; the selection is the stamp and Paint 1");
+    Ok((paint, stamp))
+}
+
+/// The options of the "everything as one package" export.
+fn flow_all_options(state: &AppState, sc: &Scratch) -> Result<ExportOptions, String> {
+    Ok(ExportOptions { dir: flow_dir(sc, "all")?, package: wte_core::ExportPackage::Zip, ..export_options(state, sc)? })
+}
+
+/// The import of the model in work: a document with texture sets (the OBJ cube: its Base is the checker it references).
+fn flow_imported(state: &AppState, sc: &Scratch) -> Result<(), String> {
+    let doc = doc_of(state).map_err(|_| format!("no document was opened (dialog: {})", dialog_name(&state.dialog)))?;
+    if doc.sets.is_empty() {
+        return Err("the document has no texture set".to_owned());
+    }
+    log_document(doc);
+    if flow_tag(sc)? == "obj" {
+        let base = doc.sets[0].layers.first().ok_or("no Base layer")?;
+        let LayerKind::Raster(pixels) = &base.kind else { return Err("the Base is not a paint layer".to_owned()) };
+        if **pixels != flow_texture() {
+            return Err("the Base of the OBJ cube is not the checker its MTL references".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Opens the next generated model (after "Don't save" for the current document).
+fn flow_open_next(_state: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
+    let next = sc.values.get("flow_next").copied().unwrap_or(0);
+    sc.values.insert("flow_model", next);
+    sc.values.insert("flow_next", next + 1);
+    log::info!("export_flow: model {}", FLOW_FILES.get(next as usize).copied().unwrap_or("?"));
+    phase_mark(Some("export_flow model"));
+    Ok(())
+}
+
+fn flow_open() -> Vec<Step> {
+    vec![
+        Step::Setup("next generated model", flow_open_next),
+        Step::Dyn("open it as a new document", |_, sc| {
+            let path = assets_dir(sc).join(FLOW_FILES.get(flow_model(sc)?).ok_or("no such model")?);
+            Ok(vec![Step::Do(AppAction::ConfirmPending(Pending::NewFromModel(Some(path))))])
+        }),
+        Step::WaitIdle,
+        Step::Dyn("accept the import dialog with its defaults", accept_import),
+        Step::WaitIdle,
+        Step::Dyn("close an import warnings message", close_message),
+        Step::WaitIdle,
+    ]
+}
+
+/// Gives every set whose active layer is not a paint layer (a stamp or text layer, or none, as a saved project may
+/// leave it) a new paint layer, as the brush's own steps (3) and (4) would on the first press (toast "Created paint
+/// layer"), so the stroke that follows is exactly one history entry on a fresh import and on a saved `.wtep` alike
+/// (check_exp_1 D6). A fresh import already has "Paint 1" active in every set: nothing changes there.
+fn flow_paint_layers(state: &mut AppState, _sc: &mut Scratch) -> Result<(), String> {
+    let doc = &mut state.session.as_mut().ok_or("no document")?.doc;
+    for set in doc.set_ids() {
+        match doc.paint_target(set) {
+            wte_core::PaintTarget::Ready(_) => {}
+            wte_core::PaintTarget::NotRaster(_) | wte_core::PaintTarget::NoActiveLayer => {
+                let layer = doc.add_raster_layer(set, None).map_err(|e| format!("set {set:?}: {e:?}"))?;
+                log::info!("export_flow: set {set:?} gets the paint layer {layer:?} before the stroke");
+            }
+            other => return Err(format!("set {set:?}: the active layer cannot be painted ({other:?})")),
+        }
+    }
+    Ok(())
+}
+
+/// The flow on the open document (EXPORT_SELECT_PLAN 7): paint, stamp, text and a wrapped stamp, then export one
+/// layer, a selection and everything as one zip, each checked file by file against the document, which the exports
+/// must leave unchanged.
+fn flow_steps() -> Vec<Step> {
+    vec![
+        Step::Assert("a document with texture sets (the OBJ cube's Base is its texture)", flow_imported),
+        Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
+        Step::WaitIdle,
+        Step::Do(AppAction::FrameModel),
+        Step::WaitIdle,
+        Step::Setup("every set's active layer is a paint layer (a saved project may end on a stamp layer)", flow_paint_layers),
+        Step::Setup("remember the history and the composite", |s, sc| {
+            remember_undo(s, sc)?;
+            remember_composite(s, sc, "flow_before")
+        }),
+        // Paint.
+        Step::Do(AppAction::SetTool(ToolKind::Brush)),
+        Step::Do(AppAction::BrushSizeStep(2)),
+        Step::Do(AppAction::SetPrimaryColor(RED)),
+        Step::Dyn("a brush stroke on Paint 1", |s, _| hit_stroke(s, 0)),
+        Step::WaitIdle,
+        Step::Assert("the stroke painted: one history entry, composite changed", |s, sc| {
+            undo_since(s, sc, 1)?;
+            changed_since(s, sc, "flow_before")
+        }),
+        // Image stamp (Project).
+        Step::Setup("Stamp tool: the sample image, 20 %, Project", |s, sc| {
+            setup_stamp_image(s, sc)?;
+            s.tools.stamp.size_frac = 0.2;
+            s.tools.stamp.rotation_deg = 0.0;
+            s.tools.stamp.mode = SurfaceMode::Project;
+            Ok(())
+        }),
+        Step::Do(AppAction::SetTool(ToolKind::Stamp)),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
+        Step::Dyn("place the image stamp", |s, _| {
+            let (xf, first, _) = stamp_spots(s)?;
+            Ok(vec![click(ViewId::Main3D, norm(&xf, first.pos))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("remember the image stamp's layer", |s, sc| remember_stamp_layer(s, sc, false, "flow_stamp")),
+        // Text.
+        Step::Setup("text content \"WTE\"", |s, _| {
+            s.tools.text.content = "WTE".to_owned();
+            s.tools.text.em_frac = 0.08;
+            s.tools.text.color = [20, 20, 20, 255];
+            Ok(())
+        }),
+        Step::Do(AppAction::SetTool(ToolKind::Text)),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
+        Step::Dyn("place the text", |s, _| {
+            let (xf, _, second) = stamp_spots(s)?;
+            Ok(vec![click(ViewId::Main3D, norm(&xf, second.pos))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("remember the text's layer", |s, sc| remember_stamp_layer(s, sc, true, "flow_text")),
+        // Wrapped stamp.
+        Step::Setup("Stamp tool: Wrap", |s, _| {
+            s.tools.stamp.mode = SurfaceMode::Wrap;
+            s.tools.stamp.wrap = WrapOptions::default();
+            Ok(())
+        }),
+        Step::Do(AppAction::SetTool(ToolKind::Stamp)),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
+        Step::Dyn("place the wrapped stamp", |s, _| {
+            let (xf, spot) = third_spot(s)?;
+            Ok(vec![click(ViewId::Main3D, norm(&xf, spot.pos))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("the wrapped stamp: Wrap, covers texels, Final bake landed; remember it and the document", |s, sc| {
+            let (id, placement) = placed_stamp(s, false)?;
+            let Placement::Projected(p) = placement else { return Err("the wrapped stamp is not a 3D stamp".to_owned()) };
+            if p.mode != SurfaceMode::Wrap {
+                return Err(format!("the third stamp was placed in {:?}", p.mode));
+            }
+            if s.final_bakes_pending || s.wrap_jobs_pending || doc_of(s)?.has_unbaked_stamps() {
+                return Err("a Final bake is still pending".to_owned());
+            }
+            log::info!("export_flow: wrapped stamp {id:?} placed with {p:?}");
+            remember_stamp_layer(s, sc, false, "flow_wrap")?;
+            remember_undo(s, sc)?;
+            let doc = doc_of(s)?;
+            let (key, rev) = (flow_doc_key(doc), doc.revision());
+            sc.values.insert("flow_key", key);
+            sc.values.insert("flow_rev", rev);
+            Ok(())
+        }),
+        // One layer.
+        Step::Dyn("Export this layer: the wrapped stamp", |_, sc| {
+            Ok(vec![Step::Do(AppAction::ShowExportLayers(vec![LayerId(remembered(sc, "flow_wrap")?)]))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("into <out>_<model>_one", |s, sc| dialog_into_dir(s, flow_dir(sc, "one")?)),
+        Step::Dyn("Export (the dialog's options)", run_dialog_export),
+        Step::WaitIdle,
+        Step::Assert("exactly the wrapped stamp's PNG, its layer's pixels, with ink", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let images = expect_layer_files(s, &flow_dir(sc, "one")?, &[LayerId(remembered(sc, "flow_wrap")?)])?;
+            let n = ink(&images[0]);
+            if n == 0 {
+                return Err("the wrapped stamp's file is empty".to_owned());
+            }
+            log::info!("export_flow: wrapped stamp file with {n} inked texels");
+            Ok(())
+        }),
+        // A selection of two.
+        Step::Dyn("select the stamp, Ctrl-select the text", |s, sc| {
+            let (a, b) = flow_pair(s, sc)?;
+            Ok(vec![Step::Do(AppAction::SelectLayer(a)), Step::Do(AppAction::ToggleLayerSelected(b))])
+        }),
+        Step::WaitIdle,
+        Step::Dyn("Export selected layers", |s, sc| {
+            let (a, b) = flow_pair(s, sc)?;
+            let selection = session_of(s)?.layer_selection();
+            if selection.len() != 2 || !selection.contains(&a) || !selection.contains(&b) {
+                return Err(format!("the selection is {selection:?}, expected {a:?} and {b:?}"));
+            }
+            Ok(vec![Step::Do(AppAction::ShowExportLayers(selection))])
+        }),
+        Step::WaitIdle,
+        Step::Setup("into <out>_<model>_sel", |s, sc| dialog_into_dir(s, flow_dir(sc, "sel")?)),
+        Step::Dyn("Export (the dialog's options)", run_dialog_export),
+        Step::WaitIdle,
+        Step::Assert("exactly the two PNGs, each its layer, different, without the stroke colour", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let (a, b) = flow_pair(s, sc)?;
+            let images = expect_layer_files(s, &flow_dir(sc, "sel")?, &[a, b])?;
+            if images[0] == images[1] {
+                return Err("the two exported layers are the same picture".to_owned());
+            }
+            let doc = doc_of(s)?;
+            for (id, image) in [a, b].iter().zip(&images) {
+                let stamp_layer = doc.layer(*id).is_some_and(|l| !l.is_raster());
+                if stamp_layer && count_color(image, RED) > 0 {
+                    return Err("a stamp layer's file holds the stroke colour".to_owned());
+                }
+            }
+            Ok(())
+        }),
+        // Everything, one package.
+        Step::Dyn("export everything as one zip", |s, sc| {
+            let opts = flow_all_options(s, sc)?;
+            if opts.dir.exists() {
+                std::fs::remove_dir_all(&opts.dir).map_err(|e| e.to_string())?;
+            }
+            Ok(vec![Step::Do(AppAction::RunExport(opts))])
+        }),
+        Step::WaitIdle,
+        Step::Assert("one zip; its entries are the planned files and match the document", |s, sc| {
+            assert_no_dialog(s, sc)?;
+            let doc = doc_of(s)?;
+            let opts = flow_all_options(s, sc)?;
+            let zip = wte_core::export::package_name(&doc.name);
+            let listing = dir_names(&opts.dir)?;
+            if listing != [zip.clone()] {
+                return Err(format!("{} holds {listing:?}", opts.dir.display()));
+            }
+            let bytes = std::fs::read(opts.dir.join(&zip)).map_err(|e| e.to_string())?;
+            let entries = wte_core::export::read_package(&bytes)?;
+            let summary = verify_export(doc, &opts, &entries)?;
+            log::info!("export_flow {}: {zip} {} bytes; {summary}", flow_tag(sc)?, bytes.len());
+            Ok(())
+        }),
+        Step::Assert("the exports left the document unchanged; no temp file anywhere", |s, sc| {
+            let doc = doc_of(s)?;
+            if flow_doc_key(doc) != remembered(sc, "flow_key")? {
+                return Err("the layers or composites changed during the exports".to_owned());
+            }
+            if doc.revision() != remembered(sc, "flow_rev")? {
+                return Err(format!("the revision changed during the exports ({} -> {})", remembered(sc, "flow_rev")?, doc.revision()));
+            }
+            undo_since(s, sc, 0)?;
+            for what in ["one", "sel", "all"] {
+                let names = dir_names(&flow_dir(sc, what)?)?;
+                if names.iter().any(|n| n.contains(".tmp-")) {
+                    return Err(format!("a temp file or folder is left in {what}: {names:?}"));
+                }
+            }
+            phase_mark(None);
+            Ok(())
+        }),
+    ]
+}
+
+/// `export_flow [PATH]` (EXPORT_SELECT_PLAN 7): the user's workflow end to end on a generated cube as OBJ (+ MTL +
+/// texture), glTF, GLB and ASCII FBX, or once on PATH.
+fn export_flow(has_path: bool) -> Vec<Step> {
+    let mut steps = Vec::new();
+    if has_path {
+        steps.push(Step::Setup("the model is PATH", |_, sc| {
+            sc.values.insert("flow_model", 4);
+            phase_mark(Some("export_flow PATH"));
+            Ok(())
+        }));
+        steps.extend(open_and_accept(true));
+        steps.extend(flow_steps());
+    } else {
+        steps.push(Step::Setup("write the cube as OBJ + MTL + PNG, glTF, GLB and ASCII FBX", flow_write_assets));
+        for _ in FLOW_FILES {
+            steps.extend(flow_open());
+            steps.extend(flow_steps());
+        }
+    }
+    steps.push(Step::Do(AppAction::SetViewMode(ViewMode::Split)));
+    steps.push(Step::WaitIdle);
     steps
 }
 
@@ -1593,6 +2528,11 @@ fn assert_exported(state: &AppState, scratch: &Scratch) -> Result<(), String> {
     for path in &plan {
         file_non_empty(path)?;
     }
+    // Exactly the planned files, each holding what the app shows (EXPORT_SELECT_PLAN 7.2: existence alone let a blank
+    // file or the wrong layer pass).
+    let files = read_export_dir(doc, &opts)?;
+    let summary = verify_export(doc, &opts, &files)?;
+    log::info!("export_run: {summary}");
     let names: Vec<String> = plan.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
     let per_layer = |kind: &str| names.iter().filter(|n| n.ends_with(".png") && n.contains(&format!("_{kind}_"))).count();
     if per_layer("stamp") != 1 || per_layer("text") != 1 {
@@ -2062,6 +3002,8 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
         psd: true,
         include_hidden: false,
         dilate_px: 0,
+        layers: None,
+        package: wte_core::ExportPackage::Files,
     })
 }
 
@@ -2074,7 +3016,8 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
 /// environment variables `WTE_SELFTEST_STEP_TIMEOUT` / `WTE_SELFTEST_RUN_TIMEOUT` (seconds) override both.
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)> {
     match name {
-        "workflow_path" | "fuzz_path" | "brush_types_path" | "text_preview_path" | "final_bake_async" | "wrap_surface" => {
+        "workflow_path" | "fuzz_path" | "brush_types_path" | "text_preview_path" | "final_bake_async" | "wrap_surface"
+        | "export_flow" => {
             Some((Duration::from_secs(300), Duration::from_secs(3600)))
         }
         _ => None,
@@ -2807,6 +3750,11 @@ fn workflow_path(has_path: bool) -> Vec<Step> {
                 file_non_empty(path)?;
                 total += std::fs::metadata(path).map_or(0, |m| m.len());
             }
+            // Exactly the planned files, each holding what the app shows (pixels, layers, recomposition).
+            let doc = doc_of(s)?;
+            let opts = export_options(s, sc)?;
+            let summary = verify_export(doc, &opts, &read_export_dir(doc, &opts)?)?;
+            log::info!("workflow export: {summary}");
             let names: Vec<String> = plan.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
             for ext in ["png", "ora", "psd"] {
                 if !names.iter().any(|n| n.ends_with(&format!(".{ext}"))) {
@@ -6963,7 +7911,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 39);
+        assert_eq!(scenario_names().len(), 42);
     }
 
     #[test]

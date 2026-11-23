@@ -3487,7 +3487,10 @@ the patch's triangles (a landing's local triangle: binary search in `patch.tris`
   cells on both sides in its row (or in its column) are owned by the **same part** (the owner grid keeps each cell's
   owner part): a gap between two parts (Jump small gaps: tiles, kit-bashed pieces) is not surface lost to a cut. For
   one part this is round 9's span rule, cell for cell (the sweep's Lantern: 11.23 % either way); a 40 x 40 tiled floor
-  with Jump on: 17.06 % -> 0.
+  with Jump on: 17.06 % -> 0. `rejected_pairs` and `lost_cells` work over the picture's cells only (the cells whose
+  centres lie in the picture form one rectangle) and over runs of uncovered cells along rows and columns (the covered
+  cells at both ends of a run, inside the picture or beyond it): the same counts, 2.7 ms instead of 13 ms per
+  statistics pass on a 1,024 x 525 grid (WaterBottle).
 - **Tiled UV footprints (item 5, `uv_share.rs`).** A triangle whose UV box spans more than one texture but at most
   `UV_SHARE_TILED_MAX` (64) is rasterized wrapped into the unit square, each texel once (it shares when it covers a
   texel twice by itself, or as any other footprint when more than half of its texels are counted twice); beyond that,

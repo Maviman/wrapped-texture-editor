@@ -1995,19 +1995,23 @@ impl OwnerGrid {
         (self.lo64[0] + (i as f64 + 0.5) * self.cell64, self.lo64[1] + (j as f64 + 0.5) * self.cell64)
     }
 
+    /// Stable (w1): the cells whose centres lie inside `picture` (`|x| <= picture[0]`, `|y| <= picture[1]` with the
+    /// build's arithmetic): column range and row range, `None` when empty. The centres grow with the index, so the
+    /// cells inside form one rectangle.
+    fn picture_cells(&self, picture: [f64; 2]) -> Option<([usize; 2], [usize; 2])> {
+        let [w, h] = self.dims;
+        let cols: Vec<usize> = (0..w).filter(|&i| self.centre(i, 0).0.abs() <= picture[0]).collect();
+        let rows: Vec<usize> = (0..h).filter(|&j| self.centre(0, j).1.abs() <= picture[1]).collect();
+        Some(([*cols.first()?, *cols.last()?], [*rows.first()?, *rows.last()?]))
+    }
+
     /// Of the (cell centre inside `picture`, laid triangle covering it) pairs, those the owner test drops and all.
     pub(crate) fn rejected_pairs(&self, picture: [f64; 2]) -> (usize, usize) {
-        let [w, h] = self.dims;
+        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return (0, 0) };
+        let w = self.dims[0];
         let (mut rejected, mut total) = (0usize, 0usize);
-        for j in 0..h {
-            if self.centre(0, j).1.abs() > picture[1] {
-                continue;
-            }
-            for i in 0..w {
-                if self.centre(i, j).0.abs() > picture[0] {
-                    continue;
-                }
-                let e = self.pairs[j * w + i];
+        for j in j0..=j1 {
+            for e in &self.pairs[j * w + i0..=j * w + i1] {
                 total += e[0] as usize;
                 rejected += e[1] as usize;
             }
@@ -2021,92 +2025,110 @@ impl OwnerGrid {
     /// the nearest covered cells on both sides must be owned by the same part: a gap between two parts (Jump small
     /// gaps: tiles, kit-bashed pieces) is no surface lost to a cut (round 9 counted it: tiles300 16.85 % with no cut).
     /// For one part the same cells as round 9's row and column spans. Returns (lost, picture cells). Stable (w1, item
-    /// 3): from the stored marks, for any picture.
+    /// 3): from the stored marks, for any picture; the work is over the picture's cells (and the scans from its sides
+    /// to the nearest covered cell).
     pub(crate) fn lost_cells(&self, picture: [f64; 2]) -> (usize, usize) {
-        let dims = self.dims;
-        let width = dims[0];
-        let n = dims[0] * dims[1];
+        let Some(([i0, i1], [j0, j1])) = self.picture_cells(picture) else { return (0, 0) };
+        let [width, height] = self.dims;
+        let (rw, rh) = (i1 - i0 + 1, j1 - j0 + 1);
         let mark = &self.mark;
-        let covered = |k: usize| mark[k] & 1 != 0;
-        // check:A (round 9): the picture beyond a closure (where the ends or the halves meet: a triangle-sized
-        // tooth line, and with a helix the band past the meeting line) is not lost to a cut. Uncovered picture
-        // cells 4-connected through uncovered picture cells to a cell a closure triangle covers are left out.
-        let in_picture = |i: usize, j: usize| {
-            let (x, y) = self.centre(i, j);
-            x.abs() <= picture[0] && y.abs() <= picture[1]
-        };
-        let neighbours = |k: usize| {
-            let (i, j) = (k % width, k / width);
-            [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < dims[1]).then(|| k + width)]
-        };
-        let seed = |k: usize| !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| mark[m] & 2 != 0);
-        let mut beyond: Vec<bool> = (0..n).map(seed).collect();
-        let mut queue: Vec<usize> = beyond.iter().enumerate().filter_map(|(k, &b)| b.then_some(k)).collect();
-        while let Some(k) = queue.pop() {
-            for m in neighbours(k).into_iter().flatten() {
-                if !beyond[m] && !covered(m) && in_picture(m % width, m / width) {
-                    beyond[m] = true;
-                    queue.push(m);
-                }
-            }
-        }
-        // Per cell the part of the nearest covered cell above it in its column (`NONE`: none), then upwards from the
-        // bottom the part of the nearest covered cell below; per row the same left and right.
         let part = &self.part;
-        let mut above = vec![NONE; n];
-        let mut last = vec![NONE; width];
-        for j in 0..dims[1] {
-            for (i, l) in last.iter_mut().enumerate() {
-                let k = j * width + i;
-                above[k] = *l;
-                if covered(k) {
-                    *l = part[k];
+        let covered = |k: usize| mark[k] & 1 != 0;
+        // Index in the picture rectangle of grid cell (i, j).
+        let at = |i: usize, j: usize| (j - j0) * rw + (i - i0);
+        // check:A (round 9): the picture beyond a closure (where the ends or the halves meet: a triangle-sized tooth
+        // line, and with a helix the band past the meeting line) is not lost to a cut. Uncovered picture cells
+        // 4-connected through uncovered picture cells to a cell a closure triangle covers are left out.
+        let neighbours = |i: usize, j: usize| {
+            [(i > 0).then(|| (i - 1, j)), (i + 1 < width).then(|| (i + 1, j)), (j > 0).then(|| (i, j - 1)), (j + 1 < height).then(|| (i, j + 1))]
+        };
+        let inside = |i: usize, j: usize| (i0..=i1).contains(&i) && (j0..=j1).contains(&j);
+        let mut beyond = vec![false; rw * rh];
+        let mut queue: Vec<(usize, usize)> = Vec::new();
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                if !covered(j * width + i) && neighbours(i, j).into_iter().flatten().any(|(a, b)| mark[b * width + a] & 2 != 0) {
+                    beyond[at(i, j)] = true;
+                    queue.push((i, j));
                 }
             }
         }
-        let mut enclosed = vec![false; n];
-        last.fill(NONE);
-        for j in (0..dims[1]).rev() {
-            for (i, l) in last.iter_mut().enumerate() {
-                let k = j * width + i;
-                enclosed[k] = above[k] != NONE && above[k] == *l;
-                if covered(k) {
-                    *l = part[k];
+        while let Some((i, j)) = queue.pop() {
+            for (a, b) in neighbours(i, j).into_iter().flatten() {
+                if inside(a, b) && !beyond[at(a, b)] && !covered(b * width + a) {
+                    beyond[at(a, b)] = true;
+                    queue.push((a, b));
                 }
             }
         }
-        drop(above);
-        let (mut lost, mut pic_cells) = (0usize, 0usize);
-        let mut left = vec![NONE; width];
-        for j in 0..dims[1] {
-            if self.centre(0, j).1.abs() > picture[1] {
-                continue;
+        // The part of the nearest covered cell before index `from` going by `step` along a line (`NONE`: none).
+        let nearest = |mut k: isize, step: isize, count: usize| {
+            for _ in 0..count {
+                if covered(k as usize) {
+                    return part[k as usize];
+                }
+                k += step;
             }
+            NONE
+        };
+        // A run of uncovered picture cells along a line (a column, a row) between covered cells: enclosed when the
+        // covered cells at both ends (inside the picture or beyond it, `nearest`) belong to the same part.
+        let same = |a: u32, b: u32| a != NONE && a == b;
+        // Columns, row by row: per column the last covered part and the start of the current uncovered run.
+        let mut enclosed = vec![false; rw * rh];
+        let mut up: Vec<u32> = (i0..=i1).map(|i| if j0 > 0 { nearest(((j0 - 1) * width + i) as isize, -(width as isize), j0) } else { NONE }).collect();
+        let mut start = vec![usize::MAX; rw];
+        for j in j0..=j1 {
+            for c in 0..rw {
+                let k = j * width + i0 + c;
+                if covered(k) {
+                    if start[c] != usize::MAX && same(up[c], part[k]) {
+                        for r in start[c]..j {
+                            enclosed[(r - j0) * rw + c] = true;
+                        }
+                    }
+                    start[c] = usize::MAX;
+                    up[c] = part[k];
+                } else if start[c] == usize::MAX {
+                    start[c] = j;
+                }
+            }
+        }
+        for c in 0..rw {
+            let below = if j1 + 1 < height { nearest(((j1 + 1) * width + i0 + c) as isize, width as isize, height - j1 - 1) } else { NONE };
+            if start[c] != usize::MAX && same(up[c], below) {
+                for r in start[c]..=j1 {
+                    enclosed[(r - j0) * rw + c] = true;
+                }
+            }
+        }
+        // Rows: the same runs; a run's cells are lost unless beyond a closure, when the run is enclosed in its row or
+        // the cell in its column.
+        let mut lost = 0usize;
+        let count = |j: usize, from: usize, to: usize, in_row: bool| {
+            (from..to).filter(|&i| !beyond[at(i, j)] && (in_row || enclosed[at(i, j)])).count()
+        };
+        for j in j0..=j1 {
             let row = j * width;
-            let mut l = NONE;
-            for (i, slot) in left.iter_mut().enumerate() {
-                *slot = l;
+            let mut left = if i0 > 0 { nearest((row + i0 - 1) as isize, -1, i0) } else { NONE };
+            let mut from = usize::MAX;
+            for i in i0..=i1 {
                 if covered(row + i) {
-                    l = part[row + i];
+                    if from != usize::MAX {
+                        lost += count(j, from, i, same(left, part[row + i]));
+                    }
+                    from = usize::MAX;
+                    left = part[row + i];
+                } else if from == usize::MAX {
+                    from = i;
                 }
             }
-            let mut r = NONE;
-            for i in (0..width).rev() {
-                let k = row + i;
-                let in_row = left[i] != NONE && left[i] == r;
-                if covered(k) {
-                    r = part[k];
-                }
-                if self.centre(i, j).0.abs() > picture[0] {
-                    continue;
-                }
-                pic_cells += 1;
-                if !covered(k) && !beyond[k] && (in_row || enclosed[k]) {
-                    lost += 1;
-                }
+            if from != usize::MAX {
+                let right = if i1 + 1 < width { nearest((row + i1 + 1) as isize, 1, width - i1 - 1) } else { NONE };
+                lost += count(j, from, i1 + 1, same(left, right));
             }
         }
-        (lost, pic_cells)
+        (lost, rw * rh)
     }
 
     /// The owner test at cell index `k`: a fragment at 3D point `p` of a triangle with stretch `s` is kept when the

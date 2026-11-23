@@ -257,6 +257,9 @@ impl Runner {
         });
         raw.hovered_files.clear();
         raw.dropped_files.clear();
+        // The window opens in the background (`main`), so the OS never gives it the focus; a run behaves as if it had
+        // it (text cursors, `Response::has_focus`), whatever the user clicks meanwhile.
+        raw.focused = true;
         // egui 0.37 has no `RawInput::modifiers`: the modifier state is carried by `Event::ModifiersChanged`, so the
         // injected state is announced whenever it differs from the last one (NONE in frames without injected input).
         let input = self.inject.pop_front();

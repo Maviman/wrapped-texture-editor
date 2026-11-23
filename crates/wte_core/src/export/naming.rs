@@ -101,6 +101,12 @@ pub fn package_name(base: &str) -> String {
     format!("{}.zip", sanitize_file_stem(base))
 }
 
+/// File name of a single-package export of a layer selection ("Export this layer", "Export selected layers"):
+/// `<base>_selection.zip`, the base sanitized, so it never replaces the full package `<base>.zip`. See section 7.5.
+pub fn selection_package_name(base: &str) -> String {
+    format!("{}_selection.zip", sanitize_file_stem(base))
+}
+
 /// Splits a file name at its last dot into (stem, extension without the dot). A name without a dot, or with only a
 /// leading one (".hidden"), has no extension.
 pub(crate) fn split_extension(name: &str) -> (&str, &str) {

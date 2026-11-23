@@ -2425,7 +2425,16 @@ fn wrap_param_from(
         }
         let along_clip = clip.map(|(_, lo, hi)| [lo as f32, hi as f32]);
         let laid = layout.laid();
-        let owner_ctx = OwnerCtx { mesh, bvh, patch: &patch, orient: &layout.orient, entered: &layout.entered, laid: &laid, closure: &closure_tris };
+        let owner_ctx = OwnerCtx {
+            mesh,
+            bvh,
+            patch: &patch,
+            orient: &layout.orient,
+            entered: &layout.entered,
+            laid: &laid,
+            closure: &closure_tris,
+            bury_index: OnceLock::new(),
+        };
         let owner_started = Instant::now();
         let (layer, (rej, lost)) = make_layer(&owner_ctx, tris, along_clip, period.map(|t| t as f32), axis, footprint, picture);
         phase_times::add(3, owner_started.elapsed().as_micros() as u64);
@@ -2707,6 +2716,27 @@ pub(crate) mod sphere_check {
         static ON: Cell<bool> = const { Cell::new(false) };
         static RUNS: Cell<u64> = const { Cell::new(0) };
         static DIFFS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        static RECORD: Cell<bool> = const { Cell::new(false) };
+        static PRINTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// check:B (round 9): while on for the calling thread, every `wrap_param_in` records a hash of its result's
+    /// fingerprint (`prints`): a speed change that must keep the bytes compares these before / after.
+    pub(crate) fn record(on: bool) {
+        RECORD.with(|c| c.set(on));
+    }
+
+    /// The fingerprint hashes recorded on this thread so far (0 for no parameterization), then reset.
+    pub(crate) fn prints() -> Vec<u64> {
+        PRINTS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+    }
+
+    /// A hash of everything of a parameterization except its build time.
+    pub(crate) fn print_of(w: Option<&WrapParam>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        w.map(fingerprint).hash(&mut h);
+        h.finish()
     }
 
     pub(crate) fn enable(on: bool) {
@@ -2724,6 +2754,10 @@ pub(crate) mod sphere_check {
     }
 
     pub(super) fn compare(mesh: &MeshData, bvh: &Bvh, maps: &[std::sync::Arc<TexelMap>], src_size: [u32; 2], p: &Projector, got: Option<&WrapParam>) {
+        if RECORD.with(Cell::get) {
+            let print = print_of(got);
+            PRINTS.with(|d| d.borrow_mut().push(print));
+        }
         if !ON.with(Cell::get) {
             return;
         }
@@ -2792,6 +2826,152 @@ struct OwnerCtx<'c> {
     laid: &'c [bool],
     /// check:A (round 9): local triangles next to a closure (`relax::OwnerTri::closure`).
     closure: &'c [bool],
+    /// check:B (round 9): the entered parts' triangles by part and place, for `may_bury` (built on its first call).
+    bury_index: OnceLock<BuryIndex>,
+}
+
+/// check:B (round 9, speed): the triangles of the entered parts of a patch, per part a box and a uniform grid of the
+/// triangles' boxes. `may_bury` asked the BVH for every triangle in the sphere round its prism box (thousands on a
+/// dense model: 0.6 ms per call, 155 s of thread time on the chess set with Jump on) and then kept those of another
+/// entered part whose box meets the prism box; the index visits only the other parts' triangles whose boxes can meet
+/// it and applies the same two tests with the same f32 arithmetic (`any`: the order does not matter), so the answer is
+/// the same.
+struct BuryIndex {
+    parts: Vec<BuryPart>,
+}
+
+/// One entered part of `BuryIndex`.
+struct BuryPart {
+    part: u32,
+    lo: Vec3,
+    hi: Vec3,
+    /// Grid cell size and cells per axis; cell `(i, j, k)` holds `items[start[c]..start[c + 1]]`.
+    cell: f32,
+    dims: [usize; 3],
+    start: Vec<u32>,
+    items: Vec<(TriId, Vec3, Vec3)>,
+    /// Triangles over more than `BURY_BIG_CELLS` cells (asked for every query that meets the part's box).
+    big: Vec<(TriId, Vec3, Vec3)>,
+}
+
+/// A triangle spanning more cells than this is kept in `BuryPart::big`.
+const BURY_BIG_CELLS: usize = 64;
+
+impl BuryPart {
+    /// The cell range of the box `lo..hi` (clamped to the grid; monotone in each bound).
+    fn range(&self, lo: Vec3, hi: Vec3) -> [[usize; 2]; 3] {
+        let at = |x: f32, a: usize| -> usize {
+            let f = ((x - self.lo[a]) / self.cell).floor();
+            if f.is_nan() || f < 0.0 { 0 } else { (f as usize).min(self.dims[a] - 1) }
+        };
+        [0, 1, 2].map(|a| [at(lo[a], a), at(hi[a], a)])
+    }
+}
+
+impl BuryIndex {
+    fn build(mesh: &MeshData, patch: &Patch, entered: &[bool]) -> BuryIndex {
+        let mut by_part: Vec<Vec<(TriId, Vec3, Vec3)>> = vec![Vec::new(); patch.part_count as usize];
+        for (l, &tri) in patch.tris.iter().enumerate() {
+            let part = patch.part[patch.tv[l][0] as usize];
+            if entered.get(part as usize).copied().unwrap_or(false) {
+                let [a, b, c] = mesh.tri_positions(tri);
+                by_part[part as usize].push((tri, a.min(b).min(c), a.max(b).max(c)));
+            }
+        }
+        let mut parts = Vec::new();
+        for (part, tris) in by_part.into_iter().enumerate() {
+            if tris.is_empty() {
+                continue;
+            }
+            let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+            for &(_, tlo, thi) in &tris {
+                lo = lo.min(tlo);
+                hi = hi.max(thi);
+            }
+            let ext = hi - lo;
+            let side = ((tris.len() as f64).cbrt().ceil() as usize).clamp(1, 96);
+            let cell = (ext.max_element() / side as f32).max(f32::MIN_POSITIVE);
+            let finite = lo.is_finite() && hi.is_finite() && cell.is_finite();
+            let dims = if finite { [0, 1, 2].map(|a| ((ext[a] / cell).floor() as usize + 1).clamp(1, side + 1)) } else { [1, 1, 1] };
+            let mut bp = BuryPart { part: part as u32, lo, hi, cell, dims, start: Vec::new(), items: Vec::new(), big: Vec::new() };
+            let n = dims[0] * dims[1] * dims[2];
+            let index = |i: usize, j: usize, k: usize| (k * dims[1] + j) * dims[0] + i;
+            let mut count = vec![0u32; n + 1];
+            let mut small: Vec<(TriId, Vec3, Vec3, [[usize; 2]; 3])> = Vec::with_capacity(tris.len());
+            for (tri, tlo, thi) in tris {
+                let r = bp.range(tlo, thi);
+                let cells = (r[0][1] - r[0][0] + 1) * (r[1][1] - r[1][0] + 1) * (r[2][1] - r[2][0] + 1);
+                if !finite || !(tlo.is_finite() && thi.is_finite()) || cells > BURY_BIG_CELLS {
+                    bp.big.push((tri, tlo, thi));
+                    continue;
+                }
+                for k in r[2][0]..=r[2][1] {
+                    for j in r[1][0]..=r[1][1] {
+                        for i in r[0][0]..=r[0][1] {
+                            count[index(i, j, k) + 1] += 1;
+                        }
+                    }
+                }
+                small.push((tri, tlo, thi, r));
+            }
+            for c in 0..n {
+                count[c + 1] += count[c];
+            }
+            let mut fill = count.clone();
+            let mut items = vec![(0, Vec3::ZERO, Vec3::ZERO); count[n] as usize];
+            for (tri, tlo, thi, r) in small {
+                for k in r[2][0]..=r[2][1] {
+                    for j in r[1][0]..=r[1][1] {
+                        for i in r[0][0]..=r[0][1] {
+                            let c = index(i, j, k);
+                            items[fill[c] as usize] = (tri, tlo, thi);
+                            fill[c] += 1;
+                        }
+                    }
+                }
+            }
+            bp.start = count;
+            bp.items = items;
+            parts.push(bp);
+        }
+        BuryIndex { parts }
+    }
+
+    /// True when a triangle of an entered part other than `own` has its box meet `lo..hi` and its closest point to
+    /// `center` within `radius` (the tests of `may_bury`'s sphere query, in the same f32 arithmetic).
+    fn any(&self, mesh: &MeshData, own: u32, lo: Vec3, hi: Vec3, center: Vec3, radius: f32) -> bool {
+        if !center.is_finite() || radius.is_nan() || radius < 0.0 {
+            return false;
+        }
+        let r2 = radius * radius;
+        let hit = |&(tri, tlo, thi): &(TriId, Vec3, Vec3)| {
+            tlo.cmple(hi).all() && thi.cmpge(lo).all() && {
+                let [a, b, c] = mesh.tri_positions(tri);
+                (closest_point_on_triangle(center, a, b, c) - center).length_squared() <= r2
+            }
+        };
+        for bp in &self.parts {
+            if bp.part == own || !(bp.lo.cmple(hi).all() && bp.hi.cmpge(lo).all()) {
+                continue;
+            }
+            if bp.big.iter().any(hit) {
+                return true;
+            }
+            let r = bp.range(lo, hi);
+            let d = bp.dims;
+            for k in r[2][0]..=r[2][1] {
+                for j in r[1][0]..=r[1][1] {
+                    for i in r[0][0]..=r[0][1] {
+                        let c = (k * d[1] + j) * d[0] + i;
+                        if bp.items[bp.start[c] as usize..bp.start[c + 1] as usize].iter().any(hit) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 impl OwnerCtx<'_> {
@@ -2822,15 +3002,9 @@ impl OwnerCtx<'_> {
         if !(lo.is_finite() && hi.is_finite()) {
             return false;
         }
-        let mut near: Vec<(TriId, f32)> = Vec::new();
-        self.bvh.query_sphere_dist(self.mesh, (lo + hi) * 0.5, (hi - lo).length() * 0.5, &mut near);
-        near.iter().any(|&(tri, _)| {
-            self.other(tri, own).is_some() && {
-                let [a, b, c] = self.mesh.tri_positions(tri);
-                let (tlo, thi) = (a.min(b).min(c), a.max(b).max(c));
-                tlo.cmple(hi).all() && thi.cmpge(lo).all()
-            }
-        })
+        // check:B (round 9, speed): round 9's sphere query through the mesh's BVH, answered by the entered parts' index.
+        let index = self.bury_index.get_or_init(|| BuryIndex::build(self.mesh, self.patch, self.entered));
+        index.any(self.mesh, own, lo, hi, (lo + hi) * 0.5, (hi - lo).length() * 0.5)
     }
 
     /// Round 9 (T1, answer (a)-1): true when the surface at `p` (oriented normal `n`, part `own`) lies under another

@@ -76,9 +76,28 @@ pub const OWNER_MAX_CELLS: usize = 1024;
 pub const RELAX_ARAP_ITERS: u32 = 12;
 /// Conjugate-gradient iterations per component and layer, all solves together.
 pub const RELAX_CG_BUDGET: u32 = 2_500;
-/// From this many unknowns the kernels run in parallel (fixed chunks of `PAR_CHUNK`).
-pub const PAR_MIN_UNKNOWNS: usize = 16_384;
+/// From this many unknowns the kernels run in parallel (sums in fixed chunks of `PAR_CHUNK`; per-element work in
+/// chunks of `PAR_FINE`, whose size does not change any bit). check:B (round 9, speed): 16,384 -> 8,192.
+pub const PAR_MIN_UNKNOWNS: usize = 8_192;
 pub const PAR_CHUNK: usize = 8_192;
+/// check:B (round 9, speed): the chunk of the per-element kernels (terms, gather, the CG updates, the ARAP local step).
+const PAR_FINE: usize = 1_024;
+
+/// check:B (round 9, speed): `f(i, &mut v[i])` for every element, on the pool in chunks of `PAR_FINE` when `par`
+/// (each element is computed alone: the same bits either way).
+fn each<T: Send>(par: bool, v: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
+    if par {
+        v.par_chunks_mut(PAR_FINE).enumerate().for_each(|(c, chunk)| {
+            for (i, o) in chunk.iter_mut().enumerate() {
+                f(c * PAR_FINE + i, o);
+            }
+        });
+    } else {
+        for (i, o) in v.iter_mut().enumerate() {
+            f(i, o);
+        }
+    }
+}
 const ARAP_STOP: f64 = 0.0005;
 const LSCM_TOL: f64 = 1e-6;
 const LSCM_ITERS: u32 = 600;
@@ -393,74 +412,127 @@ impl<'a> Layout<'a> {
             strip_comp[o.2 as usize] = o.0 == 0;
         }
         // The solve over the components (strip components first) from the pins `pin0` and positions `x0`.
-        let solve = |x0: &[DVec2], pin0: &[bool]| -> (Vec<DVec2>, Vec<bool>, u32) {
+        // check:B (round 9, speed): a component reads no other component's result except, for a jumped part, the
+        // relaxed pose of its source vertex's component when that one comes first in `order` (`relaxed_pose`; else the
+        // seed pose). So the components are solved in levels (level 0: no such source; level k + 1: its source is on
+        // level k), the components of one level on the pool, each from the positions and pins the sequential loop
+        // would give it, and their results written back in `order`: the same bits as one after another.
+        // `memo` holds the runs of an earlier solve of this turn (the exact region's, before its fallback); a
+        // component whose start positions and pins are bit-equal to that run's takes its result
+        // (`relax_component_from` is a function of those inputs), so the fallback re-solves only the components the
+        // exact pins changed, directly or through a jump. Returns the runs for such a later solve.
+        let mut rank = vec![0usize; comp_tris.len()];
+        for (i, o) in order.iter().enumerate() {
+            rank[o.2 as usize] = i;
+        }
+        let jump_of = |c: u32| self.jump_log.iter().find(|&&(_, lt)| wedges.comp.get(lt as usize).copied() == Some(c)).copied();
+        let mut level = vec![0u32; comp_tris.len()];
+        for &(_, _, c) in &order {
+            let source = jump_of(c).and_then(|(src, _)| self.source_comp(src, &laid, &wedges, &rest)).filter(|&d| rank[d as usize] < rank[c as usize]);
+            level[c as usize] = source.map_or(0, |d| level[d as usize] + 1);
+        }
+        let levels = level.iter().copied().max().unwrap_or(0);
+        let solve = |x0: &[DVec2], pin0: &[bool], memo: Option<&[Option<CompRun>]>| -> (Vec<DVec2>, Vec<bool>, u32, Vec<Option<CompRun>>) {
         let mut x = x0.to_vec();
         let mut pinned = pin0.to_vec();
-        let mut done_comp = vec![false; comp_tris.len()];
         let mut cg_iters = 0u32;
-        for &(_, _, c) in &order {
-            let tris = &comp_tris[c as usize];
-            // A jumped part: its landing triangle re-placed from the source vertex's relaxed position and turn.
-            if let Some(&(src, lt)) = self.jump_log.iter().find(|&&(_, lt)| wedges.comp.get(lt as usize).copied() == Some(c)) {
-                let (pv_new, turn) = self.relaxed_pose(src, &laid, &wedges, &x, &done_comp, &rest);
-                let pv_old = self.p2[src as usize];
-                for &v in &patch.tv[lt as usize] {
-                    let w = wedge_at(lt, v);
-                    if w != NONE {
-                        let d = self.p2[v as usize] - pv_old;
-                        x[w as usize] = pv_new + DVec2::new(turn.x * d.x - turn.y * d.y, turn.y * d.x + turn.x * d.y);
-                        pinned[w as usize] = true;
-                    }
-                }
-            }
-            // At least one triangle's worth of pins: else the component's lowest-g triangle keeps its seed corners.
-            let mut wedge_list: Vec<u32> = tris.iter().flat_map(|&t| (0..3).map(move |k| t as usize * 3 + k)).map(|i| wedges.corner[i]).collect();
-            wedge_list.sort_unstable();
-            wedge_list.dedup();
-            if wedge_list.iter().filter(|&&w| pinned[w as usize]).count() < 3
-                && let Some(&t) = tris.iter().min_by(|&&a, &&b| tri_g(a).total_cmp(&tri_g(b)).then(a.cmp(&b)))
-            {
-                for k in 0..3 {
-                    let w = wedges.corner[t as usize * 3 + k];
-                    pinned[w as usize] = true;
-                    x[w as usize] = self.p2[patch.tv[t as usize][k] as usize];
-                }
-            }
-            // Round 9 (T4): a strip component starts from its Fermi layout (each free wedge at its vertex's spine
-            // foot and signed geodesic distance), not from the seed (LSCM from the seed was folded next to the pinned
-            // strip, D4a). Other components (jumped parts, parts without a strip) keep the seed start.
-            if strip_comp[c as usize] && !knob("WTE_TEST_SEED_START", false) {
-                for &w in &wedge_list {
-                    if !pinned[w as usize] {
-                        let f = self.fermi(wedges.vertex[w as usize]);
-                        if f.is_finite() {
-                            x[w as usize] = f;
+        let mut runs: Vec<Option<CompRun>> = vec![None; comp_tris.len()];
+        for lv in 0..=levels {
+            let comps: Vec<u32> = order.iter().map(|o| o.2).filter(|&c| level[c as usize] == lv).collect();
+            let (xr, pr) = (&x, &pinned);
+            // One component from the positions `xr` and pins `pr` (its own wedges as the sequential loop leaves them
+            // until its turn; its source's final positions): its wedges, their final positions and pins, its run.
+            let one = |c: u32| -> CompOut {
+                let tris = &comp_tris[c as usize];
+                let mut wedge_list: Vec<u32> = tris.iter().flat_map(|&t| (0..3).map(move |k| t as usize * 3 + k)).map(|i| wedges.corner[i]).collect();
+                wedge_list.sort_unstable();
+                wedge_list.dedup();
+                let local: std::collections::HashMap<u32, u32> = wedge_list.iter().enumerate().map(|(i, &w)| (w, i as u32)).collect();
+                let mut xs: Vec<DVec2> = wedge_list.iter().map(|&w| xr[w as usize]).collect();
+                let mut pins: Vec<bool> = wedge_list.iter().map(|&w| pr[w as usize]).collect();
+                // A jumped part: its landing triangle re-placed from the source vertex's relaxed position and turn.
+                if let Some((src, lt)) = jump_of(c) {
+                    let done = |d: u32| rank[d as usize] < rank[c as usize];
+                    let (pv_new, turn) = self.relaxed_pose(src, &laid, &wedges, xr, &done, &rest);
+                    let pv_old = self.p2[src as usize];
+                    for &v in &patch.tv[lt as usize] {
+                        let w = wedge_at(lt, v);
+                        if w != NONE {
+                            let d = self.p2[v as usize] - pv_old;
+                            let i = local[&w] as usize;
+                            xs[i] = pv_new + DVec2::new(turn.x * d.x - turn.y * d.y, turn.y * d.x + turn.x * d.y);
+                            pins[i] = true;
                         }
                     }
                 }
-            }
-            // The component's system over its own wedges.
-            let local: std::collections::HashMap<u32, u32> = wedge_list.iter().enumerate().map(|(i, &w)| (w, i as u32)).collect();
-            let mut sys_tris = Vec::new();
-            let mut sys_rest = Vec::new();
-            for &t in tris {
-                if let Some(r) = rest[t as usize] {
-                    sys_tris.push(std::array::from_fn::<u32, 3, _>(|k| local[&wedges.corner[t as usize * 3 + k]]));
-                    sys_rest.push(r);
+                // At least one triangle's worth of pins: else the component's lowest-g triangle keeps its seed corners.
+                if pins.iter().filter(|&&p| p).count() < 3
+                    && let Some(&t) = tris.iter().min_by(|&&a, &&b| tri_g(a).total_cmp(&tri_g(b)).then(a.cmp(&b)))
+                {
+                    for k in 0..3 {
+                        let i = local[&wedges.corner[t as usize * 3 + k]] as usize;
+                        pins[i] = true;
+                        xs[i] = self.p2[patch.tv[t as usize][k] as usize];
+                    }
                 }
-            }
-            let mut xs: Vec<DVec2> = wedge_list.iter().map(|&w| x[w as usize]).collect();
-            let pins: Vec<bool> = wedge_list.iter().map(|&w| pinned[w as usize]).collect();
-            let mut budget = RELAX_CG_BUDGET;
-            cg_iters += relax_component_from(&sys_tris, &sys_rest, &pins, &mut xs, &mut budget, false);
-            for (i, &w) in wedge_list.iter().enumerate() {
-                if xs[i].is_finite() {
+                // Round 9 (T4): a strip component starts from its Fermi layout (each free wedge at its vertex's spine
+                // foot and signed geodesic distance), not from the seed (LSCM from the seed was folded next to the
+                // pinned strip, D4a). Other components (jumped parts, parts without a strip) keep the seed start.
+                if strip_comp[c as usize] && !knob("WTE_TEST_SEED_START", false) {
+                    for (i, &w) in wedge_list.iter().enumerate() {
+                        if !pins[i] {
+                            let f = self.fermi(wedges.vertex[w as usize]);
+                            if f.is_finite() {
+                                xs[i] = f;
+                            }
+                        }
+                    }
+                }
+                // The component's system over its own wedges.
+                let mut sys_tris = Vec::new();
+                let mut sys_rest = Vec::new();
+                for &t in tris {
+                    if let Some(r) = rest[t as usize] {
+                        sys_tris.push(std::array::from_fn::<u32, 3, _>(|k| local[&wedges.corner[t as usize * 3 + k]]));
+                        sys_rest.push(r);
+                    }
+                }
+                let before = xs.clone();
+                let start: Vec<[u64; 2]> = xs.iter().map(|p| [p.x.to_bits(), p.y.to_bits()]).collect();
+                let earlier = memo.and_then(|m| m[c as usize].as_ref()).filter(|r| r.start == start && r.pins == pins);
+                let cg = match earlier {
+                    Some(r) => {
+                        xs.clone_from(&r.out);
+                        r.cg
+                    }
+                    None => {
+                        let mut budget = RELAX_CG_BUDGET;
+                        relax_component_from(&sys_tris, &sys_rest, &pins, &mut xs, &mut budget, false)
+                    }
+                };
+                let run = CompRun { start, pins: pins.clone(), out: xs.clone(), cg };
+                // A position the solve left non-finite keeps the one it started from.
+                for (xi, b) in xs.iter_mut().zip(&before) {
+                    if !xi.is_finite() {
+                        *xi = *b;
+                    }
+                }
+                (wedge_list, xs, pins, run)
+            };
+            let outs: Vec<CompOut> =
+                if comps.len() > 1 { comps.par_iter().map(|&c| one(c)).collect() } else { comps.iter().map(|&c| one(c)).collect() };
+            for (&c, (wedge_list, xs, pins, run)) in comps.iter().zip(outs) {
+                for (i, &w) in wedge_list.iter().enumerate() {
                     x[w as usize] = xs[i];
+                    pinned[w as usize] = pins[i];
+                }
+                cg_iters += run.cg;
+                if memo.is_none() {
+                    runs[c as usize] = Some(run);
                 }
             }
-            done_comp[c as usize] = true;
         }
-        (x, pinned, cg_iters)
+        (x, pinned, cg_iters, runs)
         };
         // Round 9 (T5): the exact region. A laid vertex is exact when it has one wedge, every laid triangle round it is
         // isometric in the seed (edge ratios within `ISO_TOL`, not torn) and it is connected to a strip seed through
@@ -483,16 +555,17 @@ impl<'a> Layout<'a> {
                     x1[w] = self.p2[wedges.vertex[w] as usize];
                 }
             }
-            let (xs, ps, cg) = solve(&x1, &pin1);
+            let (xs, ps, cg, runs) = solve(&x1, &pin1, None);
             if self.exact_holds(&laid, &wedges, &xs, &ps, &rest, rect) {
                 (xs, ps, cg)
             } else {
                 fell_back = true;
-                let (xs, ps, cg2) = solve(&x, &pinned);
+                let (xs, ps, cg2, _) = solve(&x, &pinned, Some(&runs));
                 (xs, ps, cg + cg2)
             }
         } else {
-            solve(&x, &pinned)
+            let (xs, ps, cg, _) = solve(&x, &pinned, None);
+            (xs, ps, cg)
         };
         #[cfg(test)]
         EXACT_OUTCOME.with(|o| o.set((if use_exact { exact_count } else { 0 }, fell_back)));
@@ -700,12 +773,12 @@ impl<'a> Layout<'a> {
     /// Position and turn (unit complex number) of vertex `v` after the relaxation: its representative wedge's
     /// position and the rotation between the seed and the relaxed layout of its representative triangle (identity when
     /// its component is not relaxed yet).
-    fn relaxed_pose(&self, v: u32, laid: &[bool], wedges: &Wedges, x: &[DVec2], done: &[bool], rest: &[Option<(f64, [DVec2; 3])>]) -> (DVec2, DVec2) {
+    fn relaxed_pose(&self, v: u32, laid: &[bool], wedges: &Wedges, x: &[DVec2], done: &dyn Fn(u32) -> bool, rest: &[Option<(f64, [DVec2; 3])>]) -> (DVec2, DVec2) {
         let patch = self.patch;
         let tri = patch.vtris(v).iter().copied().find(|&t| laid[t as usize] && rest[t as usize].is_some());
         let Some(t) = tri else { return (self.p2[v as usize], DVec2::X) };
         let comp = wedges.comp[t as usize];
-        if comp == NONE || !done[comp as usize] {
+        if comp == NONE || !done(comp) {
             return (self.p2[v as usize], DVec2::X);
         }
         let k = corner_of(patch, t, v);
@@ -722,6 +795,14 @@ impl<'a> Layout<'a> {
         let turn = angle(relaxed) - angle(seeded);
         let rot = DVec2::new(turn.cos(), turn.sin());
         (pos, if rot.is_finite() { rot } else { DVec2::X })
+    }
+
+    /// check:B (round 9): the component whose relaxed positions `relaxed_pose` reads for vertex `v` (`None`: it reads
+    /// none).
+    fn source_comp(&self, v: u32, laid: &[bool], wedges: &Wedges, rest: &[Option<(f64, [DVec2; 3])>]) -> Option<u32> {
+        let t = self.patch.vtris(v).iter().copied().find(|&t| laid[t as usize] && rest[t as usize].is_some())?;
+        let comp = wedges.comp[t as usize];
+        (comp != NONE).then_some(comp)
     }
 
     /// Per vertex: the wedge of its first laid triangle (ascending local triangle), `NONE` without one.
@@ -1301,17 +1382,7 @@ impl<'a> System<'a> {
                 std::array::from_fn(|k| DVec2::new(jx.dot(g[k]), jy.dot(g[k])) * area)
             }
         };
-        if self.par {
-            out.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(c, chunk)| {
-                for (i, o) in chunk.iter_mut().enumerate() {
-                    *o = term(c * PAR_CHUNK + i);
-                }
-            });
-        } else {
-            for (t, o) in out.iter_mut().enumerate() {
-                *o = term(t);
-            }
-        }
+        each(self.par, out, |t, o| *o = term(t));
     }
 
     /// `y[w]` = the sum of the terms of unknown `w` in incidence order (0 for a pinned unknown).
@@ -1326,17 +1397,7 @@ impl<'a> System<'a> {
             }
             s
         };
-        if self.par {
-            y.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(c, chunk)| {
-                for (i, o) in chunk.iter_mut().enumerate() {
-                    *o = one(c * PAR_CHUNK + i);
-                }
-            });
-        } else {
-            for (w, o) in y.iter_mut().enumerate() {
-                *o = one(w);
-            }
-        }
+        each(self.par, y, |w, o| *o = one(w));
     }
 
     fn dot(&self, a: &[DVec2], b: &[DVec2]) -> f64 {
@@ -1351,16 +1412,22 @@ impl<'a> System<'a> {
         let mut terms = vec![[DVec2::ZERO; 3]; self.tris.len()];
         let mut hx = vec![DVec2::ZERO; n];
         // The reference: the right-hand side with the pins moved over (the free unknowns at 0).
-        let pins_only: Vec<DVec2> = (0..n).map(|i| if self.pinned[i] { x[i] } else { DVec2::ZERO }).collect();
+        let par = self.par;
+        let mut pins_only = vec![DVec2::ZERO; n];
+        each(par, &mut pins_only, |i, o| *o = if self.pinned[i] { x[i] } else { DVec2::ZERO });
         self.terms(lscm, &pins_only, None, &mut terms);
         self.gather(&terms, &mut hx);
-        let free_b: Vec<DVec2> = (0..n).map(|i| if self.pinned[i] { DVec2::ZERO } else { b[i] - hx[i] }).collect();
+        let mut free_b = pins_only;
+        each(par, &mut free_b, |i, o| *o = if self.pinned[i] { DVec2::ZERO } else { b[i] - hx[i] });
         let reference = self.dot(&free_b, &free_b).sqrt();
+        drop(free_b);
         self.terms(lscm, x, None, &mut terms);
         self.gather(&terms, &mut hx);
-        let mut r: Vec<DVec2> = (0..n).map(|i| if self.pinned[i] { DVec2::ZERO } else { b[i] - hx[i] }).collect();
-        let precondition = |r: &[DVec2]| -> Vec<DVec2> { (0..n).map(|i| if self.pinned[i] { DVec2::ZERO } else { r[i] / self.diag[i] }).collect() };
-        let mut z = precondition(&r);
+        let mut r = vec![DVec2::ZERO; n];
+        each(par, &mut r, |i, o| *o = if self.pinned[i] { DVec2::ZERO } else { b[i] - hx[i] });
+        let precondition = |r: &[DVec2], z: &mut [DVec2]| each(par, z, |i, o| *o = if self.pinned[i] { DVec2::ZERO } else { r[i] / self.diag[i] });
+        let mut z = vec![DVec2::ZERO; n];
+        precondition(&r, &mut z);
         let mut p = z.clone();
         let mut rz = self.dot(&r, &z);
         let mut q = vec![DVec2::ZERO; n];
@@ -1377,21 +1444,17 @@ impl<'a> System<'a> {
                 break;
             }
             let alpha = rz / pq;
-            for ((xi, ri), (pi, qi)) in x.iter_mut().zip(r.iter_mut()).zip(p.iter().zip(&q)) {
-                *xi += *pi * alpha;
-                *ri -= *qi * alpha;
-            }
+            each(par, x, |i, xi| *xi += p[i] * alpha);
+            each(par, &mut r, |i, ri| *ri -= q[i] * alpha);
             iters += 1;
             *budget -= 1;
-            z = precondition(&r);
+            precondition(&r, &mut z);
             let rz_new = self.dot(&r, &z);
             let beta = rz_new / rz;
             if !beta.is_finite() {
                 break;
             }
-            for (pi, zi) in p.iter_mut().zip(&z) {
-                *pi = *zi + *pi * beta;
-            }
+            each(par, &mut p, |i, pi| *pi = z[i] + *pi * beta);
             rz = rz_new;
         }
         iters
@@ -1441,6 +1504,7 @@ fn relax_component_from(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[b
         eprintln!("relax: {} unknowns, {} triangles, {} pinned, LSCM {iters} iterations", x.len(), tris.len(), sys.pinned.iter().filter(|&&p| p).count());
     }
     let mut rot = vec![DVec2::X; tris.len()];
+    let mut local = vec![(DVec2::X, 0.0f64); tris.len()];
     let mut terms = vec![[DVec2::ZERO; 3]; tris.len()];
     let mut rhs = vec![DVec2::ZERO; x.len()];
     let mut prev = f64::INFINITY;
@@ -1448,18 +1512,24 @@ fn relax_component_from(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[b
         if *budget == 0 {
             break;
         }
-        // Local step: the closest rotation per triangle; the energy of the current layout.
-        let mut energy = 0.0;
-        for (t, c) in tris.iter().enumerate() {
+        // Local step: the closest rotation per triangle; the energy of the current layout (check:B: the rotations and
+        // the energy terms per triangle on the pool for a large system, the energy summed in triangle order: the same
+        // bits).
+        let xr: &[DVec2] = x;
+        each(sys.par, &mut local, |t, o| {
             let (area, g) = rest[t];
-            let xs = c.map(|w| x[w as usize]);
+            let xs = tris[t].map(|w| xr[w as usize]);
             let jx = g[0] * xs[0].x + g[1] * xs[1].x + g[2] * xs[2].x;
             let jy = g[0] * xs[0].y + g[1] * xs[1].y + g[2] * xs[2].y;
             let (a, b, cc, d) = (jx.x, jx.y, jy.x, jy.y);
             let v = DVec2::new(a + d, cc - b);
             let r = if v.length() > 0.0 && v.is_finite() { v.normalize() } else { DVec2::X };
+            *o = (r, 0.5 * area * ((a - r.x).powi(2) + (b + r.y).powi(2) + (cc - r.y).powi(2) + (d - r.x).powi(2)));
+        });
+        let mut energy = 0.0;
+        for (t, &(r, e)) in local.iter().enumerate() {
             rot[t] = r;
-            energy += 0.5 * area * ((a - r.x).powi(2) + (b + r.y).powi(2) + (cc - r.y).powi(2) + (d - r.x).powi(2));
+            energy += e;
         }
         if debug {
             eprintln!("relax: ARAP energy {energy:.6e}");
@@ -1479,6 +1549,23 @@ fn relax_component_from(tris: &[[u32; 3]], rest: &[(f64, [DVec2; 3])], pins: &[b
     }
     iters
 }
+
+/// check:B (round 9, speed): one component's relaxation in a solve of `Layout::relax`: its start positions (bits) and
+/// pins, its result and the CG steps it took.
+#[derive(Clone)]
+struct CompRun {
+    start: Vec<[u64; 2]>,
+    pins: Vec<bool>,
+    out: Vec<DVec2>,
+    cg: u32,
+}
+
+/// check:B (round 9, speed): one component's result in a level of `Layout::relax`'s solve: its wedges, their final
+/// positions and pins, its run.
+type CompOut = (Vec<u32>, Vec<DVec2>, Vec<bool>, CompRun);
+
+/// check:B (round 9): (first, last) covered cell per row or column of the owner grid.
+type Spans = Vec<(usize, usize)>;
 
 // ----- the owner grid (round 9, T1: the place owner) -----
 
@@ -1551,6 +1638,10 @@ const OWNER_CHUNK_ROWS: usize = 16;
 /// The owner build runs on the pool from this many triangles, its \`buried\` pass also from this many mixed cells.
 const OWNER_PAR_TRIS: usize = 2048;
 const OWNER_PAR_MIXED: usize = 20_000;
+/// check:B (round 9, speed): ... and from this many cells (a grid of up to 1,024 x 512 cells costs 30-40 ms on one
+/// thread whatever the triangle count: the small models' whole parameterization). Each cell, row and count is computed
+/// alone or summed as integers: the same bits on the pool.
+const OWNER_PAR_CELLS: usize = 65_536;
 
 /// One cell during the owner build: the owner's depth, index and 3D point; the first candidate's part and point and
 /// the `mixed` bits (1 another part, 2 another place).
@@ -1638,10 +1729,17 @@ impl OwnerGrid {
         // places (one farther than half the owner test's smallest tolerance from the first candidate's point:
         // candidates all at one place need no choice, e.g. coplanar overlapping parts).
         let half_tol = 0.5 * OWNER_SAME as f64 * cell * std::f64::consts::SQRT_2;
-        let mut cells: Vec<CellState> = vec![CellState::default(); n];
         // On the pool only for large inputs: a parameterization running on a busy pool (another bake, a test run)
         // would wait for it (same bits either way: each chunk writes only its own cells).
-        let par = tris.len() >= OWNER_PAR_TRIS;
+        let par = tris.len() >= OWNER_PAR_TRIS || n >= OWNER_PAR_CELLS;
+        // check:B (round 9, speed): a large grid's cells are first written on the pool (25 MB for 1,024 x 512 cells:
+        // the page faults of one thread were a third of a small model's parameterization).
+        let mut cells: Vec<CellState> = Vec::with_capacity(n);
+        if par {
+            cells.par_extend((0..n).into_par_iter().map(|_| CellState::default()));
+        } else {
+            cells.resize(n, CellState::default());
+        }
         let pass1 = |(c, out): (usize, &mut [CellState])| {
             let base = c * chunk_rows * width;
             let (r0, r1) = (c * chunk_rows, ((c + 1) * chunk_rows).min(dims[1]));
@@ -1771,30 +1869,71 @@ impl OwnerGrid {
                 eprintln!("owner: pass 2 {:.1} ms, {} cells asked", t0.elapsed().as_secs_f64() * 1e3, asked.into_inner());
             }
         }
-        let grid = OwnerGrid {
-            lo: [lo[0] as f32, lo[1] as f32],
-            cell: cell as f32,
-            dims,
-            g: cells.iter().map(|s| if s.best == NONE { f32::INFINITY } else { s.g as f32 }).collect(),
-            pos: cells.iter().map(|s| s.p).collect(),
-            scale: cells.iter().map(|s| if s.best == NONE { 1.0 } else { tris[s.best as usize].s }).collect(),
+        let g_of = |s: &CellState| if s.best == NONE { f32::INFINITY } else { s.g as f32 };
+        let scale_of = |s: &CellState| if s.best == NONE { 1.0 } else { tris[s.best as usize].s };
+        let grid = if par {
+            OwnerGrid {
+                lo: [lo[0] as f32, lo[1] as f32],
+                cell: cell as f32,
+                dims,
+                g: cells.par_iter().map(g_of).collect(),
+                pos: cells.par_iter().map(|s| s.p).collect(),
+                scale: cells.par_iter().map(scale_of).collect(),
+            }
+        } else {
+            OwnerGrid {
+                lo: [lo[0] as f32, lo[1] as f32],
+                cell: cell as f32,
+                dims,
+                g: cells.iter().map(g_of).collect(),
+                pos: cells.iter().map(|s| s.p).collect(),
+                scale: cells.iter().map(scale_of).collect(),
+            }
         };
         // Round 9 (A7): `lost_cut`, the picture's cells without an owner inside the laid set's outline: an uncovered
         // cell with covered cells on both sides in its row or in its column (a cut wedge, a shrunk seam, a hole), as
         // against picture beyond a mesh edge or beyond the spine's ends (open to the grid's border both ways).
+        if debug {
+            eprintln!("owner: grid out {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        }
         let covered = |k: usize| cells[k].best != NONE;
-        let mut rspan = vec![(usize::MAX, 0usize); dims[1]];
-        let mut cspan = vec![(usize::MAX, 0usize); dims[0]];
-        for (j, r) in rspan.iter_mut().enumerate() {
-            for (i, c) in cspan.iter_mut().enumerate() {
+        // Row spans per row; column spans per chunk of rows, merged by min / max (check:B: on the pool for a large
+        // grid; the same spans).
+        let row_span = |j: usize| {
+            let mut r = (usize::MAX, 0usize);
+            for i in 0..width {
                 if covered(j * width + i) {
                     r.0 = r.0.min(i);
                     r.1 = r.1.max(i);
-                    c.0 = c.0.min(j);
-                    c.1 = c.1.max(j);
                 }
             }
+            r
+        };
+        let col_spans = |c: usize| {
+            let mut spans = vec![(usize::MAX, 0usize); width];
+            for j in c * chunk_rows..((c + 1) * chunk_rows).min(dims[1]) {
+                for (i, s) in spans.iter_mut().enumerate() {
+                    if covered(j * width + i) {
+                        s.0 = s.0.min(j);
+                        s.1 = s.1.max(j);
+                    }
+                }
+            }
+            spans
+        };
+        let (rspan, parts): (Spans, Vec<Spans>) = if par {
+            ((0..dims[1]).into_par_iter().map(row_span).collect(), (0..chunks).into_par_iter().map(col_spans).collect())
+        } else {
+            ((0..dims[1]).map(row_span).collect(), (0..chunks).map(col_spans).collect())
+        };
+        let mut cspan = vec![(usize::MAX, 0usize); dims[0]];
+        for part in &parts {
+            for (c, p) in cspan.iter_mut().zip(part) {
+                c.0 = c.0.min(p.0);
+                c.1 = c.1.max(p.1);
+            }
         }
+        drop(parts);
         // check:A (round 9): the picture beyond a closure (where the ends or the halves meet: a triangle-sized
         // tooth line, and with a helix the band past the meeting line) is not lost to a cut. Uncovered picture
         // cells 4-connected through uncovered picture cells to a cell a closure triangle covers are left out.
@@ -1802,17 +1941,27 @@ impl OwnerGrid {
             let (x, y) = (lo[0] + (i as f64 + 0.5) * cell, lo[1] + (j as f64 + 0.5) * cell);
             x.abs() <= picture[0] && y.abs() <= picture[1]
         };
-        let mut beyond = vec![false; n];
-        let mut queue: Vec<usize> = Vec::new();
         let neighbours = |k: usize| {
             let (i, j) = (k % width, k / width);
             [(i > 0).then(|| k - 1), (i + 1 < width).then(|| k + 1), (j > 0).then(|| k - width), (j + 1 < dims[1]).then(|| k + width)]
         };
-        for (k, b) in beyond.iter_mut().enumerate() {
-            if !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| cells[m].closure) {
-                *b = true;
-                queue.push(k);
+        let seed = |k: usize| !covered(k) && in_picture(k % width, k / width) && neighbours(k).into_iter().flatten().any(|m| cells[m].closure);
+        let mut beyond = vec![false; n];
+        // check:B: the seeds on the pool for a large grid (the flood below reaches the same set from them in any order).
+        if par {
+            beyond.par_chunks_mut(chunk_rows * width).enumerate().for_each(|(c, out)| {
+                for (i, b) in out.iter_mut().enumerate() {
+                    *b = seed(c * chunk_rows * width + i);
+                }
+            });
+        } else {
+            for (k, b) in beyond.iter_mut().enumerate() {
+                *b = seed(k);
             }
+        }
+        let mut queue: Vec<usize> = beyond.iter().enumerate().filter_map(|(k, &b)| b.then_some(k)).collect();
+        if debug {
+            eprintln!("owner: spans, seeds {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
         while let Some(k) = queue.pop() {
             for m in neighbours(k).into_iter().flatten() {
@@ -1822,11 +1971,13 @@ impl OwnerGrid {
                 }
             }
         }
-        let (mut lost, mut pic_cells) = (0usize, 0usize);
-        for (j, r) in rspan.iter().enumerate() {
+        // Per row (lost, picture cells), integer sums (check:B: on the pool for a large grid).
+        let row_lost = |j: usize| {
+            let r = rspan[j];
+            let (mut lost, mut pic_cells) = (0usize, 0usize);
             let y = lo[1] + (j as f64 + 0.5) * cell;
             if y.abs() > picture[1] {
-                continue;
+                return (0, 0);
             }
             for (i, c) in cspan.iter().enumerate() {
                 let x = lo[0] + (i as f64 + 0.5) * cell;
@@ -1838,6 +1989,13 @@ impl OwnerGrid {
                     lost += 1;
                 }
             }
+            (lost, pic_cells)
+        };
+        let sum = |a: (usize, usize), b: (usize, usize)| (a.0 + b.0, a.1 + b.1);
+        let (lost, pic_cells) =
+            if par { (0..dims[1]).into_par_iter().map(row_lost).reduce(|| (0, 0), sum) } else { (0..dims[1]).map(row_lost).fold((0, 0), sum) };
+        if debug {
+            eprintln!("owner: lost {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
         drop(cells);
         // The rejected share at the cell centres inside the picture, of the laid triangles (`WrapStats::rejected`: the

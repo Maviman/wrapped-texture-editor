@@ -3428,3 +3428,132 @@ fn wa38_the_graph_is_built_once_per_mesh_and_shared_by_the_jobs() {
     assert_eq!(testkit::layers(&shared), testkit::layers(&own));
     assert_eq!(WrapStatsAlias { micros: 0, ..shared.stats() }, WrapStatsAlias { micros: 0, ..own.stats() });
 }
+
+// ----- check:B (round 9): byte checks of speed changes and a probe of the sweep's heavy parameterizations -----
+
+/// check:B (round 9): runs the wrap tests on this thread and prints a hash of every parameterization they make
+/// (`FP <test> <n> <hash>`, everything but the build time; `sphere_check::record`). A speed change that must keep the
+/// bytes compares this output before and after (`--ignored --nocapture --test-threads=1`). Red tests contribute what
+/// they make before their failing assert.
+#[test]
+#[ignore]
+fn check_b_fingerprints() {
+    use crate::wrap_param::sphere_check;
+    let tests: Vec<(&str, fn())> = vec![
+        ("wa1", wa1_a_cylinder_unrolls_exactly_away_from_and_on_the_seam),
+        ("wa2", wa2_the_cylinder_picture_keeps_its_area_and_every_cell_its_share),
+        ("wa3", wa3_a_picture_longer_than_the_way_round_has_its_ends_meet),
+        ("wa4", wa4_a_bumpy_plate_receives_the_whole_picture),
+        ("wa4_r8", wa4_r8_bumpy_plates_receive_the_picture_once_whole_and_smooth),
+        ("wa5", wa5_a_cube_edge_unfolds_exactly_and_a_corner_is_cut_cleanly),
+        ("wa6", wa6_the_sphere_seam_is_invisible),
+        ("wa7", wa7_bad_meshes_and_bad_pictures_never_fail),
+        ("wa7b", wa7_the_reach_is_bucketed_and_holds_the_picture),
+        ("wa8", wa8_gaps_cracks_and_thin_sheets),
+        ("wa11", wa11_a_parameterization_is_reused_exactly_when_it_serves),
+        ("wa16", wa16_jump_small_gaps_continues_across_a_gap_as_flat_ground),
+        ("wa17", wa17_jump_small_gaps_climbs_a_cube_standing_on_the_floor),
+        ("wa18", wa18_overlap_winds_on_like_tape),
+        ("wa19", wa19_overlap_limits_and_both_options_together),
+        ("wa20", wa20_a_bumpy_ball_receives_the_picture_once_whole_and_smooth),
+        ("wa21", wa21_a_closed_piece_is_covered_once_with_cuts_where_the_edges_meet),
+        ("wa22", wa22_a_torus_is_covered_once),
+        ("wa23", wa23_a_cone_tip_and_a_cube_corner_are_cut_once),
+        ("wa24", wa24_jump_small_gaps_is_bounded_by_the_footprint),
+        ("wa25", wa25_the_owner_test_is_inert_where_the_layout_is_exact),
+        ("wa27", wa27_a_relaxed_parameterization_is_reused_exactly),
+        ("wa31", wa31_the_owner_does_not_depend_on_the_mesh_density),
+        ("wa32", wa32_a_helix_round_a_tube_has_its_ends_meet),
+        ("wa33", wa33_rivets_do_not_cut_the_picture),
+        ("wa34", wa34_a_saddle_corner_lies_once),
+        ("wa35", wa35_exact_parts_stay_exact),
+        ("wa36", wa36_the_layout_does_not_depend_on_the_texture_resolution),
+        ("wa37", wa37_nothing_is_lost_without_a_reason),
+        ("check_a_boundary", check_a_a_stamp_at_a_mesh_boundary),
+        ("check_a_scale", check_a_covered_follows_a_reused_scale),
+        ("check_a_huge_text", check_a_a_huge_text_on_a_small_part),
+        ("check_a_three_parts", check_a_jump_across_three_parts),
+        ("check_a_many_turns", check_a_overlap_at_many_turns),
+        ("check_a8_shapes", check_a8_shapes_that_try_to_break_the_relaxed_wrap),
+        ("check_a8_slivers", check_a8_slivers_and_zero_area_triangles_in_the_relaxation),
+        ("check_a8_huge_tiny", check_a8_huge_tiny_and_boundary_stamps_on_the_relaxed_path),
+        ("check_a9_share", check_a9_a_piece_takes_its_share),
+        ("check_a9_mug", check_a9_a_mug_handle_with_jump),
+        ("check_a9_cone", check_a9_a_helix_on_a_cone),
+        ("check_a9_rivet", check_a9_a_rivet_on_a_box_corner),
+        ("check_a9_small", check_a9_a_picture_smaller_than_one_triangle),
+    ];
+    sphere_check::record(true);
+    let _ = sphere_check::prints();
+    let mut total = 0;
+    for (name, test) in tests {
+        let red = std::panic::catch_unwind(test).is_err();
+        let prints = sphere_check::prints();
+        for (i, h) in prints.iter().enumerate() {
+            println!("FP {name} {i} {h:016x}");
+        }
+        println!("FP {name}: {} parameterizations{}", prints.len(), if red { " (red)" } else { "" });
+        total += prints.len();
+    }
+    sphere_check::record(false);
+    println!("FP total {total}");
+    assert!(total >= 200, "only {total} parameterizations");
+}
+
+/// check:B (round 9): one parameterization of the sweep (`wrap_surface` step 10) rebuilt from its logged placement
+/// bits, timed by phase, with its fingerprint hash. Env: `WTE_PROBE_MODEL` (a model file), `WTE_PROBE_BITS`
+/// (`origin x,y,z;rotation x,y,z,w;half x,y` as f32 bits, from the scenario's `placement bits` line),
+/// `WTE_PROBE_JUMP` (`true` / `false`), `WTE_PROBE_RUNS` (default 1). Release: `cargo test --release -p wte_core
+/// --lib check_b_probe -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn check_b_probe() {
+    use crate::doc_build::TextureChoice;
+    let Ok(path) = std::env::var("WTE_PROBE_MODEL") else {
+        eprintln!("WTE_PROBE_MODEL not set, skipped");
+        return;
+    };
+    let bits = std::env::var("WTE_PROBE_BITS").expect("WTE_PROBE_BITS");
+    let groups: Vec<Vec<f32>> = bits.split(';').map(|g| g.split(',').map(|v| f32::from_bits(v.trim().parse::<u32>().unwrap())).collect()).collect();
+    let jump: bool = std::env::var("WTE_PROBE_JUMP").is_ok_and(|v| v == "true");
+    let runs: usize = std::env::var("WTE_PROBE_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    let t = Instant::now();
+    let model = crate::import::import_from_path(std::path::Path::new(&path), &Default::default(), &crate::progress::NoProgress).unwrap();
+    let n = model.mesh.sets.len();
+    let doc = Document::from_import(model, vec![TextureChoice::Detected; n], &crate::progress::NoProgress).unwrap();
+    eprintln!("probe: {path} loaded in {:.0} ms, {} triangles", ms(t), doc.mesh.tri_count());
+    let mut p = wrapped(Vec3::ZERO, Vec3::Y, Vec3::X, Vec2::ONE);
+    p.origin = Vec3::new(groups[0][0], groups[0][1], groups[0][2]);
+    p.rotation = Quat::from_xyzw(groups[1][0], groups[1][1], groups[1][2], groups[1][3]);
+    p.half_size = Vec2::new(groups[2][0], groups[2][1]);
+    p.wrap = WrapOptions { jump_gaps: jump, overlap: false };
+    let src = cells();
+    let maps = doc.texel_maps();
+    let t = Instant::now();
+    let graph = crate::wrap_param::WrapMesh::build(&doc.mesh);
+    eprintln!("probe: graph {:.0} ms", ms(t));
+    for run in 0..runs {
+        let _ = crate::wrap_param::phase_times::take();
+        let t = Instant::now();
+        let param = crate::wrap_param::wrap_param_in(&doc.mesh, &doc.bvh, &graph, &maps, src.size(), &p);
+        let total = ms(t);
+        let ph = crate::wrap_param::phase_times::take().map(|us| us as f64 / 1e3);
+        eprintln!(
+            "probe run {run}: {total:.1} ms [collect {:.1}, front {:.1}, relax {:.1}, owner {:.1}], {} candidates, print {:016x}, {:?}",
+            ph[0],
+            ph[1],
+            ph[2],
+            ph[3],
+            crate::wrap_param::phase_times::last_candidates(),
+            crate::wrap_param::sphere_check::print_of(param.as_ref()),
+            param.as_ref().map(|w| w.stats())
+        );
+    }
+    // Optionally (`WTE_PROBE_SPHERE=true`) round 8's sphere path for the same placement: graph path = sphere path.
+    if std::env::var("WTE_PROBE_SPHERE").is_ok_and(|v| v == "true") {
+        let t = Instant::now();
+        let sphere = crate::wrap_param::sphere_check::sphere_param(&doc.mesh, &doc.bvh, &maps, src.size(), &p);
+        eprintln!("probe sphere path: {:.1} ms, print {:016x}", ms(t), crate::wrap_param::sphere_check::print_of(sphere.as_ref()));
+    }
+}

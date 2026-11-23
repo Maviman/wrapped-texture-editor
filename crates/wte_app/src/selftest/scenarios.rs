@@ -6892,6 +6892,15 @@ fn ws_log_path_stamp(state: &mut AppState, sc: &mut Scratch, jump: &str) -> Resu
         stats.map_or(0, |s| s.jumps),
         applied.map_or("-".to_owned(), |ms| format!("{ms:.0}")),
     );
+    // check:B (round 9): the placement as bits, so a core probe can rebuild this parameterization exactly.
+    log::info!(
+        "wrap_surface (10) Jump small gaps {jump} placement bits: origin {:?} rotation {:?} half {:?} flip {} {}",
+        p.origin.to_array().map(f32::to_bits),
+        p.rotation.to_array().map(f32::to_bits),
+        p.half_size.to_array().map(f32::to_bits),
+        p.flip_x,
+        p.flip_y,
+    );
     let keys = if jump == "on" { WS_Q_ON } else { WS_Q_OFF };
     let (dup, scatter) = quality.map_or((f32::NAN, f32::NAN), |q| (q.dup, q.scatter));
     for (key, v) in keys.into_iter().zip([ratio, dup, scatter]) {

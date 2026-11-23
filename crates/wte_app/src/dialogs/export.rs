@@ -501,7 +501,9 @@ fn options_ui(
                 let mut scope = scope_of(&st.options);
                 let before = scope;
                 ui.selectable_value(&mut scope, LayerScope::Visible, "Visible").on_hover_text("The visible layers");
-                ui.selectable_value(&mut scope, LayerScope::All, "All").on_hover_text("Hidden layers too");
+                ui.selectable_value(&mut scope, LayerScope::All, "All").on_hover_text(
+                    "Hidden layers too, in the per-layer, ORA and PSD files (the flattened texture is the visible layers)",
+                );
                 let n = st.selected_layers.len();
                 ui.add_enabled_ui(n > 0, |ui| {
                     ui.selectable_value(&mut scope, LayerScope::Selected, format!("Selected ({n})"))

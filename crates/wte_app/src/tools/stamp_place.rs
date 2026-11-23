@@ -117,8 +117,6 @@ fn anchored(mut placement: Placement, frame: Option<&TextFrame>) -> Placement {
     placement
 }
 
-/// The warning for a stamp or text (`what`) whose bake covers no texel (also shown by `stamp_bakes` when the first
-/// bake of a new stamp lands on a worker, round 5).
 /// The name of a new image stamp (and of its layers) from the chosen image's file name: the file stem, so the layer
 /// reads "logo" and its per-layer export "..._stamp_logo.png" (accept_fixes item D). The blob keeps the full file name
 /// (the project's embedded file, Extract sources). "Stamp" for an empty name; a name that is all extension
@@ -132,6 +130,8 @@ pub(crate) fn image_stamp_name(file_name: &str) -> String {
     if stem.is_empty() { name.to_owned() } else { stem }
 }
 
+/// The warning for a stamp or text (`what`) whose bake covers no texel (also shown by `stamp_bakes` when the first
+/// bake of a new stamp lands on a worker, round 5).
 pub(crate) fn no_texels_text(what: &str) -> String {
     format!(
         "The {what} was added as a layer but covers no texels here (the surface faces away, is hidden, or has no room in the texture)"

@@ -5860,7 +5860,8 @@ them as `AppAction::Cancel` (`ModalResponse::should_close()` may be used for the
   "1 file will be written: <base>.zip (N files inside)" carries the "will be replaced" marker, the rows list the entries.
   **Layers** row (export-select; replaces the round-1 checkbox "Include hidden layers") in the options grid after the base
   name: `Visible` | `All` | `Selected (N)` (selectable labels; `scope_of` / `apply_scope`): Visible / All = `layers: None`
-  with `include_hidden` false / true; Selected = `layers: Some(st.selected_layers)` (and clears the set filter when the
+  with `include_hidden` false / true (All's hover, check_accept: "Hidden layers too, in the per-layer, ORA and PSD files
+  (the flattened texture is the visible layers)"); Selected = `layers: Some(st.selected_layers)` (and clears the set filter when the
   layers change: their set decides), disabled with N = 0 (hover "Select layers in the Layers list first"). Under Selected a
   weak line names the layers ("Logo, WTE", after three "... and 2 more", `selection_names`; fix_export: "+ its layer in 1
   other texture set" / "+ their layers in N other texture sets" when designs span sets, `linked_extra` / `linked_note`;

@@ -507,6 +507,23 @@ pub(crate) fn wa7_meshes() -> Vec<(&'static str, RawMesh)> {
 
 #[test]
 fn wa7_bad_meshes_and_bad_pictures_never_fail() {
+    wa7_run(false);
+}
+
+/// Stable (fix-wrap, item 6): WA7's time limit, 200 ms per parameterization (the best of up to five runs,
+/// `best_param_ms`), checked in a serial run on an otherwise idle machine: `cargo test -p wte_core --lib perf_ --
+/// --ignored --test-threads=1` (the gate runs it). In the parallel test run the other tests share the machine and a
+/// wall-clock time depends on them (fix_exp_1: 366.5 ms under load against 59 ms alone); the parameterization's own
+/// CPU time is no substitute (its parallel parts on one thread take 3-5 x the wall time, measured on this machine,
+/// so the same bound could not stay).
+#[test]
+#[ignore = "perf: run serially by the gate (cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1)"]
+fn perf_wa7_parameterizations_within_200_ms() {
+    wa7_run(true);
+}
+
+/// WA7's cases (`wa7_bad_meshes_and_bad_pictures_never_fail`); the 200 ms limit is asserted with `timed` only.
+fn wa7_run(timed: bool) {
     let src = cells();
     let mut slowest = (0.0f64, String::new());
     for (name, raw) in wa7_meshes() {
@@ -555,8 +572,10 @@ fn wa7_bad_meshes_and_bad_pictures_never_fail() {
         let empty = PremulMips::build(&PixelBuf::new(0, 0));
         assert!(model.param(&empty, &wrapped(pos, n, Vec3::Y, Vec2::splat(0.3))).is_none());
     }
-    println!("WA7: slowest parameterization {:.1} ms ({}) (limit 200 ms)", slowest.0, slowest.1);
-    assert!(slowest.0 <= 200.0, "{slowest:?}");
+    println!("WA7: slowest parameterization {:.1} ms ({}) (limit 200 ms{})", slowest.0, slowest.1, if timed { "" } else { ", checked by perf_wa7_parameterizations_within_200_ms" });
+    if timed {
+        assert!(slowest.0 <= 200.0, "{slowest:?}");
+    }
 }
 
 #[test]
@@ -1515,6 +1534,20 @@ fn scaled(mut raw: RawMesh, scale: f32) -> RawMesh {
 /// non-unit rotation: no panic, finite coordinates, `covered` in 0..1, both bake qualities, the queries.
 #[test]
 fn check_a_own_bad_meshes_never_fail() {
+    check_a_own_run(false);
+}
+
+/// Stable (fix-wrap, item 6): check:A's own meshes under WA7's time limit (200 ms per parameterization, the best of
+/// up to five runs) in a serial run on an otherwise idle machine, as `perf_wa7_parameterizations_within_200_ms`
+/// (197.7 ms of 200 in a parallel run on an idle machine, 276.5 ms under load).
+#[test]
+#[ignore = "perf: run serially by the gate (cargo test -p wte_core --lib perf_ -- --ignored --test-threads=1)"]
+fn perf_check_a_own_meshes_within_200_ms() {
+    check_a_own_run(true);
+}
+
+/// check:A's own meshes (`check_a_own_bad_meshes_never_fail`); the 200 ms limit is asserted with `timed` only.
+fn check_a_own_run(timed: bool) {
     let src = cells();
     let meshes: Vec<(&str, RawMesh)> = vec![
         ("single triangle", single_triangle()),
@@ -1580,8 +1613,10 @@ fn check_a_own_bad_meshes_never_fail() {
             }
         }
     }
-    println!("check:A own meshes: slowest parameterization {:.1} ms ({}) (WA7 limit 200 ms)", slowest.0, slowest.1);
-    assert!(slowest.0 <= 200.0, "{slowest:?}");
+    println!("check:A own meshes: slowest parameterization {:.1} ms ({}) (WA7 limit 200 ms{})", slowest.0, slowest.1, if timed { "" } else { ", checked by perf_check_a_own_meshes_within_200_ms" });
+    if timed {
+        assert!(slowest.0 <= 200.0, "{slowest:?}");
+    }
 }
 
 /// check:A: a stamp at the boundary of a mesh: centred on a corner of a plate (a quarter on the surface), on the

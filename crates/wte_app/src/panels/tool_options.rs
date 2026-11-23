@@ -123,35 +123,67 @@ const STRETCH_LINE_MIN: f32 = 0.05;
 
 /// One line under "Wrapped over N triangles": plain help text or a warning.
 #[derive(Clone, Debug, PartialEq)]
-enum WrapLine {
+pub(crate) enum WrapLine {
     Help(String),
     Warn(String),
 }
 
+/// Least `WrapStats::lost_cut` (share of the picture lost inside the laid outline to cuts) that gets a line.
+const LOST_CUT_LINE_MIN: f32 = 0.02;
+/// Least `WrapStats::rejected` (share of the laid picture the owner test drops: it lies on surface under or behind
+/// another part) that gets a line.
+const HIDDEN_LINE_MIN: f32 = 0.05;
+
 /// The lines under "Wrapped over N triangles" of `wrap_stats_lines`, in order. Round 8 (R8-1, plan 4.1): a relaxed wrap
 /// that stretched by 5 % or more says so (help text: it is the intended behaviour on a curved surface), and seams
-/// inside the picture are named; the round-6 warnings follow unchanged.
-fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
+/// inside the picture are named. Stable (w1, item 6): each loss has one line that names its own cause, and no two lines
+/// contradict each other:
+/// - the ends met (`met_itself` / `passed`, Ends meet): "The ends meet at the back" (with the share of the picture's
+///   length shown when below 95 %); only a helix (`passed`) says "Longer than the way round";
+/// - the picture reaches a boundary edge (`reached_edge`) and less than 98 % lies on the surface: "runs off the
+///   surface: an edge, a hole or the end of the part";
+/// - picture lost inside the laid outline to cuts (`lost_cut` >= 2 %): a cut line;
+/// - laid picture dropped because it lies on surface under or behind another part (`rejected` >= 5 %): a hidden line;
+/// - less than 98 % on the surface and none of the above explains it: the covered share, without a cause;
+/// - then the round-6 lines (turns, parts, limit).
+pub(crate) fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
     let mut out = Vec::new();
+    let pct = |x: f32| (x * 100.0).round().max(1.0);
     if s.relaxed && s.stretch >= STRETCH_LINE_MIN {
-        let pct = (s.stretch * 100.0).round().max(1.0);
-        out.push(WrapLine::Help(format!("Fitted to the curved surface: stretched up to {pct:.0} %")));
+        out.push(WrapLine::Help(format!("Fitted to the curved surface: stretched up to {:.0} %", pct(s.stretch))));
     }
     if s.seams > 0 {
         out.push(WrapLine::Help("Cut where it cannot lie flat (a corner, a handle, or where its edges meet)".to_owned()));
     }
-    if s.covered < 0.98 {
-        let off = ((1.0 - s.covered) * 100.0).round().max(1.0);
-        out.push(WrapLine::Warn(format!("{off:.0} % of the picture runs off the surface: an edge, a hole or the end of the part")));
+    // The ends met (Ends meet; Overlap winds the rest on: "Wound N times").
+    let ends = !opts.overlap && (s.met_itself || s.passed);
+    let ends_cut = ends && s.ends_share < 0.95;
+    if ends {
+        let shown = (s.ends_share * 100.0).round();
+        out.push(WrapLine::Warn(match (s.passed, ends_cut) {
+            (true, true) => format!("Longer than the way round: {shown:.0} % shown, the ends meet at the back"),
+            (false, true) => format!("The ends meet at the back: {shown:.0} % of the picture's length shown"),
+            _ => "The ends meet at the back".to_owned(),
+        }));
     }
-    if s.met_itself && !opts.overlap {
-        out.push(WrapLine::Warn("The ends meet at the back".to_owned()));
+    let edge = s.reached_edge && s.covered < 0.98;
+    if edge {
+        out.push(WrapLine::Warn(format!("{:.0} % of the picture runs off the surface: an edge, a hole or the end of the part", pct(1.0 - s.covered))));
     }
-    // Round 9 (package B, plan section 6): a picture longer than the way round (also a helix, `passed`) says how much
-    // of it is shown.
-    if s.ends_share < 0.95 {
-        let pct = (s.ends_share * 100.0).round();
-        out.push(WrapLine::Warn(format!("Longer than the way round: {pct:.0} % shown")));
+    let cut = s.lost_cut >= LOST_CUT_LINE_MIN;
+    if cut {
+        out.push(WrapLine::Warn(format!("{:.0} % of the picture is lost where the surface had to be cut", pct(s.lost_cut))));
+    }
+    if s.rejected >= HIDDEN_LINE_MIN {
+        out.push(WrapLine::Warn(format!(
+            "{:.0} % of the laid picture falls on surface hidden under or behind another part and is not shown there",
+            pct(s.rejected)
+        )));
+    }
+    // Less on the surface than the ends and the cuts explain, and no edge reached: the covered share alone.
+    let expected = if ends_cut { s.ends_share } else { 1.0 } - if cut { s.lost_cut } else { 0.0 };
+    if !edge && s.covered < 0.98 && s.covered < expected - 0.02 {
+        out.push(WrapLine::Warn(format!("Only {:.0} % of the picture lies on the surface", (s.covered * 100.0).round())));
     }
     if s.turns > 1 {
         out.push(WrapLine::Warn(format!("Wound {} times", s.turns)));
@@ -163,6 +195,13 @@ fn wrap_stats_texts(s: &WrapStats, opts: WrapOptions) -> Vec<WrapLine> {
         out.push(WrapLine::Warn("Too large for this model: the wrap stops at 1 million vertices / 8 turns".to_owned()));
     }
     out
+}
+
+/// Stable (w1): the texts of `wrap_stats_texts` (the self-test's log of the panel lines).
+pub(crate) fn wrap_stats_line_texts(s: &WrapStats, opts: WrapOptions) -> Vec<String> {
+    wrap_stats_texts(s, opts).into_iter().map(|l| match l {
+        WrapLine::Help(t) | WrapLine::Warn(t) => t,
+    }).collect()
 }
 
 /// Width of the label column of the option grids.
@@ -730,8 +769,8 @@ mod tests {
                 WrapLine::Warn("The ends meet at the back".to_owned())
             ]
         );
-        // The round-6 warnings stay as they were, after the new lines.
-        let off = wte_core::WrapStats { covered: 0.5, jumps: 2, ..base };
+        // The round-6 warnings stay as they were, after the new lines; stable (w1): "runs off" only at an edge.
+        let off = wte_core::WrapStats { covered: 0.5, reached_edge: true, jumps: 2, ..base };
         assert_eq!(
             wrap_stats_texts(&off, opts),
             vec![
@@ -739,6 +778,90 @@ mod tests {
                 WrapLine::Warn("Continued onto 2 separate parts".to_owned())
             ]
         );
+    }
+
+    /// Stable (w1, item 6): each loss names its own cause, one line each, never contradicting: the sweep's cases
+    /// (numbers from their logs).
+    #[test]
+    fn the_wrap_lines_name_the_right_cause_and_never_contradict() {
+        let base = wte_core::WrapStats {
+            verts: 100,
+            tris: 180,
+            cut_tris: 0,
+            covered: 1.0,
+            met_itself: false,
+            reached_edge: false,
+            limited: false,
+            jumps: 0,
+            turns: 1,
+            micros: 1000,
+            relaxed: false,
+            seams: 0,
+            seams_by_rule: [0; 5],
+            flipped: 0,
+            stretch: 0.0,
+            rejected: 0.0,
+            cg_iters: 0,
+            passed: false,
+            ends_share: 1.0,
+            lost_cut: 0.0,
+        };
+        let opts = WrapOptions::default();
+        let texts = |s: wte_core::WrapStats| wrap_stats_line_texts(&s, opts);
+        // The Lantern: no edge, the loss is cut wedges (round 9 said "runs off the surface: an edge ...").
+        let lantern = wte_core::WrapStats { covered: 0.8849, lost_cut: 0.1123, ..base };
+        assert_eq!(texts(lantern), vec!["11 % of the picture is lost where the surface had to be cut".to_owned()]);
+        // The torus knot: a helix, its ends met; nothing ran off an edge.
+        let knot = wte_core::WrapStats { covered: 0.44, passed: true, ends_share: 0.43, ..base };
+        assert_eq!(texts(knot), vec!["Longer than the way round: 43 % shown, the ends meet at the back".to_owned()]);
+        // many_islands with Jump on: one closure line (round 9 stacked "runs off", "The ends meet", "Longer than the
+        // way round" and the parts line), the small covered share named without a cause, the parts.
+        let islands = wte_core::WrapStats { covered: 0.0333, met_itself: true, ends_share: 0.3318, jumps: 2, rejected: 0.0625, lost_cut: 0.0051, ..base };
+        let lines = texts(islands);
+        assert_eq!(
+            lines,
+            vec![
+                "The ends meet at the back: 33 % of the picture's length shown".to_owned(),
+                "6 % of the laid picture falls on surface hidden under or behind another part and is not shown there".to_owned(),
+                "Only 3 % of the picture lies on the surface".to_owned(),
+                "Continued onto 2 separate parts".to_owned()
+            ]
+        );
+        assert!(!lines.iter().any(|l| l.contains("runs off") || l.contains("Longer than the way round")), "{lines:?}");
+        // DamagedHelmet with Jump on: all of it on the surface, 17 % of it on hidden surface (round 9: no line).
+        let helmet = wte_core::WrapStats { covered: 1.0, reached_edge: true, rejected: 0.1695, jumps: 9, ..base };
+        assert_eq!(
+            texts(helmet),
+            vec![
+                "17 % of the laid picture falls on surface hidden under or behind another part and is not shown there".to_owned(),
+                "Continued onto 9 separate parts".to_owned()
+            ]
+        );
+        // nonmanifold: an edge and hidden surface, both true.
+        let book = wte_core::WrapStats { covered: 0.63, reached_edge: true, rejected: 0.70, ..base };
+        assert_eq!(
+            texts(book),
+            vec![
+                "37 % of the picture runs off the surface: an edge, a hole or the end of the part".to_owned(),
+                "70 % of the laid picture falls on surface hidden under or behind another part and is not shown there".to_owned()
+            ]
+        );
+        // An open noisy field (no edge, no closure, little cut): the covered share alone, no cause invented.
+        let noisy = wte_core::WrapStats { covered: 0.87, lost_cut: 0.024, ..base };
+        assert_eq!(texts(noisy), vec!["2 % of the picture is lost where the surface had to be cut".to_owned(), "Only 87 % of the picture lies on the surface".to_owned()]);
+        // Overlap winds the rest on: no ends line.
+        let wound = wte_core::WrapStats { met_itself: true, turns: 3, ..base };
+        assert_eq!(wrap_stats_line_texts(&wound, WrapOptions { jump_gaps: false, overlap: true }), vec!["Wound 3 times".to_owned()]);
+        // Never "runs off" without an edge, never "Longer than the way round" without a pass.
+        for covered in [0.3f32, 0.9, 0.99] {
+            for (met, passed, edge) in [(false, false, false), (true, false, false), (false, true, false), (true, false, true), (false, false, true)] {
+                let s = wte_core::WrapStats { covered, met_itself: met, passed, reached_edge: edge, ends_share: 0.5, ..base };
+                let lines = texts(s);
+                assert_eq!(lines.iter().any(|l| l.contains("runs off")), edge && covered < 0.98, "{s:?}: {lines:?}");
+                assert_eq!(lines.iter().any(|l| l.contains("Longer than the way round")), passed, "{s:?}: {lines:?}");
+                assert!(lines.iter().filter(|l| l.contains("ends meet")).count() <= 1, "{lines:?}");
+            }
+        }
     }
 
     /// Round 9 (package B, plan section 6): a picture longer than the way round says how much of it is shown.
@@ -767,8 +890,8 @@ mod tests {
             lost_cut: 0.0,
         };
         let opts = WrapOptions::default();
-        assert_eq!(wrap_stats_texts(&base, opts), vec![WrapLine::Warn("Longer than the way round: 43 % shown".to_owned())]);
-        assert!(wrap_stats_texts(&wte_core::WrapStats { ends_share: 0.95, ..base }, opts).is_empty());
+        assert_eq!(wrap_stats_texts(&base, opts), vec![WrapLine::Warn("Longer than the way round: 43 % shown, the ends meet at the back".to_owned())]);
+        assert_eq!(wrap_stats_texts(&wte_core::WrapStats { ends_share: 0.95, ..base }, opts), vec![WrapLine::Warn("The ends meet at the back".to_owned())]);
     }
 
     /// Round 9 (package B, T9): the shared-texel line shows for a stamp on mirrored halves (once the warm-up found the

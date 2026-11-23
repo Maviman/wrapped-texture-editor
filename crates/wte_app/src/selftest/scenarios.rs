@@ -6548,6 +6548,10 @@ fn ws_log_panel_lines(state: &mut AppState, sc: &mut Scratch) -> Result<(), Stri
         stats.is_some_and(|s| s.passed),
         stats.map_or("-".to_owned(), |s| format!("{:.2} %", s.lost_cut * 100.0)),
     );
+    // Stable (w1): the lines the panel shows under "Wrapped over N triangles".
+    if let (Some(s), Some(Placement::Projected(p))) = (stats, doc.stamp(id).map(|st| st.placement)) {
+        log::info!("wrap_surface (10) panel wrap lines: {:?}", crate::panels::tool_options::wrap_stats_line_texts(&s, p.wrap));
+    }
     Ok(())
 }
 

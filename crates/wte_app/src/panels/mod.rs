@@ -145,10 +145,11 @@ impl PanelState {
         }
     }
 
-    /// The Color page's content height when it was last shown (points): the automatic split keeps room for it.
-    #[cfg(test)]
-    pub(crate) fn measured_color_page(&self) -> f32 {
-        self.color_content_height
+    /// Height of the whole Color page with its square at full size (points): what the measured page needs beside the
+    /// square plus `COLOR_SQUARE_MAX`. The automatic split keeps room for it (not for the page as last measured, which is
+    /// shorter after its square shrank in a small window and would keep the square small when the window grows again).
+    pub(crate) fn color_page_full_height(&self) -> f32 {
+        self.color_fixed_height + COLOR_SQUARE_MAX
     }
 
     /// Empty caches and the split the user left in the preferences (objects-tabs WP4: `Prefs::side_split`).
@@ -833,7 +834,7 @@ mod tests {
         assert!(r.text_tab.is_none() && !state.panel_rects.contains_key(&PanelHit::LayersFooter), "no Layers rows");
         assert!(r.bottom_area.contains_rect(tab) && r.panel.contains_rect(r.upper_area), "{r:?}");
         // objects-tabs (WP4): the upper group keeps its strip and the taller of the brush rows and the Color page.
-        let expected = side_groups::tab_area_height(r.panel.height(), side_groups::upper_keep(ps.color_content_height));
+        let expected = side_groups::tab_area_height(r.panel.height(), side_groups::upper_keep(ps.color_page_full_height()));
         assert!((r.bottom_area.height() - expected).abs() < 8.0, "computed height {expected}: {r:?}");
         assert!(r.bottom_area.height() > layers_area.height(), "two layers need less than a tab");
         assert!(r.tool_area.height() >= side_groups::BRUSH_OPTIONS_HEIGHT - 8.0, "the brush sliders keep their room: {r:?}");

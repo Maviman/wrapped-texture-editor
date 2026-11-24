@@ -28,6 +28,23 @@ const EYE_WIDTH: f32 = 20.0;
 /// First-frame guess of the footer's height (corrected after one frame).
 const FOOTER_HEIGHT_GUESS: f32 = 24.0;
 
+/// Room kept free between the footer and the bottom of the page, that is the split edge (WP4/5 check): a press within
+/// the edge's grab band (`side_groups::split_grab`) makes the split the user's, and egui's own resize handle reaches
+/// `resize_grab_radius_side` above the edge, so a footer button touching the edge gave away its lower 8 pt. (4 pt more
+/// than the band: the real window's fonts make the footer a little taller than measured headless.)
+pub(crate) fn footer_clearance(ui: &egui::Ui) -> f32 {
+    crate::panels::side_groups::split_grab(ui) + 4.0
+}
+
+/// The scroll offset that puts row `row` of `count` in the middle of a list `view` points high, clamped to the
+/// scrollable range (an offset past the last row is taken by egui as an overscroll and springs back).
+pub(crate) fn reveal_offset(row: u32, count: usize, view: f32) -> f32 {
+    let pitch = ROW_HEIGHT + ROW_GAP;
+    let content = (count as f32 * pitch - ROW_GAP).max(0.0);
+    let max = (content - view).max(0.0);
+    (row as f32 * pitch - (view - pitch) * 0.5).clamp(0.0, max)
+}
+
 /// UI state of the Objects tab.
 pub(crate) struct ObjectsTabState {
     /// Height of the footer in the last frame (points): the list scrolls in the room it leaves.
@@ -104,13 +121,12 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
     let mut actions = Vec::new();
     let mut hits: Vec<(PanelHit, Rect)> = Vec::new();
     let mods = ui.input(|i| i.modifiers);
-    let pitch = ROW_HEIGHT + ROW_GAP;
-    let list_height = (ui.available_height() - ps.objects.footer_height - ui.spacing().item_spacing.y).max(ROW_HEIGHT);
+    let list_height = (ui.available_height() - ps.objects.footer_height - ui.spacing().item_spacing.y - footer_clearance(ui)).max(ROW_HEIGHT);
     let reveal = session.object_reveal.filter(|&i| (i as usize) < count);
     let mut scroll = egui::ScrollArea::vertical().id_salt("side_objects_scroll").auto_shrink([false, false]).max_height(list_height);
     if let Some(i) = reveal {
-        // The requested row in the middle of the list (clamped by the scroll area at both ends).
-        scroll = scroll.vertical_scroll_offset((i as f32 * pitch - (list_height - pitch) * 0.5).max(0.0));
+        // The requested row in the middle of the list, as far as the list scrolls.
+        scroll = scroll.vertical_scroll_offset(reveal_offset(i, count, list_height));
     }
     let list = ui
         .scope(|ui| {
@@ -295,6 +311,19 @@ mod tests {
         state.upper_tab = UpperTab::Color;
         state.tool = ToolKind::Navigate;
         assert!(highlight_shown(&state), "the Navigate tool shows the selection");
+    }
+
+    #[test]
+    fn reveal_offsets_stay_in_the_scrollable_range() {
+        let pitch = ROW_HEIGHT + ROW_GAP;
+        let view = 10.0 * pitch;
+        assert_eq!(reveal_offset(0, 100, view), 0.0);
+        assert_eq!(reveal_offset(3, 100, view), 0.0, "near the top: not above the first row");
+        assert!((reveal_offset(50, 100, view) - (50.0 * pitch - (view - pitch) * 0.5)).abs() < 1e-3, "in the middle");
+        let max = 100.0 * pitch - ROW_GAP - view;
+        assert!((reveal_offset(99, 100, view) - max).abs() < 1e-3, "the last row: the list ends at its bottom");
+        assert_eq!(reveal_offset(2, 3, view), 0.0, "a list shorter than its view does not scroll");
+        assert_eq!(reveal_offset(0, 0, view), 0.0);
     }
 
     #[test]

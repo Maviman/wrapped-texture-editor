@@ -5737,9 +5737,11 @@ carries a catalog face).
      default), so a short list gives its room to the upper page; with the Brush or the Text tab
      `tab_area_height(h, upper_keep)` = `(h - upper_keep).clamp(160.min(h/2), 420).min(layers_area_max(h))` with
      `upper_keep = 24 + 4 + max(144, Color page height + 8)` (`BRUSH_OPTIONS_HEIGHT` = heading + five brush slider rows;
-     the Color page height measured when it was last shown, first guess `COLOR_FIXED_HEIGHT_GUESS + 140` = 284 pt, the
-     value measured at 1280x800), so G1 and G2 hold whichever upper tab is shown and switching upper tabs never moves the
-     split. The Layers tab: opacity / blend row, the layer list in its own scroll area (`side_layers_scroll`, as tall as the
+     the Color page height with a full-size square, `PanelState::color_page_full_height` = the page beside its square as
+     measured when it was last shown + 140, first guess `COLOR_FIXED_HEIGHT_GUESS + 140` = 284 pt, the value measured at
+     1280x800), so G1 and G2 hold whichever upper tab is shown and switching upper tabs never moves the split. (WP4/5
+     check: not the page height as last measured — after its square shrank in a small window that kept the room, and so
+     the square, small when the window grew again; `the_automatic_split_does_not_depend_on_the_window_sizes_seen_before`.) The Layers tab: opacity / blend row, the layer list in its own scroll area (`side_layers_scroll`, as tall as the
      area minus the footer measured in the last frame), then the footer buttons below it, outside the scroll area, so New /
      Duplicate / Merge Down / Rasterize / Delete stay on screen with any number of layers (finding F9).
   2. **The split**: a primary press within the resize grab radius of the lower group's top edge sets `layers_user_sized`
@@ -5872,11 +5874,14 @@ carries a catalog face).
     a plain double-click on the same row as the click before (`ObjectsTabState::last_click`: egui counts two quick clicks
     anywhere as a double-click) => `SelectObject` + `FrameSelection`; the eye => `SetObjectVisible(i, hidden)` (the
     selection is kept); a click on the empty list below the rows => `DeselectObjects` (with a selection). The footer,
-    pinned below the list (its height measured in the last frame): Hide (`HideSelectedObjects`), Isolate
+    pinned below the list (its height measured in the last frame) and kept `objects::footer_clearance` (the split's grab
+    band + 4 pt) above the bottom of the page, i.e. the split edge (WP4/5 check: a press on a footer button touching the
+    edge made the split the user's): Hide (`HideSelectedObjects`), Isolate
     (`IsolateSelectedObjects`), Show all (`ShowAllObjects`), Frame (`FrameSelection`), enabled as their Object menu
     entries (Frame always with a document), hover texts with the shortcut (`shortcut_text`). Reveal: while
     `session.object_reveal` is `Some(i)` (a pick in the 3D view) the list's offset is set so that row `i` is in the
-    middle (`vertical_scroll_offset`, clamped) and the request is cleared — when the Objects page is drawn, so a pick made
+    middle (`vertical_scroll_offset(objects::reveal_offset(..))`, clamped to `0..=content - view`: an offset past the
+    last row is an overscroll that egui springs back, WP4/5 check) and the request is cleared — when the Objects page is drawn, so a pick made
     with another tab shown is revealed when the tab is opened. Records: `ObjectRow(i)` / `ObjectEye(i)` for the rows laid
     out in this frame only, `ObjectsList` (the visible list), `ObjectsFooter`, `ObjectsHide`, `ObjectsIsolate`,
     `ObjectsShowAll`, `ObjectsFrame`. The page never changes the document: everything is an `AppAction`; it only clears

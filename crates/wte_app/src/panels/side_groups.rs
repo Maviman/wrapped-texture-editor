@@ -71,8 +71,9 @@ pub(crate) fn layers_area_max(height: f32) -> f32 {
 }
 
 /// What the upper group keeps while the lower group shows the Brush or the Text tab: its strip, and a page as tall as
-/// the taller of the five brush slider rows and the whole Color page (`color_content`, measured; so G1 and G2 hold
-/// whichever upper tab is shown, and switching upper tabs never moves the split).
+/// the taller of the five brush slider rows and the whole Color page with a full-size square (`color_content`:
+/// `PanelState::color_page_full_height`; so G1 and G2 hold whichever upper tab is shown, switching upper tabs never
+/// moves the split, and the split does not depend on the window sizes seen before).
 pub(crate) fn upper_keep(color_content: f32) -> f32 {
     let color = if color_content.is_finite() { color_content + COLOR_AREA_MARGIN } else { 0.0 };
     TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + BRUSH_OPTIONS_HEIGHT.max(color)
@@ -126,11 +127,16 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
     ps.end_frame(ui.ctx(), state);
 }
 
+/// Half the height of the band around the split edge in which a press counts as a press on the edge.
+pub(crate) fn split_grab(ui: &egui::Ui) -> f32 {
+    ui.style().interaction.resize_grab_radius_side + 3.0
+}
+
 /// The split edge (the lower group's top edge): a press on it makes the size the user's; a double-click on it returns
 /// to automatic. Read from the raw pointer input: the panel's own resize handle takes the drag.
 fn split_input(ui: &egui::Ui, ps: &mut PanelState) {
     let Some(area) = ps.layers_area_rect else { return };
-    let grab = ui.style().interaction.resize_grab_radius_side + 3.0;
+    let grab = split_grab(ui);
     let on_edge = |p: egui::Pos2| (p.y - area.top()).abs() <= grab && area.x_range().contains(p.x);
     let (pressed, double) = ui.input(|i| {
         let pressed = i.pointer.primary_pressed() && i.pointer.press_origin().is_some_and(on_edge);
@@ -161,7 +167,7 @@ fn lower_group(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, sho
     } else {
         // The Brush and the Text tab: the upper group keeps its strip and the taller of the five brush slider rows and
         // the whole Color page (G1, G2), the tab gets the rest.
-        panel.exact_size(tab_area_height(height, upper_keep(ps.color_content_height)))
+        panel.exact_size(tab_area_height(height, upper_keep(ps.color_page_full_height())))
     };
     ps.layers_list_overflow = 0.0;
     ps.layers_content_bottom = None;

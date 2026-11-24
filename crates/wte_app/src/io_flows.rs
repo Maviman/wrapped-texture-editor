@@ -281,6 +281,7 @@ fn remember_recent(app: &mut WteApp, path: &Path) {
     }
     crate::prefs::add_recent(&mut app.state.prefs, path);
     crate::brush_flows::sync_prefs(&mut app.state);
+    crate::panels::sync_prefs(&mut app.state, &app.panels);
     crate::prefs::save(&app.state.prefs);
 }
 

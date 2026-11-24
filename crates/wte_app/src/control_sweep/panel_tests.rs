@@ -1886,7 +1886,7 @@ fn a12_brush_tab_heights_at_1280x800() {
             assert!(r.panel.expand(0.5).contains_rect(r.upper_area), "{ctx}: upper group {:?} outside the panel {:?}", r.upper_area, r.panel);
             assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{ctx}: the groups overlap: {r:?}");
             let side_groups = crate::panels::side_groups::tab_area_height;
-            let keep = crate::panels::side_groups::upper_keep(app.ps.measured_color_page());
+            let keep = crate::panels::side_groups::upper_keep(app.ps.color_page_full_height());
             assert!((r.bottom_area.height() - side_groups(r.panel.height(), keep)).abs() < 1.0, "{ctx}: lower group {r:?}, keep {keep}");
             let spacing = app.h.prefix("Distance between dabs").rect;
             assert!(spacing.bottom() <= r.tool_area.bottom() + 0.5, "{ctx}: the Spacing row {spacing:?} ends below the tool area {:?}", r.tool_area);
@@ -2475,6 +2475,9 @@ fn objects_footer_buttons_queue_their_actions_and_are_enabled_when_they_can_act(
     let footer = hit_rect(&app, PanelHit::ObjectsFooter);
     let list = hit_rect(&app, PanelHit::ObjectsList);
     assert!(page.expand(0.5).contains_rect(footer) && footer.top() >= list.bottom() - 0.5, "footer {footer:?} list {list:?} page {page:?}");
+    // WP4/5 check: the footer keeps clear of the split edge's grab band (a press there made the split the user's).
+    let grab = app.h.ctx.global_style().interaction.resize_grab_radius_side + 3.0;
+    assert!(footer.bottom() + grab < r.bottom_area.top(), "footer {footer:?} in the split's grab band above {:?}", r.bottom_area);
     for hit in [PanelHit::ObjectsHide, PanelHit::ObjectsIsolate, PanelHit::ObjectsShowAll, PanelHit::ObjectsFrame] {
         assert!(footer.expand(0.5).contains_rect(hit_rect(&app, hit)), "{hit:?}");
     }
@@ -2540,6 +2543,12 @@ fn a_long_object_list_draws_only_the_rows_in_view() {
         app.idle(3);
         let moved = app.state.panel_rects.get(&PanelHit::ObjectRow(1_500)).map_or(f32::INFINITY, |r| r.top() - row.top());
         assert!(moved > 20.0, "{w}x{h}: the wheel scrolls the list ({moved} pt)");
+        // WP4/5 check: the last row is revealed at the list's bottom, not in the middle of an overscroll (egui springs
+        // an offset past the end back, so the list bounced and showed empty room below the last row).
+        app.state.session.as_mut().unwrap().object_reveal = Some(1_999);
+        app.idle(1);
+        let last = app.state.panel_rects.get(&PanelHit::ObjectRow(1_999)).copied().expect("the last row is laid out");
+        assert!(list.contains_rect(last) && list.bottom() - last.bottom() < 2.0, "{w}x{h}: last row {last:?} in the list {list:?}");
         state = app.state;
     }
 }
@@ -2565,4 +2574,45 @@ fn objects_tab_is_idle() {
     empty.state.upper_tab = UpperTab::Objects;
     empty.idle(2);
     assert!(empty.h.has("No document open") && empty.take().is_empty());
+}
+
+/// Check of WP4/5 (finding: the automatic split had a memory). With the Brush or the Text tab below, the upper group
+/// keeps room for the whole Color page. That room came from the page's height as last measured, and the page is
+/// shorter when its square shrank in a small window: back in the larger window the split kept the small room, the
+/// square stayed small, and the page measured small again — so the same window showed a 90 pt or a 140 pt square
+/// depending on the window sizes seen before. Now the room is the page at its full square, so a window shows the same
+/// layout whatever came before.
+#[test]
+fn the_automatic_split_does_not_depend_on_the_window_sizes_seen_before() {
+    let setup = |app: &mut PanelApp| {
+        app.state.tool = ToolKind::Brush;
+        app.state.side_tab = SideTab::Brush;
+        app.state.upper_tab = UpperTab::Color;
+    };
+    let layout = |app: &PanelApp| {
+        let r = &app.state.side_rects;
+        let nodes: Vec<Node> = app.h.nodes.iter().filter(|n| r.color.contains_rect(n.rect)).cloned().collect();
+        (Harness::picker_square(&nodes).rect.width(), r.bottom_area.height())
+    };
+    for (w, h) in [(1280.0, 700.0), (1366.0, 768.0), (1280.0, 800.0)] {
+        let mut fresh = PanelApp::new(sample_state(SampleKind::Sphere));
+        setup(&mut fresh);
+        fresh.h.size = vec2(w, h);
+        fresh.idle(6);
+        let want = layout(&fresh);
+        assert!(want.0 >= 139.0, "{w}x{h}: a fresh start shows the full square: {want:?}");
+
+        let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+        setup(&mut app);
+        app.h.size = vec2(640.0, 480.0);
+        app.idle(6);
+        app.h.size = vec2(w, h);
+        app.idle(6);
+        let got = layout(&app);
+        assert!((got.0 - want.0).abs() < 1.0 && (got.1 - want.1).abs() < 1.0, "{w}x{h}: after 640x480 (square, lower group) {got:?}, fresh {want:?}");
+        // Another upper tab shown in between does not move the split either.
+        app.state.upper_tab = UpperTab::Tool;
+        app.idle(3);
+        assert!((app.state.side_rects.bottom_area.height() - want.1).abs() < 1.0, "{w}x{h}: the Tool tab moved the split: {:?}", app.state.side_rects);
+    }
 }

@@ -139,6 +139,8 @@ pub struct PairingWindow {
     code: Option<String>,
     issued: Option<Instant>,
     failures: u32,
+    /// Code attempts being checked right now (`begin_attempt`); they count against the limit while they run.
+    in_flight: u32,
     locked_until: Option<Instant>,
     /// A fixed code (`WTE_COMPANION_TEST_CODE`, self-test runs only): never replaced, the window counts as open.
     fixed: Option<String>,
@@ -147,7 +149,7 @@ pub struct PairingWindow {
 impl PairingWindow {
     /// A window with a fixed code that is always open (the `companion_host` scenario).
     pub fn fixed(code: String) -> PairingWindow {
-        PairingWindow { open: true, code: Some(code.clone()), issued: None, failures: 0, locked_until: None, fixed: Some(code) }
+        PairingWindow { open: true, code: Some(code.clone()), issued: None, failures: 0, in_flight: 0, locked_until: None, fixed: Some(code) }
     }
 
     /// The dialog opened: a fresh code (unless one is still valid).
@@ -203,6 +205,24 @@ impl PairingWindow {
     /// True while a fifth failure's lockout lasts.
     pub fn locked(&self, now: Instant) -> bool {
         self.locked_until.is_some_and(|t| now < t)
+    }
+
+    /// Reserves a code attempt before its check runs (the check is a PBKDF2 done without the lock): `false` when the
+    /// failures plus the attempts already running reach the limit (answer TOO_MANY_ATTEMPTS). Ends with `end_attempt`.
+    pub fn begin_attempt(&mut self) -> bool {
+        if self.failures + self.in_flight >= MAX_CODE_FAILURES {
+            return false;
+        }
+        self.in_flight += 1;
+        true
+    }
+
+    /// The reserved attempt was checked: counted as a failure when it failed.
+    pub fn end_attempt(&mut self, now: Instant, failed: bool) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if failed {
+            self.fail(now);
+        }
     }
 
     /// A failed code attempt: after the fifth, a new code and the lockout.
@@ -537,6 +557,27 @@ pub(crate) mod tests {
         }
         f.close();
         assert_eq!(f.code(t0 + CODE_LIFETIME * 2).as_deref(), Some("K7QF3M9T"));
+    }
+
+    #[test]
+    fn concurrent_code_attempts_cannot_exceed_the_limit() {
+        let t0 = Instant::now();
+        let mut w = PairingWindow::default();
+        w.open(t0);
+        w.fail(t0);
+        w.fail(t0);
+        // Two failures so far: three attempts may run at once, a fourth is refused while they run.
+        assert!(w.begin_attempt() && w.begin_attempt() && w.begin_attempt());
+        assert!(!w.begin_attempt(), "failures + running attempts reach the limit");
+        w.end_attempt(t0, false);
+        assert!(w.begin_attempt(), "a finished good attempt frees its place");
+        w.end_attempt(t0, true);
+        w.end_attempt(t0, true);
+        assert!(!w.locked(t0));
+        w.end_attempt(t0, true);
+        assert!(w.locked(t0), "the fifth failure locks");
+        assert!(w.begin_attempt(), "the counters start again with the new code (the lockout is checked separately)");
+        w.end_attempt(t0, false);
     }
 
     #[test]

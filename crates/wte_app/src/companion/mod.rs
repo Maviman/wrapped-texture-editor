@@ -155,6 +155,10 @@ pub struct Companion {
     /// The inner size (points) before "Fit to tablet".
     fit_old: Option<egui::Vec2>,
     minimized: bool,
+    /// What the remote held was released for this minimize (the releases sent while minimized are dropped).
+    minimize_released: bool,
+    /// When the last input (local or remote) came, for the capture rate.
+    input_at: Option<Instant>,
     /// The remote stroke in contact: min and max pressure, samples (for `stroke_sessions`).
     stroke: Option<(u16, u16, u32)>,
     stroke_sessions: Vec<u64>,
@@ -182,6 +186,8 @@ impl Companion {
             fit_req: None,
             fit_old: None,
             minimized: false,
+            minimize_released: false,
+            input_at: None,
             stroke: None,
             stroke_sessions: Vec::new(),
             sessions_started: 0,
@@ -311,13 +317,23 @@ impl Companion {
             }
             return;
         };
+        if !raw.events.is_empty() {
+            self.input_at = Some(Instant::now());
+        }
         let mut msgs: Vec<Msg> = Vec::new();
+        let mut dropped_seq = 0u32;
         let mut ended = end_pending;
         while let Ok(e) = run.rx.try_recv() {
             match e {
                 HubEvent::Input { session, msg } => {
-                    if Some(session) == self.session.as_ref().map(|s| s.info.id) && !self.minimized {
-                        msgs.push(msg);
+                    if Some(session) == self.session.as_ref().map(|s| s.info.id) {
+                        if self.minimized {
+                            // Dropped (the stage released everything at the minimize), but counted as processed so
+                            // the tablet's trail of it goes away.
+                            dropped_seq = dropped_seq.max(msg.input_seq().unwrap_or(0));
+                        } else {
+                            msgs.push(msg);
+                        }
                     }
                 }
                 HubEvent::Started { session, tablet_id, name, link, caps, screen } => {
@@ -347,6 +363,16 @@ impl Companion {
         if self.session.is_none() && msgs.is_empty() && !ended {
             return;
         }
+        // Minimized (5.6): release what the remote holds once, as at a session end, since the releases the tablet sends
+        // meanwhile are dropped; otherwise the local mouse stays locked out and a latched Ctrl sticks after the restore.
+        if !self.minimized {
+            self.minimize_released = false;
+        } else if !self.minimize_released {
+            self.minimize_released = true;
+            self.stage.end_session(&mut raw.events, &mut state.pen.feed);
+            self.stroke = None;
+        }
+        self.injected_seq = self.injected_seq.max(dropped_seq);
         self.probe_strokes(&msgs);
         let ppp = ctx.pixels_per_point();
         let views: Vec<egui::Rect> =
@@ -358,6 +384,7 @@ impl Companion {
         }
         if out.had_input {
             self.last_remote = Some(Instant::now());
+            self.input_at = self.last_remote;
         }
         self.undo_redo.extend(out.actions.iter().copied().filter(|a| matches!(*a, proto::action::UNDO | proto::action::REDO)));
         if out.fit.is_some() {
@@ -541,11 +568,13 @@ impl Companion {
             hub.set_cursor(self.stage.local_pointer.map(|p| proto::Cursor { x: p.x * ppp, y: p.y * ppp, visible: true, icon: 0 }));
             if !minimized {
                 let _p = crate::app::frame_profile::scope("companion capture");
-                self.capture.pass(ctx, &hub, device, self.injected_seq);
+                let input_recent = self.input_at.is_some_and(|t| t.elapsed() < capture::INPUT_RECENT);
+                let session = self.session_id().unwrap_or(0);
+                self.capture.pass(ctx, &hub, device, self.injected_seq, session, input_recent);
             }
         }
-        // While the remote holds or hovers, keep frames coming (palm hold, focus hold).
-        if self.stage.active() {
+        // While the remote holds something down, keep frames coming (not for a hovering pen or a latched modifier).
+        if self.stage.needs_ticks() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.write_status(state, &hub, code, ctx);
@@ -830,6 +859,108 @@ mod tests {
         assert!(released, "the stroke was released at the disconnect");
         assert_eq!(c.stage.holder, Holder::None);
         assert!(c.session.is_none());
+        c.stop();
+    }
+
+    /// A connected loopback session for the minimize tests (frames run until the session is known).
+    fn minimize_setup() -> (egui::Context, Companion, AppState, client::TestClient, crate::pen::PenRouter) {
+        let ctx = egui::Context::default();
+        let mut c = Companion::new(true);
+        let state = AppState::new(crate::state::Prefs::default(), true);
+        c.start_test(&ctx, &TestServer { port: 0, code: None, auto_allow: true, adb_serial: None });
+        let addr = c.run.as_ref().unwrap().server.tcp_addrs[0];
+        let mut client = client::TestClient::connect(addr).unwrap();
+        client.handshake(client::test_hello(proto::link::USB, [7; 16], "Tab"), auth::ClientKey::Confirm).unwrap();
+        (ctx, c, state, client, crate::pen::PenRouter::default())
+    }
+
+    /// Runs frames for `ms` (pinging so the session stays up); returns every routed event.
+    fn frames_for(c: &mut Companion, ctx: &egui::Context, state: &mut AppState, router: &mut crate::pen::PenRouter, client: &mut client::TestClient, ms: u64) -> Vec<egui::Event> {
+        let mut all = Vec::new();
+        let end = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < end {
+            let _ = client.send(&Msg::Ping { t: 1 });
+            let mut raw = egui::RawInput::default();
+            c.inject(ctx, &mut raw, state);
+            router.process(&mut raw.events, &mut state.pen.feed);
+            all.extend(raw.events);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        all
+    }
+
+    fn pen_s(kind: u8, x: f32) -> proto::PenSample {
+        proto::PenSample { kind, flags: 0, pressure: 30000, x, y: 10.0, tilt: 255, reserved: 0, dt_us: 1000 }
+    }
+
+    /// The window is minimized while the tablet pen is down and the pen lifts meanwhile (checker finding): after the
+    /// restore the local mouse works and the tablet's next stroke is a new press, not a continuation.
+    #[test]
+    fn a_minimize_in_mid_stroke_releases_the_remote() {
+        use proto::pen_kind;
+        let (ctx, mut c, mut state, mut client, mut router) = minimize_setup();
+        client.pen(vec![pen_s(pen_kind::DOWN, 10.0), pen_s(pen_kind::MOVE, 12.0)]).unwrap();
+        frames_for(&mut c, &ctx, &mut state, &mut router, &mut client, 600);
+        assert_eq!(c.stage.holder, Holder::Remote, "the remote stroke is down");
+        // What logic() records when the viewport reports minimized.
+        c.minimized = true;
+        let ev = frames_for(&mut c, &ctx, &mut state, &mut router, &mut client, 100);
+        assert!(ev.iter().any(|e| matches!(e, egui::Event::PointerButton { pressed: false, .. })), "released at the minimize: {ev:?}");
+        let up_seq = client.pen(vec![pen_s(pen_kind::UP, 14.0), pen_s(pen_kind::LEAVE, 14.0)]).unwrap();
+        frames_for(&mut c, &ctx, &mut state, &mut router, &mut client, 500);
+        assert!(c.injected_seq >= up_seq, "dropped input still counts as processed ({} < {up_seq})", c.injected_seq);
+        c.minimized = false;
+        let mut raw = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(50.0, 50.0)),
+                egui::Event::PointerButton { pos: egui::pos2(50.0, 50.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            ],
+            ..egui::RawInput::default()
+        };
+        c.inject(&ctx, &mut raw, &mut state);
+        let f = router.process(&mut raw.events, &mut state.pen.feed);
+        assert!(!f.in_contact);
+        assert_eq!(raw.events.len(), 2, "the local mouse passes after the restore: {:?}", raw.events);
+        assert_eq!(c.stage.holder, Holder::Local);
+        let mut raw = egui::RawInput {
+            events: vec![egui::Event::PointerButton { pos: egui::pos2(50.0, 50.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }],
+            ..egui::RawInput::default()
+        };
+        c.inject(&ctx, &mut raw, &mut state);
+        router.process(&mut raw.events, &mut state.pen.feed);
+        // The tablet's next stroke is a stroke of its own.
+        client.pen(vec![pen_s(pen_kind::HOVER, 300.0), pen_s(pen_kind::DOWN, 300.0), pen_s(pen_kind::MOVE, 302.0), pen_s(pen_kind::UP, 302.0)]).unwrap();
+        let ev = frames_for(&mut c, &ctx, &mut state, &mut router, &mut client, 500);
+        let presses: Vec<_> = ev.iter().filter_map(|e| match e {
+            egui::Event::PointerButton { pos, pressed: true, .. } => Some(pos.x),
+            _ => None,
+        }).collect();
+        assert_eq!(presses, vec![300.0], "one new press at the new stroke: {ev:?}");
+        c.stop();
+    }
+
+    /// The tablet's Ctrl latch is released while the window is minimized (checker finding): Ctrl does not stick.
+    #[test]
+    fn a_minimize_clears_a_latched_modifier() {
+        let (ctx, mut c, mut state, mut client, mut router) = minimize_setup();
+        client.mods(proto::mods::CTRL).unwrap();
+        frames_for(&mut c, &ctx, &mut state, &mut router, &mut client, 600);
+        assert!(c.stage.active());
+        c.minimized = true;
+        client.mods(0).unwrap();
+        frames_for(&mut c, &ctx, &mut state, &mut router, &mut client, 400);
+        c.minimized = false;
+        let mut raw = egui::RawInput {
+            events: vec![egui::Event::PointerButton { pos: egui::pos2(50.0, 50.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }],
+            ..egui::RawInput::default()
+        };
+        c.inject(&ctx, &mut raw, &mut state);
+        assert!(
+            !raw.events.iter().any(|e| matches!(e, egui::Event::PointerButton { modifiers, .. } if modifiers.ctrl)),
+            "the released latch does not apply to the desktop mouse: {:?}",
+            raw.events
+        );
+        assert!(!c.stage.active());
         c.stop();
     }
 }

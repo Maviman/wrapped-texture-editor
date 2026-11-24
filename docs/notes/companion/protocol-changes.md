@@ -10,6 +10,7 @@ else is v2 and the desktop keeps speaking v1 for released tablets.
 | Date | Change | Compatible | Both repos |
 |---|---|---|---|
 | 2026-11-24 | v1 as written in the plan (D0/D1). | — | spec copied at the tablet repo's first commit |
+| 2026-11-24 | Doc only (fix pass): the spec's header names the tablet repo as the Android app's home (it said `android/`) and calls it the Tablet Companion protocol. No wire change. | yes | yes, same step |
 
 Clarifications that are not changes (2026-11-24, desktop D5-D11):
 

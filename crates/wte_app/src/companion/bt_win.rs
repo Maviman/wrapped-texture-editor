@@ -30,6 +30,7 @@ const INVALID_SOCKET: usize = usize::MAX;
 const SOCKET_ERROR: i32 = -1;
 const FIONBIO: i32 = 0x8004_667Eu32 as i32;
 const SOL_SOCKET: i32 = 0xFFFF;
+const SO_SNDTIMEO: i32 = 0x1005;
 const SO_RCVTIMEO: i32 = 0x1006;
 const SD_BOTH: i32 = 2;
 const WSAEWOULDBLOCK: i32 = 10035;
@@ -224,6 +225,12 @@ impl Link for RfcommLink {
         let r = unsafe { setsockopt(self.0.0, SOL_SOCKET, SO_RCVTIMEO, (&raw const ms).cast(), 4) };
         if r == SOCKET_ERROR { Err(last_error()) } else { Ok(()) }
     }
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        let ms: u32 = timeout.map_or(0, |t| t.as_millis().clamp(1, u128::from(u32::MAX)) as u32);
+        // SAFETY: `ms` lives across the call; the option takes a DWORD.
+        let r = unsafe { setsockopt(self.0.0, SOL_SOCKET, SO_SNDTIMEO, (&raw const ms).cast(), 4) };
+        if r == SOCKET_ERROR { Err(last_error()) } else { Ok(()) }
+    }
     fn peer_loopback(&self) -> bool {
         false
     }
@@ -313,8 +320,7 @@ pub fn listen_rfcomm(hub: Arc<Hub>) -> io::Result<(JoinHandle<()>, u32)> {
             let _ = set_nonblocking(s, false);
             log::info!("companion: Bluetooth connection");
             let link = RfcommLink(Arc::new(Sock(s)));
-            let hub = Arc::clone(&hub);
-            super::server::spawn_named("wte-companion-session", move || super::server::run_session(Box::new(link), hub));
+            super::server::spawn_session(Box::new(link), &hub);
         }
         register(RNRSERVICE_DELETE, &mut local, &mut name, &mut class);
         drop(sock);

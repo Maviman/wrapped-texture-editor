@@ -108,9 +108,11 @@ pub fn devices_args() -> Vec<String> {
     vec!["devices".into(), "-l".into()]
 }
 
-/// Runs adb without a window; `Ok((status ok, stdout + stderr))`. An adb that does not answer within `timeout` is left
-/// running (never killed) and reported as a timeout.
-pub fn run(adb: &Path, args: &[String], timeout: Duration) -> io::Result<(bool, String)> {
+/// Runs adb without a window; `Ok((status ok, stdout + stderr))`. An adb that does not answer within `timeout`, or
+/// that is still running when `stop` says so (error `Interrupted`), is left running (never killed). The watcher passes
+/// the server's stop flag, so stopping the server (a link turned off, the port changed, the app closing) never waits
+/// for a slow adb on the UI thread.
+pub fn run_until(adb: &Path, args: &[String], timeout: Duration, stop: &dyn Fn() -> bool) -> io::Result<(bool, String)> {
     let mut cmd = Command::new(adb);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
@@ -140,6 +142,9 @@ pub fn run(adb: &Path, args: &[String], timeout: Duration) -> io::Result<(bool, 
         if start.elapsed() >= timeout {
             // Left to finish by itself (the reader thread ends when it does).
             return Err(io::Error::new(io::ErrorKind::TimedOut, format!("adb {} did not answer", args.join(" "))));
+        }
+        if stop() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "the companion server stopped"));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -217,7 +222,8 @@ pub fn watch(hub: Arc<Hub>, adb_pref: Option<PathBuf>, port: u16, only_serial: O
                 reversed.clear();
                 continue;
             };
-            let devices = match run(&adb, &devices_args(), CALL_TIMEOUT) {
+            let stop = || hub.is_stopped();
+            let devices = match run_until(&adb, &devices_args(), CALL_TIMEOUT, &stop) {
                 Ok((_, text)) => parse_devices(&text),
                 Err(e) => {
                     set(AdbLine::Failed(e.to_string()));
@@ -230,7 +236,10 @@ pub fn watch(hub: Arc<Hub>, adb_pref: Option<PathBuf>, port: u16, only_serial: O
             let new: Vec<String> =
                 devices.iter().filter(|d| d.state == "device" && !reversed.contains(&d.serial)).map(|d| d.serial.clone()).collect();
             for serial in new {
-                match run(&adb, &reverse_args(&serial, port), CALL_TIMEOUT) {
+                if hub.is_stopped() {
+                    break;
+                }
+                match run_until(&adb, &reverse_args(&serial, port), CALL_TIMEOUT, &stop) {
                     Ok((true, _)) => {
                         log::info!("companion: adb reverse tcp:{port} set for {serial}");
                         reversed.push(serial);
@@ -248,6 +257,29 @@ pub fn watch(hub: Arc<Hub>, adb_pref: Option<PathBuf>, port: u16, only_serial: O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call that is still running gives up within a poll step once the stop flag is set (Server::stop joins the
+    /// watcher on the UI thread). `ping -n 4 127.0.0.1` stands in for a slow adb (about 3 s, no window).
+    #[cfg(windows)]
+    #[test]
+    fn a_running_call_gives_up_when_the_server_stops() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let s2 = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            s2.store(true, Ordering::SeqCst);
+        });
+        let t0 = Instant::now();
+        let args: Vec<String> = ["-n", "4", "127.0.0.1"].iter().map(|s| (*s).to_owned()).collect();
+        let r = run_until(Path::new("ping"), &args, Duration::from_secs(10), &|| stop.load(Ordering::SeqCst));
+        let took = t0.elapsed();
+        assert!(matches!(&r, Err(e) if e.kind() == io::ErrorKind::Interrupted), "{r:?}");
+        assert!(took < Duration::from_millis(1500), "gave up after {took:?}");
+        // Without a stop the same call finishes normally.
+        let r = run_until(Path::new("ping"), &["-n".to_owned(), "1".to_owned(), "127.0.0.1".to_owned()], Duration::from_secs(10), &|| false);
+        assert!(matches!(r, Ok((true, _))), "{r:?}");
+    }
 
     #[test]
     fn devices_list_parser() {

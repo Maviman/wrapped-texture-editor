@@ -125,9 +125,15 @@ impl InputStage {
         self.pen_in_range || self.pen_contact || self.pen_seen.is_some_and(|t| now.saturating_duration_since(t) < PALM_HOLD)
     }
 
-    /// True while anything remote is down or in range (the app keeps repainting and focused).
+    /// True while anything remote is down or in range (the window counts as focused, 5.5).
     pub fn active(&self) -> bool {
         self.pen_in_range || self.pen_contact || !self.fingers.is_empty() || self.holder == Holder::Remote || self.latched != 0 || !self.keys_down.is_empty()
+    }
+
+    /// True while the remote holds something down (pen contact, fingers, the pointer, keys): the app keeps frames coming.
+    /// A hovering pen or a latched modifier does not (each frame would capture the unchanged window).
+    pub fn needs_ticks(&self) -> bool {
+        self.pen_contact || !self.fingers.is_empty() || self.holder == Holder::Remote || !self.keys_down.is_empty()
     }
 
     /// One frame: filters the local `events` (arbiter, modifier merge), then appends the remote messages' events in order;

@@ -7183,12 +7183,29 @@ the stop flag. Per session a reader (handshake, then C2S messages -> `HubEvent` 
 writer (STATE on change, FRAME when a captured picture waits and the ack window is open, REFINE after 400 ms idle, CURSOR
 at most 30/s; encoding on scoped worker threads). The capture poller. Only the UI thread touches `AppState`.
 
+**Robustness (fix pass, `docs/notes/companion/fix.md`).** The reader never writes: a PING's answer is handed to the
+writer (`Feedback::pong`), so the reader's idle check (4.6) always runs; only its last ERROR uses `try_lock`. Every link
+has a write timeout of the idle time (RFCOMM doubled): a tablet that stops reading makes the writer's send fail, the
+writer shuts the link down and the session ends ("stopped reading"). At most `MAX_HANDSHAKES` (8) connections are in
+their handshake at once (`Hub::admit`, an `Admission` held until AUTH_OK); more are closed in the accept loop without a
+thread, and a thread that cannot be started drops its connection instead of panicking. Magic + HELLO must arrive within
+`hello_timeout` (4 s), the whole handshake within 10 s. A code attempt reserves its place among the 5 allowed failures
+(`PairingWindow::begin_attempt` / `end_attempt`) and runs the PBKDF2 without `hub.auth` held. `Server::stop` joins the
+adb watcher quickly: every adb call gives up (`run_until`, error `Interrupted`, adb left running) when the stop flag is
+set.
+
 **Capture rule** (`capture.rs`, every `logic` pass while a session streams and the window is not minimized): a pass that
 is not the captured one marks the picture dirty; a dirty picture is captured when no capture is pending, the writer
 wants a frame and the frame-rate cap allows it (else `request_repaint_after`). The callback puts the picture into the
 mailbox (replacing an older one); the writer wakes the UI when its ack window opens again. Idle app + idle tablet = no
 frames. Minimized: no capture, STATE `NO_PICTURE`, a KEY frame on restore. Measured on this machine: request -> pixels
-about 17-21 ms (one frame); `docs/notes/companion/d5-d11.md`.
+about 17-21 ms (one frame); `docs/notes/companion/d5-d11.md`. Each capture carries the session id the UI knew when it
+asked (`Captured::session`); the writer drops a capture of another session, and the mailbox is emptied when a session
+starts and ends (a picture never carries an older session's input seq). The writer counts unchanged captures in a row
+(`Hub::empty_captures`); after about a second of them and with no input for `INPUT_RECENT` (1 s) the interval becomes
+`IDLE_CAPTURE_INTERVAL` (500 ms) instead of `1 / fps` (`capture_interval`, pure). `logic` keeps repainting every
+100 ms only while the remote holds something down (`InputStage::needs_ticks`: pen contact, fingers, the pointer,
+keys), not for a hovering pen or a latched modifier.
 
 **Inject order** (`Companion::inject`): drain the hub events (input only of the current session; an `Ended` stops the
 drain so a new session's input waits a frame); without a session and without input: return (frame untouched); else
@@ -7196,6 +7213,9 @@ drain so a new session's input waits a frame); without a session and without inp
 `Touch` + `PenRecord` into `state.pen.feed`, TOUCH -> gesture mouse / wheel events, KEY / TEXT / MODS). ACTION Undo /
 Redo is queued for `logic` (dispatched when the tools are idle), FIT_REQUEST too. On a session end
 `InputStage::end_session` (Leave record, gesture button released, remote modifiers 0); `logic` restores a fitted window.
+While the window is minimized the remote input is dropped (but its seq counts as processed); the first `inject` after
+the window became minimized runs `InputStage::end_session` once, since the releases the tablet sends meanwhile are
+dropped too (else the local mouse stays locked out and a latched modifier sticks after the restore).
 While the remote is active (or input came in the last 5 s) `raw.focused = true` and `WindowFocused(false)` is dropped.
 Coordinates: surface pixels / `pixels_per_point`.
 

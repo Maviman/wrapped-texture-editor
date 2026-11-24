@@ -1,8 +1,10 @@
-# WTE Companion wire protocol (COMPANION_PROTOCOL.md)
+# Tablet Companion wire protocol (COMPANION_PROTOCOL.md)
 
-Source of truth for the desktop app (`crates/wte_app/src/companion/`) and the Android app (`android/`). Copied verbatim from
-`docs/plans/COMPANION_PLAN.md` section 4; later changes are made here first and listed in
-`docs/notes/companion/protocol-changes.md`. Golden fixtures: `docs/protocol/fixtures/v1/`.
+Source of truth for the desktop app (Wrapped Texture Editor, `crates/wte_app/src/companion/`) and the Android app
+"Tablet Companion" (https://github.com/Maviman/tablet-companion, the Gradle project at that repo's root). This file and
+the golden fixtures `fixtures/v1/` exist byte for byte in both repos (editor `docs/protocol/`, tablet repo `protocol/`).
+Copied from the editor's `docs/plans/COMPANION_PLAN.md` section 4; later changes are made in both copies in the same
+step and listed in the editor's `docs/notes/companion/protocol-changes.md` and the tablet repo's `protocol/CHANGES.md`.
 
 ## 4. Wire protocol v1 (save as `docs/protocol/COMPANION_PROTOCOL.md`)
 

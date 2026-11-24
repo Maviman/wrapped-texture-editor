@@ -104,7 +104,20 @@ pub fn from_json(text: &str) -> Result<Prefs, serde_json::Error> {
     // objects-tabs (WP4): the user's split is a finite height in `100..=2000` points (the side panel clamps it to the
     // window again).
     prefs.side_split = prefs.side_split.filter(|v| v.is_finite()).map(|v| v.clamp(MIN_SIDE_SPLIT, MAX_SIDE_SPLIT));
+    sanitize_companion(&mut prefs.companion);
     Ok(prefs)
+}
+
+/// Branch `companion`: port 0 is the default port, a desktop id that is not 32 hex digits is made again, paired
+/// tablets whose id or token does not read are dropped (that tablet pairs again).
+pub fn sanitize_companion(c: &mut crate::state::CompanionPrefs) {
+    if c.port == 0 {
+        c.port = crate::companion::DEFAULT_PORT;
+    }
+    if crate::companion::crypto::unhex_array::<16>(&c.desktop_id).is_none() {
+        c.desktop_id.clear();
+    }
+    c.paired.retain(|p| p.tablet_id().is_some() && p.token_bytes().is_some());
 }
 
 /// How the openings of the shape file `path` are closed without asking: the user's stored answer, else
@@ -354,5 +367,48 @@ mod tests {
         // A file of an older build has none of the keys.
         let old = from_json(r#"{ "flags_wireframe": true }"#).unwrap();
         assert_eq!((old.side_upper_tab, old.side_lower_tab.as_str(), old.side_split), (UpperTab::Tool, "layers", None));
+    }
+
+    /// Branch `companion`: a file without the companion entry (every older version) loads with all links off; the
+    /// entry round-trips; a broken entry is the default; bad records are dropped.
+    #[test]
+    fn companion_prefs_load_when_missing_and_round_trip() {
+        use crate::companion::auth::PairedTablet;
+        use crate::state::{CompanionPrefs, FingerMode};
+        let old = from_json(r#"{ "recent": [], "tablet_input": "win_tab" }"#).unwrap();
+        assert_eq!(old.companion, CompanionPrefs::default());
+        assert!(!old.companion.usb && !old.companion.wifi && !old.companion.bluetooth);
+        assert_eq!(old.companion.port, crate::companion::DEFAULT_PORT);
+        assert!(old.companion.allow_resize && old.companion.fingers == FingerMode::Navigate);
+        let c = CompanionPrefs {
+            usb: true,
+            wifi: true,
+            port: 47900,
+            adb_path: Some(PathBuf::from(r"C:\ptdb.exe")),
+            desktop_id: "00112233445566778899aabbccddeeff".into(),
+            paired: vec![PairedTablet::new(&[1; 16], "Tab", &[2; 32], "2026-11-24".into())],
+            fingers: FingerMode::Mouse,
+            ..CompanionPrefs::default()
+        };
+        let prefs = Prefs { companion: c.clone(), ..Prefs::default() };
+        assert_eq!(from_json(&to_json(&prefs)).unwrap().companion, c);
+        // Partial entry: the rest defaults.
+        let p = from_json(r#"{ "companion": { "wifi": true } }"#).unwrap();
+        assert!(p.companion.wifi && !p.companion.usb && p.companion.port == crate::companion::DEFAULT_PORT);
+        // Entries that do not read: the default, the rest of the file kept.
+        for odd in [r#"{ "companion": 5, "keep_backup": true }"#, r#"{ "companion": { "port": "x" }, "keep_backup": true }"#] {
+            let p = from_json(odd).unwrap();
+            assert_eq!(p.companion, CompanionPrefs::default(), "{odd}");
+            assert!(p.keep_backup);
+        }
+        let p = from_json(
+            r#"{ "companion": { "port": 0, "desktop_id": "nothex", "paired": [
+                { "id": "01010101010101010101010101010101", "name": "A", "token": "zz", "added": "" },
+                { "id": "01010101010101010101010101010101", "name": "B", "token": "0202020202020202020202020202020202020202020202020202020202020202", "added": "" } ] } }"#,
+        )
+        .unwrap();
+        assert_eq!(p.companion.port, crate::companion::DEFAULT_PORT);
+        assert_eq!(p.companion.desktop_id, "");
+        assert_eq!(p.companion.paired.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["B"]);
     }
 }

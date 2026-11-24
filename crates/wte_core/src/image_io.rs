@@ -159,6 +159,27 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8], level: PngLevel) -> Resu
     Ok(out)
 }
 
+/// RGB8 (tightly packed, `rgb.len() == width*height*3`) as baseline JPEG with `quality` clamped to 1..=100 (branch
+/// `companion`: the picture tiles of the tablet companion, COMPANION_PLAN 2.4). `Err(Empty)` for a zero-size image,
+/// `Err(Encode)` for a wrong buffer length or an encoder failure (as `encode_png`).
+pub fn encode_jpeg(width: u32, height: u32, rgb: &[u8], quality: u8) -> Result<Vec<u8>, ImageIoError> {
+    if width == 0 || height == 0 {
+        return Err(ImageIoError::Empty);
+    }
+    let expected = width as u64 * height as u64 * 3;
+    if rgb.len() as u64 != expected {
+        return Err(ImageIoError::Encode(format!(
+            "pixel data has {} bytes, expected {expected} for {width}x{height} RGB",
+            rgb.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(rgb.len() / 8 + 1024);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100))
+        .encode(rgb, width, height, ExtendedColorType::Rgb8)
+        .map_err(|e| ImageIoError::Encode(e.to_string()))?;
+    Ok(out)
+}
+
 /// File format of a flattened texture export.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum FlatFormat {
@@ -501,5 +522,38 @@ mod tests {
             Err(ImageIoError::UnsupportedFormat(message)) => assert!(message.contains("DDS"), "{message}"),
             other => panic!("expected UnsupportedFormat, got {other:?}"),
         }
+    }
+
+    /// Branch `companion`: `encode_jpeg` round-trips through `decode_image` within JPEG tolerance; wrong lengths and
+    /// zero sizes fail like `encode_png`.
+    #[test]
+    fn jpeg_round_trip_and_errors() {
+        let (w, h) = (67u32, 45u32);
+        let src = gradient(w, h);
+        let rgb: Vec<u8> = src.data.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+        for quality in [40u8, 80, 92] {
+            let bytes = encode_jpeg(w, h, &rgb, quality).unwrap();
+            assert_eq!(&bytes[..2], &[0xff, 0xd8], "JPEG SOI");
+            let back = decode_image(&bytes, Some("t.jpg"), 8192).unwrap();
+            assert_eq!(back.original_size, [w, h]);
+            let mut worst = 0i32;
+            let mut sum = 0i64;
+            for (a, b) in src.data.as_chunks::<4>().0.iter().zip(back.pixels.data.as_chunks::<4>().0) {
+                assert_eq!(b[3], 255);
+                for c in 0..3 {
+                    let d = (a[c] as i32 - b[c] as i32).abs();
+                    worst = worst.max(d);
+                    sum += d as i64;
+                }
+            }
+            let mean = sum as f64 / (w * h * 3) as f64;
+            assert!(mean < 3.0 && worst < 40, "quality {quality}: mean {mean}, worst {worst}");
+        }
+        assert!(matches!(encode_jpeg(0, 4, &[], 80), Err(ImageIoError::Empty)));
+        assert!(matches!(encode_jpeg(4, 0, &[], 80), Err(ImageIoError::Empty)));
+        assert!(matches!(encode_jpeg(2, 2, &[0; 11], 80), Err(ImageIoError::Encode(_))));
+        assert!(matches!(encode_jpeg(2, 2, &[0; 16], 80), Err(ImageIoError::Encode(_))), "RGBA length is wrong");
+        // Quality outside 1..=100 is clamped, not an error.
+        assert!(encode_jpeg(2, 2, &[7; 12], 0).is_ok() && encode_jpeg(2, 2, &[7; 12], 255).is_ok());
     }
 }

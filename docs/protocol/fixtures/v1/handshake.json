@@ -1,0 +1,23 @@
+{
+  "client_nonce": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+  "code": "K7QF3M9T",
+  "code_mode": {
+    "client_mac": "11cd66ff695d5ba0f2c1b3cf4ed692a12eb5c6ebc90f35d7db59dd72c8b778ad",
+    "server_mac": "b9a170700d8415bcfabe364b25e617df9e4b99911b5b072ed9f803797e3e2274"
+  },
+  "code_typed": "k7qf-3m9t",
+  "desktop_id": "101112131415161718191a1b1c1d1e1f",
+  "link": 2,
+  "pair_key": "db2331c8a083ee09f1d0e9d9aa877914817e39dcc3847c2b3babd1add9b8fa07",
+  "pbkdf2_iters": 100000,
+  "proto": 1,
+  "salt": "57544543312d70616972101112131415161718191a1b1c1d1e1fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf505152535455565758595a5b5c5d5e5fc0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+  "server_nonce": "505152535455565758595a5b5c5d5e5f",
+  "tablet_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "token": "1a9d94cdfd996a95614d56888ec1126c8e1aeb6005f9963a85ecf180f299d899",
+  "token_mode": {
+    "client_mac": "e4aab6ae66150f77ccdb81b37f766870b152059755c79bac1f443b1981dad0d1",
+    "server_mac": "d8aac12cdf1af5f87638e722ace451b38bbc316c6dcdc5cb25fdfc1475afa8f8"
+  },
+  "transcript": "101112131415161718191a1b1c1d1e1fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf505152535455565758595a5b5c5d5e5fc0c1c2c3c4c5c6c7c8c9cacbcccdcecf010002"
+}

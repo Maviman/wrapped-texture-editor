@@ -99,6 +99,7 @@ impl FullApp {
             Dialog::Message { .. } => "Message",
             Dialog::About => "About",
             Dialog::Shortcuts => "Shortcuts",
+            Dialog::TabletHelp => "TabletHelp",
             Dialog::CloseOpenings(_) => "CloseOpenings",
         }
     }
@@ -185,6 +186,26 @@ fn about_shortcuts_and_message_dialogs_close_by_button_backdrop_and_esc() {
     a.press(Key::Escape, Modifiers::NONE);
     a.idle(1);
     assert_eq!(a.dialog_name(), "None", "Esc closes About");
+
+    // Branch `pen-input`: Help > Tablet setup shows the help and the pen line, closes by button, backdrop and Esc.
+    a.menu(&["Help", "Tablet setup"]);
+    a.idle(3);
+    assert_eq!(a.dialog_name(), "TabletHelp");
+    assert!(a.h.has("Tablet setup"), "the heading is shown");
+    assert!(a.h.has("No pen seen yet (Help > Tablet setup)"), "the pen line is shown");
+    a.click("Close");
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "None");
+    a.menu(&["Help", "Tablet setup"]);
+    a.idle(3);
+    a.click_at(pos2(20.0, 780.0));
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "None", "a click outside closes Tablet setup");
+    a.menu(&["Help", "Tablet setup"]);
+    a.idle(3);
+    a.press(Key::Escape, Modifiers::NONE);
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "None", "Esc closes Tablet setup");
 
     a.app.state.dialog = Dialog::Message { title: "Problem".into(), lines: vec!["line one".into()] };
     a.idle(2);

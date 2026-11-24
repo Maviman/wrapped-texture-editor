@@ -1,5 +1,6 @@
 // Owner: app-panels (A4). The status bar of ARCHITECTURE.md 8.7: tool hint, hover read-out (set, UV, texel, RGBA),
-// texture size, zoom, undo label, job spinner with stage and progress.
+// texture size, zoom, undo label, job spinner with stage and progress; branch `pen-input`: the pen read-out ("Pen 47 %",
+// "Pen", "Pen (eraser)") while a pen is in range, the item dropped first.
 //
 // The items never overlap (R3-10, finding F9): `plan` decides from their measured widths which ones fit, dropping the
 // least important first, and the hint takes the rest of the width, elided at its end.
@@ -69,6 +70,8 @@ pub(crate) struct StatusWidths {
     pub size: Option<f32>,
     pub zoom: Option<f32>,
     pub undo: Option<f32>,
+    /// Branch `pen-input`: the pen read-out (`PenFrame::readout`), only while a pen is in range.
+    pub pen: Option<f32>,
 }
 
 /// Which items the status bar draws.
@@ -81,10 +84,12 @@ pub(crate) struct StatusPlan {
     pub size: bool,
     pub zoom: bool,
     pub undo: bool,
+    pub pen: bool,
 }
 
 /// Fits the items into `w.avail`. The job progress is always shown and the hint keeps `HINT_MIN_WIDTH`; then, while
-/// they fit, in this order: texture size, the shortest hover read-out, zoom, fuller hover read-outs, the undo label.
+/// they fit, in this order: texture size, the shortest hover read-out, zoom, fuller hover read-outs, the undo label, the
+/// pen read-out (branch `pen-input`: the lowest priority, so the bar of a mouse user never changes).
 /// The hint gets what is left, up to its full width. Every item costs its width plus one separator.
 pub(crate) fn plan(w: &StatusWidths) -> StatusPlan {
     let item = |x: f32| x + w.sep;
@@ -122,6 +127,7 @@ pub(crate) fn plan(w: &StatusWidths) -> StatusPlan {
         p.hover = Some(index);
     }
     p.undo = take(&mut used, w.undo);
+    p.pen = (p.undo || w.undo.is_none()) && take(&mut used, w.pen);
     p.hint = w.hint.map(|h| h.min(w.avail - (used - hint_reserved) - w.sep).max(0.0));
     p
 }
@@ -167,6 +173,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             Vec::new()
         };
         let chip = if state.hover.rgba.is_some() { SWATCH_SIDE + gap } else { 0.0 };
+        let pen = state.pen.frame.readout();
         let spinner = ui.spacing().interact_size.y;
         let widths = StatusWidths {
             avail: full.width(),
@@ -177,6 +184,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             size: size.as_deref().map(|t| measure(t, &body)),
             zoom: zoom.as_deref().map(|t| measure(t, &body)),
             undo: undo.as_deref().map(|t| measure(t, &body)),
+            pen: pen.as_deref().map(|t| measure(t, &body)),
         };
         let plan = plan(&widths);
 
@@ -205,6 +213,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if plan.size && let Some(text) = &size {
             separate(&mut right);
             rects.push(right.label(text.as_str()).on_hover_text("Texture size of the active texture set").rect);
+        }
+        if plan.pen && let Some(text) = &pen {
+            separate(&mut right);
+            rects.push(right.label(text.as_str()).on_hover_text("Pen pressure (Help > Tablet setup)").rect);
         }
         let right_used = right.min_rect();
         let right_left = if right_used.is_positive() { right_used.left() - gap - SEPARATOR_SPACING } else { full.right() };
@@ -302,6 +314,7 @@ mod tests {
             size: Some(70.0),
             zoom: Some(80.0),
             undo: Some(130.0),
+            pen: Some(60.0),
         }
     }
 
@@ -314,18 +327,26 @@ mod tests {
             + if p.size { item(w.size.unwrap()) } else { 0.0 }
             + if p.zoom { item(w.zoom.unwrap()) } else { 0.0 }
             + if p.undo { item(w.undo.unwrap()) } else { 0.0 }
+            + if p.pen { item(w.pen.unwrap()) } else { 0.0 }
     }
 
     #[test]
     fn a_wide_bar_shows_everything_and_a_narrow_one_drops_the_least_important_first() {
         let w = widths(1400.0);
         let p = plan(&w);
-        assert_eq!(p, StatusPlan { hint: Some(220.0), hover: Some(0), size: true, zoom: true, undo: true });
+        assert_eq!(p, StatusPlan { hint: Some(220.0), hover: Some(0), size: true, zoom: true, undo: true, pen: true });
+        // Without a pen in range the plan is the one of a mouse user.
+        let p = plan(&StatusWidths { pen: None, ..w });
+        assert_eq!(p, StatusPlan { hint: Some(220.0), hover: Some(0), size: true, zoom: true, undo: true, pen: false });
 
-        // 900 pt: the undo label goes before the hover read-out loses anything.
+        // 900 pt: the pen read-out and the undo label go before the hover read-out loses anything.
         let w = widths(900.0);
         let p = plan(&w);
-        assert!(!p.undo && p.size && p.zoom, "{p:?}");
+        assert!(!p.undo && !p.pen && p.size && p.zoom, "{p:?}");
+        // The pen read-out is dropped first: where the undo label still fits, the pen may not.
+        let w = widths(960.0);
+        let p = plan(&w);
+        assert!(p.undo && !p.pen, "{p:?}");
         assert_eq!(p.hover, Some(0));
 
         // 640 pt (the 640x480 window minus the toolbar): a shorter read-out, the hint elided rather than overlapping.
@@ -337,7 +358,7 @@ mod tests {
         // Very narrow: only the hint (elided) is left.
         let w = widths(200.0);
         let p = plan(&w);
-        assert_eq!(p, StatusPlan { hint: Some(186.0), hover: None, size: false, zoom: false, undo: false });
+        assert_eq!(p, StatusPlan { hint: Some(186.0), hover: None, size: false, zoom: false, undo: false, pen: false });
 
         for avail in [120.0, 200.0, 400.0, 596.0, 640.0, 800.0, 1000.0, 1236.0, 1600.0] {
             let w = widths(avail);
@@ -359,6 +380,8 @@ mod tests {
             state.status_hint = "Type the text in the tool options first".to_owned();
             state.hover = full_hover();
             state.view_mode = ViewMode::Split;
+            // Branch `pen-input`: a pen in contact adds its read-out.
+            state.pen.frame = crate::pen::PenFrame { in_range: true, in_contact: true, pressure: 0.47, ..Default::default() };
             state.doc_mut().unwrap().sets[0].name = "sphere_checker".to_owned();
             let doc = state.doc_mut().unwrap();
             let paint = doc.sets[0].active.unwrap();
@@ -381,8 +404,20 @@ mod tests {
                 }
             }
             if w >= 1280.0 {
-                // Hint, chip, read-out, size, zoom and undo label all fit.
+                // Hint, chip, read-out, size, zoom and undo label fit; the pen read-out is dropped first.
                 assert_eq!(rects.len(), 6, "{rects:?}");
+                // Branch `pen-input`: without the hover read-out the pen read-out fits too, apart from the others.
+                let hover = std::mem::take(&mut state.hover);
+                run_panels(&ctx, &mut state, &mut ps, input());
+                let rects = state.status_rects.clone();
+                assert_eq!(rects.len(), 5, "hint, size, zoom, undo, pen: {rects:?}");
+                for (i, a) in rects.iter().enumerate() {
+                    for b in &rects[i + 1..] {
+                        let overlap = a.intersect(*b);
+                        assert!(!overlap.is_positive() || overlap.width() < 0.5, "{w} pen: {a:?} overlaps {b:?}");
+                    }
+                }
+                state.hover = hover;
             }
             // With a job running the bar still fits.
             state.busy = Some(BusyInfo { title: "Export".into(), stage: "writing sphere.png".into(), fraction: 0.4, modal: false });

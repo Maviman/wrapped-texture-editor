@@ -3,8 +3,8 @@
 // the window procedure), never through the OS. On the Sphere sample: a 2D pressure ramp (width follows pressure), mouse
 // vs pen at full pressure (identical pixels, 2D and 3D), flow dynamics, a light and a full 3D stroke, the eraser end
 // (the tool switches to the Eraser and back), the barrel button (orbits, paints nothing), a pen tap on a Layers row (a
-// click) and the status readout during contact. Shots: `pen_ramp` (the 2D ramp), `pen_3d` (light and full 3D strokes);
-// the final screenshot shows a 3D ramp.
+// click), the status readout during contact and Help > Tablet setup. Shots: `pen_ramp` (the 2D ramp), `pen_3d` (light
+// and full 3D strokes), `tablet_help`; the final screenshot shows a 3D ramp.
 
 use super::*;
 use crate::selftest::PenPoint;
@@ -208,6 +208,18 @@ pub(super) fn pen() -> Vec<Step> {
         Step::WaitIdle,
         Step::Assert("the ramp painted", |s, _| {
             if paint_count(s)? > 0 { Ok(()) } else { Err("nothing painted".to_owned()) }
+        }),
+        // (10) Help > Tablet setup opens and closes.
+        Step::Do(AppAction::ShowDialog(Dialog::TabletHelp)),
+        Step::WaitIdle,
+        Step::Assert("Tablet setup is open", |s, _| {
+            if matches!(s.dialog, Dialog::TabletHelp) { Ok(()) } else { Err(format!("dialog {}", dialog_name(&s.dialog))) }
+        }),
+        Step::Shot("tablet_help"),
+        Step::Do(AppAction::CloseDialog),
+        Step::WaitIdle,
+        Step::Assert("Tablet setup closed", |s, _| {
+            if matches!(s.dialog, Dialog::None) { Ok(()) } else { Err(format!("dialog {}", dialog_name(&s.dialog))) }
         }),
     ]);
     steps

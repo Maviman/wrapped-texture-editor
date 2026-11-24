@@ -1040,6 +1040,8 @@ pub enum Dialog {
     Message { title: String, lines: Vec<String> },
     About,
     Shortcuts,
+    /// Branch `pen-input`: Help > Tablet setup (`dialogs/tablet.rs`).
+    TabletHelp,
     /// "How should the openings of this brush shape be closed?" (plan section 7 item 5; drawn by `brush_flows.rs`).
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
     CloseOpenings(Box<OpeningsDialogState>),

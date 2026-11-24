@@ -152,6 +152,7 @@ fn every_menu_entry_queues_its_action() {
         (&["Object", "Frame Selection"], |a, _| matches!(a, [A::FrameSelection])),
         (&["Object", "Select All"], |a, _| matches!(a, [A::SelectAllObjects])),
         (&["Help", "Shortcuts"], |a, _| matches!(a, [A::ShowDialog(Dialog::Shortcuts)])),
+        (&["Help", "Tablet setup"], |a, _| matches!(a, [A::ShowDialog(Dialog::TabletHelp)])),
         (&["Help", "About"], |a, _| matches!(a, [A::ShowDialog(Dialog::About)])),
     ];
     for (path, check) in cases {

@@ -3882,6 +3882,7 @@ fn dialog_name(dialog: &Dialog) -> &'static str {
         Dialog::Message { .. } => "Message",
         Dialog::About => "About",
         Dialog::Shortcuts => "Shortcuts",
+        Dialog::TabletHelp => "TabletHelp",
         Dialog::CloseOpenings(_) => "CloseOpenings",
     }
 }

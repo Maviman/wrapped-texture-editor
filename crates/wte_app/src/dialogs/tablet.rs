@@ -1,0 +1,44 @@
+// Branch `pen-input` (PEN_INPUT_PLAN 7, ARCHITECTURE 8.8): Help > Tablet setup. Static help for drawing tablets and pen
+// displays, the live pen line, and (part G) the "Tablet input" choice.
+
+use eframe::egui;
+
+use crate::view::ViewCx;
+
+/// The paragraphs of the dialog (also checked by the tests and the scenario `pen`).
+pub(crate) const TABLET_HELP: [&str; 5] = [
+    "Works with any tablet whose driver has Windows Ink turned on (the default): Wacom Tablet Properties > Mapping > \
+     \"Use Windows Ink\"; Huion > Pen settings > \"Enable Windows Ink\"; XP-Pen / Pentablet > \"Windows Ink\".",
+    "If the stroke does not follow the pressure, turn that option on. Drivers allow it per application: add Wrapped \
+     Texture Editor to the driver's application list.",
+    "Pressure options: Tool tab > Brush options (and Eraser options) > Pen pressure. The pressure curve (soft or firm) is \
+     set in the tablet driver.",
+    "Turn the pen around to erase. The lower pen button is the right mouse button (orbit in 3D, pan in 2D, context \
+     menus). Other buttons do what the driver maps them to (middle click pans, keys work as shortcuts).",
+    "The status bar shows \"Pen N %\" while the pen touches the tablet.",
+];
+
+/// Draws Help > Tablet setup.
+pub(super) fn show(ctx: &egui::Context, cx: &mut ViewCx<'_>) {
+    let max = super::max_dialog_size(ctx);
+    let pen_line = cx.state.pen.status_line();
+    let response = super::modal("tablet").show(ctx, |ui| {
+        ui.set_width(max.x.min(480.0));
+        ui.heading("Tablet setup");
+        ui.separator();
+        egui::ScrollArea::vertical().id_salt("wte_tablet_help").max_height((max.y - 120.0).max(120.0)).show(ui, |ui| {
+            for text in TABLET_HELP {
+                ui.add(egui::Label::new(text).wrap());
+                ui.add_space(4.0);
+            }
+            ui.weak(pen_line.as_str());
+        });
+        ui.separator();
+        let mut close = false;
+        super::button_row(ui, |ui| close = ui.button("Close").clicked());
+        close
+    });
+    if response.inner || super::backdrop_clicked(&response) {
+        super::close(cx);
+    }
+}

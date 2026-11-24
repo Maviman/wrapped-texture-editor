@@ -66,6 +66,32 @@ Side panel tabs (new in this build)
   - Try a small window too (e.g. half the screen): nothing should overlap,
     the pages scroll.
 
+Pen tablets (new in this build)
+-------------------------------
+With a drawing tablet or pen display (Windows Ink on in its driver):
+  1. Hover over the model: the brush ring follows the pen and the status
+     bar (bottom right) shows "Pen".
+  2. Paint in 3D and in 2D, light to hard: the stroke goes thin to thick
+     and the status bar shows the percentage. Fast curved strokes are
+     smooth, not polygonal.
+  3. Tap toolbar buttons, layer rows, tabs, sliders and menus with the
+     pen: each tap is one click. Tooltips appear when hovering.
+  4. Tool tab > Brush options > Pen pressure: turn Size off and Flow on:
+     the width stays the same and the paint builds with pressure. Size on
+     with "min 50 %": light strokes are half as wide.
+  5. Turn the pen around: the tool switches to the Eraser and erases;
+     turn it back: the previous tool returns.
+  6. Hold the lower pen button and drag: 3D orbits, 2D pans; on a layer
+     row it opens the row's menu.
+  7. Press and hold the pen still on the model: no ring animation, no
+     right-click menu, no ripple when you tap.
+  8. Restart the app: the pressure settings are remembered.
+  9. If the tablet driver's Windows Ink option is off: confirm there is no
+     pressure (strokes stay full width), then see Help > Tablet setup.
+ 10. Mouse painting feels and looks as before.
+Please note the tablet model and driver version with anything that does
+not work, and send the log (see below).
+
 If it crashes
 -------------
 You should see a box "Wrapped Texture Editor crashed. A crash report was

@@ -35,3 +35,6 @@ Plan: `docs/plans/OBJECTS_TABS_PLAN.md` sections 8-10. Gate report: `docs/report
 6. **Sweep job files**: the repo had no committed job files (`tools/round3_audit/sweep.ps1` takes a file per run and
    holds old-machine paths), so `tools/objtabs/jobs_gate.txt` with its own `sweep.sh` is the committed job list.
 7. Notes stay in `docs/notes/objtabs/` (the plan says `docs/notes/objects_tabs/`; WP0-5 already used `objtabs`).
+8. **Found in the gate:** `objects_path` on Lantern.glb (3 objects) failed "the last row is out of view": a list that
+   fits whole cannot hide its last row. The check now applies only when the list scrolls (logged otherwise); the pick
+   and its selection are still asserted (`fe855c4`).

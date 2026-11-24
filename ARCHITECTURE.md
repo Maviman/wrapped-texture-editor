@@ -354,6 +354,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `main.rs` | A1 | logging to file, panic hook, startup-failure message box, `NativeOptions`, `eframe::run_native`, exit code |
 | `crash.rs` | A1 | native crash recorder (vectored handler + unhandled filter, report + minidump), ring of recent log lines / actions, startup diagnostics (graphics env vars, hook modules), `WTE_DEBUG_NATIVE_CRASH` test hook (8.3) |
 | `cli.rs` | A1 | `CliArgs`, hand-written argument parser |
+| `gpu_check.rs` | A1 | the `--gpu-check REPORT` mode (8.11): adapter list, verdict, report text, exit code; used by the installer and CI |
 | `app.rs` | A1 | `WteApp`, `impl eframe::App` (`logic`, `ui`, `raw_input_hook`), frame order |
 | `dispatch.rs` | A1 | `dispatch(app, action, frame)`: the single mutation point for commands and the only caller of native file dialogs |
 | `shortcuts.rs` | A1 | shortcut table, `handle` (the only consumer of key presses), `shortcut_text` |
@@ -6665,6 +6666,13 @@ UTF-16 surrogate, must open instead of panicking; `--scenario` / `--size` values
   `open_path`).
 - `--screenshot`: self-test mode. `--scenario` defaults to `default`; `--size` defaults to `1280x800`.
 - `--log`: log file. Default `<OUT>.log` in self-test mode, `%APPDATA%\WrappedTextureEditor\log.txt` otherwise (8.3).
+- `--gpu-check REPORT` (`gpu_check.rs`, handled in `main` before `cli::parse`; it must be the only flag): lists the
+  wgpu adapters on the backends of `WGPU_BACKEND` (else Vulkan, DX12 and GL) without creating a window, log file or
+  message box, writes `key=value` lines to REPORT (`app_version`, `result=ok|limited|none|error`, `vulkan=yes|no`,
+  `dx12=yes|no`, `best=`, one `adapter=` line each) and exits 0 (a hardware Vulkan/DX12 adapter), 2 (only software or
+  GL adapters: starts, may be slow), 3 (no adapter: cannot start) or 5 (bad arguments, report not writable, a panic
+  while listing). The Windows installer runs it hidden before and after installing to report missing graphics
+  drivers, and the release CI runs it on the build machine (`installer/`, `.github/workflows/installer.yml`).
 ```rust
 pub struct CliArgs { pub path: Option<PathBuf>, pub screenshot: Option<PathBuf>, pub scenario: String,
                      pub size: [u32; 2], pub log: Option<PathBuf> }

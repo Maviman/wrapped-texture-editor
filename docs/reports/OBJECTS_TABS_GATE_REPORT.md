@@ -156,3 +156,89 @@ checklists including the Alt+H question. Builder notes: `docs/notes/objtabs/wp6.
 - this report
 
 Nothing was merged to `main`.
+
+## Critic (completeness check, 2026-11-24)
+
+The question: what of the request (1 select and hide objects of a multi-object file, 2 two tab groups with a draggable
+split, 3 an object menu with Hide / Isolate / Show all / Frame; selecting must not limit painting; hidden objects are
+not drawn and do not block painting, stamps or wraps) is missing or not proven? I read the plan, this report, the
+builder and check notes, and the tests and scenarios behind each claim. Everything below was run on this machine from
+this worktree (RTX 5070, Vulkan, off-screen runs only).
+
+### What was missing
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| C1 | major | **The user's whole workflow on a real multi-object file was never run.** `objects` covers hide / paint / stamp / save / reopen on the built-in Three Objects sample (no wrap, no text, no export); `objects_path` covers the list, isolate, frame, a pick and a stroke on ABeautifulGame (no hiding of one object while painting another, no stamp, wrap or text, no save, reopen or export). Nothing showed that a project of a real glTF re-imports its objects under the same names on reopen, so that the stored hidden names find their object again. | fixed: new scenario `objects_flow_path` (commit `5e67b58`), below |
+| C2 | minor | The contract "changing visibility never re-bakes existing stamps" (plan 3.4) had no test above the core. | fixed: asserted in `objects_flow_path` step 5 |
+| C3 | minor | O3 ("no tint in Preview") was not looked at in a screenshot. | fixed: `objects_flow_path` takes a Preview shot while the pawn is selected (no tint, board left out; looked at) |
+
+No test was weakened by this branch as far as I can tell: the edits to the panel and scenario tests in
+`git diff 1f0be41..` keep the intent listed in plan 6.6 (the old "Color section" checks became the upper group's
+checks; the two "collapse the Color section" clicks were removed because that header no longer exists). Every plan
+item I spot-checked is present: Object > Objects Panel, the Navigate hint, double-click on a row to frame, a click
+below the rows to deselect, the primary-colour chip opening the Color tab, the split double-click, tabs and split in
+the prefs, `hiding_drops_cached_wrap_params`, the GPU tests of plan 5.6.
+
+### `objects_flow_path` (PATH = `ABeautifulGame.glb`)
+
+The scenario finds the board (the object with the largest x/z footprint: `Chessboard`, set 4, used by no other
+object) and a pawn (`Pawn_Body_W1`, set 6, shared by the eight white pawn bodies). Steps and what each asserts:
+
+1. Hide the board from its row (revealed in the list, H): 129 of 144 vertical rays over the board hit it while it is
+   shown, **0** while it is hidden; revision, modified flag and history unchanged.
+2. The pawn from its row, Shift+F (camera target on the pawn). A Navigate click on a point where only the hidden board
+   is **deselects** (the hidden board is not picked); a click on the pawn selects it.
+3. A brush stroke from the pawn's centre out to a point whose ray would hit the board if it were shown (checked with
+   an unmasked copy of the BVH, so the check is real): the pawn's set changes, **set 4 does not**, one undo entry.
+4. A projected image stamp (size 0.4, larger than the pawn, so the board behind it would be covered), a **wrapped**
+   stamp with "jump small gaps" on, low on the pawn where the board touches its base, and a text: each one inks the
+   pawn's set and puts **no ink in a layer of set 4**; set 4's composite never changes. The wrap jumped twice (onto
+   the pawn's top), never onto the hidden board.
+5. With the wrapped stamp selected (Transform), Show all, then the board hidden again: composites and history
+   unchanged both times, so nothing was re-baked. The log shows how much the check means: with the board shown, the
+   stamp's new parameterization covers 431,174 triangles (it jumps onto the board) instead of 49,440.
+6. Navigate with the pawn selected: tint on (`highlight_shown`). Shots `designed` (tinted pawn, no board) and `preview`
+   (no tint, no board).
+7. Save As, reopen: the board is hidden again (the flags, and the BVH mask: 0 ray hits), one toast "1 object is hidden:
+   Chessboard (Object > Show All)", not modified, nothing selected, structure and composites as saved.
+8. Export one layer (the pawn's paint layer, per-layer PNG): exactly that file, equal to the layer, 20,584 inked
+   texels. Export every set's flattened PNG: 15 files, each its set's composite (`verify_export`), the hidden board's
+   set included.
+9. Show all: the rays hit the board again. Then the pawn hidden and a short stroke on its screen centre: it paints the
+   board behind it, the pawn's set is unchanged, the history ends with "Brush Stroke".
+
+Result: `"ok": true` in two runs (`target\objtabs\critic\flow_abg\`, `flow_abg_run2\`, release exe of `5e67b58`,
+SHA-256 `6EC2A1E0BE6A5CDA0DDECF86A52F0FF3E63F551F91C79EE806D8D6B624030D11`), about 25 s each. Screenshots looked at:
+`board_hidden` (pieces stand on nothing, Chessboard row dimmed with a closed eye, header "1 hidden"),
+`piece_selected` (the pawn tinted blue, its row selected), `designed` (stroke, stamps and text on the white pawns,
+which share one texture, and no board), `preview` (no tint, no board), `reopened` (same picture, the toast),
+final (board shown again and clean: no paint or stamp ink on it).
+
+The scenario needs a model whose board-like object has a texture set of its own and fails with a clear message
+otherwise. It is in `tools/objtabs/jobs_gate.txt`, ARCHITECTURE 8.11 / 9.2 and HANDOFF 4.1 (scenario count 51).
+
+### Notes for the user (not changed)
+
+- **After Show all, a selected wrapped stamp's outline describes the new surface, not its pixels.** In step 5 the
+  Transform tool rebuilt the parameterization for the new visibility (6.7 s on a worker for the board). The pixels
+  stay as baked; the next edit of that stamp bakes it again with what is visible then. This is the planned rule (plan
+  0.1 item 2, 3.4), but on a real model it shows: a wrap placed with the board hidden spreads onto the board once it is
+  shown and the stamp is touched.
+- **The Layers panel does not follow the object selection.** Selecting the pawn leaves "Texture set: King_Black" in
+  the Layers tab. Not part of the plan; a possible later convenience.
+- **Seen, not caused by this branch:** a 3D brush stroke first adds an empty paint layer to every set whose active
+  layer is a stamp or text layer (Brush row step 4), so such a stroke makes more than one undo entry; and a plain
+  Transform click on a stamp (no drag) baked it again and left an "Edit Stamp" undo entry in one of my runs.
+  `tools/transform.rs` changed only in its wrap-failure key here, so this is older behaviour; not investigated
+  further.
+- Still manual (unchanged): O1 Alt+H on Windows, O2 the split double-click with a real mouse.
+
+### Checks after the critic's change (`5e67b58`)
+
+`cargo-gnu.cmd test --workspace --no-fail-fast`: **1,292 passed / 1 failed (WA20, known) / 47 ignored** (same as the
+gate; `scenarios::tests` now counts 51 names); `test -p wte_app` again after the last edit: 415 passed / 23 ignored.
+`clippy --workspace --all-targets`: 0 warnings. Release build OK. Logs `target\objtabs\critic_*.log`.
+
+**Verdict of the critic:** the gate's PASS stands. The one major gap (the end-to-end workflow on a real multi-object
+model) is closed by `objects_flow_path`, which found no defect in the feature.

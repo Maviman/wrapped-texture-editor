@@ -80,11 +80,13 @@ and a log `<out>.log`. Scenario names (`crates/wte_app/src/selftest/scenarios.rs
 import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_path stamp_edge_path pan2d
 brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
-save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path` (50; `scenarios::tests` checks the
-count)
+save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path` (51; `scenarios::tests` checks
+the count)
 
 `*_path` scenarios need a PATH argument (a model); `objects_path` needs a model with **several objects** (gate:
-`ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model. Branch
+`ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model; `objects_flow_path` (the whole user workflow: hide the board,
+paint / stamp / wrap / text a pawn, save, reopen, export) needs a model whose board-like object has its own texture set
+(gate: `ABeautifulGame.glb`). Branch
 `objects-tabs`: `side_tabs` (the two tab groups of the side panel; also run at `--size 900x600` and `640x480`) and
 `objects` (the built-in Three Objects sample) need no PATH. `tools/objtabs/sweep.sh EXE OUT tools/objtabs/jobs_gate.txt`
 runs the whole gate sweep (sequential, off-screen). `export_flow` takes an optional PATH (a model or a saved `.wtep`):

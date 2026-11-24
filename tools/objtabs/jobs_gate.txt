@@ -61,3 +61,4 @@ side_tabs|-|640|640x480
 objects|-|
 objects_path|@SAMPLES@/ABeautifulGame.glb|abg
 objects_path|@SAMPLES@/Lantern.glb|lantern
+objects_flow_path|@SAMPLES@/ABeautifulGame.glb|abg

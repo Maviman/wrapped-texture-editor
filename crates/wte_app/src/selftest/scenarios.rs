@@ -84,6 +84,7 @@ const NAMES: &[&str] = &[
     "side_tabs",
     "objects",
     "objects_path",
+    "objects_flow_path",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -159,6 +160,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "side_tabs" => side_tabs::side_tabs(),
         "objects" => objects::objects(),
         "objects_path" => objects::objects_path(args.path.is_some()),
+        "objects_flow_path" => objects::objects_flow_path(args.path.is_some()),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -4253,7 +4255,7 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)> {
     match name {
         "workflow_path" | "fuzz_path" | "brush_types_path" | "text_preview_path" | "final_bake_async" | "wrap_surface"
-        | "export_flow" | "export_unsettled" | "save_unsettled" | "objects_path" => {
+        | "export_flow" | "export_unsettled" | "save_unsettled" | "objects_path" | "objects_flow_path" => {
             Some((Duration::from_secs(300), Duration::from_secs(3600)))
         }
         _ => None,
@@ -9273,7 +9275,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 50);
+        assert_eq!(scenario_names().len(), 51);
     }
 
     #[test]

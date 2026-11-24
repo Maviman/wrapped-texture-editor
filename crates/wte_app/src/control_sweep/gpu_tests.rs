@@ -838,6 +838,40 @@ fn hiding_during_a_held_stroke_commits_the_stroke_first() {
     assert_eq!((doc.history.undo_len(), doc.revision(), doc.is_modified()), (undo + 1, revision, modified));
 }
 
+/// objects-tabs check (plan 4.6): a document whose stored view state names hidden objects opens with them hidden (an
+/// unknown name is ignored), one Info toast names them, nothing is modified or in history, the object selection is
+/// empty, and the first frames already draw only the visible triangles.
+#[test]
+#[ignore = "needs a GPU"]
+fn a_document_opens_with_its_stored_hidden_objects() {
+    let mut a = FullApp::new(None);
+    let mut doc = Document::sample(SampleKind::Objects);
+    doc.ui_state = serde_json::json!({ "active_set": 0, "hidden_objects": ["Cube", "No such object"] });
+    crate::io_flows::install_document(&mut a.app, doc, None, false);
+    a.idle(2);
+    let session = a.state().session.as_ref().unwrap();
+    let doc = &session.doc;
+    assert_eq!(doc.hidden_objects(), [false, true, false]);
+    assert_eq!((doc.is_modified(), doc.history.undo_len()), (false, 0));
+    assert!(session.selected_objects.is_empty());
+    let labels = a.state().toasts.visible_labels();
+    assert_eq!(labels.iter().filter(|l| l.as_str() == "1 object is hidden: Cube (Object > Show All)").count(), 1, "{labels:?}");
+    let scene = a.app.scene.as_ref().expect("the scene is built");
+    let shown: usize = scene.mesh_draw(false).expect("visible triangles").2.iter().map(|d| d.tris.len()).sum();
+    let all: usize = scene.mesh_draw(true).expect("every triangle").2.iter().map(|d| d.tris.len()).sum();
+    assert_eq!(all, doc.mesh.tri_count() as usize);
+    assert_eq!(shown, all - doc.mesh.objects[1].tri_count as usize, "the cube is not drawn");
+
+    // A stored list that names nothing of this model: nothing hidden, no toast.
+    let mut doc = Document::sample(SampleKind::Objects);
+    doc.ui_state = serde_json::json!({ "hidden_objects": ["Pawn"] });
+    a.app.state.toasts = Default::default();
+    crate::io_flows::install_document(&mut a.app, doc, None, false);
+    a.idle(2);
+    assert_eq!(a.state().doc().unwrap().hidden_object_count(), 0);
+    assert!(a.state().toasts.visible_labels().is_empty(), "{:?}", a.state().toasts.visible_labels());
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The brush ring's side filter (FEATURE_BRUSH 5.11, 6.5; test A15), on the renderer alone.
 

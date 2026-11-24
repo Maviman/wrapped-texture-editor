@@ -949,6 +949,151 @@ mod tests {
         assert!(a.is_empty(), "{a:?}");
     }
 
+    /// objects-tabs check (plan 3.4): through the tools as the 3D view drives them, the ray of the eyedropper, the fill
+    /// seed, a brush stroke, a projected stamp and a wrapped stamp passes through a hidden object and acts on the object
+    /// behind it. Three Objects seen from above: the cube stands on the floor; every case is run with the cube shown
+    /// (it acts on the cube) and hidden (it acts on the floor under it and never on the cube's texels).
+    #[test]
+    fn every_tool_ray_passes_through_a_hidden_object() {
+        use std::sync::Arc;
+        use wte_core::{SampleSource, SurfaceMode, samples};
+
+        /// Changed composite texels per owning object (Floor, Cube, Ball) between two composites of set 0.
+        fn changed_per_object(doc: &Document, before: &[u8], after: &[u8]) -> [usize; 3] {
+            let set = &doc.sets[0];
+            let mut out = [0; 3];
+            for y in 0..set.height {
+                for x in 0..set.width {
+                    let i = ((y * set.width + x) * 4) as usize;
+                    if before[i..i + 4] == after[i..i + 4] {
+                        continue;
+                    }
+                    if let Some((tri, _)) = set.texel_map.owner(x, y) {
+                        out[doc.mesh.tri_object_of(tri) as usize] += 1;
+                    }
+                }
+            }
+            out
+        }
+        fn composite(state: &mut AppState) -> Vec<u8> {
+            let doc = state.doc_mut().unwrap();
+            doc.recomposite_all();
+            doc.sets[0].composite().data.clone()
+        }
+        /// A fresh trio seen from above, the cube hidden or not, the tool set; the pointer on the cube's centre.
+        fn setup(tool: ToolKind, hidden: bool) -> (AppState, ViewXform, egui::Pos2) {
+            let mut state = state_with(SampleKind::Objects);
+            state.tool = tool;
+            state.session.as_mut().unwrap().camera.pitch = 0.7;
+            let xf = xf_3d(&mut state);
+            let cube = state.doc().unwrap().mesh.objects[1].bounds.center();
+            let at = xf.world_to_screen(cube).expect("the cube is in view");
+            state.doc_mut().unwrap().set_hidden_objects(&[false, hidden, false]).unwrap();
+            let Surface::Model(hit) = xf.surface_at(state.doc().unwrap(), TextureSetId(0), at) else { panic!("a hit") };
+            assert_eq!(state.doc().unwrap().mesh.tri_object_of(hit.tri), if hidden { 0 } else { 1 }, "hidden {hidden}");
+            (state, xf, at)
+        }
+        fn click(state: &mut AppState, tools: &mut ToolController, xf: &ViewXform, at: egui::Pos2) {
+            let p = pointer(state, xf, at, egui::Modifiers::NONE);
+            tools.begin_frame();
+            tools.press(state, xf, &p, egui::PointerButton::Primary);
+            tools.release(state, xf, &p);
+        }
+
+        for hidden in [false, true] {
+            let target = if hidden { 0 } else { 1 };
+
+            // Eyedropper: the cube's top is painted red; hidden, the colour comes from the floor under it.
+            let (mut state, xf, at) = setup(ToolKind::Eyedropper, hidden);
+            let Surface::Model(cube_hit) = ({
+                let doc = state.doc_mut().unwrap();
+                doc.set_hidden_objects(&[false; 3]).unwrap();
+                let s = xf.surface_at(doc, TextureSetId(0), at);
+                doc.set_hidden_objects(&[false, hidden, false]).unwrap();
+                s
+            }) else {
+                panic!("the cube is hit")
+            };
+            let layer = paint_layer(&mut state, TextureSetId(0)).unwrap();
+            let red = [255, 0, 0, 255];
+            state.doc_mut().unwrap().fill(TextureSetId(0), layer, cube_hit.uv.unwrap(), red, wte_core::FillScope::Island).unwrap();
+            state.doc_mut().unwrap().recomposite_all();
+            let mut tools = ToolController::new();
+            click(&mut state, &mut tools, &xf, at);
+            let p = pointer(&state, &xf, at, egui::Modifiers::NONE);
+            let (set, uv) = p.surface.set_uv().unwrap();
+            let floor_colour = state.doc().unwrap().sample_color(set, uv, SampleSource::Composite).unwrap();
+            let picked = match state.actions.as_slice() {
+                [AppAction::SetPrimaryColor(c)] => *c,
+                other => panic!("eyedropper queued {other:?}"),
+            };
+            if hidden {
+                assert_eq!(picked, floor_colour, "the floor's colour");
+                assert_ne!(picked, red, "not the hidden cube's red");
+            } else {
+                assert_eq!(picked, red, "the cube's red");
+            }
+
+            // Fill (Island scope from the 3D view): the seed is the object hit.
+            let (mut state, xf, at) = setup(ToolKind::Fill, hidden);
+            state.tools.fill_scope = wte_core::FillScope::Island;
+            state.colors.primary = [10, 200, 30, 255];
+            let before = composite(&mut state);
+            click(&mut state, &mut ToolController::new(), &xf, at);
+            let after = composite(&mut state);
+            let changed = changed_per_object(state.doc().unwrap(), &before, &after);
+            assert!(changed[target] > 0 && changed.iter().sum::<usize>() == changed[target], "fill, hidden {hidden}: {changed:?}");
+
+            // Brush: a short stroke over the cube's centre paints the object the ray hits.
+            let (mut state, xf, at) = setup(ToolKind::Brush, hidden);
+            state.colors.primary = [0, 0, 255, 255];
+            let before = composite(&mut state);
+            let mut tools = ToolController::new();
+            let p = pointer(&state, &xf, at, egui::Modifiers::NONE);
+            tools.begin_frame();
+            tools.press(&mut state, &xf, &p, egui::PointerButton::Primary);
+            for dx in [2.0, 4.0] {
+                tools.begin_frame();
+                let q = pointer(&state, &xf, at + egui::vec2(dx, 0.0), egui::Modifiers::NONE);
+                tools.drag(&mut state, &xf, &q);
+            }
+            let q = pointer(&state, &xf, at + egui::vec2(4.0, 0.0), egui::Modifiers::NONE);
+            tools.release(&mut state, &xf, &q);
+            let mut frames = 0;
+            while tools.is_busy() && frames < 100_000 {
+                tools.begin_frame();
+                tools.end_frame(&mut state, 0.0);
+                frames += 1;
+            }
+            let after = composite(&mut state);
+            let changed = changed_per_object(state.doc().unwrap(), &before, &after);
+            assert!(changed[target] > 0, "brush, hidden {hidden}: {changed:?}");
+            if hidden {
+                assert_eq!(changed[1], 0, "no paint on the hidden cube: {changed:?}");
+            }
+
+            // A projected and a wrapped image stamp placed at the cube's centre.
+            for mode in [SurfaceMode::Project, SurfaceMode::Wrap] {
+                let (mut state, xf, at) = setup(ToolKind::Stamp, hidden);
+                let img = samples::sample_stamp_image(64);
+                let png = wte_core::encode_png(img.width, img.height, &img.data, wte_core::PngLevel::Fast).unwrap();
+                let blob = state.doc_mut().unwrap().add_image_blob("ring.png", Arc::from(png)).unwrap();
+                state.tools.stamp.source = Some(blob);
+                state.tools.stamp.source_name = "ring.png".to_owned();
+                state.tools.stamp.mode = mode;
+                let before = composite(&mut state);
+                click(&mut state, &mut ToolController::new(), &xf, at);
+                assert!(state.session.as_ref().unwrap().selected_stamp.is_some(), "{mode:?} placed");
+                let after = composite(&mut state);
+                let changed = changed_per_object(state.doc().unwrap(), &before, &after);
+                assert!(changed[target] > 0, "{mode:?}, hidden {hidden}: {changed:?}");
+                if hidden {
+                    assert_eq!(changed[1], 0, "{mode:?}: nothing on the hidden cube: {changed:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn error_text_is_a_sentence() {
         assert_eq!(error_text(&EditError::LayerLocked), "Layer is locked");

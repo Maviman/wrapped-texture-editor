@@ -7416,6 +7416,14 @@ the floor behind it, `all_objects` draws it again, the tint makes the cube bluer
 hidden cube's wires are gone inside its former screen box) and `perf_visibility_toggle_on_a_heavy_model` (reads
 `WTE_HEAVY_MODEL`; prints the core mask and `sync_objects` times, fails over 250 ms).
 
+objects-tabs check of WP3a/3b: `tools::tests::every_tool_ray_passes_through_a_hidden_object` (Three Objects from above,
+driven through `ToolController` as the 3D view drives it: the eyedropper, an Island fill, a brush stroke, a projected and a
+wrapped image stamp at the cube's centre act on the cube when it is shown and, with the cube hidden, on the floor under it
+and never on a cube texel); GPU (ignored): `control_sweep::gpu_tests::a_document_opens_with_its_stored_hidden_objects`
+(`install_document` with `ui_state.hidden_objects` = a known and an unknown name: the known one hidden, one Info toast
+naming it, not modified, no history, empty selection, the first frames draw without the cube; a list naming nothing of
+the model hides nothing and shows no toast).
+
 ## 10. Work packages
 
 Wave 0 creates a compiling workspace; wave 1 implements `wte_core`; wave 2 implements `wte_app`. Inside a wave the packages are

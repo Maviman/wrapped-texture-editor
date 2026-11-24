@@ -7458,6 +7458,16 @@ and text layers (exactly those two files, each = `dense(layer)`).
 
 - M1 (gate, between the waves): `tip_field::tests::a_part_cut_off_at_the_border_stays_inside_its_bound`; `tests/brush_tips.rs`: `a_baked_ball_dab_matches_the_ball` (C13 dab part), `unused_parts_do_not_change_the_printed_square` (F16 dab part, asserts the measured state and logs the miss).
 
+- Branch `pen-input` (`stroke.rs` tests, PEN_INPUT_PLAN 2.4): `size_and_flow_factors` (both factors exactly 1.0 at p = 1
+  for several minimums, `flow_factor(p) == p` bit for bit with `flow_min == 0`, monotonic, `OFF`),
+  `full_pressure_ignores_the_dynamics` (3D and 2D strokes at pressure 1.0 with any dynamics == the default: state and dab
+  count), `pressure_sizes_the_stroke_2d` (column heights at 20 % / 90 % of a 0.1 -> 1.0 ramp within 2 texels of
+  `2 * r * p`, full centre with flow off), `pressure_spacing_follows_the_radius` (dabs at constant 0.25 = floor(len /
+  step_at) +- 1, about 4x those at 1.0), `pressure_sized_stroke_is_pacing_independent` (unpaced, one dab per call, mixed:
+  same dabs, masks, pixels), `pressure_sized_stroke_is_thread_independent` (pools of 1 and 3), `eraser_follows_pressure_size`,
+  `flow_min_and_size_min_are_sanitized`, `too_many_pressure_dabs_fall_back_to_one`. The existing hashes (C1, C2,
+  `tests\brush_tips.rs`, `one_dab_per_call_gives_the_unpaced_stroke`, `pressure_scales_the_flow`) are unchanged.
+
 ### 9.2 `wte_app` tests
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
@@ -7567,6 +7577,18 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
 `a_stroke_during_a_wrap_preview_job_holds_its_output_until_it_ends`,
 `save_during_a_wrap_preview_job_settles_without_waiting_for_it`,
 `a_wrap_preview_landing_after_a_turn_to_project_in_the_same_edit_is_dropped`.
+
+- Branch `pen-input`: `tools::brush` `a_mouse_stroke_is_unchanged_by_the_pressure_settings` (12 settings, 3D and 2D, one
+  hash), `pen_pressure_reaches_the_3d_and_2d_stroke`, `pressure_is_interpolated_along_the_walk` (`walk_pressure`),
+  `a_pen_stroke_does_not_depend_on_the_pacing`; `prefs::a10_brush_preferences_round_trip_and_read_leniently` (the pressure
+  keys and `tablet_input`); `pen::decode::tests` (tip, hover, barrel, third button, eraser, pressure edges, entries
+  without a phase); `pen::route::tests` (tap = click without Touch, a move burst keeps every pressure, barrel / third
+  button, the eraser end, finger touches unchanged, record / touch mismatch, stuck emulation, Leave in contact and
+  hovering, a mouse-only frame unchanged, the feed cap, `touch_is_pen`); `pen::tests` (the cursor, readout and pen line,
+  the eraser override, a manual tool change drops it); `pen::win::tests` (struct layouts, oldest-first history, Leave vs
+  lost capture, queue cap; Windows); `selftest::tests::pen_frames_hover_down_moves_up_leave`; `status_bar` plan and
+  overlap tests with the pen item; the menu sweep's Help > Tablet setup; the GPU test
+  `about_shortcuts_and_message_dialogs_close_by_button_backdrop_and_esc` opens and closes Tablet setup. Scenario `pen`.
 
 ---
 
@@ -7934,3 +7956,17 @@ gate report `docs/reports/OBJECTS_TABS_GATE_REPORT.md`.
 | 4 | Tab groups (8.7 "Side panel") | `panels/mod.rs`, `panels/side_groups.rs`, `panels/{color,texture_sets,tool_options,toolbar}.rs`, `state.rs`, `prefs.rs`, `app.rs`, the tests of plan 6.6 | all scenarios ok; view-rect identity; screenshots of every tab |
 | 5 | Objects tab (8.7 "Objects tab") | `panels/objects.rs`, `panels/layers.rs` | the tests of plan 7.2 |
 | 6 | Scenarios, docs, gate (8.11, 1.9) | `selftest/scenarios/objects.rs`, `selftest/scenarios/side_tabs.rs`, `tools/objtabs/`, `ARCHITECTURE.md`, `HANDOFF.md`, `dist/HOW_TO_TEST.txt` | the full gate of plan section 9 |
+
+### pen-input (branch `pen-input`, `docs/plans/PEN_INPUT_PLAN.md` section 10)
+
+One builder, parts in order, each with its own commit; notes in `docs/notes/pen/`.
+
+| Part | Content | Main files | Check |
+|---|---|---|---|
+| A | Core dynamics, per-dab radius, variable spacing (5.19, 6.4) | `wte_core/src/brush.rs`, `stroke.rs` | `test -p wte_core`, existing hashes untouched, clippy 0 |
+| B | Settings, UI, prefs, pressure through the brush tool (8.2, 8.6, 8.7, 8.9) | `state.rs`, `prefs.rs`, `panels/tool_options.rs`, `tools/brush.rs` | workspace tests (WA20 only red), clippy 0 |
+| C | `pen` module pure parts, wiring, eraser override, `Step::Pen`, scenario `pen` (8.3, 8.11) | `pen/{mod,decode,route}.rs`, `app.rs`, `view/mod.rs`, `selftest/*` | tests, clippy, release build, `pen` + regression scenarios |
+| D | Windows subclass, Ink feedback and gestures (8.2, 8.13) | `pen/win.rs`, `app.rs` | tests, clippy, scenarios with and without `WTE_PEN_SUBCLASS=1` |
+| E | Status item, Tablet setup dialog, README, HOW_TO_TEST (8.7, 8.8) | `panels/status_bar.rs`, `dialogs/tablet.rs`, `panels/menu_bar.rs` | tests, clippy, scenario `pen` |
+| F | Final doc pass and verification | `ARCHITECTURE.md`, `HANDOFF.md`, `docs/plans/FEATURE_BRUSH.md`, `docs/notes/pen/build.md` | full test run, clippy, release build, the scenario list, pixel / byte identity with the 1b589a1 exe |
+| G | WinTab opt-in (own commit) | `pen/wintab.rs`, `dialogs/tablet.rs` | as F |

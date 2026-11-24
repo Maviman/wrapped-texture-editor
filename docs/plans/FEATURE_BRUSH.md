@@ -371,6 +371,7 @@ removes one package (Q1: package C; Q6: single controls; Q8: the Use control; Q9
 - `BrushTool` has no `scroll` handler; Ctrl+wheel and Shift+wheel go to the tool first and zoom the view when the
   tool does not take them (`app\view\mod.rs:420-430`).
 - Pen pressure is the constant 1.0 (`app\view\mod.rs:472`, `app\tools\brush.rs:166`).
+  **Done since (branch `pen-input`, `docs/plans/PEN_INPUT_PLAN.md`):** Windows Ink pen pressure reaches the stroke; Pen pressure Size / Flow with minimums in the Brush and Eraser options (ARCHITECTURE 1.10, 5.19, 8.6, 8.7).
 - An existing test reads the tool's private state after a budget-limited drag and must keep passing:
   `long_drag_respects_the_raycast_budget_and_finishes_on_release` (`app\tools\brush.rs:431-450`; the test view is
   800 x 600 points, `app\tools\mod.rs:537-542`).
@@ -2119,6 +2120,7 @@ the file that package owns; it needs no file of the project packages.
 - Dropping a model file on the Brush tab (a dropped model still opens as a new document).
 - Pen pressure (it is the constant 1.0 today, `app\view\mod.rs:472`) and every "dynamics" setting of Photoshop's
   panel: jitter, scattering, dual brushes, texture, wet edges.
+  Pen pressure is done since: branch `pen-input` (`docs/plans/PEN_INPUT_PLAN.md`); the dynamics stay out.
 - A fix for the long first frames when a stroke first reaches a set; it is measured and reported only.
 - A change to how the world radius is derived from Size (the set under the press point, frozen for the stroke).
 - Image-based (2D picture) brush tips.

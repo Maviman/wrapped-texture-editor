@@ -80,8 +80,8 @@ and a log `<out>.log`. Scenario names (`crates/wte_app/src/selftest/scenarios.rs
 import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_path stamp_edge_path pan2d
 brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
-save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path` (51; `scenarios::tests` checks
-the count)
+save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen` (52; `scenarios::tests` checks
+the count; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2)
 
 `*_path` scenarios need a PATH argument (a model); `objects_path` needs a model with **several objects** (gate:
 `ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model; `objects_flow_path` (the whole user workflow: hide the board,
@@ -107,6 +107,7 @@ flattened, 50 % Multiply within 2/255. `tools/round3_audit/sweep.ps1` runs a job
 | `WTE_STROKE_LOG=1` | brush phase probe: one line per slow sample and a `brush stroke probe:` line per stroke |
 | `WTE_SYNC_FINAL_BAKES=1` | old behaviour: Final stamp bakes on the UI thread (round 5 moved them to a worker) |
 | `WTE_STAMP_MODE=wrap` | new stamps start in Wrap (for like-for-like timing runs) |
+| `WTE_PEN_SUBCLASS=1` | branch `pen-input`: installs the pen window-procedure subclass in a self-test run too (it is always installed in a normal run); proves it does no harm; what it queues is dropped |
 | `RAYON_NUM_THREADS=n` | pool size; brush and wrap results must be identical for any n |
 | `WGPU_BACKEND=dx12` / Vulkan | renderer choice (see `dist/*.cmd`) |
 
@@ -142,9 +143,23 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | 6 | **Wrap on surface** (Project / Wrap toggle, Jump small gaps, Ends meet / Overlap), project format 3 | landed 2026-11-21 | 6CE65B55… |
 | 7 | brush speed on heavy models (lean pass 2, fused parallel band raster + commit), pixels unchanged | landed on top of 6 | **2787C1B9…2BF8** (= `main`) |
 | 8 | Wrap quality on bumpy surfaces + Wrap speed | **NOT landed** — branch `round8-wip` | — |
+| pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
 Reports: `docs/reports/`. Plans: `docs/plans/`.
+
+### 5.2 Pen input (branch `pen-input`)
+
+Plan `docs/plans/PEN_INPUT_PLAN.md`, decisions and per-part notes `docs/notes/pen/` (`build.md` = the measurements and
+comparisons), ARCHITECTURE 1.10. A pen is "a mouse with pressure": the pen's touch events never reach egui, a
+window-procedure subclass (`pen/win.rs`) reads exact per-sample pressure and the barrel / eraser flags, Size follows
+pressure from 10 % by default (Tool tab > Brush / Eraser options > Pen pressure), the eraser end switches to the
+Eraser and back, the barrel button is the right button, Windows Ink's press-and-hold / tap / flick feedback is off, the
+status bar shows "Pen N %", Help > Tablet setup explains the driver settings. Mouse strokes, exports and the central
+view are identical to `main` (checked against a 1b589a1 exe).
+
+**Owed by the user** (the builder had no tablet): the ten hand tests in `dist/HOW_TO_TEST.txt` ("Pen tablets"), with
+Windows Ink on; the WinTab path (part G) can only be checked with a driver whose Windows Ink option is off.
 
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 

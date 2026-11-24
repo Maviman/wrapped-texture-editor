@@ -242,6 +242,12 @@ pub fn install(hwnd: Hwnd) -> Result<String, String> {
     ))
 }
 
+/// The subclassed window, if `install` succeeded (part G opens its WinTab context on it).
+pub fn hwnd() -> Option<Hwnd> {
+    let h = HWND.load(Ordering::Acquire);
+    (h != 0).then_some(h)
+}
+
 /// The subclass procedure (see the module comment).
 unsafe extern "system" fn pen_wndproc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     let prev = PREV.load(Ordering::Acquire);
@@ -259,12 +265,16 @@ unsafe extern "system" fn pen_wndproc(hwnd: Hwnd, msg: u32, wparam: usize, lpara
             RemovePropW(hwnd, name.as_ptr());
         }
         HWND.store(0, Ordering::Release);
+        let _ = std::panic::catch_unwind(super::wintab::close);
     } else if matches!(
         msg,
         WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP | WM_POINTERLEAVE | WM_POINTERCAPTURECHANGED
     ) {
         // A panic must never cross the FFI boundary; the message is forwarded whatever happened here.
         let _ = std::panic::catch_unwind(|| on_pointer_message(msg, wparam));
+    } else if matches!(msg, super::wintab::WT_PACKET | super::wintab::WT_PROXIMITY | super::wintab::WM_ACTIVATE) {
+        // Part G: the WinTab context's packets (nothing while no context is open).
+        let _ = std::panic::catch_unwind(|| super::wintab::on_message(msg, wparam, lparam));
     }
     if prev == 0 {
         // SAFETY: the default procedure for a window whose previous one is unknown (cannot happen after `install`).

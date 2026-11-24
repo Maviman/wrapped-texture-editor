@@ -298,6 +298,10 @@ impl eframe::App for WteApp {
             crate::pen::drain_window_records(&mut self.state.pen.feed);
         }
         self.state.pen.route(&mut raw_input.events);
+        // Part G: the opt-in WinTab pressure (interactive runs only; nothing unless its context gives packets).
+        if self.selftest.is_none() {
+            self.state.pen.apply_wintab(&raw_input.events);
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -307,6 +311,12 @@ impl eframe::App for WteApp {
         // `SetTool` dispatch, before the tools and panels see this frame's input.
         if let Some(tool) = crate::pen::eraser_override(&mut self.state.pen, self.state.tool, self.tools.is_busy()) {
             dispatch::dispatch(self, AppAction::SetTool(tool), frame);
+        }
+        // Part G: the "Tablet input" preference takes effect at once (never in a self-test run).
+        if !self.state.selftest
+            && let Some(text) = self.state.pen.sync_tablet_input(self.state.prefs.tablet_input)
+        {
+            self.state.toasts.info(text);
         }
         let jobs = frame_profile::scope("jobs");
         for done in self.jobs.poll() {

@@ -193,6 +193,7 @@ fn about_shortcuts_and_message_dialogs_close_by_button_backdrop_and_esc() {
     assert_eq!(a.dialog_name(), "TabletHelp");
     assert!(a.h.has("Tablet setup"), "the heading is shown");
     assert!(a.h.has("No pen seen yet (Help > Tablet setup)"), "the pen line is shown");
+    assert!(a.h.has("Tablet input:") && a.h.has("Windows Ink (recommended)"), "part G: the Tablet input choice is shown");
     a.click("Close");
     a.idle(1);
     assert_eq!(a.dialog_name(), "None");

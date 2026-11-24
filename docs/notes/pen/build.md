@@ -23,8 +23,8 @@ Per-part details: `A.md` ... `G.md`; decisions and deviations: `decisions.md`.
 | 062b276 | C: pen module, router, eraser end, barrel button, views, `Step::Pen`, scenario `pen` (+ ARCHITECTURE for A-C) |
 | dbb55f9 | D: Windows subclass, Ink feedback / gestures off |
 | e769f96 | E: status read-out, Help > Tablet setup, README, HOW_TO_TEST |
-| (F) | final doc pass: ARCHITECTURE 9.1 / 9.2 / 10, HANDOFF, FEATURE_BRUSH, these notes |
-| (G) | WinTab opt-in, see `G.md` |
+| 5615fc8 | F: final doc pass: ARCHITECTURE 9.1 / 9.2 / 10, HANDOFF, FEATURE_BRUSH, these notes |
+| (G, last commit) | WinTab opt-in, see `G.md` |
 
 ## Final checks (part F, before part G)
 
@@ -83,3 +83,15 @@ injection of any kind was used anywhere (pens are recorded samples fed through `
 - Tap accuracy with pen jitter (egui's click distance), tooltips under the pen, the barrel-button mapping of each driver.
 - WinTab (part G) with a real driver.
 All of these are the hand tests in `dist/HOW_TO_TEST.txt` ("Pen tablets").
+
+## Part G (WinTab opt-in) checks
+
+- `cargo test --workspace --no-fail-fast`: **1,339 passed, 1 failed (WA20), 48 ignored** (+8 over part F: WinTab pure
+  5, FFI layout / closed context 2, the tablet-input preference 1). GPU dialog test (`--ignored`) passed, with the combo.
+- clippy 0 warnings; release build, final exe SHA-256 **77d0ce31acbdd06c99da2744a2b45e05935197780fbdb7a5fd792faa3fd7428c**.
+- Final sweep `target\pen\g_runs` (`tools/pen/jobs_final.txt`, 23 runs incl. smoke pen paint3d paint2d): all `"ok": true`.
+  Against part F's sweep: 82 files byte-identical, the 3 `.wtep` differ by their save time; 44 screenshots
+  pixel-identical; only `pen\shot_tablet_help.png` changed (the new combo, the WinTab line, the help sentence) and the
+  two dialog shots that print the output folder path. Against the baseline exe: the same picture as in part F (82 files
+  byte-identical, 28 shots identical, the rest only the side panel's Pen pressure rows and printed paths).
+- `shot_tablet_help.png` looked at: the combo "Tablet input: Windows Ink (recommended)", the note line, "WinTab: off".

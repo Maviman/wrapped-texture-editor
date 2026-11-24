@@ -34,6 +34,7 @@ pushed; the installer script is [`installer/WrappedTextureEditor.iss`](installer
   pressure drives the size and / or the flow and their minimums. The pressure curve is set in the tablet driver.
 - Turn the pen around to erase; the lower pen button is the right mouse button (orbit in 3D, pan in 2D, menus).
 - The status bar shows "Pen N %" while the pen touches the tablet; **Help > Tablet setup** has the details.
+- A driver without Windows Ink: Help > Tablet setup > Tablet input: **WinTab** (pressure and eraser from WinTab).
 - A mouse paints exactly as before: it always paints at full pressure.
 
 ## Develop

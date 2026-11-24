@@ -87,7 +87,10 @@ With a drawing tablet or pen display (Windows Ink on in its driver):
      right-click menu, no ripple when you tap.
   8. Restart the app: the pressure settings are remembered.
   9. If the tablet driver's Windows Ink option is off: confirm there is no
-     pressure (strokes stay full width), then see Help > Tablet setup.
+     pressure (strokes stay full width), then Help > Tablet setup >
+     Tablet input: WinTab, and check that pressure works and each stroke
+     appears once. (Without a WinTab driver a message says Windows Ink is
+     used.) Set it back to Windows Ink afterwards.
  10. Mouse painting feels and looks as before.
 Please note the tablet model and driver version with anything that does
 not work, and send the log (see below).

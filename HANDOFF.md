@@ -159,7 +159,8 @@ status bar shows "Pen N %", Help > Tablet setup explains the driver settings. Mo
 view are identical to `main` (checked against a 1b589a1 exe).
 
 **Owed by the user** (the builder had no tablet): the ten hand tests in `dist/HOW_TO_TEST.txt` ("Pen tablets"), with
-Windows Ink on; the WinTab path (part G) can only be checked with a driver whose Windows Ink option is off.
+Windows Ink on; the WinTab path (part G, opt-in: Help > Tablet setup > Tablet input: WinTab; `wintab32.dll` loaded at
+run time, pressure and eraser only) can only be checked with a driver whose Windows Ink option is off.
 
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 

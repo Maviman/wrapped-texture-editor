@@ -1,8 +1,9 @@
 // Branch `pen-input` (PEN_INPUT_PLAN 7, ARCHITECTURE 8.8): Help > Tablet setup. Static help for drawing tablets and pen
-// displays, the live pen line, and (part G) the "Tablet input" choice.
+// displays, the live pen line, and (part G) the "Tablet input" choice: Windows Ink (recommended) / WinTab.
 
 use eframe::egui;
 
+use crate::state::TabletInput;
 use crate::view::ViewCx;
 
 /// The paragraphs of the dialog (also checked by the tests and the scenario `pen`).
@@ -10,7 +11,7 @@ pub(crate) const TABLET_HELP: [&str; 5] = [
     "Works with any tablet whose driver has Windows Ink turned on (the default): Wacom Tablet Properties > Mapping > \
      \"Use Windows Ink\"; Huion > Pen settings > \"Enable Windows Ink\"; XP-Pen / Pentablet > \"Windows Ink\".",
     "If the stroke does not follow the pressure, turn that option on. Drivers allow it per application: add Wrapped \
-     Texture Editor to the driver's application list.",
+     Texture Editor to the driver's application list. Or choose Tablet input: WinTab below.",
     "Pressure options: Tool tab > Brush options (and Eraser options) > Pen pressure. The pressure curve (soft or firm) is \
      set in the tablet driver.",
     "Turn the pen around to erase. The lower pen button is the right mouse button (orbit in 3D, pan in 2D, context \
@@ -18,10 +19,14 @@ pub(crate) const TABLET_HELP: [&str; 5] = [
     "The status bar shows \"Pen N %\" while the pen touches the tablet.",
 ];
 
+/// The line under the Tablet input choice.
+pub(crate) const TABLET_INPUT_NOTE: &str = "Use WinTab only if your driver's Windows Ink option is off. Takes effect at once.";
+
 /// Draws Help > Tablet setup.
 pub(super) fn show(ctx: &egui::Context, cx: &mut ViewCx<'_>) {
     let max = super::max_dialog_size(ctx);
     let pen_line = cx.state.pen.status_line();
+    let wintab_line = cx.state.pen.wintab_line();
     let response = super::modal("tablet").show(ctx, |ui| {
         ui.set_width(max.x.min(480.0));
         ui.heading("Tablet setup");
@@ -32,6 +37,23 @@ pub(super) fn show(ctx: &egui::Context, cx: &mut ViewCx<'_>) {
                 ui.add_space(4.0);
             }
             ui.weak(pen_line.as_str());
+            ui.add_space(6.0);
+            // Part G: the pressure source (a preference; takes effect at once, `PenState::sync_tablet_input`).
+            ui.horizontal(|ui| {
+                ui.label("Tablet input:");
+                let input = &mut cx.state.prefs.tablet_input;
+                let text = |t: TabletInput| match t {
+                    TabletInput::WindowsInk => "Windows Ink (recommended)",
+                    TabletInput::WinTab => "WinTab",
+                };
+                egui::ComboBox::from_id_salt("wte_tablet_input").selected_text(text(*input)).show_ui(ui, |ui| {
+                    for t in [TabletInput::WindowsInk, TabletInput::WinTab] {
+                        ui.selectable_value(input, t, text(t));
+                    }
+                });
+            });
+            ui.weak(TABLET_INPUT_NOTE);
+            ui.weak(wintab_line);
         });
         ui.separator();
         let mut close = false;

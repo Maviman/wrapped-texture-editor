@@ -9,18 +9,20 @@
 //! - `decode.rs`: pure decoding of the pointer / pen flags.
 //! - `route.rs`: the pure event router.
 //! - `win.rs`: the Windows glue (subclass, Ink feedback off, system gestures off).
+//! - `wintab.rs`: the opt-in WinTab pressure source (part G; pure parts on every platform, FFI on Windows).
 
 #[cfg_attr(not(windows), allow(dead_code, reason = "read by the Windows window procedure only"))]
 pub mod decode;
 pub mod route;
 #[cfg(windows)]
 pub mod win;
+pub mod wintab;
 
 use std::collections::VecDeque;
 
 use eframe::egui;
 
-use crate::state::ToolKind;
+use crate::state::{TabletInput, ToolKind};
 
 pub use route::PenRouter;
 
@@ -148,12 +150,83 @@ pub struct PenState {
     pub eraser_restore: Option<ToolKind>,
     /// A manual tool change dropped the override: no new one until the eraser end leaves (or turns around).
     pub eraser_hold_off: bool,
+    /// Part G: the pressure source in effect (`sync_tablet_input`); `None` before the first interactive frame.
+    pub tablet_applied: Option<TabletInput>,
+    /// Part G: the WinTab pressure ramp between frames.
+    pub wintab_ramp: wintab::WintabRamp,
 }
 
 impl PenState {
     /// Routes one frame (`raw_input_hook` step 3).
     pub fn route(&mut self, events: &mut Vec<egui::Event>) {
         self.frame = self.router.process(events, &mut self.feed);
+    }
+
+    /// Part G (decision D8): lays the WinTab pen over this frame's notes while the WinTab source is in effect and its
+    /// context gives packets; otherwise nothing.
+    pub fn apply_wintab(&mut self, events: &[egui::Event]) {
+        #[cfg(windows)]
+        if self.tablet_applied == Some(TabletInput::WinTab) {
+            let tab = wintab::poll();
+            wintab::apply(&mut self.frame, events, &tab, &mut self.wintab_ramp);
+        }
+        #[cfg(not(windows))]
+        let _ = events;
+    }
+
+    /// Part G: opens or closes the WinTab context when the preference changed (interactive runs only; called once per
+    /// frame). Returns the toast text when WinTab was asked for and cannot be used: the app then works as with Windows Ink.
+    pub fn sync_tablet_input(&mut self, want: TabletInput) -> Option<String> {
+        if self.tablet_applied == Some(want) {
+            return None;
+        }
+        self.tablet_applied = Some(want);
+        self.wintab_ramp = wintab::WintabRamp::default();
+        #[cfg(windows)]
+        {
+            match want {
+                TabletInput::WindowsInk => {
+                    wintab::close();
+                    None
+                }
+                TabletInput::WinTab => {
+                    let Some(hwnd) = win::hwnd() else {
+                        return Some("WinTab cannot be used without the pen window hook; using Windows Ink".to_owned());
+                    };
+                    match wintab::open(hwnd) {
+                        wintab::Status::Open => {
+                            log::info!("pen input: WinTab context open");
+                            None
+                        }
+                        wintab::Status::NoDriver => Some("No WinTab tablet driver found; using Windows Ink".to_owned()),
+                        _ => Some("The WinTab driver did not open a tablet context; using Windows Ink".to_owned()),
+                    }
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            (want == TabletInput::WinTab).then(|| "WinTab is available on Windows only; using Windows Ink".to_owned())
+        }
+    }
+
+    /// Part G: the WinTab line of Help > Tablet setup.
+    pub fn wintab_line(&self) -> &'static str {
+        if self.tablet_applied != Some(TabletInput::WinTab) {
+            return "WinTab: off";
+        }
+        #[cfg(windows)]
+        {
+            match wintab::status() {
+                wintab::Status::Open => "WinTab: on",
+                wintab::Status::NoDriver => "WinTab: no WinTab driver found (Windows Ink is used)",
+                _ => "WinTab: the driver gave no tablet context (Windows Ink is used)",
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            "WinTab: not available"
+        }
     }
 
     /// The text of the pen line under the Pen pressure options (ARCHITECTURE 8.7).
@@ -351,6 +424,24 @@ mod tests {
         let mut p = pen(true, true);
         assert_eq!(eraser_override(&mut p, ToolKind::Eraser, false), None);
         assert_eq!(p.eraser_restore, None);
+    }
+
+    /// Part G: the preference is applied once per change; WinTab that cannot be used says so once and leaves Windows Ink
+    /// (in a test there is no subclassed window); the frame is untouched while WinTab is not in effect.
+    #[test]
+    fn the_tablet_input_preference_is_applied_once() {
+        let mut p = PenState::default();
+        assert_eq!(p.sync_tablet_input(TabletInput::WindowsInk), None);
+        assert_eq!(p.sync_tablet_input(TabletInput::WindowsInk), None);
+        assert_eq!(p.wintab_line(), "WinTab: off");
+        let toast = p.sync_tablet_input(TabletInput::WinTab);
+        assert!(toast.as_deref().is_some_and(|t| t.ends_with("using Windows Ink")), "{toast:?}");
+        assert_eq!(p.sync_tablet_input(TabletInput::WinTab), None, "said once");
+        assert!(p.wintab_line().starts_with("WinTab: "));
+        let events = vec![egui::Event::PointerMoved(egui::pos2(1.0, 1.0))];
+        p.apply_wintab(&events);
+        assert_eq!(p.frame, PenFrame::default(), "no context: nothing laid over the frame");
+        assert_eq!(p.sync_tablet_input(TabletInput::WindowsInk), None);
     }
 
     #[test]

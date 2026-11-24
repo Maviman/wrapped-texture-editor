@@ -424,6 +424,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `pen/mod.rs` | pen-input | `PenRecord`, `PenKind`, `PenFrame` (pointer notes, `cursor`, `readout`), `PenState` (`AppState::pen`), the eraser override (`eraser_step`, `eraser_override`), `drain_window_records` |
 | `pen/decode.rs` | pen-input | pure decoding of a pointer history entry (`RawPen` -> `PenRecord`), the `POINTER_FLAG_*` / `PEN_FLAG_*` constants |
 | `pen/route.rs` | pen-input | `PenRouter::process`: pairs pen `Touch` events with records, drops them, rewrites the barrel press, synthesizes stuck emulation, notes pressures; `touch_is_pen` without the subclass |
+| `pen/wintab.rs` | pen-input part G | opt-in WinTab: pure `wintab_state`, `spread`, `apply` (WinTab pressure over the frame's pointer notes, `WintabRamp`); Windows: run-time loaded `wintab32.dll` (`open`, `close`, `poll`, `status`, `on_message` for `WT_PACKET` / `WT_PROXIMITY` / `WM_ACTIVATE`), `LOGCONTEXTW` (212 bytes), `AXIS`, `Packet` (12 bytes) |
 | `pen/win.rs` | pen-input (Windows only) | the window-procedure subclass (`install`, `pen_wndproc`): pen history -> records (`Shared::push_history`, `leave`, `drain_into`), `WM_TABLET_QUERYSYSTEMGESTURESTATUS`, Ink pen feedback off, `MicrosoftTabletPenServiceProperty`; `POINTER_INFO` / `POINTER_PEN_INFO` (`raw-dylib` user32) |
 | `selftest/scenarios/pen.rs` | pen-input | the scenario `pen` (8.11) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
@@ -4919,6 +4920,22 @@ Branch `pen-input`:
   message is then forwarded unchanged with `CallWindowProcW(prev, ..)` and its result returned; the message work runs in
   `catch_unwind`. A failed install is logged ("pen input: ... off") and `PenRouter::touch_is_pen` is set: every touch is
   then a pen with winit's pressure. A self-test run drops what the subclass queued (`pen::discard_window_records`).
+- Part G, **WinTab (opt-in, decision D8)**: `PenState::sync_tablet_input(prefs.tablet_input)` runs in `logic` of every
+  interactive frame and acts only on a change: WinTab -> `wintab::open(win::hwnd())`: `LoadLibraryW("wintab32.dll")` and
+  `GetProcAddress` of `WTInfoW`, `WTOpenW`, `WTClose`, `WTPacketsGet`, `WTEnable`, `WTOverlap` (run-time loading: the DLL
+  exists only with a tablet driver); `WTInfoW(WTI_DEFSYSCTX, 0, &LOGCONTEXTW)` (size checked first, at most 212 bytes),
+  `lcOptions |= CXO_MESSAGES` (CXO_SYSTEM kept: the driver still moves the cursor and clicks), `lcPktData = lcMoveMask =
+  PK_CURSOR | PK_BUTTONS | PK_NORMAL_PRESSURE`, `lcPktMode = 0`, `lcMsgBase = 0x7FF0`; the pressure maximum from
+  `WTInfoW(WTI_DEVICES, DVC_NPRESSURE, &AXIS)` (`<= 0` -> 1023); `WTOpenW(hwnd, &lc, TRUE)`. Missing DLL / function / no
+  subclassed window / no context: an Info toast ("No WinTab tablet driver found; using Windows Ink" etc.) and Windows Ink
+  goes on. Windows Ink -> `wintab::close()`. The subclass hands `WT_PACKET` (drain `WTPacketsGet(ctx, 64)`; the newest
+  packet decides: tip = button 0, pressure / max, eraser = cursor % 3 == 2), `WT_PROXIMITY` (range) and `WM_ACTIVATE`
+  (`WTEnable`, `WTOverlap` when active) to `wintab::on_message`; `WM_NCDESTROY` closes the context. In `raw_input_hook`
+  (interactive only) `PenState::apply_wintab` lays the WinTab pen over the routed frame: while the tip is down every
+  pointer note of the frame gets `spread(previous frame's pressure, now, n)` (a press the first value; a new contact
+  starts at its own pressure; an Ink pen's notes are replaced), `in_range` / `in_contact` / `pressure` / `inverted` follow
+  WinTab; positions and buttons always come from the one egui pointer stream, so nothing arrives twice. Never in a
+  self-test run.
 
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
@@ -6302,7 +6319,10 @@ them as `AppAction::Cancel` (`ModalResponse::should_close()` may be used for the
 - **Tablet setup** (branch `pen-input`, `dialogs/tablet.rs`, `Dialog::TabletHelp`, Help > Tablet setup): heading, the five
   paragraphs of `TABLET_HELP` (Windows Ink in the Wacom / Huion / XP-Pen drivers; per-application setting; where the
   Pen pressure options are and that the curve is the driver's; eraser end, barrel button = right button, other buttons
-  as the driver maps them; the "Pen N %" read-out), the pen line, Close. Closes by Close, a backdrop click or Esc.
+  as the driver maps them; the "Pen N %" read-out), the pen line, the combo "Tablet input: Windows Ink (recommended) /
+  WinTab" (part G; writes `prefs.tablet_input`, applied at once by `sync_tablet_input`), the line "Use WinTab only if
+  your driver's Windows Ink option is off. Takes effect at once." and the WinTab state (`PenState::wintab_line`), Close.
+  Closes by Close, a backdrop click or Esc.
 - **Import (R1, R2)**. Opened when the import job delivers its result (8.9). Shows file name, triangle count, warnings, and one
   row per texture set:
   - materials, triangle count;
@@ -7061,6 +7081,8 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
     `EnableMouseInPointer`; nothing may panic in the window procedure (`catch_unwind`, the forward always happens); the
     subclass is installed on the window thread (`WteApp::new`) and removed at `WM_NCDESTROY`. No code is needed for
     per-monitor DPI awareness (winit sets it) or lost samples (winit reads the whole pointer frame history).
+19. Branch `pen-input` part G: `wintab32.dll` is never imported at load time (the exe would not start without a tablet
+    driver); WinTab never creates pointer events (pressure and the eraser flag only).
 
 ---
 

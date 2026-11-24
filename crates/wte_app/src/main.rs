@@ -19,6 +19,7 @@ mod dialogs;
 mod dispatch;
 mod dnd;
 mod gpu;
+mod gpu_check;
 mod io_flows;
 mod jobs;
 mod panels;
@@ -44,6 +45,16 @@ static LOG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 static SELFTEST: AtomicBool = AtomicBool::new(false);
 
 fn main() {
+    // `--gpu-check REPORT`: list the graphics adapters into REPORT and exit (8.11). No window, no log file, no message box:
+    // the installer and the release CI run it in the background.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if raw.first().is_some_and(|a| a == "--gpu-check") {
+        let code = match raw.get(1).filter(|p| !p.is_empty()) {
+            Some(report) if raw.len() == 2 => gpu_check::run(Path::new(report)),
+            _ => gpu_check::EXIT_ERROR,
+        };
+        std::process::exit(code);
+    }
     // `args_os`: `std::env::args` panics on a file name that is not valid Unicode (8.11).
     let parsed = cli::parse(std::env::args_os().skip(1));
     // Also when the arguments do not parse: an automated run must never block on a message box.

@@ -201,6 +201,46 @@ undo step (`Document::remove_layers` / `duplicate_layers`, `group_edits`); Merge
 process is not running (`export::remove_stale_temps`). (8) "Exported 1 file". A read-only or blocked folder fails before
 anything is written (`preflight`, 7.4).
 
+### 1.9 Objects and tab groups (branch `objects-tabs`, `docs/plans/OBJECTS_TABS_PLAN.md`)
+
+Two features, planned 2026-11-24 (gate report `docs/reports/OBJECTS_TABS_GATE_REPORT.md`):
+
+1. **Objects.** The importers keep a file's object structure (OBJ `o` / `g`, glTF mesh nodes, FBX `Model`s; 5.21, 6.1
+   step 9). `MeshData::tri_object` / `MeshData::objects` carry an object index per triangle; triangle order, vertex order
+   and `uv_hash` do not change, so `IMPORTER_VERSION` stays 2. The user selects objects (the Objects tab's list, or a
+   click without a drag with the Navigate tool in the 3D view, 8.6) and can **Hide selected (H), Isolate (Shift+H), Show
+   all (Alt+H), Frame selection (Shift+F)** (F, Frame Model, frames the visible objects). Hidden objects are not drawn
+   (a compacted visible index buffer, wire runs per object, 8.4) and rays pass through them: the hidden set is a bit mask
+   inside `Bvh` (5.8, 6.2), so every ray and sphere query skips hidden triangles and every worker job sees the snapshot of
+   the `Arc<Bvh>` it was made with. **Selecting never restricts painting**; a translucent tint marks the selection only
+   while the Objects tab is shown or the Navigate tool is active (8.5).
+2. **Tab groups.** The right side panel is two Photoshop-style tab groups with a draggable split (8.7 "Side panel"):
+   upper **Tool | Color | Texture sets | Objects**, lower **Layers | Brush | Text** (the strip and one tab rule of round 4,
+   unchanged). A tool change never changes the upper tab; a click on the toolbar's primary colour chip shows the Color
+   tab; the Text tool's focus request shows the Tool tab.
+
+The rules for hidden objects (the contract; 5.14 holds the same table):
+
+| Operation | Behaviour with hidden objects |
+|---|---|
+| Pick / hover / eyedropper / fill seed / stamp and text placement / gizmo drag / text-path points in the 3D view | the ray passes through hidden objects and hits what is behind them |
+| Brush and eraser in 3D | hidden triangles are never dab candidates: no paint, no shadowing of "Same side". Objects that share texels (instanced meshes, mirrored UVs) still share paint |
+| Projected stamp / text bake | hidden triangles receive nothing and do not occlude; `fit_stamp_depth` fits to visible surfaces |
+| Wrap | hidden triangles are never part of the patch, never the anchor, never a Jump target |
+| When a stamp is (re)baked | against the visibility when the bake job is made; changing visibility never re-bakes existing stamps; `project::load` keeps saved caches |
+| Fill (Layer / Island scope), 2D (UV) brush, UV stamps | texture-space operations: not masked |
+| Export, composite, save, thumbnails | unaffected |
+| Undo / redo / revision / modified flag | unaffected by hide / show / select |
+
+Hiding and selecting are **view state**: not in history, no revision change, `is_modified` untouched (like the camera
+and the layer multi-selection of 1.8). The selection is not saved; the names of the hidden objects are saved in the
+app's `UiState` inside `Manifest::ui_state` (7.2, 8.9) and restored on open with one Info toast. `FORMAT_VERSION`
+stays 3 and `required_reader` is unchanged (7.3): older builds ignore the key and show everything. The tab choice and
+the split are prefs (8.9), never written by self-test runs. **Superseded:** the round-3 user decision "the colour picker
+stays visible in the side panel whatever tool is active" (R3-10, `HANDOFF.md` section 6) is replaced by the user's
+2026-11-24 choice of Color as one tab of the upper group; mitigations: the toolbar chip, tool changes keep the tab, and
+at 1280x800 and above the whole picker is on screen whenever the Color tab is shown (guarantee G1, 8.7).
+
 ---
 
 ## 2. Workspace layout
@@ -4274,6 +4314,9 @@ manifest like any malformed field.
   warning, and a re-save writes the same `source` object with `min_reader_version` 2. Never edit either fixture string.
 - Unknown names never fail a file (`TextFeatureUnknown`, 7.1 step 5); out-of-range or non-finite values are repaired by
   `sanitize_fx`; a wrong JSON type inside `fx` fails the manifest (`ManifestInvalid`) like any malformed field.
+- objects-tabs (1.9): the names of the hidden objects live in `ui_state` (`UiState::hidden_objects`, written only when
+  one is hidden). No version change: `FORMAT_VERSION` stays 3, `required_reader` and `IMPORTER_VERSION` (2) are unchanged;
+  older builds ignore the key and show every object; a project without it opens with nothing hidden.
 - `import.importer_version` is the importer that produced the saved mesh. A change to the generated UV layout or to mesh
   normalisation that changes `uv_hash` must bump `IMPORTER_VERSION` and keep the previous path selectable by version from then
   on (5.21). A project whose version is older and whose generated layout no longer matches opens with
@@ -7562,6 +7605,13 @@ other rows are not double-clicks; a double-click selects and frames; a click bel
 and 640x480, the footer inside the page, `object_reveal = Some(1500)` brings that row into the list within two frames and
 is cleared), `objects_tab_is_idle}`. `control_sweep::apply_actions` applies the object actions through `object_ops`.
 
+objects-tabs WP6 (scenarios, gate): the scenarios `objects` and `objects_path` (8.11, `selftest/scenarios/objects.rs`);
+`scenarios::tests::every_listed_scenario_exists_and_ends_with_a_capture` counts 50 names. Gate sweep:
+`sh tools/objtabs/sweep.sh EXE OUT tools/objtabs/jobs_gate.txt` (every scenario at 1280x800, the path scenarios on the
+Khronos samples, `brush_tab` / `text_tab` / `layers` / `side_tabs` also at 900x600 and 640x480, `objects_path` on
+ABeautifulGame and Lantern); `tools/objtabs/compare_views.py` (view-rect identity at 1280x800) and `compare.py` (file by
+file) against the baseline exe's sweep.
+
 ## 10. Work packages
 
 Wave 0 creates a compiling workspace; wave 1 implements `wte_core`; wave 2 implements `wte_app`. Inside a wave the packages are
@@ -7714,3 +7764,19 @@ entry points (`view::central`, `panels::show_*`, `dialogs::show`, `ToolControlle
 `app-selftest` calls `view::gizmo::gizmo_shape` and `ViewXform::for_view`. Beyond that, **any** wave-2 package may call the
 read-only helpers `shortcuts::{table, shortcut_text}` and `theme::*`, push toasts with `state.toasts.push(..)`, and read
 `Gpu` (`device`, `queue`). Nothing else crosses package borders: commands travel as `AppAction`s, settings live in `AppState`.
+
+### objects-tabs (branch `objects-tabs`, `docs/plans/OBJECTS_TABS_PLAN.md` section 11)
+
+Lean build (HANDOFF section 7): per package one builder, then one check-and-fix pass; notes in `docs/notes/objtabs/`,
+gate report `docs/reports/OBJECTS_TABS_GATE_REPORT.md`.
+
+| # | Package | Main files | Check |
+|---|---|---|---|
+| 0 | Baseline | — | test counts, clippy, reference screenshots and exports of every scenario from the `main` exe (`docs/notes/objtabs/baseline.md`) |
+| 1 | Core objects (1.9, 5.7, 5.21, 6.1 step 9) | `mesh.rs`, `mesh_build.rs`, `import/{mod,obj,gltf,fbx}.rs`, `samples.rs`, `doc_build.rs` | `uv_hash` frozen tests untouched; ABeautifulGame: 49 objects |
+| 2 | Core visibility (5.8, 5.14, 6.2, 6.4-6.5a) | `bvh.rs`, `document.rs`, `doc_build.rs`, `doc_stamps.rs`, `wrap_param.rs`, `tests/objects.rs` | workspace tests; perf tests not slower |
+| 3a | App state, actions, menu, shortcuts, persistence (8.2, 8.3, 8.7 menu, 8.9, 8.10) | `state.rs`, `action.rs`, `dispatch.rs`, `object_ops.rs`, `shortcuts.rs`, `panels/menu_bar.rs`, `io_flows.rs` | hide / show proven by rays through actions |
+| 3b | Rendering, highlight, picking (8.4-8.6) | `gpu/scene.rs`, `gpu/renderer.rs`, `gpu/params.rs`, `gpu/shaders/tint.wgsl`, `view/*`, `dialogs/export.rs`, `tools/mod.rs` | GPU tests; scenarios full-frame identical to the baseline (only the new menu title differs) |
+| 4 | Tab groups (8.7 "Side panel") | `panels/mod.rs`, `panels/side_groups.rs`, `panels/{color,texture_sets,tool_options,toolbar}.rs`, `state.rs`, `prefs.rs`, `app.rs`, the tests of plan 6.6 | all scenarios ok; view-rect identity; screenshots of every tab |
+| 5 | Objects tab (8.7 "Objects tab") | `panels/objects.rs`, `panels/layers.rs` | the tests of plan 7.2 |
+| 6 | Scenarios, docs, gate (8.11, 1.9) | `selftest/scenarios/objects.rs`, `selftest/scenarios/side_tabs.rs`, `tools/objtabs/`, `ARCHITECTURE.md`, `HANDOFF.md`, `dist/HOW_TO_TEST.txt` | the full gate of plan section 9 |

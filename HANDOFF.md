@@ -79,9 +79,15 @@ and a log `<out>.log`. Scenario names (`crates/wte_app/src/selftest/scenarios.rs
 `empty smoke default paint3d paint2d stamp text clay preview export export_run multi roundtrip undo import
 import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_path stamp_edge_path pan2d
 brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
-text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow`
+text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
+save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path` (50; `scenarios::tests` checks the
+count)
 
-`*_path` scenarios need a PATH argument (a model). `export_flow` takes an optional PATH (a model or a saved `.wtep`):
+`*_path` scenarios need a PATH argument (a model); `objects_path` needs a model with **several objects** (gate:
+`ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model. Branch
+`objects-tabs`: `side_tabs` (the two tab groups of the side panel; also run at `--size 900x600` and `640x480`) and
+`objects` (the built-in Three Objects sample) need no PATH. `tools/objtabs/sweep.sh EXE OUT tools/objtabs/jobs_gate.txt`
+runs the whole gate sweep (sequential, off-screen). `export_flow` takes an optional PATH (a model or a saved `.wtep`):
 without one it writes a cube as OBJ+MTL+PNG, glTF, GLB and ASCII FBX and runs the whole flow on each (paint, stamp,
 text, wrapped stamp, then export one layer, a selection and everything as one zip, checked file by file);
 `export_selected` drives Ctrl / Shift / plain / right clicks in the Layers panel and the dialog's "Selected (N)";
@@ -134,6 +140,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | 6 | **Wrap on surface** (Project / Wrap toggle, Jump small gaps, Ends meet / Overlap), project format 3 | landed 2026-11-21 | 6CE65B55… |
 | 7 | brush speed on heavy models (lean pass 2, fused parallel band raster + commit), pixels unchanged | landed on top of 6 | **2787C1B9…2BF8** (= `main`) |
 | 8 | Wrap quality on bumpy surfaces + Wrap speed | **NOT landed** — branch `round8-wip` | — |
+| objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -161,7 +168,10 @@ shares texels with its mirror half); ABeautifulGame's blobs on other pieces come
 ## 6. The user's binding decisions (keep them)
 
 - 3D (projected) and 2D (UV) stamps stay **separate kinds**, not cross-editable ("3D stamp" / "2D stamp" badges).
-- The colour picker stays visible in the side panel whatever tool is active.
+- ~~The colour picker stays visible in the side panel whatever tool is active.~~ **Superseded 2026-11-24** by the
+  tab decision below (Color is one tab of the upper group). Mitigations: a click on the toolbar's primary colour chip
+  shows the Color tab, a tool change never leaves the Color tab, and at 1280x800 and above the whole picker is on
+  screen whenever the Color tab is shown (ARCHITECTURE 1.9, 8.7 guarantee G1).
 - No support for pre-round-2 projects or the legacy no-UV layout.
 - No image editor needed for PSD / ORA: validate exports with Pillow (`tools/round3/check_exports.py`).
 - Round 4 (`docs/plans/ROUND4_PLAN.md` section 7): no "connected surface" checkbox; opening an open shape file asks
@@ -171,6 +181,13 @@ shares texels with its mirror half); ABeautifulGame's blobs on other pieces come
 - Round 8 (`docs/plans/ROUND8_PLAN.md` section 12): larger than the object → edges meet in one cut at the back; keep
   the text's centre line true (stretch to the edges); cut at corners/tips sharper than 45°; on heavy models drags stay
   smooth and the picture catches up; round-6 wrapped stamps keep their saved pixels until edited.
+- Objects and tabs (2026-11-23/24, `docs/plans/OBJECTS_TABS_PLAN.md`): the side panel is **two tab groups** with a
+  draggable split, upper **Tool | Color | Texture sets | Objects**, lower **Layers | Brush | Text** (one page per group;
+  the lower group keeps the round-4 one tab rule). Objects come from the file (OBJ `o` / `g`, glTF mesh nodes, FBX
+  Models); **hide = not drawn and rays pass through** (painting, stamps, text, wraps, eyedropper, fill seed, gizmo);
+  **selecting never restricts painting**; hiding / selecting is view state (no undo entry, not "modified"); hidden
+  object names are saved in the project, the selection is not. Keys H / Shift+H / Alt+H / Shift+F (Alt+H to be tried
+  by hand on Windows; fallback Ctrl+Shift+H). Stamps bake against what is visible when they are baked.
 - Brush speed (after round 7): on the old CPU-only laptop the remaining lag (Size 50 trails 0.5-0.8 s, Size 512
   keeps painting 2-4 s after release on ABeautifulGame) was accepted ("only so much you can do without a GPU").
   **The new machine has a GPU — ask the user whether a GPU brush is now wanted** before planning one.

@@ -30,6 +30,42 @@ Exporting layers (new in this build)
   - In File > Export..., tick "Pack into one .zip file" to get everything
     as one <name>.zip instead of loose files.
 
+Objects (new in this build)
+---------------------------
+Open a model made of several parts, e.g. the chess set ABeautifulGame.glb,
+or File > Open Sample > "Three Objects".
+  - The side panel's "Objects" tab lists the parts. A click selects one,
+    Ctrl-click adds or removes, Shift-click selects a range; a double-click
+    selects it and moves the camera to it.
+  - With the Navigate tool (top of the toolbar), a click on a part in the
+    3D view selects it (a drag still turns the camera). Selected parts get
+    a light blue tint while the Objects tab is open or Navigate is active.
+  - The eye at the left of a row hides or shows that part. Hidden parts
+    are not drawn, and painting, stamps and text go "through" them onto
+    what is behind.
+  - Keys: H = hide the selected parts, Shift+H = show only the selected
+    parts (isolate), Shift+F = frame the selected parts, F = frame
+    everything that is visible.
+  - Alt+H = show everything again. Please check: does Windows beep or
+    open a menu when you press Alt+H? (If it does, tell me; Ctrl+Shift+H
+    would be the replacement.)
+  - Save the project with a part hidden and open it again: the part is
+    still hidden and a message says so. Undo is not affected by hiding.
+  - Selecting a part never limits where you can paint.
+
+Side panel tabs (new in this build)
+-----------------------------------
+  - The right panel now has two tab rows: on top Tool | Color |
+    Texture sets | Objects, below Layers | Brush | Text.
+  - The colour picker is on the "Color" tab. A click on the big colour
+    square in the toolbar (left) opens that tab. Changing tools keeps
+    the tab you chose.
+  - Drag the line between the two groups to give one more room; a
+    double-click on that line puts it back to automatic.
+  - Close and restart the app: the tabs and the split you chose are kept.
+  - Try a small window too (e.g. half the screen): nothing should overlap,
+    the pages scroll.
+
 If it crashes
 -------------
 You should see a box "Wrapped Texture Editor crashed. A crash report was

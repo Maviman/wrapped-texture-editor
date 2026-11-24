@@ -154,6 +154,14 @@ impl WteApp {
             "new 3D stamps: {}",
             if state.tools.stamp.mode == wte_core::SurfaceMode::Wrap { "Wrap (WTE_STAMP_MODE=wrap)" } else { "Project" }
         );
+        // Branch `pen-input` (part D): the window-procedure subclass for pen flags, per-sample pressure and no Ink
+        // feedback; in a self-test run only with WTE_PEN_SUBCLASS=1 (to show that it does no harm). Without it an
+        // interactive run takes every touch for a pen with winit's pressure.
+        let pen_subclass = std::env::var("WTE_PEN_SUBCLASS").is_ok_and(|v| v.trim() == "1");
+        if !selftest_mode || pen_subclass {
+            let installed = crate::pen::install(cc);
+            state.pen.router.touch_is_pen = !installed && !selftest_mode;
+        }
         let runner = selftest::Runner::new(&args, Arc::clone(&exit_code));
         if let Some(path) = args.path.clone() {
             state.push(AppAction::OpenPath(path));
@@ -284,8 +292,11 @@ impl eframe::App for WteApp {
         if let Some(runner) = &mut self.selftest {
             let records = runner.raw_input_hook(ctx, raw_input);
             self.state.pen.feed.extend(records);
+            // A real pen must not reach a scenario (`WTE_PEN_SUBCLASS=1` installs the subclass in a self-test run).
+            crate::pen::discard_window_records();
+        } else {
+            crate::pen::drain_window_records(&mut self.state.pen.feed);
         }
-        crate::pen::drain_window_records(&mut self.state.pen.feed);
         self.state.pen.route(&mut raw_input.events);
     }
 

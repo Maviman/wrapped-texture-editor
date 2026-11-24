@@ -422,7 +422,8 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `dialogs/import.rs`, `export.rs`, `unsaved.rs`, `progress.rs`, `message.rs`, `about.rs` | A5 | one modal each (`message` = error/warning list, `about` = About + Shortcuts) |
 | `pen/mod.rs` | pen-input | `PenRecord`, `PenKind`, `PenFrame` (pointer notes, `cursor`, `readout`), `PenState` (`AppState::pen`), the eraser override (`eraser_step`, `eraser_override`), `drain_window_records` |
 | `pen/decode.rs` | pen-input | pure decoding of a pointer history entry (`RawPen` -> `PenRecord`), the `POINTER_FLAG_*` / `PEN_FLAG_*` constants |
-| `pen/route.rs` | pen-input | `PenRouter::process`: pairs pen `Touch` events with records, drops them, rewrites the barrel press, synthesizes stuck emulation, notes pressures |
+| `pen/route.rs` | pen-input | `PenRouter::process`: pairs pen `Touch` events with records, drops them, rewrites the barrel press, synthesizes stuck emulation, notes pressures; `touch_is_pen` without the subclass |
+| `pen/win.rs` | pen-input (Windows only) | the window-procedure subclass (`install`, `pen_wndproc`): pen history -> records (`Shared::push_history`, `leave`, `drain_into`), `WM_TABLET_QUERYSYSTEMGESTURESTATUS`, Ink pen feedback off, `MicrosoftTabletPenServiceProperty`; `POINTER_INFO` / `POINTER_PEN_INFO` (`raw-dylib` user32) |
 | `selftest/scenarios/pen.rs` | pen-input | the scenario `pen` (8.11) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
 | `selftest/scenarios.rs` | A6 | canned scenarios (the scaffold stub already contains the action-only smoke scenarios of section 8.11) |
@@ -565,6 +566,10 @@ rfd.workspace = true
 ```
 
 wte_app does not depend on `image`/`png` directly: all encoding and decoding goes through `wte_core::image_io`.
+
+Branch `pen-input`: no new dependency. The window handle comes through `eframe::CreationContext: HasWindowHandle` with the
+trait re-exported by wgpu (`eframe::wgpu::rwh`, raw-window-handle 0.6.2, the one version in `Cargo.lock`); the Windows
+calls of `pen/win.rs` are `#[link(name = "user32", kind = "raw-dylib")]` imports, as in `gpu_check.rs` / `main.rs`.
 
 `main.rs` starts with `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` (release = no console; debug keeps one).
 No `build.rs`, no resource file: the window icon is set at runtime (`ViewportBuilder::with_icon`).
@@ -4899,6 +4904,20 @@ Branch `pen-input`:
 - `BrushSettings` gains `pressure_size` (true), `pressure_size_min` (0.10), `pressure_flow` (false), `pressure_flow_min` (0).
 - `Prefs` gains `tablet_input: TabletInput { WindowsInk (default), WinTab }` (8.9; snake_case, a value that does not read is
   Windows Ink).
+- `WteApp::new` (part D) calls `pen::install(cc)` in interactive runs (in a self-test run only with `WTE_PEN_SUBCLASS=1`):
+  the HWND from `cc.window_handle()` (`RawWindowHandle::Win32`), then `pen::win::install`: `SetWindowFeedbackSetting(hwnd,
+  kind, 0, 4, &FALSE)` for `FEEDBACK_PEN_BARRELVISUALIZATION` (2), `_TAP` (3), `_DOUBLETAP` (4), `_PRESSANDHOLD` (5),
+  `_RIGHTTAP` (6) (touch feedback untouched), `SetPropW(hwnd, "MicrosoftTabletPenServiceProperty", flags)`, and the
+  subclass: `GetWindowLongPtrW(GWLP_WNDPROC)` is stored in `PREV` before `SetWindowLongPtrW(GWLP_WNDPROC, pen_wndproc)`.
+  `pen_wndproc`: `WM_TABLET_QUERYSYSTEMGESTURESTATUS` (0x2CC) returns `TABLET_DISABLE_PRESSANDHOLD | _PENTAPFEEDBACK |
+  _PENBARRELFEEDBACK | _FLICKS` (0x10019) directly (the one message not forwarded); `WM_POINTERDOWN / UPDATE / UP` of a
+  `PT_PEN` pointer: `GetPointerPenInfo` (for `historyCount`, at most 1,024) and `GetPointerPenInfoHistory`, decoded oldest
+  first (`decode`) into the shared queue (`Mutex`, cap 8,192); `WM_POINTERLEAVE` of a known pen and
+  `WM_POINTERCAPTURECHANGED` of a pen **in contact** queue a Leave record (a capture change after a normal Up is no
+  Leave: the pen still hovers); `WM_NCDESTROY` puts the old procedure back first and removes the property. Every
+  message is then forwarded unchanged with `CallWindowProcW(prev, ..)` and its result returned; the message work runs in
+  `catch_unwind`. A failed install is logged ("pen input: ... off") and `PenRouter::touch_is_pen` is set: every touch is
+  then a pen with winit's pressure. A self-test run drops what the subclass queued (`pen::discard_window_records`).
 
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
@@ -6819,6 +6838,8 @@ pub struct Runner { /* steps, index, frame counter, scratch, injected events, sc
 impl Runner {
     pub fn new(args: &CliArgs, exit_code: Arc<AtomicI32>) -> Option<Runner>;     // None without --screenshot; unknown scenario => error scenario
     /// Branch pen-input: returns the injected `PenRecord`s of the frame (the app feeds them to the pen router).
+    /// `WTE_PEN_SUBCLASS=1` installs the Windows subclass in a self-test run too (part D: it must do no harm; the
+    /// window stays off-screen and unfocused, nothing is injected; what it queues is dropped).
     pub fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) -> Vec<PenRecord>;
     /// Branch pen-input: in every frame with a pen in contact `tick` adds 1 to the scratch values `pen_contact_frames`
     /// (and `pen_eraser_frames` when the tool is the Eraser) and sets `pen_readout_ok` when `PenFrame::readout` is "Pen N %".
@@ -7020,6 +7041,11 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
 17. Branch `pen-input`: pen `Touch` events must not reach egui (any `Event::Touch` turns on egui's touch-screen mode for the
     whole run); the router removes them. The pressure of a pointer event is read with `PenFrame::cursor` in event order
     (egui removes only key and AccessKit events from `i.events`, never pointer events), never by position alone.
+18. Branch `pen-input` (Windows): never pass pointer messages to `DefWindowProc` (Windows would then make duplicate mouse
+    messages for the pen; winit returns 0 for them and the subclass forwards to winit only); never call
+    `EnableMouseInPointer`; nothing may panic in the window procedure (`catch_unwind`, the forward always happens); the
+    subclass is installed on the window thread (`WteApp::new`) and removed at `WM_NCDESTROY`. No code is needed for
+    per-monitor DPI awareness (winit sets it) or lost samples (winit reads the whole pointer frame history).
 
 ---
 

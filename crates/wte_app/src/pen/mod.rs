@@ -10,9 +10,11 @@
 //! - `route.rs`: the pure event router.
 //! - `win.rs`: the Windows glue (subclass, Ink feedback off, system gestures off).
 
-#[allow(dead_code, reason = "read by the window procedure (win.rs, part D)")]
+#[cfg_attr(not(windows), allow(dead_code, reason = "read by the Windows window procedure only"))]
 pub mod decode;
 pub mod route;
+#[cfg(windows)]
+pub mod win;
 
 use std::collections::VecDeque;
 
@@ -169,7 +171,54 @@ impl PenState {
 /// Moves the records the window procedure queued since the last frame into `feed` (part D, `win.rs`); nothing while
 /// no subclass is installed.
 pub fn drain_window_records(feed: &mut VecDeque<PenRecord>) {
+    #[cfg(windows)]
+    win::drain_into(feed);
+    #[cfg(not(windows))]
     let _ = feed;
+}
+
+/// Drops what the window procedure queued (a self-test run with `WTE_PEN_SUBCLASS=1`: a real pen must not reach a
+/// scenario).
+pub fn discard_window_records() {
+    #[cfg(windows)]
+    win::discard();
+}
+
+/// Part D (ARCHITECTURE 8.3): installs the window-procedure subclass on the app window from `WteApp::new` (interactive
+/// runs; a self-test run only with `WTE_PEN_SUBCLASS=1`, to show the subclass does no harm). Any failure is logged and
+/// the app runs without the pen extras: the router then takes every touch for a pen (`PenRouter::touch_is_pen`), which
+/// paints with winit's pressure. Returns true when the subclass is installed.
+pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
+    #[cfg(windows)]
+    {
+        use eframe::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+        let hwnd = match cc.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+            Ok(other) => {
+                log::warn!("pen input: not a Win32 window ({other:?}); pen flags and per-sample pressure are off");
+                return false;
+            }
+            Err(e) => {
+                log::warn!("pen input: no window handle ({e}); pen flags and per-sample pressure are off");
+                return false;
+            }
+        };
+        match win::install(hwnd) {
+            Ok(line) => {
+                log::info!("{line}");
+                true
+            }
+            Err(e) => {
+                log::warn!("pen input: {e}; pen flags and per-sample pressure are off");
+                false
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cc;
+        false
+    }
 }
 
 /// What the eraser override does this frame.

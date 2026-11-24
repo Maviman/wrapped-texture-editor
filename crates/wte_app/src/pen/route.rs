@@ -18,6 +18,9 @@ use super::{FEED_CAP, PenFrame, PenKind, PenRecord};
 /// The router's state across frames.
 #[derive(Clone, Debug, Default)]
 pub struct PenRouter {
+    /// Every touch is a pen (interactive runs without the window-procedure subclass, `pen::install` failed or not on
+    /// Windows): pens then paint with winit's pressure; fingers act as a mouse too.
+    pub touch_is_pen: bool,
     /// Touch ids known to be pens (from the records); forgotten when the pen leaves.
     known: Vec<u64>,
     /// The pen in contact and the button its press became.
@@ -135,6 +138,11 @@ impl PenRouter {
                     }
                     // The pointer is gone already: a later Leave has no hover to clear.
                     self.pointer_is_pen = false;
+                    if self.touch_is_pen {
+                        // Without the subclass no Leave ever comes: the lifted pen counts as out of range.
+                        self.in_range = false;
+                        self.in_contact = false;
+                    }
                 }
             }
         }
@@ -149,7 +157,7 @@ impl PenRouter {
 
     /// A pen touch: a record of that id waits in the feed, or the id is a known pen.
     fn is_pen(&self, id: u64, feed: &VecDeque<PenRecord>) -> bool {
-        self.known.contains(&id) || feed.iter().any(|r| u64::from(r.pointer_id) == id)
+        self.touch_is_pen || self.known.contains(&id) || feed.iter().any(|r| u64::from(r.pointer_id) == id)
     }
 
     /// The record of a pen touch: the first record of that id whose kind matches the phase (records of the same id
@@ -418,6 +426,17 @@ mod tests {
         assert_eq!(events, want, "a finger keeps its touch and its emulation");
         assert!(!frame.seen && !frame.in_range);
         assert!(frame.pointer.iter().all(|(_, p)| p.is_none()));
+    }
+
+    #[test]
+    fn without_the_subclass_every_touch_is_a_pen_with_winits_pressure() {
+        let mut r = PenRouter { touch_is_pen: true, ..PenRouter::default() };
+        let mut events = emulated(TouchPhase::Start, 1.0, Some(0.3), 1.0);
+        events.extend(emulated(TouchPhase::Move, 2.0, Some(0.6), 1.0));
+        let frame = r.process(&mut events, &mut VecDeque::new());
+        assert!(no_touch(&events) && frame.in_contact);
+        let p: Vec<Option<f32>> = frame.pointer.iter().map(|(_, p)| *p).collect();
+        assert_eq!(p, vec![Some(0.3), Some(0.3), Some(0.6)]);
     }
 
     #[test]

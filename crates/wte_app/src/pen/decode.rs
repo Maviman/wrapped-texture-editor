@@ -5,15 +5,19 @@
 use super::{PenKind, PenRecord};
 
 /// `POINTER_FLAGS` (winuser.h).
+#[allow(dead_code, reason = "documented flag, not read")]
 pub const POINTER_FLAG_INRANGE: u32 = 0x2;
 pub const POINTER_FLAG_INCONTACT: u32 = 0x4;
+#[allow(dead_code, reason = "documented flag, not read")]
 pub const POINTER_FLAG_FIRSTBUTTON: u32 = 0x10;
 pub const POINTER_FLAG_SECONDBUTTON: u32 = 0x20;
 pub const POINTER_FLAG_THIRDBUTTON: u32 = 0x40;
+#[allow(dead_code, reason = "documented flag, not read")]
 pub const POINTER_FLAG_CANCELED: u32 = 0x8000;
 pub const POINTER_FLAG_DOWN: u32 = 0x1_0000;
 pub const POINTER_FLAG_UPDATE: u32 = 0x2_0000;
 pub const POINTER_FLAG_UP: u32 = 0x4_0000;
+#[allow(dead_code, reason = "documented flag, not read")]
 pub const POINTER_FLAG_CAPTURECHANGED: u32 = 0x20_0000;
 /// `PEN_FLAGS`.
 pub const PEN_FLAG_BARREL: u32 = 0x1;

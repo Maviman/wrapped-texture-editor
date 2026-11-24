@@ -162,6 +162,10 @@ view are identical to `main` (checked against a 1b589a1 exe).
 Windows Ink on; the WinTab path (part G, opt-in: Help > Tablet setup > Tablet input: WinTab; `wintab32.dll` loaded at
 run time, pressure and eraser only) can only be checked with a driver whose Windows Ink option is off.
 
+Independent check (2026-11-24, `docs/notes/pen/check.md`): plan complete; five fixes with tests (WinTab eraser press
+ended the eraser override, WinTab stroke-end blob, WinTab lock re-entry, the eraser flipping back after every mouse
+stroke, a second finger without the subclass).
+
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 
 Plan `docs/plans/ROUND8_PLAN.md` (user answers in its section 12), report `docs/reports/ROUND8_GATE_REPORT.md`,

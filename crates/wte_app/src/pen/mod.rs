@@ -349,6 +349,9 @@ pub fn eraser_override(pen: &mut PenState, tool: ToolKind, busy: bool) -> Option
         }
         EraserStep::Restore(previous) => {
             pen.eraser_restore = None;
+            // Restored by a mouse press while the eraser end still lies in range: the user works with the mouse, so
+            // the Eraser does not come back after every mouse stroke (until the end leaves or turns; check, pen-input).
+            pen.eraser_hold_off = eraser_end;
             Some(previous)
         }
         EraserStep::Drop => {
@@ -420,6 +423,14 @@ mod tests {
         eraser_override(&mut p, ToolKind::Navigate, false);
         p.frame.mouse_press = true;
         assert_eq!(eraser_override(&mut p, ToolKind::Eraser, false), Some(ToolKind::Navigate));
+        // Check (pen-input): the eraser end still lies in range; after the mouse stroke the Eraser does not come back
+        // (it did, flipping the tool after every mouse stroke) until the end leaves or turns around.
+        p.frame.mouse_press = false;
+        assert_eq!(eraser_override(&mut p, ToolKind::Navigate, false), None, "the mouse keeps its tool");
+        p.frame.in_range = false;
+        assert_eq!(eraser_override(&mut p, ToolKind::Navigate, false), None);
+        p.frame.in_range = true;
+        assert_eq!(eraser_override(&mut p, ToolKind::Navigate, false), Some(ToolKind::Eraser), "the pen came back");
         // Already the Eraser: nothing to remember.
         let mut p = pen(true, true);
         assert_eq!(eraser_override(&mut p, ToolKind::Eraser, false), None);

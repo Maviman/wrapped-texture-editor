@@ -73,6 +73,11 @@ impl PenRouter {
                 out.events.push(event.clone());
                 continue;
             }
+            if self.touch_is_pen && self.contact.is_some_and(|(c, _)| c != tid) {
+                // Without the subclass fingers count as pens too: a second touch while one paints is dropped, so two
+                // fingers never press, drag and paint at the same time (check, pen-input).
+                continue;
+            }
             let record = self.take_record(tid, phase, force, feed, &mut out);
             self.apply(&record);
             let contact_p = if record.pressure > 0.0 { record.pressure } else { force.unwrap_or(1.0) };
@@ -437,6 +442,31 @@ mod tests {
         assert!(no_touch(&events) && frame.in_contact);
         let p: Vec<Option<f32>> = frame.pointer.iter().map(|(_, p)| *p).collect();
         assert_eq!(p, vec![Some(0.3), Some(0.3), Some(0.6)]);
+    }
+
+    /// Check (pen-input): without the subclass every touch is a pen, so a second finger while the first one paints
+    /// must not add a press, moves or a release of its own (the stroke would zigzag between the two fingers).
+    #[test]
+    fn without_the_subclass_a_second_finger_does_not_paint_too() {
+        let mut r = PenRouter { touch_is_pen: true, ..PenRouter::default() };
+        // Finger 77 is translated by egui-winit; finger 78 gets only its touch events.
+        let mut events = emulated(TouchPhase::Start, 1.0, None, 1.0);
+        events.push(touch(78, TouchPhase::Start, 50.0, None));
+        events.push(touch(78, TouchPhase::Move, 51.0, None));
+        events.extend(emulated(TouchPhase::Move, 2.0, None, 1.0));
+        events.push(touch(78, TouchPhase::End, 51.0, None));
+        events.extend(emulated(TouchPhase::End, 2.0, None, 2.0));
+        r.process(&mut events, &mut VecDeque::new());
+        assert_eq!(
+            events,
+            vec![
+                moved(1.0),
+                button(1.0, PointerButton::Primary, true),
+                moved(2.0),
+                button(2.0, PointerButton::Primary, false),
+                Event::PointerGone
+            ]
+        );
     }
 
     #[test]

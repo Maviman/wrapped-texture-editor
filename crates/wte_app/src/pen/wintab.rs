@@ -67,7 +67,14 @@ pub struct WintabRamp {
 /// down. A frame without a WinTab pen is left as it is.
 pub fn apply(frame: &mut PenFrame, events: &[egui::Event], tab: &WintabPen, ramp: &mut WintabRamp) {
     if !tab.tip_down {
-        ramp.prev = None;
+        // The tip went up since the last frame: the driver's mouse moves and release that arrive with that packet are
+        // still the stroke's, so the untagged ones keep the last pressure (else the stroke ends in a full-size blob).
+        if let Some(last) = ramp.prev.take() {
+            ensure_notes(frame, events);
+            for note in &mut frame.pointer {
+                note.1.get_or_insert(last);
+            }
+        }
     }
     if !tab.in_range && !tab.tip_down {
         return;
@@ -75,18 +82,13 @@ pub fn apply(frame: &mut PenFrame, events: &[egui::Event], tab: &WintabPen, ramp
     frame.seen = true;
     frame.in_range = true;
     frame.inverted = tab.inverted;
+    // The driver makes the WinTab pen's mouse presses (`CXO_SYSTEM`): they are the pen's own, not a mouse's, so they
+    // must not end the eraser override (`pen::eraser_step`).
+    frame.mouse_press = false;
     if !tab.tip_down {
         return;
     }
-    if frame.pointer.is_empty() {
-        frame.pointer = events
-            .iter()
-            .filter_map(|e| match e {
-                egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => Some((*pos, None)),
-                _ => None,
-            })
-            .collect();
-    }
+    ensure_notes(frame, events);
     let ramp_from = ramp.prev.unwrap_or(tab.pressure);
     let values = spread(ramp_from, tab.pressure, frame.pointer.len());
     let first = values.first().copied().unwrap_or(tab.pressure);
@@ -113,6 +115,19 @@ pub fn apply(frame: &mut PenFrame, events: &[egui::Event], tab: &WintabPen, ramp
     ramp.prev = Some(tab.pressure);
 }
 
+/// A frame without pen notes (the router saw no Ink pen) gets one untagged note per pointer event, in order.
+fn ensure_notes(frame: &mut PenFrame, events: &[egui::Event]) {
+    if frame.pointer.is_empty() {
+        frame.pointer = events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => Some((*pos, None)),
+                _ => None,
+            })
+            .collect();
+    }
+}
+
 #[cfg(windows)]
 pub use ffi::{Status, WM_ACTIVATE, WT_PACKET, WT_PROXIMITY, close, on_message, open, poll, status};
 
@@ -120,7 +135,7 @@ pub use ffi::{Status, WM_ACTIVATE, WT_PACKET, WT_PROXIMITY, close, on_message, o
 mod ffi {
     //! The WinTab FFI: run-time loaded `wintab32.dll`, the context, the packets.
 
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::{Mutex, PoisonError, TryLockError};
 
     use super::{Packet, WintabPen, wintab_state};
 
@@ -337,7 +352,13 @@ mod ffi {
         if !matches!(msg, WT_PACKET | WT_PROXIMITY | WM_ACTIVATE) {
             return;
         }
-        let mut s = shared();
+        // Everything runs on the UI thread, so a held lock means this message was *sent* from inside `open` / `close`
+        // / `WTEnable` (a driver that sends instead of posting): skip it rather than deadlock on our own lock.
+        let mut s = match SHARED.try_lock() {
+            Ok(s) => s,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => return,
+        };
         let (ctx, Some(fns)) = (s.ctx, s.fns) else { return };
         if ctx == 0 {
             return;
@@ -397,6 +418,17 @@ mod ffi {
             assert_eq!(poll(), WintabPen::default());
             on_message(WT_PACKET, 0, 0);
             assert_eq!(poll(), WintabPen::default());
+        }
+
+        /// Check (pen-input): a WinTab message sent while this thread holds the lock (from inside `open` / `close` /
+        /// `WTEnable`) returns instead of deadlocking.
+        #[test]
+        fn a_message_sent_from_inside_a_wintab_call_does_not_deadlock() {
+            let held = shared();
+            on_message(WT_PROXIMITY, 0, 1);
+            on_message(WM_ACTIVATE, 1, 0);
+            on_message(WT_PACKET, 0, 0);
+            drop(held);
         }
     }
 }
@@ -504,5 +536,46 @@ mod tests {
         let hover = WintabPen { in_range: true, tip_down: false, pressure: 0.0, inverted: true };
         apply(&mut frame, &events, &hover, &mut WintabRamp::default());
         assert!(frame.pointer.is_empty() && frame.in_range && frame.inverted && !frame.in_contact);
+    }
+
+    /// Check (pen-input): the frame whose packet says "tip up" still carries the driver's last moves and the release of
+    /// the stroke; they keep the last pressure instead of reading 1.0 (a full-size blob at the end of every stroke).
+    #[test]
+    fn the_moves_that_come_with_the_tip_up_packet_keep_the_last_pressure() {
+        let mut ramp = WintabRamp::default();
+        let down = WintabPen { in_range: true, tip_down: true, pressure: 0.3, inverted: false };
+        apply(&mut PenFrame::default(), &[moved(1.0), press(1.0, true)], &down, &mut ramp);
+        let up = WintabPen { tip_down: false, ..down };
+        let mut frame = PenFrame::default();
+        apply(&mut frame, &[moved(2.0), moved(3.0), press(3.0, false)], &up, &mut ramp);
+        assert!(frame.pointer.iter().all(|(_, p)| *p == Some(0.3)), "{:?}", frame.pointer);
+        assert!(!frame.in_contact && frame.in_range);
+        // The frame after that: nothing is tagged any more.
+        let mut frame = PenFrame::default();
+        apply(&mut frame, &[moved(4.0)], &up, &mut ramp);
+        assert!(frame.pointer.is_empty());
+    }
+
+    /// Check (pen-input): the driver's mouse press of the WinTab eraser end is the pen's own, so it does not end the
+    /// eraser override (it did: the eraser end then painted with the previous tool).
+    #[test]
+    fn the_wintab_eraser_press_keeps_the_eraser() {
+        use crate::pen::{PenState, eraser_override};
+        use crate::state::ToolKind;
+        let mut pen = PenState::default();
+        let mut ramp = WintabRamp::default();
+        let hover = WintabPen { in_range: true, tip_down: false, pressure: 0.0, inverted: true };
+        apply(&mut pen.frame, &[moved(1.0)], &hover, &mut ramp);
+        assert_eq!(eraser_override(&mut pen, ToolKind::Brush, false), Some(ToolKind::Eraser));
+        // The eraser touches: the driver's press is a passthrough mouse press for the router.
+        pen.frame = PenFrame { mouse_press: true, ..PenFrame::default() };
+        let down = WintabPen { tip_down: true, pressure: 0.5, ..hover };
+        apply(&mut pen.frame, &[moved(1.0), press(1.0, true)], &down, &mut ramp);
+        assert!(!pen.frame.mouse_press);
+        assert_eq!(eraser_override(&mut pen, ToolKind::Eraser, false), None, "the Eraser stays");
+        // A real mouse press with no WinTab pen in range still restores.
+        pen.frame = PenFrame { mouse_press: true, ..PenFrame::default() };
+        apply(&mut pen.frame, &[press(9.0, true)], &WintabPen::default(), &mut WintabRamp::default());
+        assert_eq!(eraser_override(&mut pen, ToolKind::Eraser, false), Some(ToolKind::Brush));
     }
 }

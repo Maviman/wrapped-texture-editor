@@ -4902,7 +4902,10 @@ objects-tabs (WP4, WP5; OBJECTS_TABS_PLAN 6.1, 6.5):
 Branch `pen-input`:
 - `AppState::pen: pen::PenState { feed: VecDeque<PenRecord>, router: PenRouter, frame: PenFrame, eraser_restore:
   Option<ToolKind>, eraser_hold_off: bool }` (2.2, 8.3). `PenFrame { pointer: Vec<(Pos2, Option<f32>)>, in_range, in_contact,
-  inverted, barrel, pressure (1.0 without contact), mouse_press, seen }`.
+  inverted, barrel, pressure (1.0 without contact), mouse_press, seen }`. Eraser override (`pen::eraser_step`): engage
+  while the inverted end is in range and the tools are idle; restore when it turns back, leaves the range or a mouse
+  presses; a manual tool change drops it. After a manual change or a mouse-press restore, `eraser_hold_off` keeps it
+  from engaging again until the eraser end leaves the range or turns back.
 - `BrushSettings` gains `pressure_size` (true), `pressure_size_min` (0.10), `pressure_flow` (false), `pressure_flow_min` (0).
 - `Prefs` gains `tablet_input: TabletInput { WindowsInk (default), WinTab }` (8.9; snake_case, a value that does not read is
   Windows Ink).
@@ -4934,8 +4937,11 @@ Branch `pen-input`:
   (interactive only) `PenState::apply_wintab` lays the WinTab pen over the routed frame: while the tip is down every
   pointer note of the frame gets `spread(previous frame's pressure, now, n)` (a press the first value; a new contact
   starts at its own pressure; an Ink pen's notes are replaced), `in_range` / `in_contact` / `pressure` / `inverted` follow
-  WinTab; positions and buttons always come from the one egui pointer stream, so nothing arrives twice. Never in a
-  self-test run.
+  WinTab; positions and buttons always come from the one egui pointer stream, so nothing arrives twice. The frame whose
+  packet says the tip went up keeps the last pressure on its untagged notes (the driver's last moves and release of the
+  stroke), and while the WinTab pen is in range `mouse_press` is cleared (the driver's presses are the pen's own, they
+  must not end the eraser override). `on_message` takes the lock with `try_lock` and skips a message sent from inside
+  `open` / `close` / `WTEnable` instead of deadlocking (checker fixes). Never in a self-test run.
 
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
@@ -7606,8 +7612,10 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   keys and `tablet_input`); `pen::decode::tests` (tip, hover, barrel, third button, eraser, pressure edges, entries
   without a phase); `pen::route::tests` (tap = click without Touch, a move burst keeps every pressure, barrel / third
   button, the eraser end, finger touches unchanged, record / touch mismatch, stuck emulation, Leave in contact and
-  hovering, a mouse-only frame unchanged, the feed cap, `touch_is_pen`); `pen::tests` (the cursor, readout and pen line,
-  the eraser override, a manual tool change drops it); `pen::win::tests` (struct layouts, oldest-first history, Leave vs
+  hovering, a mouse-only frame unchanged, the feed cap, `touch_is_pen`, a second finger without the subclass);
+  `pen::tests` (the cursor, readout and pen line, the eraser override incl. no re-engage after a mouse-press restore, a
+  manual tool change drops it); `pen::wintab::tests` (the tip-up frame keeps the last pressure, the WinTab eraser's
+  press keeps the Eraser, a message sent while the lock is held does not deadlock); `pen::win::tests` (struct layouts, oldest-first history, Leave vs
   lost capture, queue cap; Windows); `selftest::tests::pen_frames_hover_down_moves_up_leave`; `status_bar` plan and
   overlap tests with the pen item; the menu sweep's Help > Tablet setup; the GPU test
   `about_shortcuts_and_message_dialogs_close_by_button_backdrop_and_esc` opens and closes Tablet setup. Scenario `pen`.

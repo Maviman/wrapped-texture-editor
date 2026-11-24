@@ -12,8 +12,8 @@ use crate::ids::LayerId;
 use crate::import::{ImportOptions, ImportedModel, ImportedTexture, ModelFormat, SourceBundle, SourceFile};
 use crate::layer::{Layer, LayerKind};
 use crate::math::fnv1a64;
-use crate::mesh::{MeshData, RawMesh};
-use crate::mesh_build::{NormalizeOptions, normalize};
+use crate::mesh::{MeshData, RawMesh, RawObjects};
+use crate::mesh_build::{NormalizeOptions, normalize, normalize_with_objects};
 use crate::pixel::PixelBuf;
 use crate::progress::NoProgress;
 
@@ -110,12 +110,17 @@ impl XorShift {
 /// whose main file is the bytes `b"dummy"`, and `ImportedTexture`s named `tex0`, `tex1`, ... holding `textures`
 /// (padded with missing textures up to the highest index a material references).
 pub fn imported_from_raw(raw: RawMesh, textures: Vec<Option<PixelBuf>>) -> ImportedModel {
+    imported_from_raw_objects(raw, &RawObjects::default(), textures)
+}
+
+/// `imported_from_raw` with object data (`normalize_with_objects`): objects-tabs tests.
+pub fn imported_from_raw_objects(raw: RawMesh, objects: &RawObjects, textures: Vec<Option<PixelBuf>>) -> ImportedModel {
     let referenced = raw.materials.iter().filter_map(|m| m.texture).max().map_or(0, |m| m as usize + 1);
     let mut textures = textures;
     if textures.len() < referenced {
         textures.resize(referenced, None);
     }
-    let (mesh, report) = normalize(raw, &NormalizeOptions::default());
+    let (mesh, report) = normalize_with_objects(raw, objects, &NormalizeOptions::default());
     let textures = textures
         .into_iter()
         .enumerate()
@@ -148,7 +153,12 @@ pub fn imported_from_raw(raw: RawMesh, textures: Vec<Option<PixelBuf>>) -> Impor
 /// unlocked raster layer of `size x size` per set (active), assembled with `Document::from_parts`.
 /// Such a document cannot be re-imported; persistence tests use `Document::sample` or a real import.
 pub fn doc_from_raw(raw: RawMesh, size: u32) -> Document {
-    let model = imported_from_raw(raw, Vec::new());
+    doc_from_raw_objects(raw, &RawObjects::default(), size)
+}
+
+/// `doc_from_raw` with object data (`normalize_with_objects`): objects-tabs tests.
+pub fn doc_from_raw_objects(raw: RawMesh, objects: &RawObjects, size: u32) -> Document {
+    let model = imported_from_raw_objects(raw, objects, Vec::new());
     let mut next_id = 1u64;
     let sets: Vec<SetParts> = model
         .mesh

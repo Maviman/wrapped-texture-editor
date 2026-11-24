@@ -28,7 +28,7 @@ use crate::import::{
     AssetResolver, ImportOptions, RawImport, TextureRequest, TextureSource, base64_decode, clean_unit, decode_text,
     load_textures, normalize_ref,
 };
-use crate::mesh::{RawMaterial, RawMesh, RawTriangle};
+use crate::mesh::{RawMaterial, RawMesh, RawObjects, RawTriangle};
 
 /// Deepest node nesting accepted (real files stay below 10).
 const MAX_DEPTH: usize = 64;
@@ -1260,6 +1260,8 @@ pub(crate) fn load_fbx(
 
     let conversion = axis_conversion(scene.settings.as_ref());
     let mut world_cache: HashMap<String, DMat4> = HashMap::new();
+    // One object per `Model` with geometry (5.21), named by its display name.
+    let mut objects = RawObjects::default();
     let mut skinned = false;
     for id in &scene.order {
         let model = scene.objects[id];
@@ -1302,6 +1304,9 @@ pub(crate) fn load_fbx(
         if geometries.is_empty() && model.child("Vertices").is_some() {
             geometries.push(model);
         }
+        if geometries.is_empty() {
+            continue;
+        }
         for geometry in geometries {
             let gid = object_id(geometry).unwrap_or_default();
             if scene.connections.iter().any(|(c, p, _)| *p == gid && scene.class(c) == Some("Deformer")) {
@@ -1309,6 +1314,9 @@ pub(crate) fn load_fbx(
             }
             builder.add_geometry(geometry, &model_name, transform, &materials);
         }
+        let object = objects.names.len() as u32;
+        objects.names.push(model_name);
+        objects.tri_object.resize(builder.triangles.len(), object);
     }
     if skinned {
         builder.warnings.push(ImportWarning::SkinIgnored);
@@ -1330,7 +1338,7 @@ pub(crate) fn load_fbx(
             }
         }
     }
-    Ok(RawImport { mesh: RawMesh { triangles, materials }, textures, warnings })
+    Ok(RawImport { mesh: RawMesh { triangles, materials }, objects, textures, warnings })
 }
 
 #[cfg(test)]
@@ -2247,5 +2255,19 @@ Connections:  {{
         let again = import_from_bundle(&bundle, &model.options, true, &NoProgress).unwrap();
         assert_eq!(again.mesh.uv_hash, model.mesh.uv_hash);
         assert!(again.textures[0].image.is_some());
+    }
+
+    /// Objects-tabs WP1: one object per `Model` with geometry, named by the model; a model without geometry is none.
+    #[test]
+    fn models_are_objects() {
+        let ascii6 = "; FBX 6.1.0 project file\nObjects:  {\n\tModel: \"Model::Box\", \"Mesh\" {\n\t\tVertices: 0,0,0,1,0,0,1,1,0,0,1,0\n\t\tPolygonVertexIndex: 0,1,2,-4\n\t}\n\tModel: \"Model::Null\", \"Null\" {\n\t}\n\tModel: \"Model::Lid\", \"Mesh\" {\n\t\tVertices: 5,0,0,6,0,0,5,1,0\n\t\tPolygonVertexIndex: 0,1,-3\n\t}\n}\nConnections:  {\n\tConnect: \"OO\", \"Model::Box\", \"Model::Scene\"\n\tConnect: \"OO\", \"Model::Null\", \"Model::Scene\"\n\tConnect: \"OO\", \"Model::Lid\", \"Model::Scene\"\n}\n";
+        let raw = load(ascii6.as_bytes(), &[]).unwrap();
+        assert_eq!(raw.mesh.triangles.len(), 3);
+        assert_eq!(raw.objects.names, ["Box", "Lid"]);
+        assert_eq!(raw.objects.tri_object, [0, 0, 1]);
+        let model = import_memory(ModelFormat::Fbx, ascii6.as_bytes().to_vec());
+        let names: Vec<&str> = model.mesh.objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["Box", "Lid"]);
+        assert_eq!(model.mesh.objects.iter().map(|o| o.tri_count).collect::<Vec<_>>(), [2, 1]);
     }
 }

@@ -235,15 +235,15 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `progress.rs` | S | `Progress` trait, `NoProgress` |
 | `pixel.rs` | S | `PixelBuf`, `CroppedBuf`, `PixelView` and their trivial accessors (fully implemented) |
 | `blob.rs` | S | `BlobStore`, `Blob`, `BlobKind` (fully implemented + tests; round 4 T3: allocation check before hashing) |
-| `mesh.rs` | S | `MeshData`, `MaterialSlot`, `SetInfo`, `TriFlags`, `RawMesh`, `RenderVertex`, `WireEdge`, `UvStats` + trivial accessors |
+| `mesh.rs` | S | `MeshData`, `MaterialSlot`, `SetInfo`, `TriFlags`, `RawMesh`, `RenderVertex`, `WireEdge`, `UvStats` + trivial accessors; objects-tabs: `ObjectInfo`, `RawObjects`, `MeshData::{tri_object, objects}` |
 | `layer.rs` | S | `Layer`, `LayerKind`, `BlendMode`, `TextureSet` struct |
 | `stamp.rs` | S; round 6 A | `StampObject`, `StampSource`, `Placement`, `Projector` (round 6: `mode`, `wrap`), `SurfaceMode`, `WrapOptions`, `UvPlacement`, `BakeQuality` (types only) |
 | `document.rs` | S | `Document`, `DocumentSnapshot`, `Commit`, lookup accessors, id allocation, revision tracking, `guard_no_stroke`, `mark_layer_dirty`, `debug_check_structure` |
-| `testutil.rs` | S | test-only helpers: temp dir under `target/`, image comparison (PSNR), deterministic RNG, `doc_from_raw`, `imported_from_raw` |
-| `mesh_build.rs` | C1 | `normalize`, UV tile normalisation, normals, fallback UVs, `wire_edges`, `render_vertices`, `uv_hash`, `uv_layout_image` |
+| `testutil.rs` | S | test-only helpers: temp dir under `target/`, image comparison (PSNR), deterministic RNG, `doc_from_raw`, `imported_from_raw` (and their `_objects` forms) |
+| `mesh_build.rs` | C1 | `normalize`, UV tile normalisation, normals, fallback UVs, `wire_edges`, `render_vertices`, `uv_hash`, `uv_layout_image`; objects-tabs: `normalize_with_objects` (6.1 step 9) |
 | `bvh.rs` | C1 | `Bvh`, `Hit`, `Cull`, raycast / occluded / sphere query |
 | `texel_map.rs` | C1 | `TexelMap`, `Fragment`, `raster_tri`, gutter build, `locate` |
-| `samples.rs` | C1; round-4 additions S | procedural meshes and images, `to_obj`; the brush fixtures of FEATURE_BRUSH 8 and the writers `to_gltf`, `to_glb`, `to_fbx_ascii` |
+| `samples.rs` | C1; round-4 additions S | procedural meshes and images, `to_obj`; the brush fixtures of FEATURE_BRUSH 8 and the writers `to_gltf`, `to_glb`, `to_fbx_ascii`; objects-tabs: `object_trio`, `to_obj_objects` |
 | `pixel_ops.rs` | C1 | `PremulMips`, sampling, resize, content / non-zero bounds, crop, thumbnail, `dilate_islands` |
 | `blend.rs` | C2 | per-pixel blend kernels, PSD/ORA blend-mode names |
 | `composite.rs` | C2 | `recomposite_all`, `take_gpu_dirty`, `flatten_layers` |
@@ -992,6 +992,25 @@ pub struct MeshData {
     pub sets: Vec<SetInfo>,                    // index == TextureSetId.0
     pub bounds: Aabb,
     pub uv_hash: u64,                          // fnv1a64 over indices, uv bits and per-triangle set ids
+    // objects-tabs (6.1 step 9): object index per triangle (index into `objects`), same order as `tri_material`; not
+    // part of `uv_hash`. `objects`: at least one entry for a non-empty mesh, order of first appearance in the raw
+    // triangle list.
+    pub tri_object: Vec<u32>,
+    pub objects: Vec<ObjectInfo>,
+}
+/// One object of the model (an OBJ object / group, a glTF mesh node, an FBX Model).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectInfo {
+    pub name: String,                          // unique within the mesh, never empty
+    pub tri_count: u32,
+    pub bounds: Aabb,                          // bounds of the object's triangles (world space, transforms baked)
+}
+/// Importer-side object data, parallel to `RawMesh::triangles` (`RawMesh` / `RawTriangle` themselves are unchanged).
+/// `Default` = no object structure.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RawObjects {
+    pub tri_object: Vec<u32>,                  // one entry per raw triangle: index into `names`; empty = one unnamed object
+    pub names: Vec<String>,                    // as the file gives them; may be empty strings or repeat
 }
 impl MeshData {                                 // trivial accessors, implemented by the scaffold
     pub fn tri_count(&self) -> u32;
@@ -1002,6 +1021,8 @@ impl MeshData {                                 // trivial accessors, implemente
     pub fn tri_set(&self, t: TriId) -> Option<TextureSetId>;   // None for NO_UV triangles and set-less materials
     pub fn geo_normal(&self, t: TriId) -> Vec3;                // unit; Vec3::Y for degenerate
     pub fn diag(&self) -> f32;                                 // bounds.diagonal().max(1e-12)
+    pub fn object_count(&self) -> u32;                         // objects.len()
+    pub fn tri_object_of(&self, t: TriId) -> u32;              // tri_object[t], 0 when the vector is short (hand-built test meshes)
 }
 
 /// GPU vertex (32 bytes). Produced by the core so the app needs no knowledge of the mesh layout.
@@ -1012,7 +1033,8 @@ pub struct RenderVertex { pub pos: [f32; 3], pub normal: [f32; 3], pub uv: [f32;
 /// One unique edge per UV side: a seam yields two entries (same positions, different UVs).
 #[derive(Copy, Clone, Debug)]
 pub struct WireEdge { pub a: [f32; 3], pub b: [f32; 3], pub uv_a: [f32; 2], pub uv_b: [f32; 2],
-                      pub kind: EdgeKind, pub set: Option<TextureSetId> }
+                      pub kind: EdgeKind, pub set: Option<TextureSetId>,
+                      pub object: u32 /* objects-tabs: the object of the emitted triangle side (6.1 wire_edges) */ }
 
 /// Importer output before normalization: a triangle soup.
 #[derive(Clone, Debug, Default)]
@@ -1035,8 +1057,11 @@ pub struct NormalizeOptions {
     pub model_name: String,              // names the fallback-UV set and sets without texture or material name; "" => "Texture"
     pub texture_names: Vec<String>,      // file stems, index = RawMaterial::texture; a missing index falls back to the material name
 }
-/// Runs the pipeline of section 6.1. Deterministic for identical input.
+/// Runs the pipeline of section 6.1. Deterministic for identical input. One object (step 9).
 pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport);
+/// objects-tabs: `normalize` with object data; `normalize(raw, opts) == normalize_with_objects(raw, &RawObjects::default(), opts)`.
+/// The object data never changes triangle order, vertex order or `uv_hash` (`IMPORTER_VERSION` stays 2).
+pub fn normalize_with_objects(raw: RawMesh, objects: &RawObjects, opts: &NormalizeOptions) -> (MeshData, MeshReport);
 impl MeshData {
     pub fn render_vertices(&self) -> Vec<RenderVertex>;       // 1:1 with positions/normals/uvs
     pub fn wire_edges(&self) -> Vec<WireEdge>;                // de-duplicated, deterministic order
@@ -1156,6 +1181,14 @@ pub fn sample_stamp_image(size: u32) -> PixelBuf;  // ring + arrow with soft alp
 /// OBJ + MTL text for a raw mesh (writes v = 1 - v; triangles without UVs are written as faces without `vt`).
 /// `texture_names[i]` is the map_Kd for raw texture index i.
 pub fn to_obj(raw: &RawMesh, mtl_name: &str, texture_names: &[String]) -> (String, String);
+/// objects-tabs: `to_obj` plus an `o <name>` line whenever the object changes (`to_obj` itself stays byte-identical).
+pub fn to_obj_objects(raw: &RawMesh, objects: &RawObjects, mtl_name: &str, texture_names: &[String]) -> (String, String);
+/// objects-tabs: three separate shells in disjoint UV regions of one texture (one material "Trio", one set):
+/// "Floor" (8 x 8 grid, x, z in -3..3, y = 0, u 0.5..0.99), "Cube" (closed unit cube, x, z in -0.5..0.5, y in 0..1, in the
+/// middle of the floor, u 0..0.5, v 0..0.5), "Ball" (uv_sphere r 0.5 at (1.75, 0.5, 0), u 0.01..0.49, v 0.51..0.99).
+/// A top-down ray through the cube hits the cube first and the floor behind it.
+pub fn object_trio() -> (RawMesh, RawObjects);
+pub const OBJECT_TRIO_NAMES: [&str; 3];            // ["Floor", "Cube", "Ball"]
 // Round 4 (FEATURE_BRUSH 8), paint fixtures with documented UV islands:
 pub fn thin_slab(thickness: f32) -> RawMesh;       // 1 x 1 plate, x, y in 0..1, z in -thickness..0; seam_cube's six islands
 pub fn fold(inner_angle_deg: f32) -> RawMesh;      // two unit quads sharing the edge x = 1; angle between the front faces
@@ -1782,7 +1815,9 @@ synchronous wrap path, or by the app's warm-up thread) and shared with every job
 pub const MAX_TEXTURE_SIDE: u32 = 8192;
 pub const DEFAULT_BLANK_SIDE: u32 = 1024;
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)] pub enum SampleKind { Sphere, Cube, TwoMaterial }
+#[derive(Copy, Clone, PartialEq, Eq, Debug)] pub enum SampleKind { Sphere, Cube, TwoMaterial, Objects }
+// Objects (objects-tabs): `object_trio()` named "objects", written with `to_obj_objects` and read back by the OBJ importer
+// (objects "Floor", "Cube", "Ball"), texture "objects_checker.png".
 
 #[derive(Clone, Debug)]
 pub enum TextureChoice {
@@ -2478,7 +2513,16 @@ pub fn import_from_bundle(bundle: &SourceBundle, opts: &ImportOptions, decode_te
     -> Result<ImportedModel, ImportError>;
 
 // import/obj.rs, import/gltf.rs   (pub(crate))
-pub(crate) struct RawImport { pub mesh: RawMesh, pub textures: Vec<ImportedTexture>, pub warnings: Vec<ImportWarning> }
+pub(crate) struct RawImport { pub mesh: RawMesh, pub objects: RawObjects /* objects-tabs */, pub textures: Vec<ImportedTexture>,
+                              pub warnings: Vec<ImportWarning> }
+// Objects (objects-tabs, 6.1 step 9). OBJ: `o <name>` and `g <name>` lines set the current object / group (the whole rest
+// of the line is the name; `g` without a name is "default"; a name seen again continues the same entry). If at least one
+// face follows an `o` line the objects are the `o` entries, else, if at least one face follows a `g` line, the `g`
+// entries; faces in front of the first `o` (`g`) form one unnamed object; a file without either is one object. glTF / GLB:
+// each visited node with a mesh is one object, named by the node, else by its mesh, else unnamed; two nodes instancing one
+// mesh are two objects; a node whose primitives are all skipped yields no triangles and disappears in normalization.
+// FBX: one object per `Model` with geometry, named by its display name. Objects do not change triangles, order or
+// `uv_hash`: `IMPORTER_VERSION` stays 2.
 pub(crate) fn load_obj(main: &[u8], resolver: &dyn AssetResolver, opts: &ImportOptions, decode_textures: bool)
     -> Result<RawImport, ImportError>;
 // OBJ numbers: a `v` / `vt` / `vn` line with a missing, malformed or non-finite number (`abc`, `nan`, `inf`, `1e39`, which
@@ -2496,8 +2540,8 @@ pub(crate) fn load_fbx(main: &[u8], resolver: &dyn AssetResolver, opts: &ImportO
     -> Result<RawImport, ImportError>;
 // import/auto_uv.rs: the generated layout of 6.1 step 4 (box-projection charts, shelf-packed).
 pub(crate) fn generate_atlas_uvs(tris: &[[Vec3; 3]]) -> Vec<[Vec2; 3]>;
-// import/mod.rs then calls normalize(raw.mesh, &NormalizeOptions { generate_fallback_uvs: opts.generate_fallback_uvs
-//     || auto_uvs, model_name: <file stem>, texture_names: raw.textures.iter().map(|t| t.name.clone()).collect() }).
+// import/mod.rs then calls normalize_with_objects(raw.mesh, &raw.objects, &NormalizeOptions { generate_fallback_uvs:
+//     opts.generate_fallback_uvs || auto_uvs, model_name: <file stem>, texture_names: raw.textures.iter().map(|t| t.name.clone()).collect() }).
 // OBJ / MTL / ASCII FBX text: `decode_text` (UTF-8, else Latin-1; a UTF-8 BOM is dropped; a UTF-16 LE / BE BOM, as
 // Notepad's "Unicode" writes, decodes the rest as UTF-16) normalizes CRLF, lone CR (classic Mac OS) and mixed line
 // endings to LF before any line-based parsing.
@@ -2668,6 +2712,8 @@ pub fn decode_row(src: &[u8], out_len: usize) -> Option<Vec<u8>>;
 `psnr(a: &PixelBuf, b: &PixelBuf) -> f64`, `hash_pixels(buf: &PixelBuf) -> u64`, `XorShift` deterministic RNG (`XorShift::new(seed: u64)`, `next_u32`, `next_f32` in `[0, 1)`),
 `imported_from_raw(raw: RawMesh, textures: Vec<Option<PixelBuf>>) -> ImportedModel` (normalize with default options -> dummy
 in-memory `SourceBundle` whose main file is the bytes `b"dummy"` -> `ImportedTexture`s named `tex0`, `tex1`, ...),
+`imported_from_raw_objects(raw, &RawObjects, textures)` / `doc_from_raw_objects(raw, &RawObjects, size)` (the same through
+`normalize_with_objects`; objects-tabs),
 `doc_from_raw(raw: RawMesh, size: u32) -> Document` (`imported_from_raw` -> **one** blank white, unlocked raster layer of
 `size x size` per set, active -> `Document::from_parts`), so algorithm tests do not depend on the importers and paint directly on
 that single layer. (`Document::from_import` and `Document::sample` produce the locked "Base" + "Paint 1" pair instead.)
@@ -2853,10 +2899,21 @@ never runs two parses at the same time.
    `material_ranges` and its two sub-ranges `material_uv_ranges` / `material_nouv_ranges` (either may be empty; for a material
    with `texture_set == None` the uv range is empty), `bounds`, per-set `UV_MIRRORED` flags (sign of UV area versus the set's
    area-weighted majority) and `uv_hash`.
+9. **Objects** (objects-tabs, `normalize_with_objects`): every kept triangle carries the raw object index of its triangle
+   (`objects.tri_object[i]`, 0 when the vector is empty or shorter than the triangle list; an index `>= names.len()` counts as
+   0). The object is **not** part of the sort key nor of the vertex key: triangle order, vertex order and `uv_hash` are
+   bit-identical to `normalize` for every input. Objects are renumbered densely in order of first appearance in the *raw*
+   triangle order, counting only triangles that survived step 1 (an object without a surviving triangle disappears). Names:
+   an empty name becomes `"Object N"` (N = 1-based dense index); if the mesh has exactly one object and its name is empty, it
+   is `opts.model_name`, or `"Model"` when that is empty too; then names are made unique in index order with `_2`, `_3`.
+   `ObjectInfo::tri_count` and `bounds` come from the final triangles.
 
 `wire_edges`: for every triangle edge build the key (min/max of the two vertex *position bit patterns*); edges with the same key are
 the same geometric edge. Classify: one incident triangle => `Boundary`; two or more whose UVs at both ends are identical => `Interior`
 (emit once); otherwise `Seam` (emit once per distinct UV pair). Sort the output by (set, kind, a, b) for determinism.
+objects-tabs: each half edge also carries its triangle's object (as the last field of the derived order, never part of the
+grouping); the emitted entry's `object` is that of the side's smallest-object half edge, so an edge shared by two objects
+belongs to one of them (corner case: it disappears with that object when hidden).
 `uv_layout_images(mesh, side)` draws the layout thumbnails of all sets from one `wire_edges` call (in parallel); the import job
 uses it (one `wire_edges` per set made ABeautifulGame's 13 sets x 1.5 M triangles take seconds).
 
@@ -6556,6 +6613,12 @@ those tests.
   material name, else model name, uniquified); fallback UVs make every triangle paintable and non-overlapping; `uv_hash` stable
   across two runs and different for a changed UV; `uv_layout_image` of `seam_cube` has orange pixels on every island border and
   is deterministic.
+  objects-tabs (6.1 step 9): `objects_follow_their_triangles_through_the_sort`, `object_data_never_changes_the_mesh` (random object
+  data leaves positions, normals, uvs, indices, flags, ranges, sets and `uv_hash` equal to `normalize`, and the wireframe equal
+  apart from `object`), `unnamed_and_duplicate_names`, `objects_without_triangles_disappear`, `no_object_data_is_one_object`,
+  `wire_edges_name_their_object`. Importers: OBJ `o` objects, `g` groups without `o`, `o` wins, faces before the first `o`,
+  re-entered names, no `o`/`g` = one object named after the model, `to_obj_objects` round trip; glTF mesh nodes (named / unnamed
+  with a named mesh / shared mesh / duplicate names, transforms in the bounds); FBX two `Model`s; `Document::sample(Objects)`.
 - **bvh** [C1]: 10k random rays against brute force (same triangle, `t` within 1e-4); `occluded == raycast.is_some()`;
   `query_sphere` equals brute-force closest-point; analytic `uv_sphere` hits (position on the sphere, normal ~ position / r, UV matches
   the equirect formula); axis-parallel rays (infinite `inv_dir`); ray origin on an AABB face; `Cull::Back`; a hit on a

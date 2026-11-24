@@ -81,6 +81,30 @@ pub struct MeshData {
     pub bounds: Aabb,
     /// `fnv1a64` over indices, uv bits and per-triangle set ids.
     pub uv_hash: u64,
+    /// Object index per triangle (index into `objects`), same order as `tri_material`. Not part of `uv_hash`.
+    pub tri_object: Vec<u32>,
+    /// The objects of the model (OBJ `o` / `g`, glTF mesh nodes, FBX `Model`s): at least one entry for a non-empty
+    /// mesh, in order of first appearance in the raw triangle list (section 6.1 step 9).
+    pub objects: Vec<ObjectInfo>,
+}
+
+/// One object of the model (an OBJ object / group, a glTF mesh node, an FBX Model).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectInfo {
+    /// Unique within the mesh, never empty.
+    pub name: String,
+    pub tri_count: u32,
+    /// Bounds of the object's triangles (world space, transforms baked).
+    pub bounds: Aabb,
+}
+
+/// Importer-side object data, parallel to `RawMesh::triangles`. `Default` = no object structure.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RawObjects {
+    /// One entry per raw triangle: index into `names`. Empty = every triangle belongs to one unnamed object.
+    pub tri_object: Vec<u32>,
+    /// Names as the file gives them; may be empty strings or repeat.
+    pub names: Vec<String>,
 }
 
 impl MeshData {
@@ -138,6 +162,17 @@ impl MeshData {
     pub fn diag(&self) -> f32 {
         self.bounds.diagonal().max(1e-12)
     }
+
+    /// Number of objects (`objects.len()`).
+    pub fn object_count(&self) -> u32 {
+        self.objects.len() as u32
+    }
+
+    /// The object of triangle `t`: `tri_object[t]`, 0 when the vector is short (hand-built test meshes).
+    #[inline]
+    pub fn tri_object_of(&self, t: TriId) -> u32 {
+        self.tri_object.get(t as usize).copied().unwrap_or(0)
+    }
 }
 
 /// GPU vertex (32 bytes). Produced by the core so the app needs no knowledge of the mesh layout.
@@ -166,6 +201,8 @@ pub struct WireEdge {
     pub uv_b: [f32; 2],
     pub kind: EdgeKind,
     pub set: Option<TextureSetId>,
+    /// The object of the triangle side this entry was emitted for (an edge shared by two objects belongs to one).
+    pub object: u32,
 }
 
 /// Importer output before normalization: a triangle soup.
@@ -235,6 +272,8 @@ mod tests {
             sets: vec![SetInfo { name: "a".into(), materials: vec![0], texture: None, tri_count: 1 }],
             bounds: Aabb { min: Vec3::ZERO, max: Vec3::splat(2.0) },
             uv_hash: 0,
+            tri_object: vec![0; 2],
+            objects: vec![ObjectInfo { name: "tiny".into(), tri_count: 2, bounds: Aabb { min: Vec3::ZERO, max: Vec3::splat(2.0) } }],
         }
     }
 
@@ -251,6 +290,9 @@ mod tests {
         assert_eq!(m.geo_normal(0), Vec3::Z);
         assert_eq!(m.geo_normal(1), Vec3::Y, "degenerate triangle");
         assert!((m.diag() - 12f32.sqrt()).abs() < 1e-6);
+        assert_eq!(m.object_count(), 1);
+        assert_eq!(m.tri_object_of(1), 0);
+        assert_eq!(m.tri_object_of(99), 0, "beyond the vector: object 0");
     }
 
     #[test]

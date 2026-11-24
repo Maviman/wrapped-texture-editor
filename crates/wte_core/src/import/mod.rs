@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ImageIoError, ImportError, ImportWarning};
 use crate::image_io::{DecodedImage, decode_image};
-use crate::mesh::{MeshData, MeshReport, RawMesh};
-use crate::mesh_build::{NormalizeOptions, normalize};
+use crate::mesh::{MeshData, MeshReport, RawMesh, RawObjects};
+use crate::mesh_build::{NormalizeOptions, normalize_with_objects};
 use crate::pixel::PixelBuf;
 use crate::progress::Progress;
 
@@ -291,7 +291,7 @@ fn import_core(
         texture_names: raw.textures.iter().map(|t| t.name.clone()).collect(),
     };
     let empty_reasons = reasons();
-    let (mesh, report) = normalize(raw.mesh, &normalize_opts);
+    let (mesh, report) = normalize_with_objects(raw.mesh, &raw.objects, &normalize_opts);
     if mesh.tri_count() == 0 {
         let mut reasons = empty_reasons;
         if report.dropped_degenerate > 0 {
@@ -338,10 +338,12 @@ fn mesh_warnings(mesh: &MeshData, report: &MeshReport, warnings: &mut Vec<Import
 }
 
 /// Output of the format-specific loaders before normalization. `import/mod.rs` then calls
-/// `normalize(raw.mesh, &NormalizeOptions { generate_fallback_uvs: opts.generate_fallback_uvs, model_name: <file stem>,
-/// texture_names: raw.textures.iter().map(|t| t.name.clone()).collect() })`.
+/// `normalize_with_objects(raw.mesh, &raw.objects, &NormalizeOptions { generate_fallback_uvs: opts.generate_fallback_uvs,
+/// model_name: <file stem>, texture_names: raw.textures.iter().map(|t| t.name.clone()).collect() })`.
 pub(crate) struct RawImport {
     pub mesh: RawMesh,
+    /// The object of every raw triangle (OBJ `o` / `g`, glTF mesh nodes, FBX `Model`s); default = one object.
+    pub objects: RawObjects,
     pub textures: Vec<ImportedTexture>,
     pub warnings: Vec<ImportWarning>,
 }
@@ -992,7 +994,7 @@ mod tests {
         let raw = load(true).unwrap();
         eprintln!("parse with textures: {:?} ({} textures)", t.elapsed(), raw.textures.len());
         let t = std::time::Instant::now();
-        let (mesh, _) = normalize(raw.mesh, &NormalizeOptions::default());
+        let (mesh, _) = crate::mesh_build::normalize(raw.mesh, &NormalizeOptions::default());
         eprintln!("normalize: {:?}", t.elapsed());
         let t = std::time::Instant::now();
         let model = import_from_path(path, &opts, &NoProgress).unwrap();

@@ -5,7 +5,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glam::{DVec3, Vec2, Vec3};
 use rayon::prelude::*;
@@ -13,8 +13,8 @@ use rayon::prelude::*;
 use crate::ids::TextureSetId;
 use crate::math::{Aabb, fnv1a64};
 use crate::mesh::{
-    EdgeKind, MaterialSlot, MeshData, MeshReport, RawMaterial, RawMesh, RawTriangle, RenderVertex, SetInfo, TriFlags,
-    WireEdge,
+    EdgeKind, MaterialSlot, MeshData, MeshReport, ObjectInfo, RawMaterial, RawMesh, RawObjects, RawTriangle,
+    RenderVertex, SetInfo, TriFlags, WireEdge,
 };
 use crate::pixel::PixelBuf;
 
@@ -44,6 +44,8 @@ struct Work {
     flags: TriFlags,
     /// `(p1 - p0) x (p2 - p0)`: direction = face normal, length = twice the area.
     face: DVec3,
+    /// Raw object index (step 9): `RawObjects::tri_object[i]`, 0 when missing or out of range.
+    object: u32,
 }
 
 /// Result of the UV step for a triangle that has usable UVs.
@@ -135,9 +137,22 @@ fn signed_uv_area(uv: [Vec2; 3]) -> f64 {
 /// even when fallback UVs were generated for them afterwards (then `fallback_uvs_generated` is set and no triangle
 /// of the result carries `NO_UV`). `wrapped_tris` counts triangles whose UVs were folded onto the 0..1 tile: a
 /// non-zero tile was subtracted, or the UVs leave 0..1 by more than 1e-4. A triangle whose material index has no
-/// entry in `raw.materials` is assigned to one extra material named "default".
+/// entry in `raw.materials` is assigned to one extra material named "default". The mesh has one object (step 9).
 pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport) {
+    normalize_with_objects(raw, &RawObjects::default(), opts)
+}
+
+/// `normalize` with object data (section 6.1 step 9): `objects.tri_object` runs parallel to `raw.triangles`. The object
+/// data never changes the triangle order, the vertex order or `uv_hash`; it only fills `MeshData::tri_object` and
+/// `MeshData::objects`. A missing entry or an index past `objects.names` counts as raw object 0.
+pub fn normalize_with_objects(raw: RawMesh, objects: &RawObjects, opts: &NormalizeOptions) -> (MeshData, MeshReport) {
     let RawMesh { triangles: raw_tris, materials: mut raw_materials } = raw;
+    let raw_object = |i: usize| -> u32 {
+        match objects.tri_object.get(i) {
+            Some(&o) if (o as usize) < objects.names.len() => o,
+            _ => 0,
+        }
+    };
     let mut report = MeshReport { total_tris: raw_tris.len().min(u32::MAX as usize) as u32, ..MeshReport::default() };
 
     // Step 1: drop triangles with non-finite positions or (almost) no area.
@@ -155,7 +170,7 @@ pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport
     let declared_materials = raw_materials.len() as u32;
     let mut uses_default_material = false;
     let mut work: Vec<Work> = Vec::with_capacity(raw_tris.len());
-    for t in raw_tris {
+    for (raw_index, t) in raw_tris.into_iter().enumerate() {
         if !finite(&t) {
             report.dropped_degenerate += 1;
             continue;
@@ -184,7 +199,7 @@ pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport
                 ([Vec2::ZERO; 3], TriFlags::NO_UV)
             }
         };
-        work.push(Work { pos, normals: t.normals, uv, material, flags, face });
+        work.push(Work { pos, normals: t.normals, uv, material, flags, face, object: raw_object(raw_index) });
     }
     if uses_default_material {
         raw_materials.push(RawMaterial {
@@ -343,6 +358,8 @@ pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport
         sets,
         bounds: Aabb::EMPTY,
         uv_hash: 0,
+        tri_object: Vec::with_capacity(work.len()),
+        objects: Vec::new(),
     };
     for &i in &order {
         let w = &work[i];
@@ -361,6 +378,27 @@ pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport
         }
         mesh.tri_material.push(w.material);
         mesh.tri_flags.push(if mirrored[i] { w.flags | TriFlags::UV_MIRRORED } else { w.flags });
+    }
+
+    // Step 9: objects, numbered densely in order of first appearance in the raw triangle order (kept triangles only;
+    // `work` is in raw order). Not part of any sort or vertex key, so nothing above depends on them.
+    let mut dense: HashMap<u32, u32> = HashMap::new();
+    let mut raw_of_dense: Vec<u32> = Vec::new();
+    for w in &work {
+        dense.entry(w.object).or_insert_with(|| {
+            raw_of_dense.push(w.object);
+            raw_of_dense.len() as u32 - 1
+        });
+    }
+    mesh.objects = object_infos(&raw_of_dense, objects, opts);
+    mesh.tri_object.extend(order.iter().map(|&i| dense[&work[i].object]));
+    for t in 0..mesh.tri_count() {
+        let [a, b, c] = mesh.tri_positions(t);
+        let info = &mut mesh.objects[mesh.tri_object[t as usize] as usize];
+        info.tri_count += 1;
+        for p in [a, b, c] {
+            info.bounds.extend(p);
+        }
     }
 
     // Step 8 (rest): materials, ranges, bounds, hash.
@@ -387,7 +425,37 @@ pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport
     (mesh, report)
 }
 
+/// Step 9 names: an empty name becomes "Object N" (N = 1-based dense index); a single unnamed object takes the model
+/// name ("Model" when that is empty); then names are made unique in index order with `_2`, `_3`. Counts and bounds
+/// are filled in by the caller.
+fn object_infos(raw_of_dense: &[u32], objects: &RawObjects, opts: &NormalizeOptions) -> Vec<ObjectInfo> {
+    let single = raw_of_dense.len() == 1;
+    let mut used: HashSet<String> = HashSet::with_capacity(raw_of_dense.len());
+    let mut out = Vec::with_capacity(raw_of_dense.len());
+    for (i, &r) in raw_of_dense.iter().enumerate() {
+        let given = objects.names.get(r as usize).map_or("", String::as_str);
+        let base = if !given.is_empty() {
+            given.to_owned()
+        } else if single {
+            if opts.model_name.is_empty() { "Model".to_owned() } else { opts.model_name.clone() }
+        } else {
+            format!("Object {}", i + 1)
+        };
+        let mut name = base.clone();
+        let mut suffix = 2;
+        while used.contains(&name) {
+            name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        used.insert(name.clone());
+        out.push(ObjectInfo { name, tri_count: 0, bounds: Aabb::EMPTY });
+    }
+    out
+}
+
 /// One side of a triangle edge, keyed for grouping: `key` = the two position bit patterns (smaller first).
+/// `object` is the last field, so the derived order of the other fields is unchanged; it never takes part in the
+/// grouping (`same_side`).
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct HalfEdge {
     key: [u32; 6],
@@ -395,6 +463,15 @@ struct HalfEdge {
     set: u32,
     /// UV bit patterns at the two ends, in key order.
     uv: [u32; 4],
+    /// The object of the triangle.
+    object: u32,
+}
+
+impl HalfEdge {
+    /// The same geometric edge with the same set and UVs (the object does not count).
+    fn same_side(&self, other: &HalfEdge) -> bool {
+        self.key == other.key && self.set == other.set && self.uv == other.uv
+    }
 }
 
 impl MeshData {
@@ -421,6 +498,7 @@ impl MeshData {
         for t in 0..self.tri_count() {
             let tri = self.tri(t);
             let set = self.tri_set(t);
+            let object = self.tri_object_of(t);
             for k in 0..3 {
                 let (ia, ib) = (tri[k] as usize, tri[(k + 1) % 3] as usize);
                 let (pa, pb) = (bits3(self.positions[ia]), bits3(self.positions[ib]));
@@ -437,6 +515,7 @@ impl MeshData {
                     key: [pa[0], pa[1], pa[2], pb[0], pb[1], pb[2]],
                     set: set.map_or(u32::MAX, |s| s.0),
                     uv: [ua[0], ua[1], ub[0], ub[1]],
+                    object,
                 });
             }
         }
@@ -454,6 +533,7 @@ impl MeshData {
             uv_b: [f32::from_bits(h.uv[2]), f32::from_bits(h.uv[3])],
             kind,
             set: if h.set == u32::MAX { None } else { Some(TextureSetId(h.set)) },
+            object: h.object,
         };
         for group in halves.chunk_by(|x, y| x.key == y.key) {
             if group.len() == 1 {
@@ -461,9 +541,9 @@ impl MeshData {
                 continue;
             }
             // The group is sorted by (set, uv): distinct sides are runs of equal entries.
-            let distinct = group.chunk_by(|x, y| x == y).count();
+            let distinct = group.chunk_by(|x, y| x.same_side(y)).count();
             let kind = if distinct == 1 { EdgeKind::Interior } else { EdgeKind::Seam };
-            for side in group.chunk_by(|x, y| x == y) {
+            for side in group.chunk_by(|x, y| x.same_side(y)) {
                 edges.push(emit(&side[0], kind));
             }
         }
@@ -1231,5 +1311,167 @@ mod tests {
         assert!(uv_layout_image(&mesh, TextureSetId(7), 32).data.as_chunks::<4>().0.iter().all(|p| *p == DARK));
         assert_eq!(uv_layout_image(&mesh, TextureSetId(0), 0).byte_len(), 0);
         assert_eq!(uv_layout_image(&mesh, TextureSetId(0), 1).data, ORANGE);
+    }
+
+    // ----- objects-tabs WP1: step 9 (objects) -----
+
+    /// `RawObjects` over `n` raw triangles: object `of(i)` for triangle `i`, names as given.
+    fn raw_objects(n: usize, names: &[&str], of: impl FnMut(usize) -> u32) -> RawObjects {
+        RawObjects { tri_object: (0..n).map(of).collect(), names: names.iter().map(|s| (*s).to_owned()).collect() }
+    }
+
+    fn named(model: &str) -> NormalizeOptions {
+        NormalizeOptions { model_name: model.to_owned(), ..NormalizeOptions::default() }
+    }
+
+    fn names_of(mesh: &MeshData) -> Vec<&str> {
+        mesh.objects.iter().map(|o| o.name.as_str()).collect()
+    }
+
+    /// Every object's triangle count and bounds agree with `tri_object`.
+    fn check_objects(mesh: &MeshData) {
+        assert_eq!(mesh.tri_object.len(), mesh.tri_count() as usize);
+        assert!(!mesh.objects.is_empty());
+        assert!(mesh.tri_object.iter().all(|&o| o < mesh.object_count()));
+        assert_eq!(mesh.objects.iter().map(|o| o.tri_count).sum::<u32>(), mesh.tri_count());
+        for (i, info) in mesh.objects.iter().enumerate() {
+            let tris: Vec<u32> = (0..mesh.tri_count()).filter(|&t| mesh.tri_object_of(t) == i as u32).collect();
+            assert_eq!(info.tri_count as usize, tris.len(), "object {i}");
+            assert!(info.tri_count > 0, "object {i} has no triangle");
+            let points: Vec<Vec3> = tris.iter().flat_map(|&t| mesh.tri_positions(t)).collect();
+            assert_eq!(info.bounds, Aabb::from_points(&points), "object {i} bounds");
+            assert!(!info.name.is_empty());
+            assert_eq!(mesh.objects.iter().filter(|o| o.name == info.name).count(), 1, "object names are unique");
+        }
+    }
+
+    #[test]
+    fn objects_follow_their_triangles_through_the_sort() {
+        // Two materials x two objects, interleaved; every fifth triangle has no UVs (sorted last in its material).
+        let mut raw = RawMesh { triangles: Vec::new(), materials: vec![mat("a", Some(0)), mat("b", Some(1))] };
+        for i in 0..40 {
+            raw.triangles.push(simple(i as f32 * 2.0, (i % 2) as u32, i % 5 != 0));
+        }
+        let objects = raw_objects(40, &["Left", "Right"], |i| ((i / 2) % 2) as u32);
+        let expected: HashMap<[u32; 3], u32> =
+            raw.triangles.iter().enumerate().map(|(i, t)| (bits3(t.positions[0]), objects.tri_object[i])).collect();
+        let (mesh, _) = normalize_with_objects(raw, &objects, &NormalizeOptions::default());
+        check_structure(&mesh);
+        check_objects(&mesh);
+        assert_eq!(names_of(&mesh), ["Left", "Right"]);
+        // The triangles were reordered (by material, NO_UV last); each one keeps the object of its raw triangle.
+        assert_ne!(mesh.tri_object, objects.tri_object, "the sort moved triangles");
+        for t in 0..mesh.tri_count() {
+            assert_eq!(mesh.tri_object_of(t), expected[&bits3(mesh.tri_positions(t)[0])], "triangle {t}");
+        }
+    }
+
+    #[test]
+    fn object_data_never_changes_the_mesh() {
+        let fixtures = [samples::two_material_model(), samples::seam_cube(1.0), samples::soup_sets(5, 600, 3), samples::uv_sphere(16, 8, 1.0)];
+        for (f, raw) in fixtures.into_iter().enumerate() {
+            let mut rng = XorShift::new(f as u64 + 3);
+            // Indices past the names (99) count as object 0.
+            let objects = raw_objects(raw.triangles.len(), &["a", "", "b", "a", "c"], |_| match rng.next_u32() % 7 {
+                6 => 99,
+                k => k % 5,
+            });
+            let (plain, plain_report) = normalize(raw.clone(), &named("model"));
+            let (with, with_report) = normalize_with_objects(raw, &objects, &named("model"));
+            assert_eq!(plain_report, with_report, "fixture {f}");
+            assert_eq!(plain.positions, with.positions, "fixture {f}");
+            assert_eq!(plain.normals, with.normals, "fixture {f}");
+            assert_eq!(plain.uvs, with.uvs, "fixture {f}");
+            assert_eq!(plain.indices, with.indices, "fixture {f}");
+            assert_eq!(plain.tri_material, with.tri_material, "fixture {f}");
+            assert_eq!(plain.tri_flags, with.tri_flags, "fixture {f}");
+            assert_eq!(plain.material_ranges, with.material_ranges, "fixture {f}");
+            assert_eq!(plain.sets, with.sets, "fixture {f}");
+            assert_eq!(plain.bounds, with.bounds, "fixture {f}");
+            assert_eq!(plain.uv_hash, with.uv_hash, "fixture {f}");
+            check_objects(&with);
+            assert!(with.objects.len() > 1, "fixture {f}: several objects");
+            // The wireframe is the same apart from the object of each entry.
+            let strip = |m: &MeshData| m.wire_edges().into_iter().map(|e| format!("{:?}", WireEdge { object: 0, ..e })).collect::<Vec<_>>();
+            assert_eq!(strip(&plain), strip(&with), "fixture {f}");
+        }
+    }
+
+    #[test]
+    fn unnamed_and_duplicate_names() {
+        let raw = RawMesh { triangles: (0..4).map(|i| simple(i as f32 * 2.0, 0, true)).collect(), materials: vec![mat("m", Some(0))] };
+        let objects = raw_objects(4, &["", "Pawn", "Pawn", ""], |i| i as u32);
+        let (mesh, _) = normalize_with_objects(raw.clone(), &objects, &named("chess"));
+        assert_eq!(names_of(&mesh), ["Object 1", "Pawn", "Pawn_2", "Object 4"]);
+        check_objects(&mesh);
+        // A single unnamed object takes the model name, "Model" when there is none.
+        let one = raw_objects(4, &[""], |_| 0);
+        assert_eq!(names_of(&normalize_with_objects(raw.clone(), &one, &named("chess")).0), ["chess"]);
+        assert_eq!(names_of(&normalize_with_objects(raw.clone(), &one, &named("")).0), ["Model"]);
+        // A name that already ends in a suffix is not confused with a generated one.
+        let tricky = raw_objects(4, &["A_2", "A", "A", "A"], |i| i as u32);
+        assert_eq!(names_of(&normalize_with_objects(raw, &tricky, &named("")).0), ["A_2", "A", "A_3", "A_4"]);
+    }
+
+    #[test]
+    fn objects_without_triangles_disappear() {
+        let mut raw = RawMesh { triangles: (0..6).map(|i| simple(i as f32 * 2.0, 0, true)).collect(), materials: vec![mat("m", Some(0))] };
+        // Object "Gone" (triangles 2 and 3) is all degenerate; "Unused" has no triangle at all.
+        for t in &mut raw.triangles[2..4] {
+            t.positions = [t.positions[0]; 3];
+        }
+        let objects = raw_objects(6, &["Unused", "First", "Gone", "Last"], |i| [1, 1, 2, 2, 3, 3][i]);
+        let (mesh, report) = normalize_with_objects(raw, &objects, &NormalizeOptions::default());
+        assert_eq!(report.dropped_degenerate, 2);
+        assert_eq!(names_of(&mesh), ["First", "Last"]);
+        assert_eq!(mesh.tri_object, [0, 0, 1, 1]);
+        check_objects(&mesh);
+    }
+
+    #[test]
+    fn no_object_data_is_one_object() {
+        let mesh = mesh_of(samples::two_material_model());
+        assert_eq!(mesh.objects.len(), 1);
+        assert_eq!(mesh.objects[0].name, "Model");
+        assert_eq!(mesh.objects[0].tri_count, mesh.tri_count());
+        assert_eq!(mesh.objects[0].bounds, mesh.bounds);
+        assert!(mesh.tri_object.iter().all(|&o| o == 0));
+        assert_eq!(mesh.tri_object.len(), mesh.tri_count() as usize);
+        assert_eq!(normalize(samples::flat_quad(), &named("quad")).0.objects[0].name, "quad");
+        // An empty mesh has no object.
+        let (empty, _) = normalize(RawMesh::default(), &NormalizeOptions::default());
+        assert!(empty.objects.is_empty() && empty.tri_object.is_empty());
+    }
+
+    #[test]
+    fn wire_edges_name_their_object() {
+        // A quad split into one triangle per object (the diagonal is shared), plus a lone triangle of object 2.
+        let quad = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
+        let uv = |p: [f32; 3]| [p[0], 1.0 - p[1]];
+        let corner = |idx: [usize; 3]| tri(idx.map(|i| quad[i]), Some(idx.map(|i| uv(quad[i]))), 0);
+        let mut raw = RawMesh { triangles: vec![corner([0, 1, 2]), corner([0, 2, 3])], materials: vec![mat("m", Some(0))] };
+        raw.triangles.push(simple(5.0, 0, true));
+        let objects = raw_objects(3, &["B", "A", "C"], |i| i as u32);
+        let (mesh, _) = normalize_with_objects(raw, &objects, &NormalizeOptions::default());
+        let edges = mesh.wire_edges();
+        assert_eq!(edges.len(), 8, "4 quad sides, the diagonal, 3 sides of the lone triangle");
+        for e in &edges {
+            let on_quad = e.a[0] <= 1.0 && e.b[0] <= 1.0;
+            if !on_quad {
+                assert_eq!(e.object, 2, "{e:?}");
+                assert_eq!(e.kind, EdgeKind::Boundary);
+                continue;
+            }
+            let diagonal = e.a == [0.0, 0.0, 0.0] && e.b == [1.0, 1.0, 0.0];
+            if diagonal {
+                // Shared by both objects: one Interior entry, owned by one of them (the smaller index).
+                assert_eq!((e.kind, e.object), (EdgeKind::Interior, 0));
+            } else {
+                // Sides 0-1 and 1-2 belong to the first triangle, 2-3 and 3-0 to the second.
+                let first = (e.a[1] == 0.0 && e.b[1] == 0.0) || (e.a[0] == 1.0 && e.b[0] == 1.0);
+                assert_eq!(e.object, if first { 0 } else { 1 }, "{e:?}");
+                assert_eq!(e.kind, EdgeKind::Boundary);
+            }
+        }
     }
 }

@@ -1089,6 +1089,8 @@ mod tests {
             sets: Vec::new(),
             bounds: crate::math::Aabb::from_points(&positions),
             uv_hash: 0,
+            tri_object: vec![0; n as usize],
+            objects: vec![crate::mesh::ObjectInfo { name: "m".into(), tri_count: n, bounds: crate::math::Aabb::from_points(&positions) }],
             positions,
         }
     }

@@ -482,6 +482,7 @@ mod tests {
             uv_b: [x * 0.1, 0.5],
             kind,
             set: set.map(TextureSetId),
+            object: 0,
         }
     }
 

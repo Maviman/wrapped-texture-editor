@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 
 use glam::{Vec2, Vec3};
 
-use crate::mesh::{RawMaterial, RawMesh, RawTriangle};
+use crate::mesh::{RawMaterial, RawMesh, RawObjects, RawTriangle};
 use crate::pixel::PixelBuf;
 
 fn material(name: &str, base_color: [f32; 4], texture: Option<u32>) -> RawMaterial {
@@ -394,6 +394,16 @@ fn obj_material_name(raw: &RawMesh, index: u32) -> String {
 /// Materials are written to the MTL in index order as `newmtl`, `Kd`, `d` and (when the material has a texture with
 /// a non-empty name in `texture_names`) `map_Kd`.
 pub fn to_obj(raw: &RawMesh, mtl_name: &str, texture_names: &[String]) -> (String, String) {
+    write_obj(raw, None, mtl_name, texture_names)
+}
+
+/// `to_obj` plus an `o <name>` line in front of a face whenever its object (`objects.tri_object`, 0 when missing)
+/// changes, so that the OBJ importer reads the objects back (objects-tabs plan 2.4).
+pub fn to_obj_objects(raw: &RawMesh, objects: &RawObjects, mtl_name: &str, texture_names: &[String]) -> (String, String) {
+    write_obj(raw, Some(objects), mtl_name, texture_names)
+}
+
+fn write_obj(raw: &RawMesh, objects: Option<&RawObjects>, mtl_name: &str, texture_names: &[String]) -> (String, String) {
     // Index of a value in its OBJ list (1-based), adding it on first use. Insertion order defines the file order.
     fn intern<const N: usize>(map: &mut HashMap<[u32; N], usize>, list: &mut Vec<[f32; N]>, value: [f32; N]) -> usize {
         let key = value.map(|c| (c + 0.0).to_bits());
@@ -408,7 +418,16 @@ pub fn to_obj(raw: &RawMesh, mtl_name: &str, texture_names: &[String]) -> (Strin
     let mut vn_list: Vec<[f32; 3]> = Vec::new();
     let mut faces = String::new();
     let mut current: Option<u32> = None;
-    for t in &raw.triangles {
+    let mut current_object: Option<u32> = None;
+    for (i, t) in raw.triangles.iter().enumerate() {
+        if let Some(objects) = objects {
+            let object = objects.tri_object.get(i).copied().unwrap_or(0);
+            if current_object != Some(object) {
+                current_object = Some(object);
+                let name = objects.names.get(object as usize).map_or("", String::as_str);
+                let _ = writeln!(faces, "o {name}");
+            }
+        }
         if current != Some(t.material) {
             current = Some(t.material);
             let _ = writeln!(faces, "usemtl {}", obj_material_name(raw, t.material));
@@ -462,6 +481,55 @@ pub fn to_obj(raw: &RawMesh, mtl_name: &str, texture_names: &[String]) -> (Strin
 // Round 4 (scaffold S1): the generators of FEATURE_BRUSH section 8 and the three model-file writers. The bake
 // fixtures (`open_box` to `cup`) carry no UVs and no normals.
 // ---------------------------------------------------------------------------------------------------------------------
+
+/// Names of the three objects of `object_trio`, in object order.
+pub const OBJECT_TRIO_NAMES: [&str; 3] = ["Floor", "Cube", "Ball"];
+
+/// Objects-tabs plan 2.4: three separate shells with UVs in disjoint regions of one texture (one material "Trio"
+/// referencing texture 0, one set). Object 0 **"Floor"**: an 8 x 8 grid of quads (`x`, `z` in -3..3, `y` = 0, facing
+/// +Y; the grid lines are shifted so that no floor vertex meets a cube or ball vertex), UV `u` 0.5..0.99, `v`
+/// 0.01..0.99. Object 1 **"Cube"**: a closed unit cube (`x`, `z` in -0.5..0.5, `y` in 0..1) standing on the floor in
+/// the middle of the model, its faces (in `push_box` order) the cells of a 2 x 3 grid in `u` 0..0.5, `v` 0..0.5.
+/// Object 2 **"Ball"**: `uv_sphere(24, 12, 0.5)` centred at (1.75, 0.5, 0) with its UVs scaled into `u` 0.01..0.49,
+/// `v` 0.51..0.99. A top-down ray through the cube hits the cube's top face first and the floor behind it.
+pub fn object_trio() -> (RawMesh, RawObjects) {
+    let mut triangles = Vec::new();
+    let mut tri_object = Vec::new();
+    // Floor.
+    let n = 8u32;
+    let (u0, u1, v0, v1) = (0.5f32, 0.99f32, 0.01f32, 0.99f32);
+    let (du, dv, step) = ((u1 - u0) / n as f32, (v1 - v0) / n as f32, 6.0 / n as f32);
+    let line = |k: u32| if k == 0 { 0.0 } else if k == n { 6.0 } else { step * (k as f32 + 0.37) };
+    for j in 0..n {
+        for i in 0..n {
+            let (xa, xb) = (-3.0 + line(i), -3.0 + line(i + 1));
+            let (za, zb) = (3.0 - line(j), 3.0 - line(j + 1));
+            let floor = [Vec3::new(xa, 0.0, za), Vec3::new(xb, 0.0, za), Vec3::new(xb, 0.0, zb), Vec3::new(xa, 0.0, zb)];
+            let island = [u0 + du * i as f32, u0 + du * (i + 1) as f32, v1 - dv * (j + 1) as f32, v1 - dv * j as f32];
+            push_island_quad(&mut triangles, floor, island, 0);
+        }
+    }
+    tri_object.resize(triangles.len(), 0);
+    // Cube.
+    let cell = |f: usize| {
+        let (col, row) = ((f % 2) as f32, (f / 2) as f32);
+        let (w, h) = (0.25, 0.5 / 3.0);
+        [col * w + 0.01, (col + 1.0) * w - 0.01, row * h + 0.01, (row + 1.0) * h - 0.01]
+    };
+    push_box(&mut triangles, Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5), Some(std::array::from_fn(cell)), 0);
+    tri_object.resize(triangles.len(), 1);
+    // Ball.
+    let centre = Vec3::new(1.75, 0.5, 0.0);
+    for mut t in uv_sphere(24, 12, 0.5).triangles {
+        t.positions = t.positions.map(|p| p + centre);
+        t.uvs = t.uvs.map(|uv| uv.map(|c| Vec2::new(0.01 + c.x * 0.48, 0.51 + c.y * 0.48)));
+        t.material = 0;
+        triangles.push(t);
+    }
+    tri_object.resize(triangles.len(), 2);
+    let raw = RawMesh { triangles, materials: vec![material("Trio", [0.8, 0.8, 0.8, 1.0], Some(0))] };
+    (raw, RawObjects { tri_object, names: OBJECT_TRIO_NAMES.map(str::to_owned).to_vec() })
+}
 
 /// The atlas cell `[u0, u1, v0, v1]` of island `index` in a grid of `cols x rows` cells, inset by 1/64 of a cell
 /// width on every side.

@@ -19,10 +19,12 @@ use crate::import::{
     AssetResolver, ImportOptions, RawImport, TextureRequest, TextureSource, clean_unit, decode_text, load_textures,
     normalize_ref, parse_texture_ref,
 };
-use crate::mesh::{RawMaterial, RawMesh, RawTriangle};
+use crate::mesh::{RawMaterial, RawMesh, RawObjects, RawTriangle};
 
 /// `TriInfo::material` of a face in front of the first `usemtl`.
 const NO_MATERIAL: u32 = u32::MAX;
+/// `TriInfo::o` / `TriInfo::g` of a face in front of the first `o` / `g` line.
+const NO_OBJECT: u32 = u32::MAX;
 /// Colour of materials without `Kd` and of materials the MTL does not define.
 const DEFAULT_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 
@@ -35,6 +37,10 @@ struct TriInfo {
     has_uv: bool,
     /// Every corner of the face has a valid `vn` reference.
     has_normal: bool,
+    /// Index into `Prepass::o_names` of the current `o`, or `NO_OBJECT`.
+    o: u32,
+    /// Index into `Prepass::g_names` of the current `g`, or `NO_OBJECT`.
+    g: u32,
 }
 
 /// Result of `sanitize_obj`.
@@ -46,6 +52,10 @@ struct Prepass {
     material_names: Vec<String>,
     /// `mtllib` references in order of first appearance, without duplicates.
     mtllibs: Vec<String>,
+    /// `o` names in order of first appearance (a name seen again continues the same entry).
+    o_names: Vec<String>,
+    /// `g` names in order of first appearance (`g` without a name is "default").
+    g_names: Vec<String>,
     /// The `v` / `vt` / `vn` lines whose numbers could not be used.
     bad: BadNumbers,
 }
@@ -110,7 +120,9 @@ fn resolve_index(token: &str, count: usize) -> Result<Option<usize>, ()> {
 ///   that attribute from the whole face; a face with a position index out of range is dropped and recorded in
 ///   `Prepass::bad` like a bad number line; an index that is not an integer is an error; faces with fewer than three
 ///   corners are dropped. A face with n corners yields n - 2 `TriInfo`s (tobj triangulates it as a fan).
-/// - `usemtl` / `mtllib` are recorded, not written; everything else (`o`, `g`, `s`, `l`, `p`, comments) is dropped.
+/// - `usemtl` / `mtllib` are recorded, not written; `o` and `g` are recorded as objects (the whole rest of the line is
+///   the name; `g` without a name is "default"; a name seen again continues its entry); everything else (`s`, `l`, `p`,
+///   comments) is dropped.
 /// - A trailing `\` joins a line with the next one.
 fn sanitize_obj(source: &str) -> Result<Prepass, ImportError> {
     let mut out = Prepass {
@@ -118,10 +130,14 @@ fn sanitize_obj(source: &str) -> Result<Prepass, ImportError> {
         tris: Vec::new(),
         material_names: Vec::new(),
         mtllibs: Vec::new(),
+        o_names: Vec::new(),
+        g_names: Vec::new(),
         bad: BadNumbers::default(),
     };
     let mut material_index: BTreeMap<String, u32> = BTreeMap::new();
     let mut current_material = NO_MATERIAL;
+    let (mut o_index, mut g_index): (BTreeMap<String, u32>, BTreeMap<String, u32>) = (BTreeMap::new(), BTreeMap::new());
+    let (mut current_o, mut current_g) = (NO_OBJECT, NO_OBJECT);
     let (mut v_count, mut vt_count, mut vn_count) = (0usize, 0usize, 0usize);
     let mut corners: Vec<(usize, Option<usize>, Option<usize>)> = Vec::new();
     let mut joined = String::new();
@@ -254,7 +270,7 @@ fn sanitize_obj(source: &str) -> Result<Prepass, ImportError> {
                     };
                 }
                 out.text.push('\n');
-                let info = TriInfo { material: current_material, has_uv, has_normal };
+                let info = TriInfo { material: current_material, has_uv, has_normal, o: current_o, g: current_g };
                 out.tris.extend(std::iter::repeat_n(info, corners.len() - 2));
             }
             "usemtl" if !rest.is_empty() => {
@@ -271,10 +287,39 @@ fn sanitize_obj(source: &str) -> Result<Prepass, ImportError> {
             "mtllib" if !rest.is_empty() && !out.mtllibs.iter().any(|m| m == rest) => {
                 out.mtllibs.push(rest.to_owned());
             }
+            "o" => current_o = intern_name(&mut o_index, &mut out.o_names, rest),
+            "g" => current_g = intern_name(&mut g_index, &mut out.g_names, if rest.is_empty() { "default" } else { rest }),
             _ => {}
         }
     }
     Ok(out)
+}
+
+/// The index of `name` in `names`, appended on first use.
+fn intern_name(index: &mut BTreeMap<String, u32>, names: &mut Vec<String>, name: &str) -> u32 {
+    *index.entry(name.to_owned()).or_insert_with(|| {
+        names.push(name.to_owned());
+        names.len() as u32 - 1
+    })
+}
+
+/// The objects of the file (5.21): the `o` entries when at least one face follows an `o` line, else the `g` entries
+/// when at least one face follows a `g` line, else none (one object). Faces in front of the first `o` (or `g`) form
+/// one unnamed object.
+fn objects_of(prepass: &Prepass) -> RawObjects {
+    let pick = |of: fn(&TriInfo) -> u32, names: &[String]| -> Option<RawObjects> {
+        if !prepass.tris.iter().any(|t| of(t) != NO_OBJECT) {
+            return None;
+        }
+        let mut names = names.to_vec();
+        let unnamed = names.len() as u32;
+        let tri_object: Vec<u32> = prepass.tris.iter().map(|t| if of(t) == NO_OBJECT { unnamed } else { of(t) }).collect();
+        if tri_object.contains(&unnamed) {
+            names.push(String::new());
+        }
+        Some(RawObjects { tri_object, names })
+    };
+    pick(|t| t.o, &prepass.o_names).or_else(|| pick(|t| t.g, &prepass.g_names)).unwrap_or_default()
 }
 
 /// Rewrites an MTL file into the statements the importer uses, in a form tobj parses without failing:
@@ -622,7 +667,8 @@ pub(crate) fn load_obj(
         }
     }
 
-    Ok(RawImport { mesh: RawMesh { triangles, materials }, textures, warnings })
+    let objects = objects_of(&prepass);
+    Ok(RawImport { mesh: RawMesh { triangles, materials }, objects, textures, warnings })
 }
 
 #[cfg(test)]
@@ -1008,5 +1054,94 @@ Tr 0.3\n";
         assert_eq!(pre.tris.len(), 1);
         assert_eq!(pre.tris[0].material, NO_MATERIAL);
         assert_eq!(sanitize_mtl("newmtl  M 1 \n Kd 1 0.5 0 \nNs 10\nmap_Kd  a.png \n"), "newmtl M 1\nKd 1 0.5 0\nmap_Kd a.png\n");
+    }
+
+    // ----- objects-tabs WP1: `o` / `g` as objects -----
+
+    /// Six vertices: a triangle at x = 0 and one at x = 5, then the faces of `body`.
+    fn with_vertices(body: &str) -> String {
+        format!("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 5 0 0\nv 6 0 0\nv 5 1 0\nv 6 1 0\n{body}")
+    }
+
+    fn objects_of_text(body: &str) -> RawObjects {
+        load(&with_vertices(body), &[]).objects
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn o_lines_are_objects() {
+        // Faces in front of the first `o` form an unnamed object; a re-entered name continues its object; a quad is
+        // two triangles of its object; the whole rest of the line is the name.
+        let objects = objects_of_text("f 1 2 3\no Alpha one\nf 4 5 7 6\ng grp\no Beta\nf 1 2 3\no Alpha one\nf 4 5 6\n");
+        assert_eq!(objects.names, names(&["Alpha one", "Beta", ""]));
+        assert_eq!(objects.tri_object, [2, 0, 0, 1, 0]);
+        let (mesh, _) = crate::mesh_build::normalize_with_objects(
+            load(&with_vertices("f 1 2 3\no Alpha one\nf 4 5 7 6\no Beta\nf 1 2 3\n"), &[]).mesh,
+            &objects_of_text("f 1 2 3\no Alpha one\nf 4 5 7 6\no Beta\nf 1 2 3\n"),
+            &crate::mesh_build::NormalizeOptions::default(),
+        );
+        let got: Vec<&str> = mesh.objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(got, ["Object 1", "Alpha one", "Beta"]);
+    }
+
+    #[test]
+    fn g_groups_are_objects_when_there_is_no_o() {
+        let objects = objects_of_text("g a\nf 1 2 3\ng b\nf 4 5 6\ng a\nf 4 5 6\ng\nf 1 2 3\n");
+        assert_eq!(objects.names, names(&["a", "b", "default"]));
+        assert_eq!(objects.tri_object, [0, 1, 0, 2]);
+        // Faces in front of the first `g`.
+        let objects = objects_of_text("f 1 2 3\ng a\nf 4 5 6\n");
+        assert_eq!((objects.names, objects.tri_object), (names(&["a", ""]), vec![1, 0]));
+        // An `o` with faces after it wins over the groups.
+        let objects = objects_of_text("o X\ng a\nf 1 2 3\ng b\nf 4 5 6\n");
+        assert_eq!((objects.names, objects.tri_object), (names(&["X"]), vec![0, 0]));
+        // An `o` without faces after it does not: the groups are the objects.
+        let objects = objects_of_text("g a\nf 1 2 3\ng b\nf 4 5 6\no Late\n");
+        assert_eq!((objects.names, objects.tri_object), (names(&["a", "b"]), vec![0, 1]));
+    }
+
+    #[test]
+    fn a_file_without_o_or_g_is_one_object_named_after_the_model() {
+        assert_eq!(objects_of_text("f 1 2 3\nf 4 5 6\n"), RawObjects::default());
+        let file = |name: &str, text: String| crate::import::SourceFile {
+            key: crate::import::normalize_ref(name),
+            original_name: name.to_owned(),
+            bytes: Arc::from(text.into_bytes()),
+        };
+        let bundle = crate::import::SourceBundle {
+            format: crate::import::ModelFormat::Obj,
+            main: file("Thing.obj", with_vertices("f 1 2 3\nf 4 5 6\n")),
+            sidecars: Vec::new(),
+            extras: Vec::new(),
+            original_path: None,
+        };
+        let model =
+            crate::import::import_from_bundle(&bundle, &ImportOptions::default(), false, &crate::progress::NoProgress).unwrap();
+        assert_eq!(model.mesh.objects.len(), 1);
+        assert_eq!(model.mesh.objects[0].name, model.name);
+        assert_eq!(model.mesh.objects[0].tri_count, 2);
+        // The same file with objects: the triangle order and uv_hash do not change.
+        let mut with = bundle.clone();
+        with.main = file("Thing.obj", with_vertices("o A\nf 1 2 3\no B\nf 4 5 6\n"));
+        let split =
+            crate::import::import_from_bundle(&with, &ImportOptions::default(), false, &crate::progress::NoProgress).unwrap();
+        assert_eq!(split.mesh.uv_hash, model.mesh.uv_hash);
+        assert_eq!(split.mesh.indices, model.mesh.indices);
+        let got: Vec<&str> = split.mesh.objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(got, ["A", "B"]);
+    }
+
+    #[test]
+    fn to_obj_objects_round_trips_the_object_trio() {
+        let (raw, objects) = samples::object_trio();
+        let (obj, mtl) = samples::to_obj_objects(&raw, &objects, "m.mtl", &["t.png".to_owned()]);
+        let import = load(&obj, &[("m.mtl", &mtl)]);
+        assert_same_mesh(&import.mesh, &raw);
+        assert_eq!(import.objects, objects);
+        // `to_obj` itself writes no `o` line.
+        assert!(!samples::to_obj(&raw, "m.mtl", &[]).0.lines().any(|l| l.starts_with("o ")));
     }
 }

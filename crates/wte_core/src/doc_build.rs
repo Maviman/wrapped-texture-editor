@@ -36,6 +36,8 @@ pub enum SampleKind {
     Sphere,
     Cube,
     TwoMaterial,
+    /// Objects-tabs plan 2.4: `samples::object_trio` (objects "Floor", "Cube", "Ball").
+    Objects,
 }
 
 /// Where the base texture of a set comes from.
@@ -371,15 +373,22 @@ impl Document {
     /// -> import_from_bundle(.., decode_textures = true, ..) -> from_import(all Detected). Needs core-import at run time.
     ///
     /// Sphere: `uv_sphere(64, 32, 1.0)` named "sphere"; Cube: `seam_cube(1.5)` named "cube"; TwoMaterial:
-    /// `two_material_model()` named "two_materials" with the sets "body_checker" and "head_checker". Every texture
-    /// is a 1024 x 1024 checker.
+    /// `two_material_model()` named "two_materials" with the sets "body_checker" and "head_checker"; Objects:
+    /// `object_trio()` named "objects", written with `to_obj_objects` (so the OBJ importer reads its three objects
+    /// back), texture "objects_checker.png". Every texture is a 1024 x 1024 checker.
     pub fn sample(kind: SampleKind) -> Document {
         const SIDE: u32 = 1024;
+        let mut objects = None;
         let (stem, raw, textures) = match kind {
             SampleKind::Sphere => ("sphere", samples::uv_sphere(64, 32, 1.0), vec![("sphere_checker.png", 16)]),
             SampleKind::Cube => ("cube", samples::seam_cube(1.5), vec![("cube_checker.png", 12)]),
             SampleKind::TwoMaterial => {
                 ("two_materials", samples::two_material_model(), vec![("body_checker.png", 12), ("head_checker.png", 16)])
+            }
+            SampleKind::Objects => {
+                let (raw, trio) = samples::object_trio();
+                objects = Some(trio);
+                ("objects", raw, vec![("objects_checker.png", 16)])
             }
         };
         let file = |name: &str, bytes: Vec<u8>| SourceFile {
@@ -389,7 +398,10 @@ impl Document {
         };
         let mtl_name = format!("{stem}.mtl");
         let texture_names: Vec<String> = textures.iter().map(|(name, _)| (*name).to_owned()).collect();
-        let (obj, mtl) = samples::to_obj(&raw, &mtl_name, &texture_names);
+        let (obj, mtl) = match &objects {
+            Some(objects) => samples::to_obj_objects(&raw, objects, &mtl_name, &texture_names),
+            None => samples::to_obj(&raw, &mtl_name, &texture_names),
+        };
 
         let mut sidecars = vec![file(&mtl_name, mtl.into_bytes())];
         for &(name, cells) in &textures {
@@ -728,5 +740,24 @@ mod tests {
         let mut text = layer(1, 50);
         text.kind = LayerKind::Text { stamp: crate::ids::StampId(50), cache: Arc::new(SparseBuf::empty()) };
         assert!(matches!(build(vec![text], vec![stamp(50, 0)]), Err(DocError::BadSetup(_))));
+    }
+
+    /// Objects-tabs WP1 (plan 2.4): the "Three Objects" sample goes through the OBJ importer and keeps its objects.
+    #[test]
+    fn the_objects_sample_has_floor_cube_and_ball() {
+        let doc = Document::sample(SampleKind::Objects);
+        let names: Vec<&str> = doc.mesh.objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, crate::samples::OBJECT_TRIO_NAMES);
+        assert_eq!(doc.mesh.objects.iter().map(|o| o.tri_count).sum::<u32>(), doc.mesh.tri_count());
+        assert_eq!(doc.sets.len(), 1);
+        assert_eq!(doc.sets[0].name, "objects_checker");
+        // The cube stands in the middle of the floor; the ball beside it.
+        let (floor, cube, ball) = (doc.mesh.objects[0].bounds, doc.mesh.objects[1].bounds, doc.mesh.objects[2].bounds);
+        assert!(floor.min.x < cube.min.x && cube.max.x < ball.min.x && ball.max.x < floor.max.x);
+        assert_eq!((cube.min.y, cube.max.y), (0.0, 1.0));
+        // The other samples are one object named after the model.
+        let sphere = Document::sample(SampleKind::Sphere);
+        assert_eq!(sphere.mesh.objects.len(), 1);
+        assert_eq!(sphere.mesh.objects[0].name, "sphere");
     }
 }

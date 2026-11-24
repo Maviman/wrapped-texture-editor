@@ -107,7 +107,7 @@ flattened, 50 % Multiply within 2/255. `tools/round3_audit/sweep.ps1` runs a job
 | `WTE_STROKE_LOG=1` | brush phase probe: one line per slow sample and a `brush stroke probe:` line per stroke |
 | `WTE_SYNC_FINAL_BAKES=1` | old behaviour: Final stamp bakes on the UI thread (round 5 moved them to a worker) |
 | `WTE_STAMP_MODE=wrap` | new stamps start in Wrap (for like-for-like timing runs) |
-| `WTE_COMPANION_PORT`, `WTE_COMPANION_TEST_CODE`, `WTE_COMPANION_AUTO_ALLOW=1`, `WTE_COMPANION_EXPECT_SESSIONS`, `WTE_COMPANION_ADB_SERIAL` | branch `companion`, scenario `companion_host` only (`--screenshot` runs): test port (47811), fixed pairing code, allow confirm requests at once, sessions to wait for, the one adb serial the watcher may address (`docs/notes/companion/desktop.md`) |
+| `WTE_COMPANION_PORT`, `WTE_COMPANION_TEST_CODE`, `WTE_COMPANION_AUTO_ALLOW=1`, `WTE_COMPANION_EXPECT_SESSIONS`, `WTE_COMPANION_ADB_SERIAL`, `WTE_COMPANION_LINGER_MS` | branch `companion`, scenario `companion_host` only (`--screenshot` runs): test port (47811), fixed pairing code, allow confirm requests at once, sessions to wait for, the one adb serial the watcher may address, ms to keep serving after the asserts (`docs/notes/companion/desktop.md`) |
 | `WTE_PEN_SUBCLASS=1` | branch `pen-input`: installs the pen window-procedure subclass in a self-test run too (it is always installed in a normal run); proves it does no harm; what it queues is dropped |
 | `RAYON_NUM_THREADS=n` | pool size; brush and wrap results must be identical for any n |
 | `WGPU_BACKEND=dx12` / Vulkan | renderer choice (see `dist/*.cmd`) |

@@ -17,3 +17,5 @@ Clarifications that are not changes (2026-11-24, desktop D5-D11):
   `hello_ack.hex` fixture is a sample message and keeps its value.
 - The server sends an empty FRAME (0 tiles) only when `last_input_seq` advanced; nothing while the picture and the
   input stay the same.
+- STATE `trail_rgba` is read by the tablet as an Android colour int `0xAARRGGBB` (the desktop sends `0xFF2040D0`, an
+  opaque blue). Recorded the same way in the tablet repo's `protocol/CHANGES.md` (2026-11-24, Android builder).

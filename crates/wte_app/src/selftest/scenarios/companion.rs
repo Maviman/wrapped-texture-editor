@@ -10,8 +10,8 @@
 // `companion_host`: the desktop side of the Android end-to-end run (tablet-companion/tools/e2e.sh). It listens on
 // 127.0.0.1:`WTE_COMPANION_PORT` (default 47811) with `WTE_COMPANION_TEST_CODE` / `WTE_COMPANION_AUTO_ALLOW`, writes the
 // surface coordinates of the 2D view to `<out_stem>_coords.json`, waits (up to 300 s) until
-// `WTE_COMPANION_EXPECT_SESSIONS` sessions have each drawn a pen stroke with varying pressure, asserts the paint and
-// exits with the screenshot.
+// `WTE_COMPANION_EXPECT_SESSIONS` sessions have each drawn a pen stroke with varying pressure, asserts the paint, keeps
+// serving for `WTE_COMPANION_LINGER_MS` (default 0) and exits with the screenshot.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 
@@ -491,9 +491,33 @@ pub(super) fn companion_host() -> Vec<Step> {
             }
             Ok(())
         }),
+        // Keep streaming for `WTE_COMPANION_LINGER_MS` before the screenshot and exit, so the tablet test can
+        // confirm its last input and take its own screenshot of the same, settled picture (tools/e2e.sh).
+        Step::Setup("read WTE_COMPANION_LINGER_MS (default 0)", |_, sc| {
+            sc.values.insert("linger_ms", linger_ms(std::env::var("WTE_COMPANION_LINGER_MS").ok().as_deref()));
+            sc.values.insert("linger_from", now_ms());
+            Ok(())
+        }),
+        Step::Until("the linger time is over", |_, sc| {
+            let want = remembered(sc, "linger_ms")?;
+            let from = remembered(sc, "linger_from")?;
+            Ok(now_ms().saturating_sub(from) >= want)
+        }),
+        Step::WaitIdle,
     ]);
     steps
 }
+
+/// `WTE_COMPANION_LINGER_MS`: milliseconds `companion_host` keeps serving after its asserts (default 0, at most 60 s).
+fn linger_ms(var: Option<&str>) -> u64 {
+    var.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0).min(60_000)
+}
+
+/// Wall-clock milliseconds (the scratch values hold only `u64`).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
 
 /// Logs and writes `<out_stem>_coords.json`: the port, the surface size and the 2D view's centre and stroke row in
 /// surface pixels (what the tablet test draws along).
@@ -517,4 +541,18 @@ fn write_coords(state: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
     let mut path = sc.out_stem.clone().into_os_string();
     path.push("_coords.json");
     std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", Path::new(&path).display()))
+}
+
+#[cfg(test)]
+mod linger_tests {
+    use super::linger_ms;
+
+    #[test]
+    fn linger_variable_parses_and_is_capped() {
+        assert_eq!(linger_ms(None), 0);
+        assert_eq!(linger_ms(Some("")), 0);
+        assert_eq!(linger_ms(Some(" 6000 ")), 6000);
+        assert_eq!(linger_ms(Some("abc")), 0);
+        assert_eq!(linger_ms(Some("999999")), 60_000);
+    }
 }

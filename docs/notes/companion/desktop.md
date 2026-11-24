@@ -50,6 +50,7 @@ wait $desktop; echo "desktop exit $?"; grep '"ok"' "$out/e2e_usb.json"
 | `WTE_COMPANION_AUTO_ALLOW` | off | `1` = confirm mode is offered (USB link from loopback) and allowed at once |
 | `WTE_COMPANION_EXPECT_SESSIONS` | 1 | sessions that must each draw a stroke with varying pressure before the run ends |
 | `WTE_COMPANION_ADB_SERIAL` | none | the one adb serial the desktop's adb watcher may address |
+| `WTE_COMPANION_LINGER_MS` | 0 | after the asserts, keep serving this long (at most 60 s) before the screenshot and exit; `tools/e2e.sh` uses 8000 so the tablet confirms its last input and takes its screencap of the settled picture (added by the Android builder) |
 | `WTE_SELFTEST_RUN_TIMEOUT` / `WTE_SELFTEST_STEP_TIMEOUT` | 330 / 300 s | override the timeouts (whole seconds) |
 
 Without AUTO_ALLOW and without a code a new tablet gets ERROR 3 PAIRING_CLOSED (the dialog is not open in a headless

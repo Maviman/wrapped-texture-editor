@@ -148,27 +148,6 @@ fn main() {
     }
 }
 
-/// Rank of an adapter for `wgpu_options`' selector, lower is better: software adapters last, then Vulkan before DX12
-/// before Metal before GL, then discrete before integrated before virtual GPUs.
-fn adapter_rank(info: &wgpu::AdapterInfo) -> (u8, u8, u8) {
-    let software = u8::from(info.device_type == wgpu::DeviceType::Cpu);
-    let backend = match info.backend {
-        wgpu::Backend::Vulkan => 0,
-        wgpu::Backend::Dx12 => 1,
-        wgpu::Backend::Metal => 2,
-        wgpu::Backend::Gl => 3,
-        _ => 4,
-    };
-    let device = match info.device_type {
-        wgpu::DeviceType::DiscreteGpu => 0,
-        wgpu::DeviceType::IntegratedGpu => 1,
-        wgpu::DeviceType::VirtualGpu => 2,
-        wgpu::DeviceType::Other => 3,
-        wgpu::DeviceType::Cpu => 4,
-    };
-    (software, backend, device)
-}
-
 /// The wgpu setup (8.1, 8.4): the backends of `WGPU_BACKEND` (else all primary ones plus GL) as egui-wgpu chooses them,
 /// but
 /// * the adapter is picked by `adapter_rank`: Vulkan first. DX12 is the fallback (with MSAA off, `gpu::msaa_for`), GL
@@ -181,7 +160,10 @@ fn wgpu_options(mut options: egui_wgpu::WgpuConfiguration) -> egui_wgpu::WgpuCon
     if let egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_setup {
         create.native_adapter_selector = Some(Arc::new(|adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {
             let usable = adapters.iter().filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)));
-            let best = usable.min_by_key(|a| adapter_rank(&a.get_info())).cloned();
+            let best = usable.min_by_key(|a| {
+                let info = a.get_info();
+                gpu_check::adapter_rank(info.backend, info.device_type)
+            }).cloned();
             for a in adapters {
                 let info = a.get_info();
                 log::info!("graphics adapter available: {} ({:?}, {:?})", info.name, info.backend, info.device_type);

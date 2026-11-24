@@ -150,6 +150,15 @@ begin
     '  (or Windows Update > Advanced options > Optional updates > Driver updates)';
 end;
 
+{ Where the DirectX 12 / Vulkan-without-overlays start options are, or how to get them. }
+function TroubleshootAdvice(): String;
+begin
+  if WizardIsComponentSelected('gpulaunchers') then
+    Result := 'If the editor then does not start, use its "DirectX 12" or "Vulkan without overlays" shortcut in the Start menu.'
+  else
+    Result := 'If the editor then does not start, run Setup again and tick "Graphics troubleshooting start options".';
+end;
+
 { Runs the editor's own --gpu-check (no window, no focus change) from the setup's temp folder and fills GpuCode and
   GpuSummary. Runs once; also in silent mode, where the result only goes to the setup log. }
 procedure RunGpuCheck();
@@ -190,8 +199,7 @@ begin
     GpuSummary := GpuSummary +
       'WARNING: the graphics check could not finish (code ' + IntToStr(Code) + ': ' + ReportValue(Lines, 'error') + ').' + #13#10 +
       'This usually means a broken graphics driver or an overlay program (OBS, Steam, Overwolf) that hooks into it.' + #13#10#13#10 +
-      DriverAdvice() + #13#10 +
-      'If the editor then does not start, use the "Graphics troubleshooting start options" from the Start menu.';
+      DriverAdvice() + #13#10 + TroubleshootAdvice();
   end;
   Log('Graphics check exit code ' + IntToStr(Code) + #13#10 + GpuSummary);
 end;
@@ -215,7 +223,8 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  if (CurPageID = SystemPage.ID) and (GpuCode = GpuNone) then
+  { Never in a silent install: nobody could answer, and the result is already in the setup log. }
+  if (CurPageID = SystemPage.ID) and (GpuCode = GpuNone) and not WizardSilent then
     Result := MsgBox('No graphics driver with Vulkan or DirectX 12 was found, so the editor will not start until one is ' +
       'installed.' + #13#10#13#10 + 'Install the editor anyway?', mbConfirmation, MB_YESNO) = IDYES;
 end;
@@ -244,6 +253,25 @@ begin
       ExpandConstant('{userappdata}\WrappedTextureEditor') + #13#10 + ExpandConstant('{app}\crash') + #13#10#13#10 +
       'Your .wtep projects and exported textures are never deleted. Choose No to keep the settings for a later install.',
       mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+{ The uninstaller cannot remove a running editor (a per-user uninstaller cannot delete on reboot), which would leave an
+  orphaned exe without an Add/Remove Programs entry: ask to close it first. A silent uninstall stops with an error. }
+function InitializeUninstall(): Boolean;
+var
+  Exe: String;
+begin
+  Result := True;
+  Exe := ExpandConstant('{app}\{#AppExeName}');
+  while FileExists(Exe) and not RenameFile(Exe, Exe + '.uninstall-check') do
+    if SuppressibleMsgBox('Wrapped Texture Editor is still running. Close it (save your work first), then click Retry.',
+      mbError, MB_RETRYCANCEL, IDCANCEL) <> IDRETRY then
+    begin
+      Result := False;
+      Exit;
+    end;
+  if FileExists(Exe + '.uninstall-check') then
+    RenameFile(Exe + '.uninstall-check', Exe);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

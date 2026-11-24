@@ -52,6 +52,11 @@ function Uninstall([string[]]$extra, [string]$log) {
     $deadline = (Get-Date).AddSeconds(120)
     while ((Test-Path $UninstallKey) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
     while ((Test-Path (Join-Path $InstallDir $ExeName)) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    # The second phase (%TEMP%\_iu*.tmp) deletes unins000.* and the folder last.
+    while ((Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '_iu*' }) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+    }
+    while ((Test-Path (Join-Path $InstallDir 'unins000.dat')) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
     Start-Sleep -Seconds 2
 }
 
@@ -96,13 +101,19 @@ Check (Test-Path $shot) 'the smoke scenario wrote its screenshot'
 $p = Start-Process -FilePath $exe -PassThru
 Start-Sleep -Seconds 20
 $alive = -not $p.HasExited
+$responding = $alive -and $p.Responding
+if ($alive) { Stop-Process -Id $p.Id -Force; $p.WaitForExit(10000) | Out-Null }
+# Read the log only now: the app holds it open for writing while it runs.
 $log = Join-Path $DataDir 'log.txt'
 $logText = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
-if ($alive) { Stop-Process -Id $p.Id -Force; $p.WaitForExit(10000) | Out-Null }
 Copy-Item $log (Join-Path $LogDir 'app-start.log') -ErrorAction SilentlyContinue
 Check $alive 'a normal start keeps running'
 Check ($logText -match 'graphics backend in use') 'a normal start creates its window and graphics device'
-Check ($logText -notmatch 'could not start') 'a normal start reports no startup error'
+# Any ERROR line (a panic, 'graphics device lost', a wgpu error, 'could not start'): after a fatal error the app waits on
+# an error box, so "still running" alone does not prove it works.
+$errors = @($logText -split "`n" | Where-Object { $_ -match '\sERROR\s' })
+Check ($errors.Count -eq 0) "a normal start logs no error ($($errors -join ' | '))"
+Check $responding 'the window answers messages (not hung)'
 
 # --- 3. Upgrade in place -------------------------------------------------------------------------------------------
 Run-Setup $UpgradeSetup @() (Join-Path $LogDir 'upgrade.log')

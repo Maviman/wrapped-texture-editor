@@ -61,6 +61,28 @@ impl AdapterLine {
     }
 }
 
+/// Rank of an adapter, lower is better: software adapters last, then Vulkan before DX12 before Metal before GL, then
+/// discrete before integrated before virtual GPUs. The app's adapter selector (`main.rs`) and the report's `best=` use
+/// it, so the installer names the adapter the app will really use.
+pub fn adapter_rank(backend: wgpu::Backend, device_type: wgpu::DeviceType) -> (u8, u8, u8) {
+    let software = u8::from(device_type == wgpu::DeviceType::Cpu);
+    let backend = match backend {
+        wgpu::Backend::Vulkan => 0,
+        wgpu::Backend::Dx12 => 1,
+        wgpu::Backend::Metal => 2,
+        wgpu::Backend::Gl => 3,
+        _ => 4,
+    };
+    let device = match device_type {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        wgpu::DeviceType::VirtualGpu => 2,
+        wgpu::DeviceType::Other => 3,
+        wgpu::DeviceType::Cpu => 4,
+    };
+    (software, backend, device)
+}
+
 /// `Ok` with a hardware Vulkan or DX12 adapter, `Limited` with only software or OpenGL adapters, `None` without any.
 pub fn classify(adapters: &[AdapterLine]) -> Verdict {
     if adapters.iter().any(AdapterLine::is_full) {
@@ -79,7 +101,7 @@ pub fn report_text(adapters: &[AdapterLine], verdict: Verdict) -> String {
     let _ = writeln!(out, "result={}", verdict.word());
     let _ = writeln!(out, "vulkan={}", if adapters.iter().any(|a| a.backend == wgpu::Backend::Vulkan) { "yes" } else { "no" });
     let _ = writeln!(out, "dx12={}", if adapters.iter().any(|a| a.backend == wgpu::Backend::Dx12) { "yes" } else { "no" });
-    let best = adapters.iter().find(|a| a.is_full()).or_else(|| adapters.first());
+    let best = adapters.iter().min_by_key(|a| adapter_rank(a.backend, a.device_type));
     let _ = writeln!(out, "best={}", best.map_or_else(String::new, |a| format!("{} ({:?})", a.name, a.backend)));
     for a in adapters {
         let driver = if a.driver.is_empty() { String::new() } else { format!(", driver {}", a.driver) };
@@ -112,7 +134,9 @@ fn list_adapters() -> Vec<AdapterLine> {
         .iter()
         .map(|a| {
             let info = a.get_info();
-            AdapterLine { name: info.name, backend: info.backend, device_type: info.device_type, driver: info.driver_info }
+            // Vulkan: driver name + version; DX12 leaves driver_info empty and puts the version in `driver`.
+            let driver = [info.driver.as_str(), info.driver_info.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+            AdapterLine { name: info.name, backend: info.backend, device_type: info.device_type, driver }
         })
         .collect();
     lines.dedup();
@@ -129,18 +153,46 @@ pub fn run(report: &Path) -> i32 {
     std::thread::spawn(move || {
         let _ = tx.send(std::panic::catch_unwind(list_adapters).map_err(|_| "the graphics driver failed while listing adapters"));
     });
-    let found = rx.recv_timeout(TIMEOUT).unwrap_or(Err("listing the graphics adapters did not finish within 20 s"));
+    let received = rx.recv_timeout(TIMEOUT);
+    let timed_out = received.is_err();
+    let found = received.unwrap_or(Err("listing the graphics adapters did not finish within 20 s"));
     let text = match &found {
         Ok(adapters) => report_text(adapters, classify(adapters)),
         Err(error) => format!("app_version={}\nresult=error\nerror={error}\n", env!("CARGO_PKG_VERSION")),
     };
-    if std::fs::write(report, text).is_err() {
+    let written = std::fs::write(report, text).is_ok();
+    if timed_out {
+        // The listing thread is stuck in a driver, possibly holding the loader lock: a normal exit would run every DLL's
+        // detach code and could hang on it. Terminate without that.
+        terminate_now(EXIT_ERROR);
+    }
+    if !written {
         return EXIT_ERROR;
     }
     match found {
         Ok(adapters) => classify(&adapters).exit_code(),
         Err(_) => EXIT_ERROR,
     }
+}
+
+/// Ends the process at once, without running DLL detach code (`TerminateProcess` on the current process).
+#[cfg(windows)]
+fn terminate_now(code: i32) -> ! {
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+    }
+    // SAFETY: the pseudo handle of the current process is always valid; TerminateProcess on it does not return.
+    unsafe {
+        TerminateProcess(GetCurrentProcess(), code as u32);
+    }
+    std::process::exit(code)
+}
+
+#[cfg(not(windows))]
+fn terminate_now(code: i32) -> ! {
+    std::process::exit(code)
 }
 
 #[cfg(test)]
@@ -175,6 +227,10 @@ mod tests {
         assert_eq!(lines[3], "dx12=yes");
         assert_eq!(lines[4], "best=RTX 5070 (Vulkan)", "the hardware adapter, not the first one");
         assert!(lines.contains(&"adapter=RTX 5070 (Vulkan, DiscreteGpu, driver 591.44)"), "{text}");
+        let igpu = line("Intel UHD", wgpu::Backend::Vulkan, wgpu::DeviceType::IntegratedGpu);
+        let dgpu = line("RTX 4060 Laptop", wgpu::Backend::Vulkan, wgpu::DeviceType::DiscreteGpu);
+        let hybrid = report_text(&[igpu, dgpu], Verdict::Ok);
+        assert!(hybrid.contains("best=RTX 4060 Laptop (Vulkan)"), "the adapter the app picks, not the first listed: {hybrid}");
         let none = report_text(&[], Verdict::None);
         assert!(none.contains("result=none\nvulkan=no\ndx12=no\nbest=\n"), "{none}");
     }

@@ -20,3 +20,6 @@ pub const DEFAULT_PORT: u16 = 47800;
 pub const DISCOVERY_PORT: u16 = 47801;
 /// The port of the `companion_host` test scenario (never the real one).
 pub const TEST_PORT: u16 = 47811;
+pub mod client;
+pub mod discovery;
+pub mod server;

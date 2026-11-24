@@ -204,6 +204,19 @@ pub(crate) fn run_test_pass(ctx: &egui::Context, input: egui::RawInput, f: impl 
 mod tests {
     use super::*;
 
+    /// Writes the window icon as a PNG to `WTE_ICON_OUT`; `installer/make_icon.py` turns it into `installer/app.ico`
+    /// for the installer, its shortcuts and Add/Remove Programs. Run:
+    /// `cargo test -p wte_app --bin wrapped_texture_editor write_icon_png -- --ignored` with `WTE_ICON_OUT` set.
+    #[test]
+    #[ignore = "tool: exports the icon for the installer"]
+    fn write_icon_png() {
+        let out = std::env::var_os("WTE_ICON_OUT").expect("set WTE_ICON_OUT to the PNG to write");
+        let icon = app_icon();
+        let png = wte_core::image_io::encode_png(icon.width, icon.height, &icon.rgba, wte_core::image_io::PngLevel::High)
+            .expect("encode the icon");
+        std::fs::write(out, png).expect("write the icon");
+    }
+
     #[test]
     fn icon_is_a_round_glyph_on_transparent_background() {
         let icon = app_icon();

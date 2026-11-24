@@ -1,0 +1,11 @@
+Example models for Wrapped Texture Editor
+=========================================
+
+Open one with File > New from Model... (or drag it onto the editor window):
+
+  torus_knot.obj             a knotted tube: good for wrapped stamps and text that follow the surface
+  mobius.obj                 a one-sided strip: shows how stamps behave across a twist
+  ngons_tiling.obj           one mesh with several materials (texture sets) and n-gon faces
+  gltf_node_transforms.gltf  a small glTF scene whose parts are placed by node transforms
+
+They come from the project's test shapes (test-assets/shapes) and are covered by the project's licence.

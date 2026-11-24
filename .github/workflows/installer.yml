@@ -1,0 +1,191 @@
+# Builds the Windows installer (Inno Setup), smoke-tests it on a clean runner, and on a version tag (v1.2.3) publishes it
+# to a GitHub Release. The release job only runs when the smoke test passed.
+name: Windows installer
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      upgrade_version: ${{ steps.version.outputs.upgrade_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from Cargo.toml (and the tag)
+        id: version
+        shell: pwsh
+        run: |
+          $m = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          $v = $m.Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml ($v). Tag the release as v$v."
+          }
+          $numeric = ($v -replace '[-+].*$', '')
+          while (($numeric.Split('.')).Count -lt 4) { $numeric += '.0' }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "numeric=$numeric" >> $env:GITHUB_OUTPUT
+          "upgrade_version=$v-upgradetest" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v ($numeric)"
+
+      - name: Cache cargo downloads and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: wte-release-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: wte-release-${{ runner.os }}-
+
+      - name: Rust toolchain (pinned 1.99.1, GNU host, see TOOLCHAIN.md)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File tools\setup-toolchain.ps1
+
+      - name: Build the editor (release)
+        shell: cmd
+        run: .\cargo-gnu.cmd build --release --locked -p wte_app
+
+      - name: Unit tests of the packaging-related code
+        shell: cmd
+        run: .\cargo-gnu.cmd test --release --locked -p wte_app --bin wrapped_texture_editor -- gpu_check cli::tests
+
+      - name: Graphics check on the build machine (information only)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath target\release\wrapped_texture_editor.exe -ArgumentList '--gpu-check', 'gpu-check.txt' -PassThru -Wait
+          Get-Content gpu-check.txt
+          Write-Host "exit code $($p.ExitCode)"
+
+      - name: Stage the installed files
+        shell: pwsh
+        run: |
+          $stage = 'target\installer\stage'
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$stage\Examples" | Out-Null
+          Copy-Item target\release\wrapped_texture_editor.exe "$stage\Wrapped Texture Editor.exe"
+          Copy-Item installer\app.ico $stage
+          Copy-Item 'dist\Start - DirectX 12.cmd', 'dist\Start - Vulkan without overlays.cmd' $stage
+          foreach ($f in 'torus_knot.obj', 'torus_knot.mtl', 'torus_knot.png', 'mobius.obj', 'mobius.mtl', 'mobius.png',
+                         'ngons_tiling.obj', 'ngons_tiling.mtl', 'ngons_a.png', 'ngons b.png', 'gltf_node_transforms.gltf') {
+            Copy-Item -LiteralPath "test-assets\shapes\$f" "$stage\Examples\"
+          }
+          Copy-Item installer\EXAMPLES.txt "$stage\Examples\README.txt"
+          Get-ChildItem -Recurse $stage | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Installing Inno Setup failed' }
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: Compile Setup.exe (and a higher-versioned copy for the upgrade test)
+        shell: pwsh
+        run: |
+          $v = '${{ steps.version.outputs.version }}'
+          $n = '${{ steps.version.outputs.numeric }}'
+          $stage = (Resolve-Path target\installer\stage).Path
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $out = (Resolve-Path out).Path
+          & $env:ISCC /Q "/DAppVersion=$v" "/DAppVersionNumeric=$n" "/DStageDir=$stage" "/DOutputDir=$out" installer\WrappedTextureEditor.iss
+          if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
+          & $env:ISCC /Q "/DAppVersion=$v-upgradetest" "/DAppVersionNumeric=$n" "/DStageDir=$stage" "/DOutputDir=$out" "/DOutputBaseFilename=UpgradeTest-Setup" installer\WrappedTextureEditor.iss
+          if ($LASTEXITCODE -ne 0) { throw 'ISCC failed (upgrade test copy)' }
+          Get-ChildItem out | Select-Object Name, Length | Format-Table -AutoSize
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: out/WrappedTextureEditor-*-Setup.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-test-installer
+          path: out/UpgradeTest-Setup.exe
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: installer
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: dl
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-test-installer
+          path: dl
+
+      - name: Silent install, start, upgrade, uninstall
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dl\WrappedTextureEditor-*-Setup.exe | Select-Object -First 1).FullName
+          .\installer\smoke-test.ps1 -Setup $setup -UpgradeSetup (Resolve-Path dl\UpgradeTest-Setup.exe).Path `
+            -Version '${{ needs.build.outputs.version }}' -UpgradeVersion '${{ needs.build.outputs.upgrade_version }}' `
+            -LogDir (Join-Path $PWD 'smoke-logs')
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-logs
+          path: smoke-logs
+          if-no-files-found: ignore
+
+  release:
+    needs: [build, smoke]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: installer
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: dl
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cd dl
+          sha256sum WrappedTextureEditor-*-Setup.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          sed "s/@VERSION@/$VERSION/g" ../installer/RELEASE_NOTES.md > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" WrappedTextureEditor-*-Setup.exe SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" WrappedTextureEditor-*-Setup.exe SHA256SUMS.txt --title "Wrapped Texture Editor $VERSION" --notes-file notes.md
+          fi

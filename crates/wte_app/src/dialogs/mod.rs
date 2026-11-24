@@ -9,6 +9,7 @@ use crate::state::Dialog;
 use crate::view::ViewCx;
 
 pub mod about;
+pub mod companion;
 pub mod export;
 pub mod import;
 pub mod message;
@@ -53,6 +54,7 @@ pub fn show(ctx: &egui::Context, cx: &mut ViewCx<'_>, ds: &mut DialogsState) {
         Dialog::About => about::show_about(ctx, cx),
         Dialog::Shortcuts => about::show_shortcuts(ctx, cx),
         Dialog::TabletHelp => tablet::show(ctx, cx),
+        Dialog::Companion => companion::show(ctx, cx),
         Dialog::CloseOpenings(st) => crate::brush_flows::show_openings_dialog(ctx, cx, st),
     }
     // Always put back: dialogs never assign `state.dialog` themselves, they push actions.

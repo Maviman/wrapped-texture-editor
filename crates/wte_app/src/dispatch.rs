@@ -991,7 +991,29 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::CloseDialog => close_dialog(app),
         A::CancelJob => app.jobs.cancel_modal(),
         A::Toast(level, text) => app.state.toasts.push(level, text),
+        A::Companion(c) => companion_command(app, c, frame),
     }
+}
+
+/// Branch `companion`: a Tablet companion command; "Browse for adb.exe" asks with the native dialog first (never in a
+/// self-test run).
+fn companion_command(app: &mut WteApp, c: crate::companion::CompanionAction, frame: &eframe::Frame) {
+    use crate::companion::CompanionAction;
+    let c = match c {
+        CompanionAction::BrowseAdb(None) => {
+            if app.state.selftest {
+                return;
+            }
+            let picked = rfd::FileDialog::new().set_title("Find adb.exe").add_filter("adb.exe", &["exe"]).set_parent(frame).pick_file();
+            match picked {
+                Some(path) => CompanionAction::BrowseAdb(Some(path)),
+                None => return,
+            }
+        }
+        other => other,
+    };
+    let ctx = app.ctx.clone();
+    app.companion.command(&ctx, &mut app.state, c);
 }
 
 /// Runs `f` on the session; no-op without one.

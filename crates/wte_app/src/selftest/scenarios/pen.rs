@@ -10,10 +10,10 @@ use super::*;
 use crate::selftest::PenPoint;
 
 /// Brush diameter of the scenario (texels).
-const SIZE: f32 = 40.0;
+pub(super) const SIZE: f32 = 40.0;
 /// The 2D ramp's row and ends (UV).
-const RAMP_V: f32 = 0.5;
-const RAMP_U: [f32; 2] = [0.15, 0.85];
+pub(super) const RAMP_V: f32 = 0.5;
+pub(super) const RAMP_U: [f32; 2] = [0.15, 0.85];
 
 /// The `pen` steps (the dispatcher adds the final screenshot and Exit).
 pub(super) fn pen() -> Vec<Step> {
@@ -226,7 +226,7 @@ pub(super) fn pen() -> Vec<Step> {
 }
 
 /// Clears the probes the runner writes while a pen touches (`Runner::probe_pen`).
-fn reset_probes(_: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
+pub(super) fn reset_probes(_: &mut AppState, sc: &mut Scratch) -> Result<(), String> {
     for key in ["pen_contact_frames", "pen_eraser_frames", "pen_readout_ok"] {
         sc.values.insert(key, 0);
     }
@@ -268,7 +268,7 @@ fn model_pen(state: &AppState, disc: &[[f32; 2]], p: (f32, f32), inverted: bool,
 }
 
 /// FNV hash of every raster layer above Base of every set (the painted pixels).
-fn paint_hash(state: &AppState) -> Result<u64, String> {
+pub(super) fn paint_hash(state: &AppState) -> Result<u64, String> {
     let doc = doc_of(state)?;
     Ok(doc.sets.iter().flat_map(|s| s.layers.iter().skip(1)).fold(0xcbf2_9ce4_8422_2325, |h, layer| match &layer.kind {
         LayerKind::Raster(buf) => wte_core::fnv1a64(h, &buf.data),
@@ -277,7 +277,7 @@ fn paint_hash(state: &AppState) -> Result<u64, String> {
 }
 
 /// Texels with alpha > 0 in every raster layer above Base.
-fn paint_count(state: &AppState) -> Result<u64, String> {
+pub(super) fn paint_count(state: &AppState) -> Result<u64, String> {
     let doc = doc_of(state)?;
     Ok(doc
         .sets
@@ -290,25 +290,25 @@ fn paint_count(state: &AppState) -> Result<u64, String> {
         .sum())
 }
 
-fn remember_paint(state: &mut AppState, sc: &mut Scratch, key: &'static str) -> Result<(), String> {
+pub(super) fn remember_paint(state: &mut AppState, sc: &mut Scratch, key: &'static str) -> Result<(), String> {
     let h = paint_hash(state)?;
     sc.values.insert(key, h);
     Ok(())
 }
 
-fn count_paint(state: &mut AppState, sc: &mut Scratch, key: &'static str) -> Result<(), String> {
+pub(super) fn count_paint(state: &mut AppState, sc: &mut Scratch, key: &'static str) -> Result<(), String> {
     let n = paint_count(state)?;
     sc.values.insert(key, n);
     Ok(())
 }
 
-fn same_paint(state: &AppState, sc: &Scratch, key: &str) -> Result<(), String> {
+pub(super) fn same_paint(state: &AppState, sc: &Scratch, key: &str) -> Result<(), String> {
     let (now, then) = (paint_hash(state)?, remembered(sc, key)?);
     if now == then { Ok(()) } else { Err(format!("the painted pixels differ from \"{key}\" ({now:x} vs {then:x})")) }
 }
 
 /// The paint layer of set 0 (the layer above Base).
-fn paint_layer(state: &AppState) -> Result<&PixelBuf, String> {
+pub(super) fn paint_layer(state: &AppState) -> Result<&PixelBuf, String> {
     let set = &doc_of(state)?.sets[0];
     match set.layers.get(1).map(|l| &l.kind) {
         Some(LayerKind::Raster(buf)) => Ok(buf),
@@ -317,21 +317,21 @@ fn paint_layer(state: &AppState) -> Result<&PixelBuf, String> {
 }
 
 /// Alpha of the paint layer at a UV position.
-fn alpha_at(state: &AppState, uv: [f32; 2]) -> Result<u8, String> {
+pub(super) fn alpha_at(state: &AppState, uv: [f32; 2]) -> Result<u8, String> {
     let buf = paint_layer(state)?;
     let (x, y) = ((uv[0] * buf.width as f32) as u32, (uv[1] * buf.height as f32) as u32);
     Ok(buf.data[((y * buf.width + x) * 4 + 3) as usize])
 }
 
 /// Painted rows (alpha >= 128) of the column at `u`.
-fn column_height(state: &AppState, u: f32) -> Result<u32, String> {
+pub(super) fn column_height(state: &AppState, u: f32) -> Result<u32, String> {
     let buf = paint_layer(state)?;
     let x = ((u * buf.width as f32) as u32).min(buf.width - 1);
     Ok((0..buf.height).filter(|&y| buf.data[((y * buf.width + x) * 4 + 3) as usize] >= 128).count() as u32)
 }
 
 /// The 2D ramp: the column near 20 % is less than half as tall as near 90 %; at the end it is the full 40 texels.
-fn assert_ramp(state: &AppState, _: &Scratch) -> Result<(), String> {
+pub(super) fn assert_ramp(state: &AppState, _: &Scratch) -> Result<(), String> {
     let at = |f: f32| column_height(state, RAMP_U[0] + (RAMP_U[1] - RAMP_U[0]) * f);
     let (h20, h90, end) = (at(0.2)?, at(0.9)?, at(1.0)?);
     if h20 == 0 || h20 * 2 >= h90 {

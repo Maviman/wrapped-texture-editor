@@ -100,6 +100,7 @@ impl FullApp {
             Dialog::About => "About",
             Dialog::Shortcuts => "Shortcuts",
             Dialog::TabletHelp => "TabletHelp",
+            Dialog::Companion => "Companion",
             Dialog::CloseOpenings(_) => "CloseOpenings",
         }
     }

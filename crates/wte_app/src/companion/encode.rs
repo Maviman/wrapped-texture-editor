@@ -239,11 +239,6 @@ impl Encoder {
         }
     }
 
-    /// The surface size of the last encoded frame.
-    pub fn surface(&self) -> [u32; 2] {
-        self.surface
-    }
-
     /// The FRAME for a captured image, or `None` when nothing changed and no input is to be confirmed.
     pub fn frame(&mut self, image: &egui::ColorImage, p: Params, last_input_seq: u32, capture_ms: u32, now: Instant) -> Option<Frame> {
         let surface = [image.size[0] as u32, image.size[1] as u32];

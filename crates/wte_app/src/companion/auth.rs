@@ -13,6 +13,7 @@ use super::proto::{self, Auth, AuthOk, ErrorMsg, Hello, HelloAck, auth_mode, err
 /// PBKDF2 iterations the server asks for (4.3).
 pub const PBKDF2_ITERS: u32 = 100_000;
 /// The range a client accepts (4.3).
+#[allow(dead_code, reason = "the client-side lower limit of the spec (4.3), enforced by the tablet")]
 pub const MIN_ITERS: u32 = 50_000;
 pub const MAX_ITERS: u32 = 2_000_000;
 /// The oldest protocol major version this desktop still speaks (4.2 rule 3: every released tablet version).
@@ -194,6 +195,7 @@ impl PairingWindow {
     }
 
     /// The code without refreshing it (the dialog's display).
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
     pub fn shown_code(&self) -> Option<&str> {
         self.code.as_deref().filter(|_| self.open)
     }
@@ -321,7 +323,7 @@ impl Handshake {
         }
         let ack = HelloAck {
             proto,
-            caps: proto::caps::SERVER_FIT,
+            caps: proto::caps::SERVER_CURSOR | proto::caps::SERVER_FIT,
             desktop_id: policy.desktop_id,
             server_nonce,
             auth_modes: modes,
@@ -397,6 +399,7 @@ pub fn client_auth(ack: &HelloAck, hello: &Hello, mode: u8, key: &ClientKey) -> 
 
 /// What a client authenticates with.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
 pub enum ClientKey {
     Token([u8; 32]),
     /// The normalized code.

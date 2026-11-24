@@ -168,6 +168,9 @@ pub enum AppAction {
     CloseDialog,
     CancelJob,
     Toast(ToastLevel, String),
+
+    // ---- tablet companion (branch `companion`; logic in `companion/mod.rs`) ----
+    Companion(crate::companion::CompanionAction),
 }
 
 /// Severity of a toast.

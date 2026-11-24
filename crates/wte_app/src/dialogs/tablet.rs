@@ -7,7 +7,7 @@ use crate::state::TabletInput;
 use crate::view::ViewCx;
 
 /// The paragraphs of the dialog (also checked by the tests and the scenario `pen`).
-pub(crate) const TABLET_HELP: [&str; 6] = [
+pub(crate) const TABLET_HELP: [&str; 7] = [
     "Works with any tablet whose driver has Windows Ink turned on (the default): Wacom Tablet Properties > Mapping > \
      \"Use Windows Ink\"; Huion > Pen settings > \"Enable Windows Ink\"; XP-Pen / Pentablet > \"Windows Ink\".",
     "If the stroke does not follow the pressure, turn that option on. Drivers allow it per application: add Wrapped \
@@ -21,6 +21,9 @@ pub(crate) const TABLET_HELP: [&str; 6] = [
      pressure).",
     "On a pen display with touch, a resting hand acts as a mouse: turn touch off in the tablet driver, or turn on \
      \"Ignore touch input when I'm using my pen\" in the Windows settings under Pen & Windows Ink.",
+    "An Android tablet can be the drawing tablet too: Help > Tablet companion shows this window on the tablet and takes \
+     its pen (with pressure), fingers and keyboard. The tablet app \"Tablet Companion\" is at \
+     github.com/Maviman/tablet-companion/releases.",
 ];
 
 /// The line under the Tablet input choice.

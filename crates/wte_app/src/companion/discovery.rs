@@ -14,6 +14,7 @@ pub const REPLY_MAGIC: &[u8; 5] = b"WTEC!";
 pub const VERSION: u8 = 1;
 
 /// The tablet's query.
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
 pub fn query_packet() -> Vec<u8> {
     let mut p = QUERY_MAGIC.to_vec();
     p.push(VERSION);
@@ -46,6 +47,7 @@ pub fn reply_packet(r: &Reply) -> Vec<u8> {
 }
 
 /// Parses an answer; `None` for anything else (trailing bytes are ignored).
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
 pub fn parse_reply(p: &[u8]) -> Option<Reply> {
     if p.len() < 5 + 1 + 2 + 16 + 2 || &p[..5] != REPLY_MAGIC || p[5] < 1 {
         return None;

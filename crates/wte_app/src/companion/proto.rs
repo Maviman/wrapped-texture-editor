@@ -76,12 +76,15 @@ pub mod err {
 /// `caps` bits (4.2 rule 4).
 pub mod caps {
     pub const CLIENT_PNG: u64 = 1 << 0;
+    #[allow(dead_code, reason = "a constant of the wire spec (docs/protocol/COMPANION_PROTOCOL.md)")]
     pub const CLIENT_WEBP: u64 = 1 << 1;
     pub const CLIENT_TRAIL: u64 = 1 << 2;
+    #[allow(dead_code, reason = "a constant of the wire spec (docs/protocol/COMPANION_PROTOCOL.md)")]
     pub const CLIENT_IME: u64 = 1 << 3;
     pub const SERVER_CURSOR: u64 = 1 << 0;
     pub const SERVER_FIT: u64 = 1 << 1;
     /// Reserved on both sides for an encrypted session (N1).
+    #[allow(dead_code, reason = "a constant of the wire spec (docs/protocol/COMPANION_PROTOCOL.md)")]
     pub const ENCRYPTED: u64 = 1 << 63;
 }
 
@@ -104,7 +107,9 @@ pub mod frame_flag {
 /// Tile codecs (4.5).
 pub mod codec {
     pub const JPEG: u8 = 1;
+    #[allow(dead_code, reason = "a constant of the wire spec (docs/protocol/COMPANION_PROTOCOL.md)")]
     pub const PNG: u8 = 2;
+    #[allow(dead_code, reason = "a constant of the wire spec (docs/protocol/COMPANION_PROTOCOL.md)")]
     pub const WEBP: u8 = 3;
 }
 
@@ -630,8 +635,6 @@ pub enum ProtoError {
     TooLong(u32),
     /// A `str` that is not UTF-8.
     BadUtf8(u16),
-    /// The first 4 bytes were not "WTEC".
-    BadMagic,
 }
 
 impl std::fmt::Display for ProtoError {
@@ -640,7 +643,6 @@ impl std::fmt::Display for ProtoError {
             ProtoError::Truncated(t) => write!(f, "message 0x{t:04x} is truncated"),
             ProtoError::TooLong(n) => write!(f, "message length {n} is over the limit"),
             ProtoError::BadUtf8(t) => write!(f, "message 0x{t:04x} has a string that is not UTF-8"),
-            ProtoError::BadMagic => write!(f, "the peer did not send the WTEC magic"),
         }
     }
 }
@@ -758,6 +760,7 @@ impl FrameReader {
     }
 
     /// Bytes received but not yet returned as a message.
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
     pub fn pending(&self) -> usize {
         self.buf.len() - self.start
     }
@@ -881,6 +884,7 @@ pub fn key_from_code(code: u16) -> Option<egui::Key> {
 }
 
 /// The protocol key code of an egui key (the test client and the tests).
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
 pub fn code_from_key(key: egui::Key) -> Option<u16> {
     KEY_TABLE.iter().find(|(_, k)| *k == key).map(|(c, _)| *c)
 }
@@ -892,6 +896,7 @@ pub fn modifiers_from_bits(bits: u8) -> egui::Modifiers {
 }
 
 /// The `mods` bits of egui modifiers.
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
 pub fn bits_from_modifiers(m: egui::Modifiers) -> u8 {
     (if m.ctrl || m.command { mods::CTRL } else { 0 }) | (if m.shift { mods::SHIFT } else { 0 }) | (if m.alt { mods::ALT } else { 0 })
 }

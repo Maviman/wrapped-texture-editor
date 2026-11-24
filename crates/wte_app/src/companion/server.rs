@@ -203,6 +203,8 @@ pub struct Hub {
     want_frame: AtomicBool,
     /// The writer's current frame-rate cap.
     fps: AtomicU32,
+    /// The next frame is a KEY frame (the window came back from minimized).
+    force_key: AtomicBool,
     stop: AtomicBool,
     next_id: AtomicU64,
     events: Mutex<Sender<HubEvent>>,
@@ -235,6 +237,7 @@ impl Hub {
             feedback: Mutex::new(Feedback::default()),
             want_frame: AtomicBool::new(false),
             fps: AtomicU32::new(30),
+            force_key: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             events: Mutex::new(tx),
@@ -262,6 +265,12 @@ impl Hub {
 
     pub fn fps(&self) -> u32 {
         self.fps.load(Ordering::SeqCst).max(1)
+    }
+
+    /// The next frame is sent as a KEY frame (all cells).
+    pub fn request_key(&self) {
+        self.force_key.store(true, Ordering::SeqCst);
+        self.cond.notify_all();
     }
 
     /// A captured picture for the writer (replaces one that was not taken yet).
@@ -703,6 +712,7 @@ fn run_writer(hub: &Hub, id: u64, link_kind: u8, out: &Mutex<Box<dyn Link>>) {
     let mut last_cursor = Instant::now() - Duration::from_secs(1);
     let mut surface: Option<[u16; 2]> = None;
     let mut ppp = 1.0f32;
+    let mut was_open = true;
     loop {
         if hub.is_stopped() || !hub.is_current(id) {
             break;
@@ -711,6 +721,9 @@ fn run_writer(hub: &Hub, id: u64, link_kind: u8, out: &Mutex<Box<dyn Link>>) {
         let fb = std::mem::take(&mut *lock(&hub.feedback));
         if let Some(c) = fb.config {
             rc.set_ceiling(apply_config(base, c.quality_pref, c.max_fps));
+        }
+        if hub.force_key.swap(false, Ordering::SeqCst) {
+            enc.need_key = true;
         }
         for (seq, at) in fb.acks {
             while let Some(&(s, sent)) = unacked.front() {
@@ -727,6 +740,11 @@ fn run_writer(hub: &Hub, id: u64, link_kind: u8, out: &Mutex<Box<dyn Link>>) {
         let window = rc.ceiling().window.max(1) as usize;
         let open = unacked.len() < window;
         hub.want_frame.store(open, Ordering::SeqCst);
+        if open && !was_open {
+            // The ack window opened again: the UI may hold a picture it could not hand over (capture.rs).
+            (hub.wake)();
+        }
+        was_open = open;
         let params = rc.params();
         // What waits.
         let (captured, state, cursor) = {

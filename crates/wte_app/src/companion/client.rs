@@ -118,6 +118,7 @@ impl TestClient {
     /// AUTH with `key` (the mode follows from the key); verifies the server MAC; returns the session token.
     pub fn auth(&mut self, ack: &HelloAck, key: ClientKey) -> Result<[u8; 32], String> {
         let hello = self.hello.clone().ok_or("no HELLO sent")?;
+        // The lower limit (auth::MIN_ITERS) is the tablet's; the tests run the server with fewer iterations for speed.
         if ack.pbkdf2_iters > auth::MAX_ITERS {
             return Err(format!("the server asks for {} PBKDF2 iterations", ack.pbkdf2_iters));
         }
@@ -191,6 +192,7 @@ impl TestClient {
         self.send(&Msg::Text { seq, text: text.to_owned() }).map(|_| seq)
     }
 
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
     pub fn mods(&mut self, mods: u8) -> io::Result<u32> {
         let seq = self.next_seq();
         self.send(&Msg::Mods { seq, mods }).map(|_| seq)
@@ -229,6 +231,7 @@ impl TestClient {
 
     /// Reads for up to `timeout`, applying STATE and FRAME (acking when `auto_ack`); returns the first FRAME, or
     /// `None` when none came.
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests (and the tablet side of the protocol)"))]
     pub fn wait_frame(&mut self, timeout: Duration) -> Option<Frame> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -283,20 +286,9 @@ impl TestClient {
         }
     }
 
-    /// Reads and applies everything that arrives within `timeout`.
-    pub fn drain(&mut self, timeout: Duration) {
-        self.wait_for(timeout, |_| false);
-    }
-
     /// The highest `last_input_seq` of the frames received.
     pub fn confirmed_seq(&self) -> u32 {
         self.frames.iter().map(|f| f.last_input_seq).max().unwrap_or(0)
-    }
-
-    /// Sends BYE and closes.
-    pub fn bye(mut self) {
-        let _ = self.send(&Msg::ByeC { reason: 0 });
-        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 
     /// Closes without BYE (a pulled cable).

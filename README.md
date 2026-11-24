@@ -39,6 +39,37 @@ pushed; the installer script is [`installer/WrappedTextureEditor.iss`](installer
 - A driver without Windows Ink: Help > Tablet setup > Tablet input: **WinTab** (pressure and eraser from WinTab).
 - A mouse paints exactly as before: it always paints at full pressure.
 
+## Tablet companion (Android)
+
+Draw into the editor from an Android tablet (made for a Samsung Galaxy Tab S8 Ultra with S Pen; any Android 10+ tablet
+should work): the tablet shows the editor's window live and sends the pen (with pressure, eraser, side button), your
+fingers and the keyboard back. The tablet app is **Tablet Companion**, a separate project:
+https://github.com/Maviman/tablet-companion — download its `.apk` on the tablet from
+https://github.com/Maviman/tablet-companion/releases and follow that README to install and connect it.
+
+On the PC: **Help > Tablet companion...** (off until you turn a link on):
+
+- **USB cable** (recommended): needs Google's adb.exe. Download "SDK Platform-Tools for Windows" from
+  https://developer.android.com/tools/releases/platform-tools, unpack it, and if the dialog says "No adb found",
+  click **Browse for adb.exe...**. On the tablet turn on USB debugging (Settings > About tablet > Software information,
+  tap "Build number" seven times; then Settings > Developer options > USB debugging), plug in the cable and tap Allow.
+  The dialog line reads "Ready"; choose USB in the tablet app and click **Allow** on the PC the first time. If Windows
+  does not see the tablet, install the Samsung Android USB driver.
+- **Wi-Fi**: turn it on (Windows asks once to allow the app on private networks: allow it), pick the PC in the tablet
+  app and type the code the dialog shows. Later connections need no code.
+- **Bluetooth**: pair the tablet with the PC once in Windows Settings > Bluetooth & devices, turn the switch on, choose
+  the PC in the tablet app's Bluetooth list, click Allow. Coarser and slower picture; the pen still feels immediate.
+
+The status bar shows "Tablet: ..." while a link is on (click it for the dialog). Options: let the tablet resize the
+window to its shape ("Fit to tablet"), and what one finger does (navigate in the view or act as the mouse).
+
+**Security:** the connection is checked with a pairing key, but the picture and the input are not encrypted. Use Wi-Fi
+only on a network you trust; USB does not use the network. Paired tablets are listed in the dialog (Forget removes one).
+
+Troubleshooting: the firewall prompt was dismissed -> Windows Security > Firewall & network protection > Allow an app
+through firewall > Wrapped Texture Editor (private); "No adb found" -> Browse for adb.exe; the S Pen button opens Air
+command -> turn Air command off in the tablet's S Pen settings (or use the app's eraser toggle).
+
 ## Develop
 
 - Build: `cargo build --release -p wte_app` → `target/release/wrapped_texture_editor.exe`

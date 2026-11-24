@@ -44,8 +44,9 @@ pub struct WrapJobs {
     /// The selected wrapped stamp whose parameterization is not cached: asked for by the Transform tool in every frame
     /// it is needed (`request_param`), taken by the next `pump` when no wrap job is in flight.
     want_param: Option<StampId>,
-    /// The stamp and placement whose param-only job found no surface to wrap onto: not asked for again.
-    pub(crate) param_failed: Option<(StampId, Placement)>,
+    /// The stamp and placement whose param-only job found no surface to wrap onto: not asked for again. Objects-tabs:
+    /// with the document's visibility generation of the job (after a visibility change it is asked for again).
+    pub(crate) param_failed: Option<(StampId, Placement, u64)>,
     /// What the jobs did (tests, the scenario and the log).
     pub counters: WrapJobCounters,
     /// Round 9 (package B, T8 / T9): a selected 3D stamp asked for the warm-up of the mesh's derived data (taken by
@@ -80,6 +81,9 @@ struct WrapFlight {
     started: Instant,
     /// The stamp's placement when the job was made (a param-only job that brings nothing for it: no surface).
     placement: Placement,
+    /// Objects-tabs: the document's `visibility_generation` when the job was made. A param-only job that lands after a
+    /// visibility change is not cached (`Document::apply_wrap_param`) and proves nothing about the surface.
+    visibility: u64,
 }
 
 impl WrapJobs {
@@ -208,6 +212,7 @@ fn pump_wrap(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) {
         return;
     }
     let generation = session.scene_generation;
+    let visibility = session.doc.visibility_generation();
     let job = match session.doc.next_wrap_preview_job() {
         Some(job) => job,
         None => match want.and_then(|id| session.doc.wrap_param_job(id)) {
@@ -238,7 +243,7 @@ fn pump_wrap(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context) {
         counters.params_started += 1;
         log::info!("wrap fit: stamp {} param-only job started", id.0);
     }
-    state.wrap_jobs.in_flight = Some(WrapFlight { id, kind, generation, started: Instant::now(), placement });
+    state.wrap_jobs.in_flight = Some(WrapFlight { id, kind, generation, started: Instant::now(), placement, visibility });
 }
 
 /// True while the wrap job in flight belongs to a stamp of the open document that waits for its Final bake and was made
@@ -306,11 +311,13 @@ fn apply_wrap(state: &mut AppState, generation: u64, output: Box<StampBakeOutput
         log::info!("wrap fit: stamp {} parameterization landed after {after:.0} ms (worker {worker_ms:.0} ms)", id.0);
     } else if let Some(f) = flight
         && session.doc.stamp(id).map(|s| s.placement) == Some(f.placement)
+        && session.doc.visibility_generation() == f.visibility
         && session.doc.stamp_wrap_stats(id).is_none()
     {
-        // Made for the stamp as it still is and nothing came: no surface within reach. Not asked for again.
+        // Made for the stamp as it still is (and the objects shown as they still are) and nothing came: no surface
+        // within reach. Not asked for again.
         log::info!("wrap fit: stamp {} has no surface to wrap onto ({after:.0} ms)", id.0);
-        state.wrap_jobs.param_failed = Some((id, f.placement));
+        state.wrap_jobs.param_failed = Some((id, f.placement, f.visibility));
     } else {
         log::info!("wrap fit: stamp {} result dropped (stale) after {after:.0} ms", id.0);
     }
@@ -1118,6 +1125,67 @@ mod tests {
         after_tools(&mut state, &mut jobs, &ctx);
         assert!(!jobs.any_running() && !state.wrap_jobs_pending, "nothing more to do");
         assert_eq!(state.wrap_jobs.counters.ui_params, 0);
+    }
+
+    /// Objects-tabs check of WP2: a param-only job made before a visibility change lands without being cached
+    /// (`Document::apply_wrap_param`); that proves nothing about the surface, so the stamp is asked for again rather
+    /// than marked "no surface". A failure is remembered per visibility: showing the objects again retries.
+    #[test]
+    fn a_param_only_job_overtaken_by_a_visibility_change_is_asked_for_again() {
+        let ctx = egui::Context::default();
+        let mut jobs = Jobs::new();
+        let mut state = wrap_state(true);
+        let id = placed_wrapped(&mut state, &mut jobs, &ctx);
+        let at = turned(&state, id, 0.3);
+        state.doc_mut().unwrap().set_stamp_placement(id, at, Commit::Final).unwrap();
+        pump_with(&mut state, &mut jobs, &ctx);
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Final);
+        assert_eq!(state.doc_mut().unwrap().undo().as_deref(), Some("Edit Stamp"));
+        state.session.as_mut().unwrap().selected_stamp = Some(id);
+        let mut tools = ToolController::new();
+        let ask = |state: &mut AppState, tools: &mut ToolController, jobs: &mut Jobs| {
+            assert!(!tools.ensure_wrap_param(state));
+            after_tools(state, jobs, &ctx);
+        };
+        ask(&mut state, &mut tools, &mut jobs);
+        assert_eq!(state.wrap_jobs.in_flight(), Some((id, StampJobKind::ParamOnly)));
+        // The only object is hidden while the job runs: its parameterization is not cached and proves nothing.
+        assert!(state.doc_mut().unwrap().set_hidden_objects(&[true]).unwrap());
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::ParamOnly));
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_none());
+        assert_eq!(state.wrap_jobs.param_failed, None, "not marked as having no surface");
+        // Asked for again; with everything hidden there is no surface: marked for this visibility, not asked again.
+        ask(&mut state, &mut tools, &mut jobs);
+        assert_eq!(state.wrap_jobs.in_flight(), Some((id, StampJobKind::ParamOnly)));
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::ParamOnly));
+        assert!(state.wrap_jobs.param_failed.is_some());
+        ask(&mut state, &mut tools, &mut jobs);
+        assert!(!jobs.any_running());
+        // Shown again: asked for again, and it lands.
+        assert!(state.doc_mut().unwrap().set_hidden_objects(&[false]).unwrap());
+        ask(&mut state, &mut tools, &mut jobs);
+        assert_eq!(state.wrap_jobs.in_flight(), Some((id, StampJobKind::ParamOnly)));
+        assert_eq!(deliver_next(&mut state, &mut jobs), Delivered::Wrap(StampJobKind::ParamOnly));
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_some());
+    }
+
+    /// Objects-tabs check of WP2, synchronous mode: "no surface to wrap onto" is remembered per visibility, so a stamp
+    /// whose surface was hidden gets its parameterization again once the surface is shown.
+    #[test]
+    fn the_synchronous_wrap_failure_is_retried_after_a_visibility_change() {
+        let mut state = wrap_state(false);
+        let id = place(&mut state);
+        let mut tools = ToolController::new();
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_some(), "placed with its parameterization");
+        assert!(state.doc_mut().unwrap().set_hidden_objects(&[true]).unwrap());
+        assert!(!tools.ensure_wrap_param(&mut state), "nothing to wrap onto");
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_none());
+        let tries = state.wrap_jobs.counters.ui_params;
+        assert!(!tools.ensure_wrap_param(&mut state));
+        assert_eq!(state.wrap_jobs.counters.ui_params, tries, "not tried again for the same visibility");
+        assert!(state.doc_mut().unwrap().set_hidden_objects(&[false]).unwrap());
+        assert!(tools.ensure_wrap_param(&mut state), "tried again once the surface is shown");
+        assert!(state.doc().unwrap().stamp_wrap_stats(id).is_some());
     }
 
     #[test]

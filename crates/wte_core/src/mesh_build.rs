@@ -427,10 +427,13 @@ pub fn normalize_with_objects(raw: RawMesh, objects: &RawObjects, opts: &Normali
 
 /// Step 9 names: an empty name becomes "Object N" (N = 1-based dense index); a single unnamed object takes the model
 /// name ("Model" when that is empty); then names are made unique in index order with `_2`, `_3`. Counts and bounds
-/// are filled in by the caller.
+/// are filled in by the caller. The suffix search of a base resumes after the last suffix it tried for that base (every
+/// smaller one is taken, and names are never released), so many objects with one name cost linear time; the result is
+/// the same as searching from `_2` every time.
 fn object_infos(raw_of_dense: &[u32], objects: &RawObjects, opts: &NormalizeOptions) -> Vec<ObjectInfo> {
     let single = raw_of_dense.len() == 1;
     let mut used: HashSet<String> = HashSet::with_capacity(raw_of_dense.len());
+    let mut next_suffix: HashMap<String, u32> = HashMap::new();
     let mut out = Vec::with_capacity(raw_of_dense.len());
     for (i, &r) in raw_of_dense.iter().enumerate() {
         let given = objects.names.get(r as usize).map_or("", String::as_str);
@@ -442,10 +445,15 @@ fn object_infos(raw_of_dense: &[u32], objects: &RawObjects, opts: &NormalizeOpti
             format!("Object {}", i + 1)
         };
         let mut name = base.clone();
-        let mut suffix = 2;
-        while used.contains(&name) {
-            name = format!("{base}_{suffix}");
-            suffix += 1;
+        if used.contains(&name) {
+            let suffix = next_suffix.entry(base.clone()).or_insert(2);
+            loop {
+                name = format!("{base}_{suffix}");
+                *suffix += 1;
+                if !used.contains(&name) {
+                    break;
+                }
+            }
         }
         used.insert(name.clone());
         out.push(ObjectInfo { name, tri_count: 0, bounds: Aabb::EMPTY });
@@ -1411,6 +1419,29 @@ mod tests {
         // A name that already ends in a suffix is not confused with a generated one.
         let tricky = raw_objects(4, &["A_2", "A", "A", "A"], |i| i as u32);
         assert_eq!(names_of(&normalize_with_objects(raw, &tricky, &named("")).0), ["A_2", "A", "A_3", "A_4"]);
+    }
+
+    /// Check (objects-tabs WP1/2): thousands of objects sharing one name (an instanced glTF scene whose nodes are
+    /// unnamed falls back to the one mesh name) get `_2` .. `_n` without a quadratic search (the suffix search resumes
+    /// where the last one for the same base stopped).
+    #[test]
+    fn many_objects_with_one_name_are_numbered_in_linear_time() {
+        let n = 20_000usize;
+        let raw = RawMesh { triangles: (0..n).map(|i| simple(i as f32 * 2.0, 0, true)).collect(), materials: vec![mat("m", Some(0))] };
+        // Every object is "Leaf" except one explicit "Leaf_3" (taken before the generated numbering reaches it).
+        let mut names = vec!["Leaf"; n];
+        names[1] = "Leaf_3";
+        let objects = raw_objects(n, &names, |i| i as u32);
+        let started = std::time::Instant::now();
+        let (mesh, _) = normalize_with_objects(raw, &objects, &NormalizeOptions::default());
+        let elapsed = started.elapsed();
+        assert_eq!(mesh.objects.len(), n);
+        assert_eq!(&names_of(&mesh)[..5], ["Leaf", "Leaf_3", "Leaf_2", "Leaf_4", "Leaf_5"]);
+        assert_eq!(mesh.objects[n - 1].name, format!("Leaf_{n}"));
+        let unique: HashSet<&str> = names_of(&mesh).into_iter().collect();
+        assert_eq!(unique.len(), n);
+        // The quadratic search took seconds here; the linear one takes milliseconds even in a debug build.
+        assert!(elapsed.as_secs_f64() < 3.0, "{elapsed:?}");
     }
 
     #[test]

@@ -2959,8 +2959,9 @@ never runs two parses at the same time.
    bit-identical to `normalize` for every input. Objects are renumbered densely in order of first appearance in the *raw*
    triangle order, counting only triangles that survived step 1 (an object without a surviving triangle disappears). Names:
    an empty name becomes `"Object N"` (N = 1-based dense index); if the mesh has exactly one object and its name is empty, it
-   is `opts.model_name`, or `"Model"` when that is empty too; then names are made unique in index order with `_2`, `_3`.
-   `ObjectInfo::tri_count` and `bounds` come from the final triangles.
+   is `opts.model_name`, or `"Model"` when that is empty too; then names are made unique in index order with `_2`, `_3`
+   (the smallest free suffix; the search of a base resumes after the last suffix it tried, so thousands of objects with one
+   name cost linear time). `ObjectInfo::tri_count` and `bounds` come from the final triangles.
 
 `wire_edges`: for every triangle edge build the key (min/max of the two vertex *position bit patterns*); edges with the same key are
 the same geometric edge. Classify: one incident triangle => `Boundary`; two or more whose UVs at both ends are identical => `Interior`
@@ -5426,7 +5427,9 @@ placement without surface is not retried every frame. Round 8 (R8-2): while the 
 (`doc.defers_wrap_previews()`, the asynchronous mode) it makes nothing on the UI thread: it asks for a param-only job
 (`state.wrap_jobs.request_param(id)`, started by `stamp_bakes::after_tools` in the same logic pass); the stats line
 shows "Wrapping..." and the outline appears when the job lands; a placement for which that job found no surface
-(`wrap_jobs.param_failed`) is not asked for again. `ui_params` counts the synchronous builds. The warm-up job of plan
+(`wrap_jobs.param_failed`) is not asked for again. Objects-tabs: both failure marks (`wrap_failed`, `param_failed`) carry
+the document's `visibility_generation`, so a placement is tried again after objects are shown or hidden, and a
+param-only job made before a visibility change (not cached, core 5.20) never marks a failure. `ui_params` counts the synchronous builds. The warm-up job of plan
 4.1 (`wrap_mesh_prep`) is not built: the core has no welded-graph cache yet (package A step 6). *Text on a Curve* (`text_path.rs`): for a wrapped text the curve
 points and the drawn curve lie on the surface (`path_points_on`: the flat frame's point taken to stamp-local
 coordinates, then `stamp_wrap_surface`; the flat point where it returns `None`); dragging a point raycasts the model
@@ -6109,10 +6112,12 @@ pub(crate) fn after_dispatch(state: &mut AppState, ctx: &egui::Context);
 // install_document also calls doc.set_defer_wrap_previews(state.async_final_bakes): with WTE_SYNC_FINAL_BAKES=1 the
 // wrapped Previews stay on the UI thread (the comparison mode); projected / UV Previews are unchanged in both modes.
 #[derive(Default)] pub struct WrapJobs {
-    in_flight: Option<WrapFlight>,                   // one wrap job at a time: { id, kind, generation, started, placement }
+    in_flight: Option<WrapFlight>,                   // one wrap job at a time: { id, kind, generation, started, placement,
+                                                     //   visibility (objects-tabs: doc.visibility_generation() at the start) }
     held: Option<(u64, Box<StampBakeOutput>)>,       // a Preview output that arrived while a stroke was open
     want_param: Option<StampId>,                     // the Transform tool's request (async mode), taken by pump
-    pub(crate) param_failed: Option<(StampId, Placement)>, // a param-only job found no surface: not asked again
+    pub(crate) param_failed: Option<(StampId, Placement, u64)>, // a param-only job found no surface: not asked again
+                                                     //   (u64 = the visibility generation; objects-tabs)
     pub counters: WrapJobCounters,                   // previews started / applied / due again / stale, params started /
 }                                                    // applied, ui_params (TransformTool::ensure_wrap_param, sync mode)
 // pump (before the Final part): a held Preview output is applied once no stroke is open; when no wrap job is in flight
@@ -6127,7 +6132,7 @@ pub fn on_wrap_output(app: &mut WteApp, generation: u64, output: Box<StampBakeOu
 // Another generation -> dropped. Preview: held while a stroke is open, else doc.apply_wrap_preview: Applied { due_again }
 // (the last finished picture; due_again: the stamp moved since, pump starts its next job in the same logic pass) or
 // Stale (Esc, undo, redo, a Final, a removed stamp). ParamOnly: doc.apply_wrap_param (stats and outline, no pixel);
-// nothing for an unchanged placement -> param_failed.
+// nothing for an unchanged placement and an unchanged visibility generation -> param_failed.
 pub(crate) fn after_tools(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context); // App::logic after ensure_wrap_param:
 // starts the param-only job just asked for when no wrap job is in flight; updates wrap_jobs_pending.
 // after_dispatch also asks for the next frame when a wrapped stamp waits for its Preview job and none is in flight.
@@ -6688,7 +6693,8 @@ those tests.
   objects-tabs (6.1 step 9): `objects_follow_their_triangles_through_the_sort`, `object_data_never_changes_the_mesh` (random object
   data leaves positions, normals, uvs, indices, flags, ranges, sets and `uv_hash` equal to `normalize`, and the wireframe equal
   apart from `object`), `unnamed_and_duplicate_names`, `objects_without_triangles_disappear`, `no_object_data_is_one_object`,
-  `wire_edges_name_their_object`. Importers: OBJ `o` objects, `g` groups without `o`, `o` wins, faces before the first `o`,
+  `wire_edges_name_their_object`, `many_objects_with_one_name_are_numbered_in_linear_time` (check of WP1/2: 20,000 objects
+  named "Leaf" plus one explicit "Leaf_3"). Importers: OBJ `o` objects, `g` groups without `o`, `o` wins, faces before the first `o`,
   re-entered names, no `o`/`g` = one object named after the model, `to_obj_objects` round trip; glTF mesh nodes (named / unnamed
   with a named mesh / shared mesh / duplicate names, transforms in the bounds); FBX two `Model`s; `Document::sample(Objects)`.
 - **bvh** objects-tabs: `tri_mask_basics`; `a_hidden_triangle_is_skipped_by_every_query` (`cube_on_floor`: raycast,
@@ -7151,8 +7157,9 @@ thread; the first job lands as the last good picture with `due_again`, the next 
 equals the synchronous Preview's pixels; the Final equals the synchronous Final), `esc_or_undo_while_a_wrap_preview_job_runs_keeps_the_old_pixels`,
 `a_wrap_preview_of_another_document_is_dropped`, `a_selected_wrapped_stamp_without_parameterization_gets_it_from_a_param_only_job`
 (after an undo: the Transform tool asks, `after_tools` starts one job, stats and outline come with it, no pixel
-changes, no build on the UI thread), `a_final_waits_for_its_stamps_wrap_preview_job` (then equals the synchronous
-Final), `projected_stamps_keep_their_previews_on_the_ui_thread`; `jobs::tests::a_silent_job_runs_and_delivers_but_is_not_shown_in_the_status_bar`;
+changes, no build on the UI thread), objects-tabs check of WP2: `a_param_only_job_overtaken_by_a_visibility_change_is_asked_for_again`
+and `the_synchronous_wrap_failure_is_retried_after_a_visibility_change` (failure marks per visibility generation),
+`a_final_waits_for_its_stamps_wrap_preview_job` (then equals the synchronous Final), `projected_stamps_keep_their_previews_on_the_ui_thread`; `jobs::tests::a_silent_job_runs_and_delivers_but_is_not_shown_in_the_status_bar`;
 `panels::tool_options::tests::a_relaxed_or_cut_wrap_says_so_under_the_stats_line`. Scenario `wrap_surface` steps 2b,
 6b and 10 (8.11). check:B (the job races): the drag test also reads `wte_core::param_counter` (no build on the UI
 thread); `a_final_waits_for_its_stamps_wrap_preview_job` also checks that the Final reuses the job's parameterization

@@ -5,7 +5,8 @@
 // "Export...", "Undo", "Redo", "Delete", "Cancel", "3D", "2D", "Split", "Preview", "Texture on Model", "Wireframe",
 // "Frame Model", the tool names "Navigate", "Brush", "Eraser", "Eyedropper", "Fill", "Stamp", "Text", "Transform",
 // "Smaller Brush", "Larger Brush", "Softer Brush", "Harder Brush", "New Paint Layer", "Duplicate Layer", "Merge Down",
-// "Move Layer Up", "Move Layer Down", "Reset Colors", "Swap Colors".
+// "Move Layer Up", "Move Layer Down", "Reset Colors", "Swap Colors"; objects-tabs: "Frame Selection", "Isolate Selected",
+// "Show All", "Hide Selected".
 
 use eframe::egui;
 use egui::{Key, KeyboardShortcut, Modifiers};
@@ -28,6 +29,7 @@ pub struct ShortcutDef {
 const NONE: Modifiers = Modifiers::NONE;
 const CMD: Modifiers = Modifiers::COMMAND;
 const SHIFT: Modifiers = Modifiers::SHIFT;
+const ALT: Modifiers = Modifiers::ALT;
 const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
 
 const fn def(
@@ -46,8 +48,9 @@ fn with_doc(state: &AppState, action: AppAction) -> Option<AppAction> {
 }
 
 /// The shortcut table, ordered most-specific-first: of every pair that `Modifiers::matches_logically` could confuse
-/// (Ctrl+Shift+S / Ctrl+S, Ctrl+Shift+N / Ctrl+N, Ctrl+Shift+Z / Ctrl+Z, Shift+X / X) the more specific one comes first.
-static TABLE: [ShortcutDef; 36] = [
+/// (Ctrl+Shift+S / Ctrl+S, Ctrl+Shift+N / Ctrl+N, Ctrl+Shift+Z / Ctrl+Z, Shift+X / X, Shift+F / F, Shift+H and Alt+H / H)
+/// the more specific one comes first.
+static TABLE: [ShortcutDef; 40] = [
     // file (fire while typing: they release the focus first, rule 4)
     def("Save As...", CMD_SHIFT, Key::S, None, true, |s| with_doc(s, AppAction::SaveAs(None))),
     def("Save", CMD, Key::S, None, true, |s| with_doc(s, AppAction::Save)),
@@ -73,7 +76,12 @@ static TABLE: [ShortcutDef; 36] = [
     def("Preview", NONE, Key::F5, None, true, |s| with_doc(s, AppAction::SetViewMode(ViewMode::Preview))),
     def("Texture on Model", NONE, Key::T, None, false, |_| Some(AppAction::ToggleTexture)),
     def("Wireframe", NONE, Key::W, None, false, |_| Some(AppAction::ToggleWireframe)),
+    def("Frame Selection", SHIFT, Key::F, None, false, |s| with_doc(s, AppAction::FrameSelection)),
     def("Frame Model", NONE, Key::F, None, false, |s| with_doc(s, AppAction::FrameModel)),
+    // objects (objects-tabs)
+    def("Isolate Selected", SHIFT, Key::H, None, false, |s| with_doc(s, AppAction::IsolateSelectedObjects)),
+    def("Show All", ALT, Key::H, None, false, |s| with_doc(s, AppAction::ShowAllObjects)),
+    def("Hide Selected", NONE, Key::H, None, false, |s| with_doc(s, AppAction::HideSelectedObjects)),
     // tools
     def("Navigate", NONE, Key::V, None, false, |_| Some(AppAction::SetTool(ToolKind::Navigate))),
     def("Brush", NONE, Key::B, None, false, |_| Some(AppAction::SetTool(ToolKind::Brush))),
@@ -218,11 +226,55 @@ mod tests {
             (NONE, Key::Delete),
             (NONE, Key::D),
             (SHIFT, Key::X),
+            (SHIFT, Key::F),
+            (SHIFT, Key::H),
+            (ALT, Key::H),
+            (NONE, Key::H),
         ] {
             assert!(find(m, k).is_some(), "missing binding {m:?} {k:?}");
         }
         let text_ok: Vec<_> = table().iter().filter(|d| d.text_ok).map(|d| d.action_label).collect();
         assert_eq!(text_ok, ["Save As...", "Save", "New from Model...", "Open Project...", "Export...", "Preview"]);
+        assert_eq!(table().len(), 40);
+    }
+
+    /// objects-tabs: H, Shift+H, Alt+H and Shift+F need a document and map to their actions; H in a focused text
+    /// field types "h".
+    #[test]
+    fn object_keys_map_to_their_actions_and_stay_in_text_fields() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new(Prefs::default(), true);
+        assert!(run(&ctx, &mut state, vec![key_event(Key::H, NONE)], NONE).is_empty(), "no document");
+        state.session = crate::tools::test_support::state_with(wte_core::SampleKind::Objects).session;
+        let a = run(&ctx, &mut state, vec![key_event(Key::H, NONE)], NONE);
+        assert!(matches!(a[..], [AppAction::HideSelectedObjects]), "{a:?}");
+        let a = run(&ctx, &mut state, vec![key_event(Key::H, SHIFT)], SHIFT);
+        assert!(matches!(a[..], [AppAction::IsolateSelectedObjects]), "{a:?}");
+        let a = run(&ctx, &mut state, vec![key_event(Key::H, ALT)], ALT);
+        assert!(matches!(a[..], [AppAction::ShowAllObjects]), "{a:?}");
+        let a = run(&ctx, &mut state, vec![key_event(Key::F, SHIFT)], SHIFT);
+        assert!(matches!(a[..], [AppAction::FrameSelection]), "{a:?}");
+        let a = run(&ctx, &mut state, vec![key_event(Key::F, NONE)], NONE);
+        assert!(matches!(a[..], [AppAction::FrameModel]), "{a:?}");
+
+        let mut text = String::new();
+        let field_id = egui::Id::unique("object_field");
+        let frame = |events: Vec<egui::Event>, state: &mut AppState, text: &mut String| {
+            let events: Vec<egui::Event> = std::iter::once(egui::Event::ModifiersChanged(NONE)).chain(events).collect();
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut actions = Vec::new();
+            crate::theme::run_test_pass(&ctx, input, |ui| {
+                actions = handle(ui.ctx(), state);
+                ui.add(egui::TextEdit::singleline(text).id(field_id));
+            });
+            actions
+        };
+        let _ = frame(vec![], &mut state, &mut text);
+        ctx.memory_mut(|m| m.request_focus(field_id));
+        let _ = frame(vec![], &mut state, &mut text);
+        let a = frame(vec![key_event(Key::H, NONE), egui::Event::Text("h".into())], &mut state, &mut text);
+        assert!(a.is_empty(), "{a:?}");
+        assert_eq!(text, "h");
     }
 
     fn key_event(key: Key, modifiers: Modifiers) -> egui::Event {

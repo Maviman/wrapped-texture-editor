@@ -20,7 +20,7 @@ use crate::import::{
     percent_decode,
 };
 use crate::math::linear_to_srgb;
-use crate::mesh::{RawMaterial, RawMesh, RawTriangle};
+use crate::mesh::{RawMaterial, RawMesh, RawObjects, RawTriangle};
 
 /// Material key of primitives without a material.
 const DEFAULT_MATERIAL: u32 = u32::MAX;
@@ -755,6 +755,8 @@ pub(crate) fn load_gltf(
         quantized: declares_quantization(&document),
     };
     let node_world = node_world_matrices(&nodes);
+    // One object per visited node with a mesh (5.21): name = node name, else mesh name, else empty.
+    let mut objects = RawObjects::default();
     let mut visited = vec![false; nodes.len()];
     let mut stack: Vec<(usize, Mat4)> = roots.into_iter().rev().map(|i| (i, Mat4::IDENTITY)).collect();
     while let Some((index, parent)) = stack.pop() {
@@ -773,6 +775,10 @@ pub(crate) fn load_gltf(
                 loader.skin_ignored = true;
             }
             loader.add_mesh(&mesh, world, joints.as_deref());
+            let object = objects.names.len() as u32;
+            let name = node.name().filter(|n| !n.is_empty()).or_else(|| mesh.name()).unwrap_or("");
+            objects.names.push(name.to_owned());
+            objects.tri_object.resize(loader.triangles.len(), object);
         }
         let children: Vec<usize> = node.children().map(|c| c.index()).collect();
         stack.extend(children.into_iter().rev().map(|c| (c, world)));
@@ -818,7 +824,7 @@ pub(crate) fn load_gltf(
         }
     }
 
-    Ok(RawImport { mesh: RawMesh { triangles, materials }, textures, warnings })
+    Ok(RawImport { mesh: RawMesh { triangles, materials }, objects, textures, warnings })
 }
 
 #[cfg(test)]
@@ -2125,5 +2131,38 @@ mod tests {
         assert!(is_data_uri(" DATA:,x") && !is_data_uri("data.bin") && !is_data_uri("d\u{e9}ta:"));
         let t = UvTransform { offset: Vec2::new(1.0, 2.0), rotation: 0.0, scale: Vec2::new(2.0, 3.0) };
         assert_eq!(t.apply(Vec2::new(0.5, 0.5)), Vec2::new(2.0, 3.5));
+    }
+
+    /// Objects-tabs WP1: every visited node with a mesh is one object, named by the node, else by its mesh; two nodes
+    /// sharing a mesh are two objects; node transforms are baked into the bounds; duplicate names get `_2`.
+    #[test]
+    fn mesh_nodes_are_objects() {
+        let mut doc: Value = serde_json::from_str(&samples::to_gltf(&samples::flat_quad(), glam::Mat4::IDENTITY)).unwrap();
+        assert_eq!(doc["meshes"][0]["name"], "mesh0");
+        doc["nodes"] = json!([
+            { "name": "Pawn", "mesh": 0 },
+            { "name": "Pawn", "mesh": 0, "translation": [10.0, 0.0, 0.0] },
+            { "mesh": 0, "translation": [0.0, 5.0, 0.0] },
+            { "name": "Empty", "children": [4] },
+            { "name": "", "mesh": 0, "translation": [0.0, 0.0, 7.0] }
+        ]);
+        doc["scenes"] = json!([{ "nodes": [0, 1, 2, 3] }]);
+        let raw = load_json(&doc, &[]);
+        assert_eq!(raw.objects.names, ["Pawn", "Pawn", "mesh0", "mesh0"]);
+        assert_eq!(raw.objects.tri_object, [0, 0, 1, 1, 2, 2, 3, 3]);
+        let model = import(ModelFormat::Gltf, serde_json::to_vec(&doc).unwrap(), &[]);
+        let mesh = &model.mesh;
+        let names: Vec<&str> = mesh.objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["Pawn", "Pawn_2", "mesh0", "mesh0_2"]);
+        assert!(mesh.objects.iter().all(|o| o.tri_count == 2));
+        let quad = mesh.objects[0].bounds;
+        let shifted = |d: Vec3| crate::math::Aabb { min: quad.min + d, max: quad.max + d };
+        assert_eq!(mesh.objects[1].bounds, shifted(Vec3::new(10.0, 0.0, 0.0)));
+        assert_eq!(mesh.objects[2].bounds, shifted(Vec3::new(0.0, 5.0, 0.0)));
+        assert_eq!(mesh.objects[3].bounds, shifted(Vec3::new(0.0, 0.0, 7.0)));
+        // A model without nodes of its own (one node, one mesh) is one object named after the node.
+        let single = import(ModelFormat::Gltf, samples::to_gltf(&samples::flat_quad(), glam::Mat4::IDENTITY).into_bytes(), &[]);
+        assert_eq!(single.mesh.objects.len(), 1);
+        assert_eq!(single.mesh.objects[0].name, "node0");
     }
 }

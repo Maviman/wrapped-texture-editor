@@ -87,6 +87,20 @@ pub enum PanelHit {
     /// (for the self-test).
     LayerMenuExportThis,
     LayerMenuExportSelected,
+    /// objects-tabs (WP4): a button of the upper tab strip (Tool | Color | Texture sets | Objects).
+    UpperTabButton(UpperTab),
+    /// objects-tabs (WP5): the row of an object in the Objects tab (only rows laid out in this frame are recorded).
+    ObjectRow(u32),
+    /// The eye of an object row.
+    ObjectEye(u32),
+    /// The visible part of the Objects list's scroll area.
+    ObjectsList,
+    /// The footer of the Objects tab (Hide / Isolate / Show all / Frame), below the list.
+    ObjectsFooter,
+    ObjectsHide,
+    ObjectsIsolate,
+    ObjectsShowAll,
+    ObjectsFrame,
 }
 
 /// What the 3D view shows on the surface. The discriminant is the value handed to the shaders.
@@ -291,9 +305,10 @@ impl BrushSettings {
     }
 }
 
-/// The tab of the lower area of the side panel (FEATURE_BRUSH 6.2, FEATURE_TEXT 6.1, ROUND4_PLAN 2.2 item 10). Not
-/// saved; starts on Layers. A tab whose condition is not met is greyed out and the area shows Layers, whatever this
-/// says; a tool change never writes it.
+/// The tab of the lower area of the side panel (FEATURE_BRUSH 6.2, FEATURE_TEXT 6.1, ROUND4_PLAN 2.2 item 10). Starts
+/// on Layers; objects-tabs: the chosen tab is kept in the preferences (`Prefs::side_lower_tab`, written at exit). A tab
+/// whose condition is not met is greyed out and the area shows Layers, whatever this says; a tool change never writes
+/// it.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub enum SideTab {
     #[default]
@@ -323,6 +338,57 @@ impl SideTab {
             SideTab::Text => "Text",
         }
     }
+
+    /// The name stored in `Prefs::side_lower_tab`.
+    pub fn pref_name(self) -> &'static str {
+        match self {
+            SideTab::Layers => "layers",
+            SideTab::Brush => "brush",
+            SideTab::Text => "text",
+        }
+    }
+
+    /// The tab a `Prefs::side_lower_tab` value names; Layers for anything else.
+    pub fn from_pref_name(name: &str) -> SideTab {
+        SideTab::ALL.into_iter().find(|t| t.pref_name() == name).unwrap_or_default()
+    }
+}
+
+/// objects-tabs (WP4): the tab of the upper group of the side panel. Starts on Tool; all four are always available and
+/// a tool change never writes it (OBJECTS_TABS_PLAN 6.4). Kept in the preferences (`Prefs::side_upper_tab`).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpperTab {
+    #[default]
+    Tool,
+    Color,
+    TextureSets,
+    Objects,
+}
+
+impl UpperTab {
+    /// The four tabs in the order of the strip.
+    pub const ALL: [UpperTab; 4] = [UpperTab::Tool, UpperTab::Color, UpperTab::TextureSets, UpperTab::Objects];
+
+    /// Position in the strip (index into `SideRects::upper_tab_buttons`).
+    pub fn index(self) -> usize {
+        match self {
+            UpperTab::Tool => 0,
+            UpperTab::Color => 1,
+            UpperTab::TextureSets => 2,
+            UpperTab::Objects => 3,
+        }
+    }
+
+    /// The label of the tab.
+    pub fn label(self) -> &'static str {
+        match self {
+            UpperTab::Tool => "Tool",
+            UpperTab::Color => "Color",
+            UpperTab::TextureSets => "Texture sets",
+            UpperTab::Objects => "Objects",
+        }
+    }
 }
 
 /// The page of the Text tab (FEATURE_TEXT 6.4).
@@ -341,12 +407,25 @@ pub enum TextPage {
 pub struct SideRects {
     /// The side panel's content rect.
     pub panel: egui::Rect,
-    /// The visible part of the scroll area of Tool options and Texture sets (= `PanelHit::SettingsArea`).
+    /// objects-tabs (WP4): the whole upper group (strip and page).
+    pub upper_area: egui::Rect,
+    /// The buttons of the upper strip, indexed by `UpperTab::index`.
+    pub upper_tab_buttons: [egui::Rect; 4],
+    /// The visible page of the upper group, below its strip.
+    pub upper_page: egui::Rect,
+    /// The visible Tool page (= `upper_page`, = `PanelHit::SettingsArea`) in frames where the Tool page is shown, else
+    /// `Rect::NOTHING`.
     pub tool_area: egui::Rect,
-    /// The Tool options section as laid out (unclipped; it reaches below `tool_area` when it scrolls).
+    /// The Tool options as laid out (unclipped; they reach below `tool_area` when the page scrolls), in the same frames
+    /// as `tool_area`, else `Rect::NOTHING`.
     pub tool_options: egui::Rect,
-    /// The visible Color section (= `PanelHit::ColorSection`).
+    /// The visible Color page (= `upper_page`, = `PanelHit::ColorSection`) in frames where the Color page is shown,
+    /// else `Rect::NOTHING`.
     pub color: egui::Rect,
+    /// `Some` (the visible page) exactly in the frames in which the Texture sets page was drawn.
+    pub sets_tab: Option<egui::Rect>,
+    /// `Some` (the visible page) exactly in the frames in which the Objects page was drawn.
+    pub objects_tab: Option<egui::Rect>,
     /// The lower area with the tab strip (= `PanelHit::LayersArea`).
     pub bottom_area: egui::Rect,
     /// The buttons of the tab strip, indexed by `SideTab::index`.
@@ -364,9 +443,14 @@ impl Default for SideRects {
     fn default() -> SideRects {
         SideRects {
             panel: egui::Rect::NOTHING,
+            upper_area: egui::Rect::NOTHING,
+            upper_tab_buttons: [egui::Rect::NOTHING; 4],
+            upper_page: egui::Rect::NOTHING,
             tool_area: egui::Rect::NOTHING,
             tool_options: egui::Rect::NOTHING,
             color: egui::Rect::NOTHING,
+            sets_tab: None,
+            objects_tab: None,
             bottom_area: egui::Rect::NOTHING,
             tab_buttons: [egui::Rect::NOTHING; 3],
             brush_tab: None,
@@ -748,11 +832,21 @@ pub struct Session {
     /// The layers selected in the Layers list (Ctrl / Shift-click), raw and possibly stale: read it through
     /// `layer_selection`, which normalises it. App state only: not in the document, not in history, not saved.
     pub selected_layers: Vec<LayerId>,
+    /// objects-tabs: the selected objects (indices into `doc.mesh.objects`). App state only: not in the document, not
+    /// in history, not saved.
+    pub selected_objects: std::collections::BTreeSet<u32>,
+    /// The object a Shift-click in the Objects list extends from (the last plain / Ctrl-clicked object).
+    pub object_anchor: Option<u32>,
+    /// +1 at every change of `selected_objects` (the GPU highlight buffer follows it).
+    pub object_selection_rev: u64,
+    /// Request: the Objects list scrolls this row into view once (set by a pick in the 3D view).
+    pub object_reveal: Option<u32>,
 }
 
 impl Session {
     /// Re-validates the app-side selection after any document change (called by dispatch, section 8.3): clears
-    /// `selected_stamp` if `doc.stamp(id)` is `None` and clamps `active_set` to an existing set.
+    /// `selected_stamp` if `doc.stamp(id)` is `None`, clamps `active_set` to an existing set and drops selected objects
+    /// that the mesh does not have.
     pub fn validate(&mut self) {
         if let Some(id) = self.selected_stamp
             && self.doc.stamp(id).is_none()
@@ -762,6 +856,18 @@ impl Session {
         let set_count = self.doc.sets.len();
         if self.active_set.index() >= set_count {
             self.active_set = TextureSetId(set_count.saturating_sub(1) as u32);
+        }
+        // objects-tabs: selected objects beyond the mesh's objects are dropped, a stale anchor / reveal cleared.
+        let objects = self.doc.mesh.object_count();
+        if self.selected_objects.last().is_some_and(|&o| o >= objects) {
+            self.selected_objects.retain(|&o| o < objects);
+            self.object_selection_rev += 1;
+        }
+        if self.object_anchor.is_some_and(|o| o >= objects) {
+            self.object_anchor = None;
+        }
+        if self.object_reveal.is_some_and(|o| o >= objects) {
+            self.object_reveal = None;
         }
     }
 
@@ -933,6 +1039,18 @@ pub struct Prefs {
     /// dropped (that file asks again), the others are kept.
     #[serde(deserialize_with = "lenient_prefs_serde::close_map")]
     pub brush_shape_close: std::collections::BTreeMap<PathBuf, CloseMode>,
+    /// objects-tabs (WP4): the tab of the side panel's upper group at exit. Read leniently: a value that does not read
+    /// is Tool.
+    #[serde(deserialize_with = "lenient_prefs_serde::upper_tab")]
+    pub side_upper_tab: UpperTab,
+    /// The chosen tab of the lower group at exit (`SideTab::pref_name`: "layers", "brush" or "text"); anything else
+    /// reads as "layers".
+    #[serde(deserialize_with = "lenient_prefs_serde::lower_tab")]
+    pub side_lower_tab: String,
+    /// The height of the lower group in points when the user dragged the split; `None` = automatic. A value that is
+    /// not a number reads as `None`; `prefs::from_json` keeps only a finite value in `100..=2000`.
+    #[serde(deserialize_with = "lenient_prefs_serde::split")]
+    pub side_split: Option<f32>,
 }
 
 impl Default for Prefs {
@@ -951,6 +1069,9 @@ impl Default for Prefs {
             eraser: BrushSettings::default(),
             brush_shape_path: None,
             brush_shape_close: std::collections::BTreeMap::new(),
+            side_upper_tab: UpperTab::Tool,
+            side_lower_tab: SideTab::Layers.pref_name().to_owned(),
+            side_split: None,
         }
     }
 }
@@ -1016,8 +1137,12 @@ pub struct AppState {
     pub selftest: bool,
     /// Throttle of the deferred stamp Preview bakes (`view::bake_stale_previews`, 8.4).
     pub preview_bakes: PreviewBakeClock,
-    /// The chosen tab of the lower side-panel area (see `SideTab` for when it is shown). Not saved.
+    /// The chosen tab of the lower side-panel area (see `SideTab` for when it is shown); from `Prefs::side_lower_tab`
+    /// at start, written back at exit (`panels::sync_prefs`).
     pub side_tab: SideTab,
+    /// objects-tabs (WP4): the shown tab of the side panel's upper group; from `Prefs::side_upper_tab` at start,
+    /// written back at exit.
+    pub upper_tab: UpperTab,
     /// The page of the Text tab.
     pub text_page: TextPage,
     /// The brush shape loaded from a model file (FEATURE_BRUSH 4.4).
@@ -1096,6 +1221,8 @@ impl AppState {
             colors.swatches = prefs.swatches.clone();
             colors.swatches.resize(SWATCH_COUNT, [255, 255, 255, 255]);
         }
+        let side_tab = SideTab::from_pref_name(&prefs.side_lower_tab);
+        let upper_tab = prefs.side_upper_tab;
         AppState {
             session: None,
             prefs,
@@ -1127,7 +1254,8 @@ impl AppState {
             typing_prev: false,
             selftest,
             preview_bakes: PreviewBakeClock::default(),
-            side_tab: SideTab::Layers,
+            side_tab,
+            upper_tab,
             text_page: TextPage::Character,
             brush_shape: BrushShapeState::default(),
             builtin_tips: [None, None],
@@ -1193,7 +1321,7 @@ mod lenient_prefs_serde {
     use serde_json::Value;
     use wte_core::CloseMode;
 
-    use super::BrushSettings;
+    use super::{BrushSettings, SideTab, UpperTab};
 
     /// Brush or eraser settings: every key is taken on its own; a key whose value does not read keeps its default.
     /// Sanitized (`BrushSettings::sanitized`).
@@ -1216,6 +1344,28 @@ mod lenient_prefs_serde {
             }
         }
         serde_json::from_value::<BrushSettings>(Value::Object(merged)).unwrap_or_default().sanitized()
+    }
+
+    /// The upper tab: a value that does not read is Tool.
+    pub fn upper_tab<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UpperTab, D::Error> {
+        Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
+    }
+
+    /// The lower tab's name: anything but a known name reads as "layers".
+    pub fn lower_tab<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+        let tab = match Value::deserialize(deserializer)? {
+            Value::String(name) => SideTab::from_pref_name(&name),
+            _ => SideTab::Layers,
+        };
+        Ok(tab.pref_name().to_owned())
+    }
+
+    /// The user-sized split: a value that is not a number reads as `None` (automatic).
+    pub fn split<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f32>, D::Error> {
+        Ok(match Value::deserialize(deserializer)? {
+            Value::Number(n) => n.as_f64().map(|v| v as f32),
+            _ => None,
+        })
     }
 
     /// The closing choice per shape file: an entry whose value does not read is dropped (that file asks again).
@@ -1523,6 +1673,10 @@ mod tests {
             scene_generation: 1,
             text_gap: None,
             selected_layers: Vec::new(),
+            selected_objects: Default::default(),
+            object_anchor: None,
+            object_selection_rev: 0,
+            object_reveal: None,
         };
 
         // Nothing to fix.

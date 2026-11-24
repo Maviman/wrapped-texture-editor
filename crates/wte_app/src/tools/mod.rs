@@ -6,6 +6,7 @@ use eframe::egui;
 use glam::{Vec2, Vec3};
 use wte_core::{Document, EditError, Hit, LayerId, PaintTarget, TextureSetId};
 
+use crate::action::AppAction;
 use crate::gpu::BrushRing;
 use crate::state::{AppState, OrbitCamera, Session, ToolKind, UvViewState, ViewId};
 
@@ -18,6 +19,22 @@ pub mod transform;
 
 /// Toast of every tool that meets a triangle without UVs.
 pub(crate) const NO_UV_TEXT: &str = "This part of the model has no UV mapping and cannot be painted";
+
+/// objects-tabs (8.6): pointer travel in points below which a press of the Navigate tool is a click (an object pick),
+/// not an orbit.
+pub(crate) const NAV_CLICK_TRAVEL: f32 = 4.0;
+
+/// objects-tabs (8.6): a primary press of the Navigate tool in the 3D view of a model with two or more objects, kept
+/// while the drag may still turn out to be a click.
+#[derive(Copy, Clone, Debug)]
+struct NavClick {
+    origin: egui::Pos2,
+    mods: egui::Modifiers,
+    /// The camera before the press: a click puts back the few points of orbit it made.
+    camera: OrbitCamera,
+    /// Pointer travel so far (points).
+    travel: f32,
+}
 
 /// What is under the pointer.
 #[derive(Copy, Clone, Debug)]
@@ -249,6 +266,8 @@ pub struct ToolController {
     /// The button of a brush stroke went up while its paint still trails (FEATURE_BRUSH 5.10): the interaction stays
     /// until the brush has painted everything and ended the stroke.
     brush_released: bool,
+    /// objects-tabs: the Navigate press that may still be a click (object pick).
+    nav_click: Option<NavClick>,
 }
 
 impl Default for ToolController {
@@ -272,6 +291,7 @@ impl ToolController {
             nav_last: egui::Pos2::ZERO,
             alt: false,
             brush_released: false,
+            nav_click: None,
         }
     }
 
@@ -330,6 +350,7 @@ impl ToolController {
         self.interaction = Interaction::Idle;
         self.captured = None;
         self.brush_released = false;
+        self.nav_click = None;
     }
 
     /// Start of a views pass: resets the per-frame raycast budget and the hover feedback of the tools (it is set again
@@ -409,6 +430,17 @@ impl ToolController {
         if let Some(orbit) = navigate {
             self.interaction = if orbit { Interaction::Orbit(xf.view) } else { Interaction::Pan(xf.view) };
             self.nav_last = p.pos;
+            // objects-tabs (8.6): the left button of the Navigate tool (the logical button: Space+LMB pans) in the 3D
+            // view of a model with two or more objects may be a click that picks an object.
+            if let Some(session) = state.session.as_ref()
+                && orbit
+                && button == egui::PointerButton::Primary
+                && state.tool == ToolKind::Navigate
+                && xf.view == ViewId::Main3D
+                && session.doc.mesh.object_count() >= 2
+            {
+                self.nav_click = Some(NavClick { origin: p.pos, mods: p.mods, camera: session.camera, travel: 0.0 });
+            }
             return;
         }
         self.alt = p.mods.alt;
@@ -428,6 +460,9 @@ impl ToolController {
             Interaction::Orbit(view) => {
                 let delta = p.pos - self.nav_last;
                 self.nav_last = p.pos;
+                if let Some(click) = self.nav_click.as_mut() {
+                    click.travel += delta.length();
+                }
                 if let Some(session) = state.session.as_mut() {
                     camera_of_mut(session, view).orbit(delta);
                 }
@@ -463,6 +498,12 @@ impl ToolController {
                 self.brush_released = true;
                 return;
             }
+        }
+        if let Some(click) = self.nav_click.take()
+            && click.travel < NAV_CLICK_TRAVEL
+            && self.interaction == Interaction::Orbit(ViewId::Main3D)
+        {
+            pick_object(state, xf, click);
         }
         self.go_idle();
     }
@@ -528,6 +569,26 @@ impl ToolController {
     pub fn brush_ring(&self, state: &AppState) -> Option<BrushRing> {
         self.current_slot(state).and_then(|slot| self.tool_ref(slot).brush_ring(state))
     }
+}
+
+/// objects-tabs (8.6): a Navigate click in the 3D view. The camera goes back to where the press found it, a ray is cast
+/// at the press position: on an object a plain click selects it alone, Ctrl or Shift adds or removes it (and the
+/// Objects list is asked to show its row); a plain click on nothing deselects. Actions go through `state.push`.
+fn pick_object(state: &mut AppState, xf: &ViewXform, click: NavClick) {
+    let Some(session) = state.session.as_mut() else { return };
+    session.camera = click.camera;
+    let xf = ViewXform { camera: click.camera, scene_radius: click.camera.scene_radius(&session.doc.mesh.bounds), ..*xf };
+    let add = click.mods.ctrl || click.mods.command || click.mods.shift;
+    let action = match xf.surface_at(&session.doc, session.active_set, click.origin) {
+        Surface::Model(hit) => {
+            let object = session.doc.mesh.tri_object_of(hit.tri);
+            session.object_reveal = Some(object);
+            if add { AppAction::ToggleObjectSelected(object) } else { AppAction::SelectObject(object) }
+        }
+        _ if !add => AppAction::DeselectObjects,
+        _ => return,
+    };
+    state.push(action);
 }
 
 /// An edit error as a sentence for a toast.
@@ -602,6 +663,10 @@ pub(crate) mod test_support {
             scene_generation: 1,
             text_gap: None,
             selected_layers: Vec::new(),
+            selected_objects: Default::default(),
+            object_anchor: None,
+            object_selection_rev: 0,
+            object_reveal: None,
         });
         state
     }
@@ -789,6 +854,244 @@ mod tests {
         tools.discard(&mut state);
         assert!(!tools.is_busy() && !state.doc().unwrap().stroke_active());
         assert_eq!(state.doc().unwrap().history.undo_len(), undo + 1, "the discarded stroke left no entry");
+    }
+
+    /// objects-tabs (8.6): a Navigate click (travel under 4 pt) in the 3D view of a model with two or more objects
+    /// picks the object under the press and puts the camera back; a longer drag is an orbit; Ctrl / Shift toggle; a
+    /// plain click on nothing deselects; no pick on a one-object model, in 2D or in another 3D view.
+    #[test]
+    fn a_navigate_click_picks_an_object_and_a_drag_orbits() {
+        use crate::action::AppAction as A;
+        let mut state = state_with(SampleKind::Objects);
+        state.tool = ToolKind::Navigate;
+        state.session.as_mut().unwrap().camera.pitch = 0.7; // from above: the floor lies behind the cube
+        let xf = xf_3d(&mut state);
+        let mut tools = ToolController::new();
+        let cube = state.doc().unwrap().mesh.objects[1].bounds.center();
+        let at = xf.world_to_screen(cube).expect("the cube is in view");
+        let Surface::Model(hit) = xf.surface_at(state.doc().unwrap(), TextureSetId(0), at) else { panic!("the cube is hit") };
+        assert_eq!(state.doc().unwrap().mesh.tri_object_of(hit.tri), 1);
+        let camera = state.session.as_ref().unwrap().camera;
+
+        // `dx` points of travel in two steps, then the release; returns the queued actions.
+        let click = |state: &mut AppState, tools: &mut ToolController, pos: egui::Pos2, dx: f32, mods: egui::Modifiers| {
+            let xf = ViewXform::for_view(state, ViewId::Main3D).unwrap();
+            let p = pointer(state, &xf, pos, mods);
+            tools.press(state, &xf, &p, egui::PointerButton::Primary);
+            assert_eq!(*tools.interaction(), Interaction::Orbit(ViewId::Main3D));
+            for k in 1..=2 {
+                let q = ViewPointer { pos: pos + egui::vec2(dx * k as f32 / 2.0, 0.0), ..p.clone() };
+                tools.drag(state, &xf, &q);
+            }
+            let end = ViewPointer { pos: pos + egui::vec2(dx, 0.0), ..p };
+            tools.release(state, &xf, &end);
+            assert!(!tools.is_busy());
+            std::mem::take(&mut state.actions)
+        };
+
+        // 3 pt: a click; the camera is restored and the cube's row is to be revealed.
+        let a = click(&mut state, &mut tools, at, 3.0, egui::Modifiers::NONE);
+        assert!(matches!(a[..], [A::SelectObject(1)]), "{a:?}");
+        assert_eq!(state.session.as_ref().unwrap().camera, camera, "the click left the camera where it was");
+        assert_eq!(state.session.as_ref().unwrap().object_reveal, Some(1));
+        // 5 pt: an orbit, nothing picked.
+        let a = click(&mut state, &mut tools, at, 5.0, egui::Modifiers::NONE);
+        assert!(a.is_empty(), "{a:?}");
+        assert_ne!(state.session.as_ref().unwrap().camera, camera, "the drag orbited");
+        state.session.as_mut().unwrap().camera = camera;
+        // Ctrl and Shift toggle.
+        for mods in [egui::Modifiers::CTRL, egui::Modifiers::SHIFT] {
+            let a = click(&mut state, &mut tools, at, 0.0, mods);
+            assert!(matches!(a[..], [A::ToggleObjectSelected(1)]), "{mods:?}: {a:?}");
+        }
+        // On nothing: a plain click deselects, Ctrl does nothing.
+        let empty = xf.rect.min + egui::vec2(3.0, 3.0);
+        assert!(matches!(xf.surface_at(state.doc().unwrap(), TextureSetId(0), empty), Surface::Miss));
+        let a = click(&mut state, &mut tools, empty, 0.0, egui::Modifiers::NONE);
+        assert!(matches!(a[..], [A::DeselectObjects]), "{a:?}");
+        let a = click(&mut state, &mut tools, empty, 0.0, egui::Modifiers::CTRL);
+        assert!(a.is_empty(), "{a:?}");
+        // A hidden cube: the ray passes through it.
+        state.doc_mut().unwrap().set_hidden_objects(&[false, true, false]).unwrap();
+        let a = click(&mut state, &mut tools, at, 0.0, egui::Modifiers::NONE);
+        assert!(matches!(a[..], [A::SelectObject(0)]), "the floor behind the hidden cube: {a:?}");
+        state.doc_mut().unwrap().set_hidden_objects(&[]).unwrap();
+        // Esc (cancel) during the press forgets the click.
+        let p = pointer(&state, &xf, at, egui::Modifiers::NONE);
+        tools.press(&mut state, &xf, &p, egui::PointerButton::Primary);
+        tools.cancel(&mut state);
+        tools.release(&mut state, &xf, &p);
+        assert!(state.actions.is_empty());
+
+        // Another 3D view (Preview) and the 2D view: no pick.
+        let preview = ViewXform { view: ViewId::Preview, ..xf };
+        let p = pointer(&state, &preview, at, egui::Modifiers::NONE);
+        tools.press(&mut state, &preview, &p, egui::PointerButton::Primary);
+        tools.release(&mut state, &preview, &p);
+        assert!(state.actions.is_empty(), "{:?}", state.actions);
+        let xf2 = xf_2d(&mut state);
+        let p = pointer(&state, &xf2, xf2.rect.center(), egui::Modifiers::NONE);
+        tools.press(&mut state, &xf2, &p, egui::PointerButton::Primary);
+        assert_eq!(*tools.interaction(), Interaction::Pan(ViewId::Main2D));
+        tools.release(&mut state, &xf2, &p);
+        assert!(state.actions.is_empty());
+        // Space + left button arrives as the middle button: a pan, no pick.
+        let p = pointer(&state, &xf, at, egui::Modifiers::NONE);
+        tools.press(&mut state, &xf, &p, egui::PointerButton::Middle);
+        tools.release(&mut state, &xf, &p);
+        assert!(state.actions.is_empty());
+
+        // A one-object model: a click is the old zero-length orbit, nothing is picked.
+        let mut state = state_with(SampleKind::Sphere);
+        state.tool = ToolKind::Navigate;
+        let xf = xf_3d(&mut state);
+        let a = click(&mut state, &mut tools, xf.rect.center(), 0.0, egui::Modifiers::NONE);
+        assert!(a.is_empty(), "{a:?}");
+    }
+
+    /// objects-tabs check (plan 3.4): through the tools as the 3D view drives them, the ray of the eyedropper, the fill
+    /// seed, a brush stroke, a projected stamp and a wrapped stamp passes through a hidden object and acts on the object
+    /// behind it. Three Objects seen from above: the cube stands on the floor; every case is run with the cube shown
+    /// (it acts on the cube) and hidden (it acts on the floor under it and never on the cube's texels).
+    #[test]
+    fn every_tool_ray_passes_through_a_hidden_object() {
+        use std::sync::Arc;
+        use wte_core::{SampleSource, SurfaceMode, samples};
+
+        /// Changed composite texels per owning object (Floor, Cube, Ball) between two composites of set 0.
+        fn changed_per_object(doc: &Document, before: &[u8], after: &[u8]) -> [usize; 3] {
+            let set = &doc.sets[0];
+            let mut out = [0; 3];
+            for y in 0..set.height {
+                for x in 0..set.width {
+                    let i = ((y * set.width + x) * 4) as usize;
+                    if before[i..i + 4] == after[i..i + 4] {
+                        continue;
+                    }
+                    if let Some((tri, _)) = set.texel_map.owner(x, y) {
+                        out[doc.mesh.tri_object_of(tri) as usize] += 1;
+                    }
+                }
+            }
+            out
+        }
+        fn composite(state: &mut AppState) -> Vec<u8> {
+            let doc = state.doc_mut().unwrap();
+            doc.recomposite_all();
+            doc.sets[0].composite().data.clone()
+        }
+        /// A fresh trio seen from above, the cube hidden or not, the tool set; the pointer on the cube's centre.
+        fn setup(tool: ToolKind, hidden: bool) -> (AppState, ViewXform, egui::Pos2) {
+            let mut state = state_with(SampleKind::Objects);
+            state.tool = tool;
+            state.session.as_mut().unwrap().camera.pitch = 0.7;
+            let xf = xf_3d(&mut state);
+            let cube = state.doc().unwrap().mesh.objects[1].bounds.center();
+            let at = xf.world_to_screen(cube).expect("the cube is in view");
+            state.doc_mut().unwrap().set_hidden_objects(&[false, hidden, false]).unwrap();
+            let Surface::Model(hit) = xf.surface_at(state.doc().unwrap(), TextureSetId(0), at) else { panic!("a hit") };
+            assert_eq!(state.doc().unwrap().mesh.tri_object_of(hit.tri), if hidden { 0 } else { 1 }, "hidden {hidden}");
+            (state, xf, at)
+        }
+        fn click(state: &mut AppState, tools: &mut ToolController, xf: &ViewXform, at: egui::Pos2) {
+            let p = pointer(state, xf, at, egui::Modifiers::NONE);
+            tools.begin_frame();
+            tools.press(state, xf, &p, egui::PointerButton::Primary);
+            tools.release(state, xf, &p);
+        }
+
+        for hidden in [false, true] {
+            let target = if hidden { 0 } else { 1 };
+
+            // Eyedropper: the cube's top is painted red; hidden, the colour comes from the floor under it.
+            let (mut state, xf, at) = setup(ToolKind::Eyedropper, hidden);
+            let Surface::Model(cube_hit) = ({
+                let doc = state.doc_mut().unwrap();
+                doc.set_hidden_objects(&[false; 3]).unwrap();
+                let s = xf.surface_at(doc, TextureSetId(0), at);
+                doc.set_hidden_objects(&[false, hidden, false]).unwrap();
+                s
+            }) else {
+                panic!("the cube is hit")
+            };
+            let layer = paint_layer(&mut state, TextureSetId(0)).unwrap();
+            let red = [255, 0, 0, 255];
+            state.doc_mut().unwrap().fill(TextureSetId(0), layer, cube_hit.uv.unwrap(), red, wte_core::FillScope::Island).unwrap();
+            state.doc_mut().unwrap().recomposite_all();
+            let mut tools = ToolController::new();
+            click(&mut state, &mut tools, &xf, at);
+            let p = pointer(&state, &xf, at, egui::Modifiers::NONE);
+            let (set, uv) = p.surface.set_uv().unwrap();
+            let floor_colour = state.doc().unwrap().sample_color(set, uv, SampleSource::Composite).unwrap();
+            let picked = match state.actions.as_slice() {
+                [AppAction::SetPrimaryColor(c)] => *c,
+                other => panic!("eyedropper queued {other:?}"),
+            };
+            if hidden {
+                assert_eq!(picked, floor_colour, "the floor's colour");
+                assert_ne!(picked, red, "not the hidden cube's red");
+            } else {
+                assert_eq!(picked, red, "the cube's red");
+            }
+
+            // Fill (Island scope from the 3D view): the seed is the object hit.
+            let (mut state, xf, at) = setup(ToolKind::Fill, hidden);
+            state.tools.fill_scope = wte_core::FillScope::Island;
+            state.colors.primary = [10, 200, 30, 255];
+            let before = composite(&mut state);
+            click(&mut state, &mut ToolController::new(), &xf, at);
+            let after = composite(&mut state);
+            let changed = changed_per_object(state.doc().unwrap(), &before, &after);
+            assert!(changed[target] > 0 && changed.iter().sum::<usize>() == changed[target], "fill, hidden {hidden}: {changed:?}");
+
+            // Brush: a short stroke over the cube's centre paints the object the ray hits.
+            let (mut state, xf, at) = setup(ToolKind::Brush, hidden);
+            state.colors.primary = [0, 0, 255, 255];
+            let before = composite(&mut state);
+            let mut tools = ToolController::new();
+            let p = pointer(&state, &xf, at, egui::Modifiers::NONE);
+            tools.begin_frame();
+            tools.press(&mut state, &xf, &p, egui::PointerButton::Primary);
+            for dx in [2.0, 4.0] {
+                tools.begin_frame();
+                let q = pointer(&state, &xf, at + egui::vec2(dx, 0.0), egui::Modifiers::NONE);
+                tools.drag(&mut state, &xf, &q);
+            }
+            let q = pointer(&state, &xf, at + egui::vec2(4.0, 0.0), egui::Modifiers::NONE);
+            tools.release(&mut state, &xf, &q);
+            let mut frames = 0;
+            while tools.is_busy() && frames < 100_000 {
+                tools.begin_frame();
+                tools.end_frame(&mut state, 0.0);
+                frames += 1;
+            }
+            let after = composite(&mut state);
+            let changed = changed_per_object(state.doc().unwrap(), &before, &after);
+            assert!(changed[target] > 0, "brush, hidden {hidden}: {changed:?}");
+            if hidden {
+                assert_eq!(changed[1], 0, "no paint on the hidden cube: {changed:?}");
+            }
+
+            // A projected and a wrapped image stamp placed at the cube's centre.
+            for mode in [SurfaceMode::Project, SurfaceMode::Wrap] {
+                let (mut state, xf, at) = setup(ToolKind::Stamp, hidden);
+                let img = samples::sample_stamp_image(64);
+                let png = wte_core::encode_png(img.width, img.height, &img.data, wte_core::PngLevel::Fast).unwrap();
+                let blob = state.doc_mut().unwrap().add_image_blob("ring.png", Arc::from(png)).unwrap();
+                state.tools.stamp.source = Some(blob);
+                state.tools.stamp.source_name = "ring.png".to_owned();
+                state.tools.stamp.mode = mode;
+                let before = composite(&mut state);
+                click(&mut state, &mut ToolController::new(), &xf, at);
+                assert!(state.session.as_ref().unwrap().selected_stamp.is_some(), "{mode:?} placed");
+                let after = composite(&mut state);
+                let changed = changed_per_object(state.doc().unwrap(), &before, &after);
+                assert!(changed[target] > 0, "{mode:?}, hidden {hidden}: {changed:?}");
+                if hidden {
+                    assert_eq!(changed[1], 0, "{mode:?}: nothing on the hidden cube: {changed:?}");
+                }
+            }
+        }
     }
 
     #[test]

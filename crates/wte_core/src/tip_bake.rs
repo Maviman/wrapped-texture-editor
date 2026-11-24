@@ -633,6 +633,8 @@ impl Soup {
             sets: Vec::new(),
             bounds: self.used_box(),
             uv_hash: 0,
+            tri_object: vec![0; t],
+            objects: vec![crate::mesh::ObjectInfo { name: "tip".into(), tri_count: t as u32, bounds: self.used_box() }],
         }
     }
 

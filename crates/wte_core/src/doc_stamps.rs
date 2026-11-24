@@ -1401,12 +1401,15 @@ impl Document {
     /// Applies a job's output without the staleness check: the drawn text picture (`store_text_mips`), then the caches
     /// (`apply_bake`). An output that carries an error changes nothing and returns it.
     fn apply_bake_output(&mut self, out: StampBakeOutput) -> Result<(), EditError> {
-        let StampBakeOutput { id, result, picture, wrap, .. } = out;
+        let StampBakeOutput { id, result, picture, wrap, bvh, .. } = out;
         let baked = result?;
         if let Some(drawn) = picture {
             self.store_text_mips(id, drawn.spec, drawn.frame, drawn.full, drawn.mips);
         }
-        if let Some(used) = wrap {
+        // Objects-tabs: a parameterization made with other hidden objects is not cached (the pixels still apply).
+        if let Some(used) = wrap
+            && Arc::ptr_eq(&bvh, &self.bvh)
+        {
             self.store_wrap_param(id, used.param, used.fresh);
         }
         self.apply_bake(id, baked);
@@ -1766,6 +1769,7 @@ impl Document {
             // after Esc / undo is harmless too.
             if out.kind == StampJobKind::Preview
                 && self.same_inputs(&out)
+                && Arc::ptr_eq(&out.bvh, &self.bvh)
                 && let Some(used) = out.wrap
                 && self.wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
             {
@@ -1778,12 +1782,13 @@ impl Document {
             return WrapPreview::Stale;
         }
         let due_again = self.stamp(id).is_some_and(|s| *s != out.object);
-        let StampBakeOutput { result, wrap, .. } = out;
+        let StampBakeOutput { result, wrap, bvh, .. } = out;
         match result {
             Ok(baked) => self.apply_bake(id, baked),
             Err(e) => log::warn!("stamp {}: the preview bake failed: {e}", id.0),
         }
         if let Some(used) = wrap
+            && Arc::ptr_eq(&bvh, &self.bvh)
             && self.wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
         {
             self.store_wrap_param(id, used.param, used.fresh);
@@ -1807,7 +1812,7 @@ impl Document {
     /// Round 8 (3.4): caches the parameterization of a ParamOnly job's output when it serves stamp's current placement
     /// on this document's mesh and maps (true); no pixel changes.
     pub fn apply_wrap_param(&mut self, out: StampBakeOutput) -> bool {
-        if out.kind != StampJobKind::ParamOnly || !self.same_inputs(&out) {
+        if out.kind != StampJobKind::ParamOnly || !self.same_inputs(&out) || !Arc::ptr_eq(&out.bvh, &self.bvh) {
             return false;
         }
         let id = out.id;

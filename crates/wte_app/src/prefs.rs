@@ -17,6 +17,9 @@ pub const MAX_WINDOW_SIDE: f32 = 8192.0;
 /// Most shape files whose closing choice is remembered (`Prefs::brush_shape_close`); the remembered shape's own entry
 /// is always kept.
 pub const MAX_SHAPE_CLOSE: usize = 32;
+/// Limits of a remembered side-panel split (`Prefs::side_split`, points).
+pub const MIN_SIDE_SPLIT: f32 = 100.0;
+pub const MAX_SIDE_SPLIT: f32 = 2000.0;
 
 /// `%APPDATA%\WrappedTextureEditor` (None when APPDATA is not set).
 pub fn app_data_dir() -> Option<PathBuf> {
@@ -98,6 +101,9 @@ pub fn from_json(text: &str) -> Result<Prefs, serde_json::Error> {
     prefs.eraser = prefs.eraser.sanitized();
     prefs.brush_shape_close.retain(|_, close| *close != CloseMode::Refuse);
     trim_close(&mut prefs);
+    // objects-tabs (WP4): the user's split is a finite height in `100..=2000` points (the side panel clamps it to the
+    // window again).
+    prefs.side_split = prefs.side_split.filter(|v| v.is_finite()).map(|v| v.clamp(MIN_SIDE_SPLIT, MAX_SIDE_SPLIT));
     Ok(prefs)
 }
 
@@ -299,5 +305,33 @@ mod tests {
         let read = from_json(&text).unwrap();
         assert_eq!(read.brush_shape_close.len(), MAX_SHAPE_CLOSE);
         assert_eq!(stored_close(&read, Path::new(r"E:\s\g39.obj")), CloseMode::RoundedCaps);
+    }
+
+    /// objects-tabs (WP4, plan 6.5): the side panel's tabs and split round-trip and read leniently: an unknown tab name
+    /// is the default, a split that is not a number is automatic, one out of range is clamped; the other keys still
+    /// read.
+    #[test]
+    fn side_panel_tabs_and_split_round_trip_and_read_leniently() {
+        use crate::state::{AppState, SideTab, UpperTab};
+        let prefs = Prefs {
+            side_upper_tab: UpperTab::Objects,
+            side_lower_tab: "brush".to_owned(),
+            side_split: Some(333.0),
+            ..Prefs::default()
+        };
+        assert_eq!(from_json(&to_json(&prefs)).unwrap(), prefs);
+        let state = AppState::new(prefs, true);
+        assert_eq!((state.upper_tab, state.side_tab), (UpperTab::Objects, SideTab::Brush));
+
+        let p = from_json(r#"{ "side_upper_tab": "palette", "side_lower_tab": 7, "side_split": "tall", "keep_backup": true }"#).unwrap();
+        assert_eq!((p.side_upper_tab, p.side_lower_tab.as_str(), p.side_split), (UpperTab::Tool, "layers", None));
+        assert!(p.keep_backup, "the other keys still read");
+        let p = from_json(r#"{ "side_upper_tab": "texture_sets", "side_lower_tab": "objects", "side_split": 99999 }"#).unwrap();
+        assert_eq!((p.side_upper_tab, p.side_lower_tab.as_str(), p.side_split), (UpperTab::TextureSets, "layers", Some(MAX_SIDE_SPLIT)));
+        assert_eq!(from_json(r#"{ "side_split": 3 }"#).unwrap().side_split, Some(MIN_SIDE_SPLIT));
+        assert_eq!(from_json(r#"{ "side_split": null }"#).unwrap().side_split, None);
+        // A file of an older build has none of the keys.
+        let old = from_json(r#"{ "flags_wireframe": true }"#).unwrap();
+        assert_eq!((old.side_upper_tab, old.side_lower_tab.as_str(), old.side_split), (UpperTab::Tool, "layers", None));
     }
 }

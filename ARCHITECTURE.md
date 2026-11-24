@@ -201,6 +201,46 @@ undo step (`Document::remove_layers` / `duplicate_layers`, `group_edits`); Merge
 process is not running (`export::remove_stale_temps`). (8) "Exported 1 file". A read-only or blocked folder fails before
 anything is written (`preflight`, 7.4).
 
+### 1.9 Objects and tab groups (branch `objects-tabs`, `docs/plans/OBJECTS_TABS_PLAN.md`)
+
+Two features, planned 2026-11-24 (gate report `docs/reports/OBJECTS_TABS_GATE_REPORT.md`):
+
+1. **Objects.** The importers keep a file's object structure (OBJ `o` / `g`, glTF mesh nodes, FBX `Model`s; 5.21, 6.1
+   step 9). `MeshData::tri_object` / `MeshData::objects` carry an object index per triangle; triangle order, vertex order
+   and `uv_hash` do not change, so `IMPORTER_VERSION` stays 2. The user selects objects (the Objects tab's list, or a
+   click without a drag with the Navigate tool in the 3D view, 8.6) and can **Hide selected (H), Isolate (Shift+H), Show
+   all (Alt+H), Frame selection (Shift+F)** (F, Frame Model, frames the visible objects). Hidden objects are not drawn
+   (a compacted visible index buffer, wire runs per object, 8.4) and rays pass through them: the hidden set is a bit mask
+   inside `Bvh` (5.8, 6.2), so every ray and sphere query skips hidden triangles and every worker job sees the snapshot of
+   the `Arc<Bvh>` it was made with. **Selecting never restricts painting**; a translucent tint marks the selection only
+   while the Objects tab is shown or the Navigate tool is active (8.5).
+2. **Tab groups.** The right side panel is two Photoshop-style tab groups with a draggable split (8.7 "Side panel"):
+   upper **Tool | Color | Texture sets | Objects**, lower **Layers | Brush | Text** (the strip and one tab rule of round 4,
+   unchanged). A tool change never changes the upper tab; a click on the toolbar's primary colour chip shows the Color
+   tab; the Text tool's focus request shows the Tool tab.
+
+The rules for hidden objects (the contract; 5.14 holds the same table):
+
+| Operation | Behaviour with hidden objects |
+|---|---|
+| Pick / hover / eyedropper / fill seed / stamp and text placement / gizmo drag / text-path points in the 3D view | the ray passes through hidden objects and hits what is behind them |
+| Brush and eraser in 3D | hidden triangles are never dab candidates: no paint, no shadowing of "Same side". Objects that share texels (instanced meshes, mirrored UVs) still share paint |
+| Projected stamp / text bake | hidden triangles receive nothing and do not occlude; `fit_stamp_depth` fits to visible surfaces |
+| Wrap | hidden triangles are never part of the patch, never the anchor, never a Jump target |
+| When a stamp is (re)baked | against the visibility when the bake job is made; changing visibility never re-bakes existing stamps; `project::load` keeps saved caches |
+| Fill (Layer / Island scope), 2D (UV) brush, UV stamps | texture-space operations: not masked |
+| Export, composite, save, thumbnails | unaffected |
+| Undo / redo / revision / modified flag | unaffected by hide / show / select |
+
+Hiding and selecting are **view state**: not in history, no revision change, `is_modified` untouched (like the camera
+and the layer multi-selection of 1.8). The selection is not saved; the names of the hidden objects are saved in the
+app's `UiState` inside `Manifest::ui_state` (7.2, 8.9) and restored on open with one Info toast. `FORMAT_VERSION`
+stays 3 and `required_reader` is unchanged (7.3): older builds ignore the key and show everything. The tab choice and
+the split are prefs (8.9), never written by self-test runs. **Superseded:** the round-3 user decision "the colour picker
+stays visible in the side panel whatever tool is active" (R3-10, `HANDOFF.md` section 6) is replaced by the user's
+2026-11-24 choice of Color as one tab of the upper group; mitigations: the toolbar chip, tool changes keep the tab, and
+at 1280x800 and above the whole picker is on screen whenever the Color tab is shown (guarantee G1, 8.7).
+
 ---
 
 ## 2. Workspace layout
@@ -235,15 +275,15 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `progress.rs` | S | `Progress` trait, `NoProgress` |
 | `pixel.rs` | S | `PixelBuf`, `CroppedBuf`, `PixelView` and their trivial accessors (fully implemented) |
 | `blob.rs` | S | `BlobStore`, `Blob`, `BlobKind` (fully implemented + tests; round 4 T3: allocation check before hashing) |
-| `mesh.rs` | S | `MeshData`, `MaterialSlot`, `SetInfo`, `TriFlags`, `RawMesh`, `RenderVertex`, `WireEdge`, `UvStats` + trivial accessors |
+| `mesh.rs` | S | `MeshData`, `MaterialSlot`, `SetInfo`, `TriFlags`, `RawMesh`, `RenderVertex`, `WireEdge`, `UvStats` + trivial accessors; objects-tabs: `ObjectInfo`, `RawObjects`, `MeshData::{tri_object, objects}` |
 | `layer.rs` | S | `Layer`, `LayerKind`, `BlendMode`, `TextureSet` struct |
 | `stamp.rs` | S; round 6 A | `StampObject`, `StampSource`, `Placement`, `Projector` (round 6: `mode`, `wrap`), `SurfaceMode`, `WrapOptions`, `UvPlacement`, `BakeQuality` (types only) |
 | `document.rs` | S | `Document`, `DocumentSnapshot`, `Commit`, lookup accessors, id allocation, revision tracking, `guard_no_stroke`, `mark_layer_dirty`, `debug_check_structure` |
-| `testutil.rs` | S | test-only helpers: temp dir under `target/`, image comparison (PSNR), deterministic RNG, `doc_from_raw`, `imported_from_raw` |
-| `mesh_build.rs` | C1 | `normalize`, UV tile normalisation, normals, fallback UVs, `wire_edges`, `render_vertices`, `uv_hash`, `uv_layout_image` |
-| `bvh.rs` | C1 | `Bvh`, `Hit`, `Cull`, raycast / occluded / sphere query |
+| `testutil.rs` | S | test-only helpers: temp dir under `target/`, image comparison (PSNR), deterministic RNG, `doc_from_raw`, `imported_from_raw` (and their `_objects` forms) |
+| `mesh_build.rs` | C1 | `normalize`, UV tile normalisation, normals, fallback UVs, `wire_edges`, `render_vertices`, `uv_hash`, `uv_layout_image`; objects-tabs: `normalize_with_objects` (6.1 step 9) |
+| `bvh.rs` | C1 | `Bvh`, `Hit`, `Cull`, raycast / occluded / sphere query; objects-tabs: `TriMask`, `Bvh::with_hidden` (every query skips hidden triangles) |
 | `texel_map.rs` | C1 | `TexelMap`, `Fragment`, `raster_tri`, gutter build, `locate` |
-| `samples.rs` | C1; round-4 additions S | procedural meshes and images, `to_obj`; the brush fixtures of FEATURE_BRUSH 8 and the writers `to_gltf`, `to_glb`, `to_fbx_ascii` |
+| `samples.rs` | C1; round-4 additions S | procedural meshes and images, `to_obj`; the brush fixtures of FEATURE_BRUSH 8 and the writers `to_gltf`, `to_glb`, `to_fbx_ascii`; objects-tabs: `object_trio`, `to_obj_objects` |
 | `pixel_ops.rs` | C1 | `PremulMips`, sampling, resize, content / non-zero bounds, crop, thumbnail, `dilate_islands` |
 | `blend.rs` | C2 | per-pixel blend kernels, PSD/ORA blend-mode names |
 | `composite.rs` | C2 | `recomposite_all`, `take_gpu_dirty`, `flatten_layers` |
@@ -303,12 +343,13 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `tests/end_to_end.rs` | C7 | the whole-pipeline test of section 9.1 ("end to end") |
 | `tests/project_roundtrip.rs` | C7; round 4 T5 | project tests that need painted, stamped and text content plus re-bake on load (section 9.1) |
 | `tests/brush_tips.rs` | B3 (round 4) | end-to-end tests of brush tips (FEATURE_BRUSH 8.1, 8.5): C3, C5, C10, C11, C14, C15, C20 to C22, C24, C26, `strokes_save_identically_through_both_entry_points` |
+| `tests/objects.rs` | objects-tabs WP2 | hidden objects on the "Three Objects" sample: view state, rays, brush, projected stamp + depth fit, wrap (with and without Jump), bake jobs keep their visibility, thread-count determinism with a mask |
 
 ### 2.2 `crates/wte_app/src`
 
 | File | Owner | Owns |
 |---|---|---|
-| `state.rs` | S | `AppState`, `Session`, `ViewMode`, `ViewId`, `ViewFlags`, `ShadingMode`, `Backdrop`, `CameraPreset`, `ToolKind`, tool settings (round 4: `BrushType`, `ShapeChoice`, `BrushSettings::sanitized`), `ColorState`, `HoverInfo`, `OrbitCamera`, `UvViewState`, `Dialog`, `Pending`, `Prefs`, `BusyInfo`; round 4: `SideTab`, `TextPage`, `SideRects`, `BrushShapeState`, `ReadyShape`, `PendingShape`, `OpeningsDialogState`, `TextGapSel`, `FontSampleState`, `FontSampleCell`, `ToolProbe` (types + `Default`s + `Session::validate`) |
+| `state.rs` | S | `AppState`, `Session` (objects-tabs: `selected_objects`, `object_anchor`, `object_selection_rev`, `object_reveal`), `ViewMode`, `ViewId`, `ViewFlags`, `ShadingMode`, `Backdrop`, `CameraPreset`, `ToolKind`, tool settings (round 4: `BrushType`, `ShapeChoice`, `BrushSettings::sanitized`), `ColorState`, `HoverInfo`, `OrbitCamera`, `UvViewState`, `Dialog`, `Pending`, `Prefs`, `BusyInfo`; round 4: `SideTab`, `TextPage`, `SideRects` (objects-tabs: `UpperTab`, the upper group's rects), `BrushShapeState`, `ReadyShape`, `PendingShape`, `OpeningsDialogState`, `TextGapSel`, `FontSampleState`, `FontSampleCell`, `ToolProbe` (types + `Default`s + `Session::validate`) |
 | `action.rs` | S | `AppAction`, `ToastLevel` (types only) |
 | `main.rs` | A1 | logging to file, panic hook, startup-failure message box, `NativeOptions`, `eframe::run_native`, exit code |
 | `crash.rs` | A1 | native crash recorder (vectored handler + unhandled filter, report + minidump), ring of recent log lines / actions, startup diagnostics (graphics env vars, hook modules), `WTE_DEBUG_NATIVE_CRASH` test hook (8.3) |
@@ -323,29 +364,32 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `toasts.rs` | A1 | `Toasts` queue (`push`, `error_count`) and drawing |
 | `theme.rs` | A1 | visuals, runtime window icon, vector tool icons |
 | `dnd.rs` | A1 | file drag-and-drop routing |
+| `object_ops.rs` | objects-tabs WP3a | the object commands as plain functions (8.3 "Objects"): select / toggle / range / all / none on `Session`; `set_hidden`, `set_visible`, `hide_selected`, `isolate_selected`, `show_all`, `frame_selection` on `AppState`; `hidden_names` / `hidden_from_names` / `restored_hidden_text` for `UiState` (8.9) |
 | `brush_flows.rs` | B5 (round 4) | the brush shape loaded from a model file: Load / quiet reload / Remove, the bake job and its request numbers, the event table of FEATURE_BRUSH 4.4, the closing-openings question (`Dialog::CloseOpenings`, `AnswerOpenings`, the choice per file), `startup`, `sync_prefs` |
 | `text_ops.rs` | T7 (round 4) | the font-sample job of the font picker and its atlas textures |
 | `gpu/mod.rs` | A2 | `Gpu` (device, queue, egui renderer handle) |
 | `gpu/params.rs` | S | `View3dParams`, `ViewUvParams`, `BrushRing` (plain data crossing the view/gpu boundary; imports `ShadingMode` / `Backdrop` from `state.rs`) |
 | `gpu/targets.rs` | A2 | `ViewTarget` (offscreen colour + MSAA + depth, egui texture id) |
 | `gpu/textures.rs` | A2 | `SetTexture` (dirty-rect upload, mip regeneration with the mip blit pipeline) |
-| `gpu/scene.rs` | A2 | `GpuScene` (mesh buffers, wire instance buffers, per-set textures), `sync` |
-| `gpu/renderer.rs` | A2; round 4 B6 | `Renderer`: pipelines, uniforms, `render_3d`, `render_uv`; the ring's side filter |
-| `gpu/shaders/mesh.wgsl`, `lines.wgsl`, `uvview.wgsl`, `background.wgsl`, `blit.wgsl` | A2 | shaders (`include_str!`) |
+| `gpu/scene.rs` | A2; objects-tabs WP3b | `GpuScene` (mesh buffers, wire instance buffers, per-set textures), `sync`; objects-tabs: `sync_objects` (visible index buffer, wire runs per object, highlight index buffer), the pure helpers `visible_draws`, `selected_indices`, `object_runs`, `visible_runs`, `WireList` |
+| `gpu/renderer.rs` | A2; round 4 B6; objects-tabs WP3b | `Renderer`: pipelines, uniforms, `render_3d`, `render_uv`; the ring's side filter; objects-tabs: the tint pipeline |
+| `gpu/shaders/mesh.wgsl`, `lines.wgsl`, `uvview.wgsl`, `background.wgsl`, `blit.wgsl`, `tint.wgsl` | A2; `tint.wgsl` objects-tabs WP3b | shaders (`include_str!`; `tint.wgsl` = the selection tint) |
 | `view/mod.rs` | A3 | `ViewCx`, `central` (layout, two-phase update), view tab strip |
 | `view/camera.rs` | A3 | `impl OrbitCamera` (matrices, rays, orbit/pan/zoom, framing, projection) |
 | `view/view3d.rs` | A3 | 3D view: input routing, hover raycast, overlays |
 | `view/view2d.rs` | A3 | UV view: pan/zoom, cursor -> UV, overlays |
 | `view/preview.rs` | A3 | `preview_widget` (clean, self-contained orbit view; also embedded in the export dialog), Preview mode strip |
 | `view/gizmo.rs` | A3 | stamp gizmo geometry, hit-testing and drawing (3D and UV) |
-| `tools/mod.rs` | A3 | `Tool` trait, `ToolController`, `ViewXform`, `ViewPointer`, `Surface`, `Interaction` |
+| `tools/mod.rs` | A3; objects-tabs WP3b | `Tool` trait, `ToolController`, `ViewXform`, `ViewPointer`, `Surface`, `Interaction`; objects-tabs: the Navigate click that picks an object (`NavClick`, `pick_object`) |
 | `tools/brush.rs` | A3; round 4 B7 | brush + eraser: the tip of the settings, stroke pacing, the shape cursor, the wheel gestures |
 | `tools/eyedropper.rs` | A3 | eyedropper |
 | `tools/fill.rs` | A3 | fill |
 | `tools/stamp_place.rs` | A3; round 4 T7 | image-stamp and text-stamp placement; the see-through text under the pointer |
 | `tools/transform.rs` | A3; round 4 T7 | select / move / scale / rotate stamps |
 | `tools/text_path.rs` | T7 (round 4) | the round points of a text on a Curve (drag in the view) |
-| `panels/mod.rs` | A4; round 4 S2, B4 | `panels::show_*` entry points; the side panel's tab strip Layers / Brush / Text and `side_rects` |
+| `panels/mod.rs` | A4; round 4 S2, B4; objects-tabs WP4 | `panels::show_*` entry points, `PanelState`, `sync_prefs`, the one tab rule (`shown_tab`) |
+| `panels/side_groups.rs` | objects-tabs WP4 | the side panel as two tab groups (8.7 "Side panel"): upper strip Tool / Color / Texture sets / Objects and its pages, the lower group Layers / Brush / Text, the split (drag, double-click = automatic), the sizing functions (`layers_area_*`, `upper_keep`, `tab_area_height`, `color_square_side`), `side_rects` |
+| `panels/objects.rs` | objects-tabs WP5 | the Objects tab (8.7): header line, virtualized rows with eyes, click / Ctrl / Shift / double-click, footer Hide / Isolate / Show all / Frame, reveal |
 | `panels/menu_bar.rs`, `toolbar.rs`, `tool_options.rs`, `layers.rs`, `texture_sets.rs`, `color.rs`, `status_bar.rs` | A4; round 4 B4 | one panel each (`layers.rs`: multi-select and the row menu "Export this layer..." / "Export selected layers... (N)", 8.7) |
 | `panels/brush_tab.rs` | B4 (round 4) | the Brush tab |
 | `panels/text_block.rs` | T6 (round 4) | the Text block of the tool options: `target`, `show` (four rows), the spec helpers `current_spec` / `draft_spec` / `write_draft` / `live_edit` / `click_edit`, the font rules `candidates` / `resolve_face` / `resolve_font` / `style_click`, `TextPanelState`, `GapBuffer` with its history |
@@ -993,6 +1037,25 @@ pub struct MeshData {
     pub sets: Vec<SetInfo>,                    // index == TextureSetId.0
     pub bounds: Aabb,
     pub uv_hash: u64,                          // fnv1a64 over indices, uv bits and per-triangle set ids
+    // objects-tabs (6.1 step 9): object index per triangle (index into `objects`), same order as `tri_material`; not
+    // part of `uv_hash`. `objects`: at least one entry for a non-empty mesh, order of first appearance in the raw
+    // triangle list.
+    pub tri_object: Vec<u32>,
+    pub objects: Vec<ObjectInfo>,
+}
+/// One object of the model (an OBJ object / group, a glTF mesh node, an FBX Model).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectInfo {
+    pub name: String,                          // unique within the mesh, never empty
+    pub tri_count: u32,
+    pub bounds: Aabb,                          // bounds of the object's triangles (world space, transforms baked)
+}
+/// Importer-side object data, parallel to `RawMesh::triangles` (`RawMesh` / `RawTriangle` themselves are unchanged).
+/// `Default` = no object structure.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RawObjects {
+    pub tri_object: Vec<u32>,                  // one entry per raw triangle: index into `names`; empty = one unnamed object
+    pub names: Vec<String>,                    // as the file gives them; may be empty strings or repeat
 }
 impl MeshData {                                 // trivial accessors, implemented by the scaffold
     pub fn tri_count(&self) -> u32;
@@ -1003,6 +1066,8 @@ impl MeshData {                                 // trivial accessors, implemente
     pub fn tri_set(&self, t: TriId) -> Option<TextureSetId>;   // None for NO_UV triangles and set-less materials
     pub fn geo_normal(&self, t: TriId) -> Vec3;                // unit; Vec3::Y for degenerate
     pub fn diag(&self) -> f32;                                 // bounds.diagonal().max(1e-12)
+    pub fn object_count(&self) -> u32;                         // objects.len()
+    pub fn tri_object_of(&self, t: TriId) -> u32;              // tri_object[t], 0 when the vector is short (hand-built test meshes)
 }
 
 /// GPU vertex (32 bytes). Produced by the core so the app needs no knowledge of the mesh layout.
@@ -1013,7 +1078,8 @@ pub struct RenderVertex { pub pos: [f32; 3], pub normal: [f32; 3], pub uv: [f32;
 /// One unique edge per UV side: a seam yields two entries (same positions, different UVs).
 #[derive(Copy, Clone, Debug)]
 pub struct WireEdge { pub a: [f32; 3], pub b: [f32; 3], pub uv_a: [f32; 2], pub uv_b: [f32; 2],
-                      pub kind: EdgeKind, pub set: Option<TextureSetId> }
+                      pub kind: EdgeKind, pub set: Option<TextureSetId>,
+                      pub object: u32 /* objects-tabs: the object of the emitted triangle side (6.1 wire_edges) */ }
 
 /// Importer output before normalization: a triangle soup.
 #[derive(Clone, Debug, Default)]
@@ -1036,8 +1102,11 @@ pub struct NormalizeOptions {
     pub model_name: String,              // names the fallback-UV set and sets without texture or material name; "" => "Texture"
     pub texture_names: Vec<String>,      // file stems, index = RawMaterial::texture; a missing index falls back to the material name
 }
-/// Runs the pipeline of section 6.1. Deterministic for identical input.
+/// Runs the pipeline of section 6.1. Deterministic for identical input. One object (step 9).
 pub fn normalize(raw: RawMesh, opts: &NormalizeOptions) -> (MeshData, MeshReport);
+/// objects-tabs: `normalize` with object data; `normalize(raw, opts) == normalize_with_objects(raw, &RawObjects::default(), opts)`.
+/// The object data never changes triangle order, vertex order or `uv_hash` (`IMPORTER_VERSION` stays 2).
+pub fn normalize_with_objects(raw: RawMesh, objects: &RawObjects, opts: &NormalizeOptions) -> (MeshData, MeshReport);
 impl MeshData {
     pub fn render_vertices(&self) -> Vec<RenderVertex>;       // 1:1 with positions/normals/uvs
     pub fn wire_edges(&self) -> Vec<WireEdge>;                // de-duplicated, deterministic order
@@ -1075,9 +1144,25 @@ impl Hit {
     pub fn surface_normal(&self) -> Vec3;
 }
 
-pub struct Bvh { /* private: nodes, tri_order */ }             // Send + Sync
+/// objects-tabs: a set of triangles as a bit set (the hidden triangles of a `Bvh`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriMask { /* private: bits: Vec<u64>, len: u32, count: u32 */ }
+impl TriMask {
+    pub fn from_fn(tri_count: u32, f: impl Fn(TriId) -> bool) -> TriMask;
+    pub fn get(&self, t: TriId) -> bool;                      // false beyond len
+    pub fn count(&self) -> u32;
+    pub fn is_empty(&self) -> bool;
+}
+
+pub struct Bvh { /* private: tree: Arc<BvhTree { nodes, tri_order }>, hidden: Option<Arc<TriMask>> */ }   // Send + Sync
 impl Bvh {
-    pub fn build(mesh: &MeshData) -> Bvh;
+    pub fn build(mesh: &MeshData) -> Bvh;                     // hidden: None
+    /// objects-tabs: the same tree with another hidden set (`None` or an empty mask = nothing hidden, stored as `None`).
+    /// O(1): the tree is shared. **Every query below skips the hidden triangles** (rays pass through them, any-hit
+    /// queries ignore them, sphere queries omit them); with `None` the results are bit-identical to a plain tree.
+    pub fn with_hidden(&self, hidden: Option<Arc<TriMask>>) -> Bvh;
+    pub fn hidden(&self) -> Option<&TriMask>;
+    pub fn is_hidden(&self, t: TriId) -> bool;
     /// Nearest hit with t in [t_min, t_max].
     pub fn raycast(&self, mesh: &MeshData, ray: &Ray, t_min: f32, t_max: f32, cull: Cull) -> Option<Hit>;
     /// Any-hit with early out.
@@ -1157,6 +1242,14 @@ pub fn sample_stamp_image(size: u32) -> PixelBuf;  // ring + arrow with soft alp
 /// OBJ + MTL text for a raw mesh (writes v = 1 - v; triangles without UVs are written as faces without `vt`).
 /// `texture_names[i]` is the map_Kd for raw texture index i.
 pub fn to_obj(raw: &RawMesh, mtl_name: &str, texture_names: &[String]) -> (String, String);
+/// objects-tabs: `to_obj` plus an `o <name>` line whenever the object changes (`to_obj` itself stays byte-identical).
+pub fn to_obj_objects(raw: &RawMesh, objects: &RawObjects, mtl_name: &str, texture_names: &[String]) -> (String, String);
+/// objects-tabs: three separate shells in disjoint UV regions of one texture (one material "Trio", one set):
+/// "Floor" (8 x 8 grid, x, z in -3..3, y = 0, u 0.5..0.99), "Cube" (closed unit cube, x, z in -0.5..0.5, y in 0..1, in the
+/// middle of the floor, u 0..0.5, v 0..0.5), "Ball" (uv_sphere r 0.5 at (1.75, 0.5, 0), u 0.01..0.49, v 0.51..0.99).
+/// A top-down ray through the cube hits the cube first and the floor behind it.
+pub fn object_trio() -> (RawMesh, RawObjects);
+pub const OBJECT_TRIO_NAMES: [&str; 3];            // ["Floor", "Cube", "Ball"]
 // Round 4 (FEATURE_BRUSH 8), paint fixtures with documented UV islands:
 pub fn thin_slab(thickness: f32) -> RawMesh;       // 1 x 1 plate, x, y in 0..1, z in -thickness..0; seam_cube's six islands
 pub fn fold(inner_angle_deg: f32) -> RawMesh;      // two unit quads sharing the edge x = 1; angle between the front faces
@@ -1682,6 +1775,7 @@ pub struct Document {
 // (6.5a "Reuse"): derived data, not in snapshots, not saved, not part of the structure state; at most 16 entries, least
 // recently used dropped first; an entry is used only when it `serves` the stamp's placement; `remove_stamp` drops its
 // entry and every insertion drops entries of stamps that no longer exist. (In `bakes` so that `Document` keeps its size.)
+// objects-tabs: `WrapCache::clear()` drops every entry; `set_hidden_objects` calls it on a change.
 // Round 8: `BakeSets` also holds `defer_wrap_previews: bool` (`set_defer_wrap_previews`) and `edit_serial: u64` (bumped
 // when the first stamp joins `preview_baked`, i.e. per pending edit; a wrap Preview job's output applies only in the
 // edit it was made in).
@@ -1700,7 +1794,7 @@ impl Document {                                     // implemented by the scaffo
     pub fn stamp_locked(&self, id: StampId) -> bool;                              // any linked layer is locked (5.20)
     pub fn texel_maps(&self) -> Vec<Arc<TexelMap>>;                               // index == set id
     pub fn texel_world_size(&self, set: TextureSetId) -> f32;                     // texel_map.stats.texel_world
-    pub fn raycast(&self, ray: &Ray) -> Option<Hit>;                              // nearest hit, Cull::None, t in [1e-5*diag, INF)
+    pub fn raycast(&self, ray: &Ray) -> Option<Hit>;                              // nearest hit, Cull::None, t in [1e-5*diag, INF); passes hidden objects
     pub fn revision(&self) -> u64;                                                // bumped by every content mutation, undo and redo
     pub fn history_state(&self) -> u64;                                           // id of the current history state (6.7)
     pub fn is_modified(&self) -> bool;                                            // history_state() != saved_revision (the saved state id)
@@ -1720,6 +1814,39 @@ impl Document {                                     // implemented by the scaffo
     /// flush_pending_edit and from_parts; a no-op in release builds.
     pub(crate) fn debug_check_structure(&self);
 }
+
+// objects-tabs (docs/plans/OBJECTS_TABS_PLAN.md 3.2): hidden objects. Private fields `hidden_objects: Vec<bool>` (one per
+// `mesh.objects`) and `visibility_generation: u64`, set in `from_parts` (all false, 0); not in `DocumentSnapshot`,
+// `StructureSnapshot`, the history or the manifest (the app keeps hidden object *names* in `ui_state`, 8.9).
+impl Document {
+    pub fn hidden_objects(&self) -> &[bool];                  // all false in a new or loaded document
+    pub fn object_hidden(&self, object: u32) -> bool;         // false for an unknown index
+    pub fn hidden_object_count(&self) -> usize;
+    pub fn visibility_generation(&self) -> u64;               // 0 new; +1 at every set_hidden_objects that changed something
+    /// Replaces the hidden flags (a slice of another length is padded with false / cut). Ok(false) = nothing changed.
+    /// Err(StrokeInProgress) while a stroke is open (guard_no_stroke). View state: no history entry, no revision change,
+    /// is_modified unaffected. Swaps `self.bvh` for `bvh.with_hidden(mask)` (mask = TriMask::from_fn(tri_count, hidden
+    /// of tri_object_of(t)); None when nothing is hidden) and clears the wrap cache (`WrapCache::clear`: `serves` does not
+    /// know about visibility). The pending edit is left alone (its later bake uses the new mask).
+    pub fn set_hidden_objects(&mut self, hidden: &[bool]) -> Result<bool, EditError>;
+    pub fn visible_bounds(&self) -> Aabb;                     // union of visible objects; mesh.bounds when none or all are hidden
+    pub fn objects_bounds(&self, objects: &[u32]) -> Option<Aabb>;   // union of the listed visible objects; None when none
+}
+```
+**Rules for hidden objects** (objects-tabs plan 3.4; the contract):
+
+| Operation | Behaviour with hidden objects |
+|---|---|
+| Pick / hover / eyedropper / fill seed / stamp and text placement / gizmo drag / text-path points in the 3D view | the ray passes through hidden objects and hits what is behind them (`Document::raycast`, every BVH ray query) |
+| Brush and eraser in 3D | hidden triangles are never dab candidates: no paint, no shadowing of "Same side" (6.4). Objects that share texels (instanced meshes, mirrored UVs) still share paint: a property of the UVs |
+| Projected stamp / text bake | hidden triangles receive nothing and do not occlude; `fit_stamp_depth` fits to visible surfaces (6.5) |
+| Wrap | hidden triangles are never part of the patch, never the anchor, never a Jump target (6.5a) |
+| When a stamp is (re)baked | against the visibility at the moment the bake job is made (the job's `Arc<Bvh>`). Changing visibility never re-bakes existing stamps; undo / redo restore stored pixels; `project::load` keeps saved caches, and the rare load-time re-bake of a damaged cache runs with everything visible (the app restores visibility after `load` returns) |
+| Fill (Layer / Island scope), 2D (UV) brush, UV stamps | texture-space operations: not masked (the seed comes from a visible surface) |
+| Export, composite, save, thumbnails | unaffected |
+| Undo / redo / revision / modified flag | unaffected by hide / show / select |
+
+```rust
 
 /// Immutable copy for background save/export. Send + Sync + 'static.
 #[derive(Clone)]
@@ -1783,7 +1910,9 @@ synchronous wrap path, or by the app's warm-up thread) and shared with every job
 pub const MAX_TEXTURE_SIDE: u32 = 8192;
 pub const DEFAULT_BLANK_SIDE: u32 = 1024;
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)] pub enum SampleKind { Sphere, Cube, TwoMaterial }
+#[derive(Copy, Clone, PartialEq, Eq, Debug)] pub enum SampleKind { Sphere, Cube, TwoMaterial, Objects }
+// Objects (objects-tabs): `object_trio()` named "objects", written with `to_obj_objects` and read back by the OBJ importer
+// (objects "Floor", "Cube", "Ball"), texture "objects_checker.png".
 
 #[derive(Clone, Debug)]
 pub enum TextureChoice {
@@ -2257,8 +2386,11 @@ impl StampBakeJob {
     pub fn run(self) -> StampBakeOutput;            // on the calling thread's rayon pool (the synchronous path); never creates a pool
     pub fn run_isolated(self) -> StampBakeOutput;   // `pool.install(|| self.run())` in the core's bake pool (4.6); what the app's worker calls
 }
-/// Result of a job. Send + 'static. Carries the job's identity (id, object, mesh and map Arcs), the baked buffers
+/// objects-tabs: a job carries the BVH (and so the hidden objects) of the moment it is made; it bakes against that
+/// visibility whenever it runs.
+/// Result of a job. Send + 'static. Carries the job's identity (id, object, mesh, bvh and map Arcs), the baked buffers
 /// `Vec<(TextureSetId, SparseBuf)>` or the error, for a drawn text its picture (spec, mips, frame, full), and `elapsed()`.
+/// objects-tabs: its wrap parameterization is cached only while `Arc::ptr_eq(out.bvh, doc.bvh)` (6.5a).
 pub struct StampBakeOutput { /* ... */ }
 impl StampBakeOutput { pub fn stamp(&self) -> StampId; pub fn is_text(&self) -> bool; pub fn elapsed(&self) -> Duration; pub fn is_error(&self) -> bool; }
 pub enum FinalBake { Applied { id: StampId, empty: bool }, Failed { id: StampId }, Stale, Busy(Box<StampBakeOutput>) }
@@ -2479,7 +2611,16 @@ pub fn import_from_bundle(bundle: &SourceBundle, opts: &ImportOptions, decode_te
     -> Result<ImportedModel, ImportError>;
 
 // import/obj.rs, import/gltf.rs   (pub(crate))
-pub(crate) struct RawImport { pub mesh: RawMesh, pub textures: Vec<ImportedTexture>, pub warnings: Vec<ImportWarning> }
+pub(crate) struct RawImport { pub mesh: RawMesh, pub objects: RawObjects /* objects-tabs */, pub textures: Vec<ImportedTexture>,
+                              pub warnings: Vec<ImportWarning> }
+// Objects (objects-tabs, 6.1 step 9). OBJ: `o <name>` and `g <name>` lines set the current object / group (the whole rest
+// of the line is the name; `g` without a name is "default"; a name seen again continues the same entry). If at least one
+// face follows an `o` line the objects are the `o` entries, else, if at least one face follows a `g` line, the `g`
+// entries; faces in front of the first `o` (`g`) form one unnamed object; a file without either is one object. glTF / GLB:
+// each visited node with a mesh is one object, named by the node, else by its mesh, else unnamed; two nodes instancing one
+// mesh are two objects; a node whose primitives are all skipped yields no triangles and disappears in normalization.
+// FBX: one object per `Model` with geometry, named by its display name. Objects do not change triangles, order or
+// `uv_hash`: `IMPORTER_VERSION` stays 2.
 pub(crate) fn load_obj(main: &[u8], resolver: &dyn AssetResolver, opts: &ImportOptions, decode_textures: bool)
     -> Result<RawImport, ImportError>;
 // OBJ numbers: a `v` / `vt` / `vn` line with a missing, malformed or non-finite number (`abc`, `nan`, `inf`, `1e39`, which
@@ -2497,8 +2638,8 @@ pub(crate) fn load_fbx(main: &[u8], resolver: &dyn AssetResolver, opts: &ImportO
     -> Result<RawImport, ImportError>;
 // import/auto_uv.rs: the generated layout of 6.1 step 4 (box-projection charts, shelf-packed).
 pub(crate) fn generate_atlas_uvs(tris: &[[Vec3; 3]]) -> Vec<[Vec2; 3]>;
-// import/mod.rs then calls normalize(raw.mesh, &NormalizeOptions { generate_fallback_uvs: opts.generate_fallback_uvs
-//     || auto_uvs, model_name: <file stem>, texture_names: raw.textures.iter().map(|t| t.name.clone()).collect() }).
+// import/mod.rs then calls normalize_with_objects(raw.mesh, &raw.objects, &NormalizeOptions { generate_fallback_uvs:
+//     opts.generate_fallback_uvs || auto_uvs, model_name: <file stem>, texture_names: raw.textures.iter().map(|t| t.name.clone()).collect() }).
 // OBJ / MTL / ASCII FBX text: `decode_text` (UTF-8, else Latin-1; a UTF-8 BOM is dropped; a UTF-16 LE / BE BOM, as
 // Notepad's "Unicode" writes, decodes the rest as UTF-16) normalizes CRLF, lone CR (classic Mac OS) and mixed line
 // endings to LF before any line-based parsing.
@@ -2669,6 +2810,8 @@ pub fn decode_row(src: &[u8], out_len: usize) -> Option<Vec<u8>>;
 `psnr(a: &PixelBuf, b: &PixelBuf) -> f64`, `hash_pixels(buf: &PixelBuf) -> u64`, `XorShift` deterministic RNG (`XorShift::new(seed: u64)`, `next_u32`, `next_f32` in `[0, 1)`),
 `imported_from_raw(raw: RawMesh, textures: Vec<Option<PixelBuf>>) -> ImportedModel` (normalize with default options -> dummy
 in-memory `SourceBundle` whose main file is the bytes `b"dummy"` -> `ImportedTexture`s named `tex0`, `tex1`, ...),
+`imported_from_raw_objects(raw, &RawObjects, textures)` / `doc_from_raw_objects(raw, &RawObjects, size)` (the same through
+`normalize_with_objects`; objects-tabs),
 `doc_from_raw(raw: RawMesh, size: u32) -> Document` (`imported_from_raw` -> **one** blank white, unlocked raster layer of
 `size x size` per set, active -> `Document::from_parts`), so algorithm tests do not depend on the importers and paint directly on
 that single layer. (`Document::from_import` and `Document::sample` produce the locked "Base" + "Paint 1" pair instead.)
@@ -2854,10 +2997,22 @@ never runs two parses at the same time.
    `material_ranges` and its two sub-ranges `material_uv_ranges` / `material_nouv_ranges` (either may be empty; for a material
    with `texture_set == None` the uv range is empty), `bounds`, per-set `UV_MIRRORED` flags (sign of UV area versus the set's
    area-weighted majority) and `uv_hash`.
+9. **Objects** (objects-tabs, `normalize_with_objects`): every kept triangle carries the raw object index of its triangle
+   (`objects.tri_object[i]`, 0 when the vector is empty or shorter than the triangle list; an index `>= names.len()` counts as
+   0). The object is **not** part of the sort key nor of the vertex key: triangle order, vertex order and `uv_hash` are
+   bit-identical to `normalize` for every input. Objects are renumbered densely in order of first appearance in the *raw*
+   triangle order, counting only triangles that survived step 1 (an object without a surviving triangle disappears). Names:
+   an empty name becomes `"Object N"` (N = 1-based dense index); if the mesh has exactly one object and its name is empty, it
+   is `opts.model_name`, or `"Model"` when that is empty too; then names are made unique in index order with `_2`, `_3`
+   (the smallest free suffix; the search of a base resumes after the last suffix it tried, so thousands of objects with one
+   name cost linear time). `ObjectInfo::tri_count` and `bounds` come from the final triangles.
 
 `wire_edges`: for every triangle edge build the key (min/max of the two vertex *position bit patterns*); edges with the same key are
 the same geometric edge. Classify: one incident triangle => `Boundary`; two or more whose UVs at both ends are identical => `Interior`
 (emit once); otherwise `Seam` (emit once per distinct UV pair). Sort the output by (set, kind, a, b) for determinism.
+objects-tabs: each half edge also carries its triangle's object (as the last field of the derived order, never part of the
+grouping); the emitted entry's `object` is that of the side's smallest-object half edge, so an edge shared by two objects
+belongs to one of them (corner case: it disappears with that object when hidden).
 `uv_layout_images(mesh, side)` draws the layout thumbnails of all sets from one `wire_edges` call (in parallel); the import job
 uses it (one `wire_edges` per set made ABeautifulGame's 13 sets x 1.5 M triangles take seconds).
 
@@ -2875,6 +3030,12 @@ uses it (one `wire_edges` per set made ABeautifulGame's 13 sets x 1.5 M triangle
   barycentric blend of vertex normals (`geo_normal` if the blend is degenerate), **negated iff `!front_face`** — the flip is decided
   by the winding alone, so `surface_normal()` recovers the stored shading normal exactly; `uv` = barycentric blend unless `NO_UV`.
 - **Sphere query**: descend into nodes whose point-to-AABB squared distance <= r^2; at leaves use `closest_point_on_triangle`. Sort.
+- **Hidden triangles** (objects-tabs): `intersect` (every ray query) and `walk_sphere` (every sphere query) take the mask
+  once (`self.hidden.as_deref()`) and skip a hidden triangle in the leaf loop before its triangle test. Node boxes are not
+  rebuilt: a ray simply finds nothing in hidden leaves. One predictable branch per leaf triangle (no measurable cost:
+  `docs/notes/objtabs/wp2.md`). The mask lives in the BVH rather than as a query parameter because about 50 production call
+  sites query it, several on worker threads through a cloned `Arc<Bvh>`: a job sees the visibility of the moment it cloned
+  the `Arc` (a snapshot by construction), and a toggle costs one mask build instead of a BVH rebuild.
 
 ### 6.3 TexelMap and the surface rasterizer [C1]
 
@@ -2963,7 +3124,8 @@ structure snapshots do not pin raster pixels, section 6.7).
 **One 3D dab** at centre `c`, reference normal `n`, radius `r` (`dab_3d`); `aa = texel_world_size(set)` and the **support radius**
 is `r_s = r + 0.5 * aa`:
 1. `bvh.query_sphere(c, r_s)`; keep triangles of this set that are not `NO_UV`; if `same_side_only`, drop triangles with
-   `dot(geo_normal(tri), n) < -0.2`.
+   `dot(geo_normal(tri), n) < -0.2`. (objects-tabs: the query skips hidden triangles, so a hidden object is never a dab
+   candidate and never takes part in any side or occlusion test.)
 2. Per candidate triangle: `d` = signed distance from `c` to the triangle plane; skip if `|d| >= r_s`.
    `rho = sqrt(max(0, r_s^2 - d^2))`. With the triangle's 3D-to-UV-pixel affine map (gradients `grad_u`, `grad_v` in px per world
    unit) the clip box is `uv_px(c projected onto the plane) +/- (rho*|grad_u| + gutter + 1, rho*|grad_v| + gutter + 1)`. Without it a
@@ -3130,6 +3292,10 @@ The app bounds the work per frame (at most 64 surface samples per frame, section
 
 ### 6.5 Stamp / text bake [C4]
 
+objects-tabs: every geometric query of a bake (candidates, occluders, the depth fit) goes through the job's BVH, so hidden
+triangles receive nothing, do not occlude and are not fitted to; the job's `Arc<Bvh>` fixes the visibility of the moment
+the job was made (5.14 rules).
+
 Source pixels: for an image stamp, the blob is decoded once (`decode_image`, max side 8192) and turned into `PremulMips`, cached in
 `Document::image_mips`; for a text stamp, `rasterize_text` output is cached in `Document::text_mips` together with the `TextSpec` it
 was built from (re-rasterized only when the spec changes). Font lookup: `FontCache::get` for `spec.font`, plus `FontCache::fallback`;
@@ -3288,6 +3454,13 @@ the lowest remaining set id, else the stamp is removed. `merge_down` on a stamp/
 layer's id, name, opacity and blend (exact when the lower layer is Normal at 100%; otherwise an accepted approximation).
 
 ### 6.5a Wrap bake (round 6, `wrap_param.rs`, `wrap_bake.rs`)
+
+objects-tabs: hidden triangles are never patch members, never the anchor and never a Jump target. Every BVH query of the
+parameterization skips them; the one path that is not a BVH query, `collect_grown`'s growth over the welded graph
+(`WrapMesh::vtris`), treats a hidden triangle as outside the reach sphere (`in_sphere` returns `None`). The Jump branch
+floods only over triangles marked by the masked sphere query, and `wrap_relax` / `wrap_bake` only walk the collected patch.
+A parameterization is cached only while the document still has the BVH it was made with (`StampBakeOutput::bvh`,
+`Arc::ptr_eq`): a job made before a visibility change still applies its pixels but does not refill the cache.
 
 A wrapped stamp (`Projector::mode == Wrap`) gets a **local parameterization**: every vertex near it gets stamp-local
 coordinates (world units along `right` / `up` of the projector, origin at the anchor); a texel's barycentrics give its
@@ -4111,7 +4284,9 @@ impl From<&Placement> for PlacementEntry {}    impl PlacementEntry { pub fn to_p
 ```
 Plain arrays instead of glam serde keep the JSON stable. A manually chosen texture is linked to its set by the key of its
 `extras` entry (`textures/set<NN>/<name>`, 5.15); `SetEntry` therefore needs no separate reference field. `ui_state` is written by the app (camera, UV view, view mode, active set,
-colours, swatches) and ignored by the core.
+colours, swatches; objects-tabs: `hidden_objects`, the names of the hidden objects, written only when one is hidden) and
+ignored by the core. No version change (7.3): older builds ignore the unknown key and show everything; older projects load
+with nothing hidden.
 
 A text without round-4 features is written with exactly the keys of version 1. Names
 (`style`, `kind`) are strings, so an unknown name never fails a file; a wrong JSON type inside `fx` fails the
@@ -4140,6 +4315,9 @@ manifest like any malformed field.
   warning, and a re-save writes the same `source` object with `min_reader_version` 2. Never edit either fixture string.
 - Unknown names never fail a file (`TextFeatureUnknown`, 7.1 step 5); out-of-range or non-finite values are repaired by
   `sanitize_fx`; a wrong JSON type inside `fx` fails the manifest (`ManifestInvalid`) like any malformed field.
+- objects-tabs (1.9): the names of the hidden objects live in `ui_state` (`UiState::hidden_objects`, written only when
+  one is hidden). No version change: `FORMAT_VERSION` stays 3, `required_reader` and `IMPORTER_VERSION` (2) are unchanged;
+  older builds ignore the key and show every object; a project without it opens with nothing hidden.
 - `import.importer_version` is the importer that produced the saved mesh. A change to the generated UV layout or to mesh
   normalisation that changes `uv_hash` must bump `IMPORTER_VERSION` and keep the previous path selectable by version from then
   on (5.21). A project whose version is older and whose generated layout no longer matches opens with
@@ -4449,10 +4627,16 @@ pub struct Session {
     pub scene_generation: u64,                 // process-wide unique; changes whenever the document object is replaced
                                                // => GpuScene rebuild; also identifies the session a Save job belongs to
     pub selected_layers: Vec<LayerId>,         // export-select (1.8): the Layers list's selection, raw (may be stale)
+    // objects-tabs: the object selection. App state only: not in the document, not in history, not saved.
+    pub selected_objects: BTreeSet<u32>,       // indices into doc.mesh.objects
+    pub object_anchor: Option<u32>,            // the row a Shift-click extends from (the last plain / Ctrl-clicked object)
+    pub object_selection_rev: u64,             // +1 at every change of selected_objects (the GPU highlight follows it)
+    pub object_reveal: Option<u32>,            // request: the Objects list scrolls this row into view once (3D pick)
 }
 impl Session {
     /// Re-validates app-side selection after any document change (called by dispatch, section 8.3): clears
-    /// `selected_stamp` if `doc.stamp(id)` is None, clamps `active_set` to an existing set.
+    /// `selected_stamp` if `doc.stamp(id)` is None, clamps `active_set` to an existing set; objects-tabs: drops selected
+    /// objects `>= object_count` (bumping `object_selection_rev`) and a stale anchor / reveal.
     pub fn validate(&mut self);
     /// The selected layers of the active set, bottom to top, normalised on every read: ids that are gone or belong to
     /// another set are dropped; when the active layer is not among them the selection is the active layer alone; no
@@ -4484,7 +4668,9 @@ pub struct Prefs { pub recent: Vec<PathBuf> /* max 10 */, pub last_dir: Option<P
                    pub swatches: Vec<[u8; 4]> }   // Serialize + Deserialize + Default, every field #[serde(default)]
 /// A clickable control of the Layers list (8.7); `AppState::panel_rects` maps it to its rect of the last frame.
 pub enum PanelHit { LayerRow(LayerId), LayerEye(LayerId), LayerThumb(LayerId), LayerName(LayerId), LayerLock(LayerId),
-                    LayerAlphaLock(LayerId) }
+                    LayerAlphaLock(LayerId), /* ... later rounds, see below; objects-tabs: */ UpperTabButton(UpperTab),
+                    ObjectRow(u32), ObjectEye(u32), ObjectsList, ObjectsFooter, ObjectsHide, ObjectsIsolate,
+                    ObjectsShowAll, ObjectsFrame }
 
 pub struct BusyInfo { pub title: String, pub stage: String, pub fraction: f32, pub modal: bool }
 
@@ -4581,6 +4767,11 @@ pub enum AppAction {
     ReplaceStampImage(StampId, Option<PathBuf>),       // "Choose..." of a selected image stamp
     SelectStamp(Option<StampId>), UpdateStampSource(StampId, StampSource, Commit),
     UpdateStampPlacement(StampId, Placement, Commit), UpdateStampTint(StampId, [u8; 4], Commit), DeleteStamp(StampId),
+    // objects (objects-tabs; `object_ops.rs`)
+    SelectObject(u32) /* plain click */, ToggleObjectSelected(u32) /* Ctrl-click; Ctrl/Shift-click in 3D */,
+    SelectObjectRange(u32) /* Shift-click in the list */, SelectAllObjects, DeselectObjects,
+    SetObjectVisible(u32, bool) /* the eye of a row */, HideSelectedObjects, IsolateSelectedObjects, ShowAllObjects,
+    FrameSelection,
     // ui
     ShowDialog(Dialog), CloseDialog, CancelJob, Toast(ToastLevel, String),
 }
@@ -4623,6 +4814,19 @@ Round 4 (scaffold S2):
 - `AppAction` gains `LoadBrushShape(Option<PathBuf>)`, `ReloadBrushShape`, `RemoveBrushShape`,
   `AnswerOpenings(Option<CloseMode>)` (`None` = Cancel), `SetBrushShapeClose(CloseMode)` (the Brush tab's "Openings"),
   `LoadFontSamples`.
+
+objects-tabs (WP4, WP5; OBJECTS_TABS_PLAN 6.1, 6.5):
+- `UpperTab { Tool (default), Color, TextureSets, Objects }` (`Serialize` / `Deserialize`, snake_case; `ALL`, `index`,
+  `label`: "Tool", "Color", "Texture sets", "Objects"). `AppState::upper_tab: UpperTab` (from `Prefs::side_upper_tab` at
+  start; a tool change never writes it, 8.7). `AppState::side_tab` now starts from `Prefs::side_lower_tab`
+  (`SideTab::pref_name` / `from_pref_name`: "layers" | "brush" | "text"; `SideTab` itself stays non-serde).
+- `SideRects` keeps its field names with the meanings of 8.7 "Side panel" and gains `upper_area`, `upper_tab_buttons:
+  [Rect; 4]`, `upper_page`, `sets_tab: Option<Rect>`, `objects_tab: Option<Rect>`; `tool_area` / `tool_options` /
+  `color` are `Rect::NOTHING` in frames where their page is not shown.
+- `PanelHit` gains `UpperTabButton(UpperTab)`, `ObjectRow(u32)`, `ObjectEye(u32)`, `ObjectsList`, `ObjectsFooter`,
+  `ObjectsHide`, `ObjectsIsolate`, `ObjectsShowAll`, `ObjectsFrame`. `SettingsArea` is recorded only while the Tool page
+  is shown, `ColorSection` / `ColorContent` only while the Color page is shown.
+- `Prefs` gains `side_upper_tab: UpperTab`, `side_lower_tab: String`, `side_split: Option<f32>` (8.9).
 
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
@@ -4803,7 +5007,11 @@ Notes:
   but whose paint still trails (FEATURE_BRUSH 5.10, "finishing") is the user's completed stroke: `cancel` and `finish`
   complete it (one history entry) before the command runs; only `discard` (Undo, Esc) throws it away. The guarded
   actions include `LoadBrushShape`, `AnswerOpenings(Some(_))` and `SetBrushShapeClose` (they start a modal bake), not
-  `ReloadBrushShape`, `RemoveBrushShape`, `AnswerOpenings(None)` or `LoadFontSamples`.
+  `ReloadBrushShape`, `RemoveBrushShape`, `AnswerOpenings(None)` or `LoadFontSamples`. objects-tabs: `SetObjectVisible`,
+  `HideSelectedObjects`, `IsolateSelectedObjects` and `ShowAllObjects` are guarded (the core refuses a visibility change
+  during an open stroke) and **finish** the interaction like Save (hiding is view state and never throws away what the
+  user painted: H with the button still held commits the stroke, one history entry, then hides). The selection actions and
+  `FrameSelection` are not guarded.
 - `Undo` / `Redo`: `doc.undo()` / `doc.redo()`; `Some(label)` => info toast "Undo: <label>" / "Redo: <label>".
 - **After every document-changing action**: `session.validate()` (clears a `selected_stamp` that no longer exists, clamps
   `active_set`). Tools and panels must in any case treat a `selected_stamp` for which `doc.stamp(id)` is `None` as "no selection".
@@ -4843,8 +5051,20 @@ Notes:
   highlights, not on the original under it.
 - `SetViewMode(Preview)`: `tools.cancel` + `doc.flush_pending_edit()`; remember the previous mode in `last_edit_mode`.
   `SetViewMode(other)` and `SetTool(..)` also `tools.cancel`.
-- `FrameModel`: 3D views frame `mesh.bounds`; the 2D view fits the texture (both in Split). `ToggleTexture`: `Textured <-> Clay`
+- `FrameModel`: 3D views frame `doc.visible_bounds()` (objects-tabs: the visible objects; `mesh.bounds` when nothing is
+  hidden); the 2D view fits the texture (both in Split). `ResetCamera` frames `visible_bounds()` too. `ToggleTexture`: `Textured <-> Clay`
   (from `UvChecker` it goes to `Textured`). `ResetColors`: primary black, secondary white.
+- **Objects** (objects-tabs, `object_ops.rs`; no document change, no history entry, no revision change, `is_modified`
+  untouched — the same as camera and layer multi-selection): `SelectObject(o)` = `{o}`, anchor `o`; `ToggleObjectSelected(o)`
+  adds / takes out `o`, anchor `o`; `SelectObjectRange(o)` = the range anchor..=o (no valid anchor: a plain select), the
+  anchor stays; `SelectAllObjects`, `DeselectObjects` (also clears the anchor); unknown indices are ignored;
+  `object_selection_rev` +1 when the set changed. `SetObjectVisible(o, v)` flips one flag (the selection is not touched);
+  `HideSelectedObjects` hides the selected objects (they stay selected, so the eye or Show All brings them back in place);
+  `IsolateSelectedObjects` shows the selected and hides every other object; both are no-ops with an empty selection;
+  `ShowAllObjects`. They all go through `Document::set_hidden_objects` (5.14); an `Err` (open stroke) is a warning toast;
+  no toast otherwise; no-ops without a session. `FrameSelection`: `doc.objects_bounds(selected)` (visible selected objects)
+  else `visible_bounds()`, framed with `OrbitCamera::frame` on `session.camera` in 3D / Split, `session.preview_camera` in
+  Preview, nothing in 2D. `Cancel` (Esc) does not clear the object selection.
 - `ShowExport`: `tools.cancel` + `doc.flush_pending_edit()` (so the dialog and its preview show Full-quality stamps), then
   `Dialog::Export` with the defaults of 8.8.
 - `RunExport(opts)`: `doc.flush_pending_edit()`, remember `opts.dir` in `prefs.last_export_dir`, `start_export` (8.9).
@@ -4907,6 +5127,8 @@ pub struct View3dParams {
     pub matte: Option<[u8; 3]>,
     pub wireframe: bool, pub seams: bool, pub nearest: bool,
     pub backdrop: Backdrop, pub brush: Option<BrushRing>,
+    pub all_objects: bool,   // objects-tabs: draw hidden objects too (the export dialog's preview; 8.5)
+    pub highlight: bool,     // objects-tabs: draw the selection tint (Main3D only, rule in 8.5)
 }
 pub struct ViewUvParams {
     pub set: TextureSetId,
@@ -4952,8 +5174,43 @@ impl GpuScene {
     /// stale sets according to the throttling rule below (`force_mips` = regenerate now); one submit.
     pub fn sync(&mut self, gpu: &Gpu, renderer: &Renderer, doc: &mut Document, force_mips: bool);
     pub fn mips_stale(&self) -> bool;                        // any set whose level 0 is newer than its mip chain
+    /// objects-tabs: rebuilds the visible index buffer and the visible wire ranges when `doc.visibility_generation()`
+    /// changed, and the highlight index buffer when that or `selection_rev` changed; two integer compares otherwise.
+    /// `view::sync_scene` calls it every frame after `sync` with the session's `selected_objects` / `object_selection_rev`.
+    /// Logs "objects: visible geometry rebuilt in N ms (...)" on a change.
+    pub fn sync_objects(&mut self, gpu: &Gpu, doc: &Document, selected: &BTreeSet<u32>, selection_rev: u64);
+    /// Vertex buffer, index buffer and draws of a render: the visible triangles, or all with `all_objects`; `None` for an
+    /// empty mesh or when every triangle is hidden.
+    pub(crate) fn mesh_draw(&self, all_objects: bool) -> Option<(&wgpu::Buffer, &wgpu::Buffer, &[Draw])>;
+    pub(crate) fn highlight(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)>;   // vertices, indices, index count
+    /// The wire buffers and the instance ranges to draw (the visible objects' runs, or `0..n` with `all_objects`).
+    pub(crate) fn wire_all(&self, all_objects: bool) -> Option<(&wgpu::Buffer, &[Range<u32>])>;   // also wire_seams
+    pub(crate) fn wire_uv(&self, set: usize, all_objects: bool) -> Option<(&wgpu::Buffer, &[Range<u32>])>;
 }
+// objects-tabs pure helpers (unit-tested without a GPU):
+pub(crate) fn visible_draws(mesh: &MeshData, draws: &[Draw], hidden: &[bool]) -> (Vec<u32>, Vec<Draw>); // compacted per draw, empty draws dropped
+pub(crate) fn selected_indices(mesh: &MeshData, hidden: &[bool], selected: &BTreeSet<u32>) -> Vec<u32>; // mesh order
+pub(crate) fn object_runs(objects: &[u32]) -> Vec<(u32, Range<u32>)>;          // of a list sorted by object
+pub(crate) fn visible_runs(runs: &[(u32, Range<u32>)], hidden: &[bool]) -> Vec<Range<u32>>; // neighbours merged
+pub(crate) struct WireList { pub instances: Vec<LineInstance>, pub runs: Vec<(u32, Range<u32>)> }
 ```
+**Objects on the GPU** (objects-tabs, plan 5.1-5.2). `wire_instances_3d` / `wire_instances_uv_all` return `WireList`s:
+each group they build (3D all: interior, then seams + boundaries; 3D seams; UV per set: interior, then seams) is
+stable-sorted by `WireEdge::object` before it is appended, and its `object_runs` are kept (offset to the buffer). With one
+object the instance bytes are those of the build without objects (tested). The draw order of wires of different objects
+can therefore differ from earlier builds on multi-object models (plan risk 5). While nothing is hidden the mesh is drawn
+from the full index buffer with `build_draws`, and each wire buffer with one `0..n` instance range, exactly as before.
+While objects are hidden: a compacted index buffer of the visible triangles (`visible_draws`, one pass over the triangles,
+a subset of the full buffer so it always fits) with its own draws; wires are drawn as one `draw(0..4, range)` per visible
+run (neighbours merged); the UV view draws only the visible objects' UV wires (the texture is shown whole). The highlight
+is an index buffer of the selected visible objects' triangles (`selected_indices`), drawn by the **tint pipeline**
+(`tint.wgsl`: `view_only` layout, the mesh vertex buffer layout, `TriangleList`, `DepthMode::Overlay` = `LessEqual` without
+depth write, `LINE_BLEND`; the vertex shader pulls depth by the wires' `DEPTH_PULL` = 2e-4 so the tint wins against the
+mesh's own depth; the fragment colour is the constant `(0.25, 0.61, 1.0, 0.30)` in the wires' sRGB-byte convention).
+`render_3d`: backdrop, mesh from `mesh_draw(p.all_objects)`, then the tint when `p.highlight` and `highlight()` is
+`Some`, then the wires as ranges. Measured on ABeautifulGame (1.5 M triangles, 49 objects, release build, RTX 5070):
+isolating 2 objects costs 2.9 ms (core mask) + 33 ms (`sync_objects` incl. the 18 MB upload); hiding one 1.5 + 19 ms;
+Show All 2 ms (`control_sweep::gpu_tests::perf_visibility_toggle_on_a_heavy_model`, budget 250 ms).
 **Deferred stamp Preview bakes** (review round 2, finding SP-1). `io_flows::install_document` turns on
 `Document::set_defer_preview_bakes(true)`, so a gizmo drag frame, a wheel notch, a tint / size slider frame or a keystroke in a
 text stamp's content field only updates the stamp object. `view::sync_scene` calls `view::bake_stale_previews(doc,
@@ -5242,10 +5499,30 @@ impl ToolController {
 }
 ```
 
+**Objects in the views** (objects-tabs, plan 5.3-5.5). Main3D: `all_objects: false`, `highlight:
+view3d::highlight_shown(state)` = objects are selected, no stroke is open and the tool is Navigate or the side panel shows
+the Objects tab (`upper_tab == Objects`, WP4; a tint would falsify the colours while painting with another tab shown). Preview mode: `all_objects: false`, no highlight.
+The export dialog's preview (`ViewId::ExportPreview`): `all_objects: true` (an export contains every object), no
+highlight. The 2D view shows the texture whole and leaves out the UV wires of hidden objects; painting in 2D is not
+masked; no highlight in 2D. `view::locate_px` (texel -> surface point: the UV-stamp outline traced onto the model
+`uv_outline_in_3d`, the brush ring of a 2D cursor, the hover position of the 2D view) returns `None` for a texel owned by
+a hidden object, so no outline point, ring or position lands on a hidden triangle. Everything hidden: the 3D view shows
+the backdrop and tools hit nothing.
+
 **Routing (identical for both views; subject to the input gate of 8.5).** Presses are detected with
 `i.pointer.button_pressed(b) && response.contains_pointer()` (`Sense::DRAG` captures immediately, so the first dab lands on
 mouse-down). On press:
 1. RMB => Orbit (3D) / Pan (2D). MMB or Space+LMB => Pan. Tool `Navigate` + LMB => Orbit (3D) / Pan (2D).
+   objects-tabs: **a Navigate click picks an object** — a press of the logical primary button (Space+LMB is a pan) with
+   the Navigate tool in `Main3D` on a model with two or more objects remembers `NavClick { origin, mods, camera, travel }`;
+   the orbit adds each pointer delta's length to `travel`; at the release with `travel < NAV_CLICK_TRAVEL` (4 pt) the
+   camera is put back (the sub-4-pt orbit is undone) and a ray is cast at `origin` (hidden objects are passed through):
+   a hit => `SelectObject(tri_object_of(hit.tri))`, with Ctrl or Shift `ToggleObjectSelected`, and
+   `session.object_reveal = Some(object)`; a miss without a modifier => `DeselectObjects` (pushed through
+   `state.push`). `go_idle` (cancel, discard) forgets the click. Painting tools keep every click; one-object models, the
+   Preview views and the 2D view never pick, so a Navigate click there is the old zero-length orbit. The Navigate tool
+   options add the line "Click an object to select it; Ctrl- or Shift-click adds or removes it." on a model with two or
+   more objects.
 2. Otherwise LMB => `tool.press`; `true` => `Interaction::Tool`.
 Motion during a tool drag uses **every** `Event::PointerMoved` in `i.events` of the frame, not only the latest position.
 Hover: each frame the pointer is over a view, compute `Surface` once (one raycast in 3D), fill `state.hover`, call `tool.hover`.
@@ -5298,7 +5575,9 @@ placement without surface is not retried every frame. Round 8 (R8-2): while the 
 (`doc.defers_wrap_previews()`, the asynchronous mode) it makes nothing on the UI thread: it asks for a param-only job
 (`state.wrap_jobs.request_param(id)`, started by `stamp_bakes::after_tools` in the same logic pass); the stats line
 shows "Wrapping..." and the outline appears when the job lands; a placement for which that job found no surface
-(`wrap_jobs.param_failed`) is not asked for again. `ui_params` counts the synchronous builds. The warm-up job of plan
+(`wrap_jobs.param_failed`) is not asked for again. Objects-tabs: both failure marks (`wrap_failed`, `param_failed`) carry
+the document's `visibility_generation`, so a placement is tried again after objects are shown or hidden, and a
+param-only job made before a visibility change (not cached, core 5.20) never marks a failure. `ui_params` counts the synchronous builds. The warm-up job of plan
 4.1 (`wrap_mesh_prep`) is not built: the core has no welded-graph cache yet (package A step 6). *Text on a Curve* (`text_path.rs`): for a wrapped text the curve
 points and the drawn curve lie on the surface (`path_points_on`: the flat frame's point taken to stamp-local
 coordinates, then `stamp_wrap_surface`; the flat point where it returns `None`); dragging a point raycasts the model
@@ -5445,7 +5724,8 @@ release commits the last accepted point (no entry when none was accepted).
 
 ```rust
 pub struct PanelState { /* layer thumbnails keyed by (LayerId, Layer::version), set thumbnails, rename-in-progress, drag state */ }
-impl PanelState { pub fn new() -> PanelState; }
+impl PanelState { pub fn new() -> PanelState; pub fn with_prefs(prefs: &Prefs) -> PanelState /* objects-tabs: the stored split */; }
+pub fn sync_prefs(state: &mut AppState, ps: &PanelState);   // objects-tabs: tabs + split into `state.prefs` (at exit)
 pub fn show_menu_bar(ui: &mut egui::Ui, state: &mut AppState);
 pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState);
 pub fn show_side_panel(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState);
@@ -5459,13 +5739,17 @@ cache; Stamp tool source preview) and `doc.register_font` / `doc.default_font` (
 carries a catalog face).
 
 - **Menu bar**. File: New from Model... (Ctrl+N), Open Project... (Ctrl+O), Open Recent >, Open Sample > (Sphere, Cube, Two
-  Materials), Save (Ctrl+S), Save As... (Ctrl+Shift+S), Import Image as Stamp... (`ImportStampImage(None)`), Export... (Ctrl+E),
+  Materials, Three Objects), Save (Ctrl+S), Save As... (Ctrl+Shift+S), Import Image as Stamp... (`ImportStampImage(None)`), Export... (Ctrl+E),
   Extract Original Files... (`ExtractSources(None)`; enabled with any open document, saved or not), Exit. Edit: Undo / Redo with
   the entry label, Delete (`DeleteSelection`). View: 3D / 2D / Split / Preview, Texture on Model (T), Shading > (Textured, Clay,
   UV Checker), Wireframe (W), UV Seams, UV Wireframe in 2D, Alpha Checker, Lit, Frame Model (F), Reset Camera, camera presets.
   Layer: New Paint Layer, Duplicate, Merge Down, Delete, Rasterize, Move Up / Down (the `*Active*` actions); below a
   separator "Export Layer..." (one layer selected) or "Export Selected Layers... (N)" (several), enabled with an active
-  layer, => `ShowExportLayers(session.layer_selection())` (export-select, 1.8). Help: Shortcuts,
+  layer, => `ShowExportLayers(session.layer_selection())` (export-select, 1.8). Object (objects-tabs, between Layer and
+  Help): Hide Selected (H) and Isolate Selected (Shift+H), enabled with a non-empty object selection; Show All (Alt+H),
+  enabled when `hidden_object_count() > 0`; Frame Selection (Shift+F), enabled with a document; Select All (with a
+  document) / Deselect All (with a selection); below a separator "Objects Panel" (always enabled, checked while shown):
+  sets `state.upper_tab = Objects` (a setting, like the Background entries; WP4). Help: Shortcuts,
   About. Shortcut texts come from `shortcuts::shortcut_text`. Entries are enabled exactly when they can act (review round 2,
   finding merge-down-enabled-onto-locked-base): Merge Down (menu and Layers footer alike) = `panels::layers::can_merge_down`
   (the active layer is unlocked and directly above an unlocked paint layer: the checks of `Document::merge_down`, so on a new
@@ -5474,36 +5758,87 @@ carries a catalog face).
   selected stamp, else the active layer) is not protected by a lock. Ctrl+M stays a shortcut without a disabled state (a refused
   merge shows the warning toast).
 - **Toolbar** (left, 44 pt): vector-painted icon buttons from `theme`, tooltips with shortcuts; below them the primary/secondary
-  colour chip with swap.
-- **Side panel** (right), three areas from top to bottom (fix round 3, R3-10, user decision 2; `panels::show_side_panel`):
-  1. one scroll area with the collapsing sections Tool options and Texture sets; it gets the room the other two leave and
-     shows a thin scroll bar whenever it overflows (`ScrollStyle::thin()` for all side panel scroll areas: egui's default
-     floating bars are invisible until hovered, which hid that anything was cut off);
-  2. the *Color* section pinned below it (`egui::Panel::bottom("side_color_area")`, not resizable, `exact_size` = its content height of the last frame
-     plus the frame margins and 2 pt of slack — a scroll area cannot grow a panel by itself, and without the slack a
-     rounding difference shows the scroll bar, which narrows the swatches and flips the layout every frame):
-     at a 1280x800 window or larger the whole picker (RGB row, colour bar, saturation/value square, hue bar, hex field, both
-     swatch rows) is on screen whatever tool is active and whatever is selected. Its room is what the Layers area leaves
-     minus 112 pt kept for the tool options (about 96 pt of them visible after the areas' spacing); when that is short the square (`slider_width`, 140 pt at most) shrinks to fit,
-     down to 72 pt, then the section scrolls in its own scroll area (`side_color_scroll`). The height of the open section
-     without the square is measured each frame (`PanelState::color_fixed_height`) for the next frame's fit;
-  3. a resizable bottom area (`egui::Panel::bottom("side_layers_area")`, default 40 % of the panel height (at most
-     420 pt), at least 200 pt (header, opacity row, two whole rows, footer), at most 85 % and at most the panel height minus 112 + 60 pt for the
-     tool options and the Color area — a size set in a large window is clamped to that when the window shrinks). Until the
-     user drags its edge (`PanelState::layers_user_sized`, set by a primary press within the resize grab radius of the
-     area's top edge, kept across documents) the area hugs its content (`layers_area_fit`: header + rows + footer measured
-     in the last frame, `layers_natural_height`, between 200 pt and the default), so a short list gives its room to the
-     tool options and the Color section (R3-10 review: at 1280x800 the Brush options are whole again); with more layers
-     it grows back to the default and the list scrolls. It holds the *Layers* section: opacity / blend row, then the layer list in its own scroll area
-     (`side_layers_scroll`, as tall as the area minus the footer measured in the last frame), then the footer buttons below
-     it, outside the scroll area, so New / Duplicate / Merge Down / Rasterize / Delete stay on screen with any number of
-     layers (finding F9: with 5 layers they scrolled out of sight).
-  `state.panel_rects` records, besides the layer row controls, the visible settings area (`PanelHit::SettingsArea`), the
-  Color area (`ColorSection`) and its unclipped content (`ColorContent`; inside `ColorSection` = nothing scrolled away), the
-  list's visible rect (`LayersList`), the footer (`LayersFooter`) and its Delete button (`LayersDelete`), the whole Layers
-  area (`LayersArea`); `panel_rects` is
-  cleared at the start of `show_side_panel`. New areas (e.g. the Brush tab planned for round 4) go in as further panels
-  there. The sections:
+  colour chip with swap. objects-tabs (WP4): a click on the primary chip shows the side panel's Color tab (`upper_tab =
+  Color`, a setting; hover "Primary colour: click to show the Color tab").
+- **Side panel** (right): two Photoshop-style tab groups with a draggable split (objects-tabs WP4,
+  `docs/plans/OBJECTS_TABS_PLAN.md` section 6; `panels::show_side_panel` -> `panels/side_groups.rs`). It replaces the
+  round-3 "three areas" (tool options / pinned Color section / Layers area; R3-10, user decision 2) and with it the
+  round-3 rule "the whole colour picker is on screen whatever tool is active" (user decision 2026-11-24: Color is one tab
+  of the upper group; mitigations below: the toolbar chip, tool changes keep the tab, G1).
+  ```
+  | Tool | Color | Texture sets | Objects |   upper strip, 24 pt
+  | page of the shown upper tab           |   own vertical scroll area per page (thin visible bars)
+  |=======================================|   the split: the lower group's resize edge
+  | Layers | Brush | Text                 |   lower strip, 24 pt (one tab rule unchanged)
+  | page of the shown lower tab           |
+  ```
+  1. **Lower group** = the round-4 resizable bottom panel `egui::Panel::bottom("side_layers_area")`, unchanged rules:
+     tab strip Layers | Brush | Text (`shown_tab`, below), default 40 % of the panel height (at most 420 pt), at least
+     200 pt (`LAYERS_MIN_HEIGHT`), at most `layers_area_max = (h * 0.85).min(h - UPPER_MIN_HEIGHT).max(200)` with
+     `UPPER_MIN_HEIGHT = 24 + 112` (strip + page minimum; a size set in a large window is clamped to that when the window
+     shrinks). Until the user drags the edge (`PanelState::layers_user_sized`) its height is automatic: with the Layers tab
+     it hugs its content (`layers_area_fit`: header + rows + footer measured in the last frame, between 200 pt and the
+     default), so a short list gives its room to the upper page; with the Brush or the Text tab
+     `tab_area_height(h, upper_keep)` = `(h - upper_keep).clamp(160.min(h/2), 420).min(layers_area_max(h))` with
+     `upper_keep = 24 + 4 + max(144, Color page height + 8)` (`BRUSH_OPTIONS_HEIGHT` = heading + five brush slider rows;
+     the Color page height with a full-size square, `PanelState::color_page_full_height` = the page beside its square as
+     measured when it was last shown + 140, first guess `COLOR_FIXED_HEIGHT_GUESS + 140` = 284 pt, the value measured at
+     1280x800), so G1 and G2 hold whichever upper tab is shown and switching upper tabs never moves the split. (WP4/5
+     check: not the page height as last measured — after its square shrank in a small window that kept the room, and so
+     the square, small when the window grew again; `the_automatic_split_does_not_depend_on_the_window_sizes_seen_before`.) The Layers tab: opacity / blend row, the layer list in its own scroll area (`side_layers_scroll`, as tall as the
+     area minus the footer measured in the last frame), then the footer buttons below it, outside the scroll area, so New /
+     Duplicate / Merge Down / Rasterize / Delete stay on screen with any number of layers (finding F9).
+  2. **The split**: a primary press within the resize grab radius of the lower group's top edge sets `layers_user_sized`
+     (read from the raw pointer input; the panel's own resize handle takes the drag); from then on the height applies to
+     every lower tab, clamped to `200.min(h/2)..=layers_area_max(h)`, and is kept across documents. A **double-click on
+     the edge** (`button_double_clicked` with the pointer on the edge) returns to automatic.
+  3. **Upper group** = the room the lower group leaves: the strip (`upper_tab_strip`, same widget style as the lower
+     strip: `Button::selectable`, all four always enabled, a click writes `state.upper_tab`, a setting), 4 pt, then the
+     page of `state.upper_tab`, each in its own scroll area with no minimum height. The pages' thin bars lie over the
+     content's right edge (`floating_allocated_width = 0`; visible while the page overflows) instead of taking 6 pt of
+     its width: egui reserves a bar's room only from the frame after it first shows it while the option grids keep
+     their column widths from the frame before, so a page that started to overflow grew the side panel by 6 pt for good
+     (egui keeps a side panel's width; the `text` / `text_tab` scenarios ended at 306 / 312 pt):
+     - Tool: `tool_options::show` in `side_settings_scroll` (same id as before). The page starts with the plain strong
+       heading "<Tool> options" (not collapsible: the tab is the section) and keeps the options' 18-pt indent of the
+       round-3 collapsing header (every width budget of the Text block and the stamp rows was set for it).
+     - Color: `color::show(ui, state, ps, square)` in `side_color_scroll` (no collapsing header);
+       `square = color_square_side(width, page height - 8, color_fixed_height)` (140 pt at most, shrinks down to 72 pt,
+       then the page scrolls); `PanelState::color_fixed_height` (the page without its square) and `color_content_height`
+       are measured while the page is shown.
+     - Texture sets: `texture_sets::show` in `side_sets_scroll` (no collapsing header).
+     - Objects: `objects::show` (WP5, below).
+     Without a document each page shows what it showed before ("No document open" in Texture sets, Objects and Layers).
+  **Tab behaviour** (plan 6.4). Lower group unchanged (the one tab rule; a tool change never writes `side_tab`). Upper
+  group: a tool change never writes `upper_tab` (colour changes are the most frequent trip: a jump to the Tool tab on every
+  B / E press would throw the user out of the Color tab). Exceptions: `state.focus_text_content` with the Text tool sets
+  `upper_tab = Tool` at the start of `show_side_panel` (the content field is on the Tool page; a stale request of another
+  tool is dropped there without a tab change); a click on the toolbar's primary colour chip sets `upper_tab = Color`;
+  Object > Objects Panel sets `upper_tab = Objects`. The wrong-view hint's status line is kept current every frame
+  (`tool_options::sync_wrong_view_status`), whichever page is shown.
+  **Guarantees** (replace the round-3 "three areas" ones; at a window of 1280x800 or larger, side panel at least 740 pt
+  high, split automatic): **G1** with the Color tab, any tool, any selection and any lower tab, the whole Color page is on
+  screen without scrolling (`ColorContent` inside `ColorSection`) and the square is 140 pt; **G2** with the Tool tab and the
+  Brush or Eraser, the five slider rows (Size ... Spacing) are inside `tool_area`, with the Layers and with the Brush tab
+  below; **G3** (unchanged) the Layers footer and Delete lie below the list, inside the panel; the Brush tab's rows inside
+  the lower area (A12); the side panel at most 300 pt wide; **G4** the four upper tab buttons fit in one row at 300 pt
+  (measured: 259.4 pt of the 283 pt content width, so "Texture sets" keeps its name), the groups never overlap, no strip
+  button lies outside its group. At 900x600 and 640x480 the groups stay inside the panel and apart, the upper page keeps
+  at least 90 pt, the pages scroll, the Color square shrinks to 72 pt before the page scrolls.
+  **Records.** `state.panel_rects` (cleared at the start of `show_side_panel`) holds, besides the layer row controls:
+  `UpperTabButton(tab)`; `SettingsArea` (the visible Tool page) only while the Tool page is shown; `ColorSection` (the
+  visible Color page) and `ColorContent` (its unclipped content) only while the Color page is shown; `LayersList`,
+  `LayersFooter`, `LayersDelete`, `LayersArea`; the Objects tab's records (below). `state.side_rects` (`SideRects`):
+  `panel`; `upper_area` (strip + page), `upper_tab_buttons[UpperTab::index]`, `upper_page` (the visible page);
+  `tool_area` (= `upper_page`) and `tool_options` (the Tool page's content as laid out) in frames where the Tool page is
+  shown, else `Rect::NOTHING`; `color` (= `upper_page`) likewise for the Color page; `sets_tab` / `objects_tab` = `Some(page)`
+  in frames where that page is shown; `bottom_area`, `tab_buttons`, `brush_tab`, `brush_tab_content`, `text_tab` as in
+  round 4.
+  **Preferences** (8.9): `Prefs::side_upper_tab`, `side_lower_tab`, `side_split` are read at start (`AppState::new` copies
+  the tabs, `PanelState::with_prefs` starts user-sized at `side_split`) and written at exit (`panels::sync_prefs`, next to
+  `brush_flows::sync_prefs` in `WteApp::on_exit`; never in self-test mode, which starts from `Prefs::default()`: Tool +
+  Layers, split automatic).
+  The pages:
   - *Tool options* for `state.tool`: Brush/Eraser (size, hardness, opacity, flow, spacing; round 4: "Same side only" removed, the Brush tab's Type replaces it); Fill (scope);
     Stamp (source thumbnail + Choose... => `ImportStampImage(None)`, size, rotation, project-through); Text (multiline content —
     focused when `state.focus_text_content` is set, which the panel then clears —, family and style combos from `state.fonts`
@@ -5568,7 +5903,33 @@ carries a catalog face).
     default 100 pt they widened the panel by ~30 pt as soon as the Text tool was chosen, so the model jumped under the
     cursor (a click computed or aimed before the switch landed beside the model, with no stamp placed).
   - *Color*: `color_picker_color32(ui, &mut c, Alpha::Opaque)`, hex field, 24 swatches (click = set, right-click = store).
-  - *Texture sets*: name, resolution, thumbnail (`doc.set_thumbnail`), UV coverage; click => `SetActiveSet`.
+  - *Texture sets*: name, resolution, thumbnail (`doc.set_thumbnail`), UV coverage; click => `SetActiveSet`. (Set
+    thumbnails are made only while this page is shown.)
+  - *Objects* (objects-tabs WP5, `panels/objects.rs`, plan section 7; `PanelState::objects: ObjectsTabState`): one weak
+    header line "32 objects · 3 hidden · 1,523,104 triangles" (`objects::header_text`: "1 object", no "hidden" part when
+    none is, thousands separators) — "No document open" without a document; the list in
+    `ScrollArea::vertical().id_salt("side_objects_scroll").auto_shrink([false, false]).max_height(page - header - footer)`
+    with `show_rows(ROW_HEIGHT = 22, object_count)` (row gap 1 pt): only the rows in view are laid out, so thousands of
+    objects cost nothing per frame. A row: allocated, then `ui.interact(rect, Sense::click())`, then the 20-pt eye on its
+    left registered after it (so the eye wins its click; `layers::paint_eye`); the name elided with "…" to the room before
+    the right-aligned weak triangle count; selected rows get the selection fill (x0.6, strong name), hidden rows a closed
+    eye and a weak name; hover text: full name, triangle count, "Hidden", and the click help. Clicks
+    (`objects::row_click_action`): plain => `SelectObject`, Ctrl => `ToggleObjectSelected`, Shift => `SelectObjectRange`;
+    a plain double-click on the same row as the click before (`ObjectsTabState::last_click`: egui counts two quick clicks
+    anywhere as a double-click) => `SelectObject` + `FrameSelection`; the eye => `SetObjectVisible(i, hidden)` (the
+    selection is kept); a click on the empty list below the rows => `DeselectObjects` (with a selection). The footer,
+    pinned below the list (its height measured in the last frame) and kept `objects::footer_clearance` (the split's grab
+    band + 4 pt) above the bottom of the page, i.e. the split edge (WP4/5 check: a press on a footer button touching the
+    edge made the split the user's): Hide (`HideSelectedObjects`), Isolate
+    (`IsolateSelectedObjects`), Show all (`ShowAllObjects`), Frame (`FrameSelection`), enabled as their Object menu
+    entries (Frame always with a document), hover texts with the shortcut (`shortcut_text`). Reveal: while
+    `session.object_reveal` is `Some(i)` (a pick in the 3D view) the list's offset is set so that row `i` is in the
+    middle (`vertical_scroll_offset(objects::reveal_offset(..))`, clamped to `0..=content - view`: an offset past the
+    last row is an overscroll that egui springs back, WP4/5 check) and the request is cleared — when the Objects page is drawn, so a pick made
+    with another tab shown is revealed when the tab is opened. Records: `ObjectRow(i)` / `ObjectEye(i)` for the rows laid
+    out in this frame only, `ObjectsList` (the visible list), `ObjectsFooter`, `ObjectsHide`, `ObjectsIsolate`,
+    `ObjectsShowAll`, `ObjectsFrame`. The page never changes the document: everything is an `AppAction`; it only clears
+    `object_reveal`.
   - *Layers* of the active set, top row = top layer: eye toggle, 40-px thumbnail, kind badge ("Paint", "3D stamp",
     "2D stamp", "3D text", "2D text": `layers::kind_badge(doc, layer)`; 3D = `Placement::Projected`, 2D = `Placement::Uv`;
     hover text says which view edits it) plus a small "3D" / "2D" tag over the thumbnail's lower left corner of stamp and text
@@ -5626,7 +5987,8 @@ or Eraser; Text while `text_block::target(state)` is `Some` (the tool is Text, o
 stamp is a text). A disabled tab is greyed out with a hover text; the area shows `shown_tab(state)` = `side_tab` when
 its tab is enabled, else Layers. A click writes `state.side_tab` directly; `SetTool` never writes it. With Layers the
 area hugs its rows as in round 3; with Brush or Text it has the computed height `panel height - Color height - 144 -
-4`, limited to 160..420 pt (FEATURE_BRUSH 6.1); a size the user dragged is kept for every tab. The Brush and the Text
+4`, limited to 160..420 pt (FEATURE_BRUSH 6.1; objects-tabs WP4: `tab_area_height(h, upper_keep)`, see "Side panel"
+above); a size the user dragged is kept for every tab. The Brush and the Text
 tab draw in their own scroll area (`brush_tab::show`, `text_tab::show`). Every frame the panel writes
 `state.side_rects`.
 
@@ -5981,10 +6343,12 @@ pub(crate) fn after_dispatch(state: &mut AppState, ctx: &egui::Context);
 // install_document also calls doc.set_defer_wrap_previews(state.async_final_bakes): with WTE_SYNC_FINAL_BAKES=1 the
 // wrapped Previews stay on the UI thread (the comparison mode); projected / UV Previews are unchanged in both modes.
 #[derive(Default)] pub struct WrapJobs {
-    in_flight: Option<WrapFlight>,                   // one wrap job at a time: { id, kind, generation, started, placement }
+    in_flight: Option<WrapFlight>,                   // one wrap job at a time: { id, kind, generation, started, placement,
+                                                     //   visibility (objects-tabs: doc.visibility_generation() at the start) }
     held: Option<(u64, Box<StampBakeOutput>)>,       // a Preview output that arrived while a stroke was open
     want_param: Option<StampId>,                     // the Transform tool's request (async mode), taken by pump
-    pub(crate) param_failed: Option<(StampId, Placement)>, // a param-only job found no surface: not asked again
+    pub(crate) param_failed: Option<(StampId, Placement, u64)>, // a param-only job found no surface: not asked again
+                                                     //   (u64 = the visibility generation; objects-tabs)
     pub counters: WrapJobCounters,                   // previews started / applied / due again / stale, params started /
 }                                                    // applied, ui_params (TransformTool::ensure_wrap_param, sync mode)
 // pump (before the Final part): a held Preview output is applied once no stroke is open; when no wrap job is in flight
@@ -5999,7 +6363,7 @@ pub fn on_wrap_output(app: &mut WteApp, generation: u64, output: Box<StampBakeOu
 // Another generation -> dropped. Preview: held while a stroke is open, else doc.apply_wrap_preview: Applied { due_again }
 // (the last finished picture; due_again: the stamp moved since, pump starts its next job in the same logic pass) or
 // Stale (Esc, undo, redo, a Final, a removed stamp). ParamOnly: doc.apply_wrap_param (stats and outline, no pixel);
-// nothing for an unchanged placement -> param_failed.
+// nothing for an unchanged placement and an unchanged visibility generation -> param_failed.
 pub(crate) fn after_tools(state: &mut AppState, jobs: &mut Jobs, ctx: &egui::Context); // App::logic after ensure_wrap_param:
 // starts the param-only job just asked for when no wrap job is in flight; updates wrap_jobs_pending.
 // after_dispatch also asks for the next frame when a wrapped stamp waits for its Preview job and none is in flight.
@@ -6109,7 +6473,10 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
   - *Open Sample*: unsaved check -> `Document::sample(kind)` synchronously -> `install_document`.
 - `install_document`: `tools.cancel`; replaces `state.session` (fresh camera framed on `mesh.bounds`, `uv_view` fit on first
   draw — the session starts with `UvViewState::default()` and the 2D view calls `fit` in the first frame in which
-  `session.uv_view` still equals that default; there is no separate flag —, `ui_state` restored when present, `selected_stamp = None`, a new process-wide unique `scene_generation`); resets the
+  `session.uv_view` still equals that default; there is no separate flag —, `ui_state` restored when present — objects-tabs: `UiState::hidden_objects` (names; unknown names ignored, anything but an
+  array of strings counts as none) is applied with `doc.set_hidden_objects(hidden_from_names(..))` before the session is
+  stored, with one Info toast "1 object is hidden: Cube (Object > Show All)" / "N objects are hidden: A, B (Object > Show
+  All)" (names up to three) when any is hidden; the object selection starts empty —, `selected_stamp = None`, a new process-wide unique `scene_generation`); resets the
   document-bound tool settings **`tools.stamp.source = None; tools.stamp.source_name.clear()`** (a `BlobId` of the previous
   document must never be used with the new one); closes dialogs.
 - Close (`handle_close_request`, on `i.viewport().close_requested()`): a modal job is running => `ViewportCommand::CancelClose`
@@ -6154,7 +6521,12 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
 - Prefs (`prefs.rs`): `load() -> Prefs`, `save(&Prefs)`; JSON at `%APPDATA%\WrappedTextureEditor\prefs.json` (a few KB; failures
   are logged and ignored; never read or written in self-test mode). eframe's `persistence` feature is not used. Round 4:
   `brush`, `eraser` (written through `brush_flows::sync_prefs` at every write), `brush_shape_path`, `brush_shape_close`
-  (the closing choice per shape file, at most 32).
+  (the closing choice per shape file, at most 32). objects-tabs (WP4): `side_upper_tab` (a value that does not read is
+  Tool), `side_lower_tab` (anything but "layers" / "brush" / "text" reads as "layers"), `side_split` (the user-sized lower
+  group height in points, `None` = automatic; a value that is not a number reads as `None`, `from_json` clamps a finite
+  one to `100..=2000`, the panel clamps it to the window again) — read leniently (`lenient_prefs_serde`), so a bad value
+  never resets the other keys; written by `panels::sync_prefs` next to `brush_flows::sync_prefs` in `WteApp::on_exit`
+  (never in self-test mode). Older files have none of the keys: Tool + Layers, split automatic.
 
 Round 4 (S2): `prefs.json` (round 4): `brush`, `eraser`, `brush_shape_path`, `brush_shape_close` (B5 reads `brush` and `eraser`
 leniently and sanitized). `brush_flows::sync_prefs` copies the tool settings in directly before every write.
@@ -6256,7 +6628,8 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
    `flush_pending_edit`, which finalizes Preview-baked stamps (5.20).
 5. **Order.** `Modifiers::matches_logically` ignores extra Shift and Alt, so `consume_shortcut` for `Ctrl+S` also matches
    Ctrl+Shift+S. The table lists the more specific binding of every such pair first: Ctrl+Shift+S before Ctrl+S, Ctrl+Shift+N
-   before Ctrl+N, Ctrl+Shift+Z before Ctrl+Z, Shift+X before X. A unit test checks that no entry is shadowed by an earlier one.
+   before Ctrl+N, Ctrl+Shift+Z before Ctrl+Z, Shift+X before X; objects-tabs: Shift+F before F, Shift+H and Alt+H before H.
+   A unit test checks that no entry is shadowed by an earlier one. The table has 40 entries.
 6. **Brackets.** `consume_shortcut` matches the *logical* key: Shift+`[` arrives as `Key::OpenCurlyBracket`, Shift+`]` as
    `Key::CloseCurlyBracket`. Hardness is bound to `KeyboardShortcut::new(Modifiers::SHIFT, Key::OpenCurlyBracket)` /
    `Key::CloseCurlyBracket` with `display: Some("Shift+[")` / `Some("Shift+]")`; size to `Key::OpenBracket` / `CloseBracket` with
@@ -6273,12 +6646,15 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
 | Ctrl+J / Ctrl+M | `DuplicateActiveLayer` / `MergeActiveDown` | Delete | `DeleteSelection` |
 | Ctrl+`]` / Ctrl+`[` | `MoveActiveLayer(+1 / -1)` | D / Shift+X | `ResetColors` / `SwapColors` |
 | Esc | `Cancel` | Space+drag, MMB | Pan (read by the views as "Space held"; not a table entry) |
+| H / Shift+H | `HideSelectedObjects` / `IsolateSelectedObjects` (objects-tabs) | Alt+H / Shift+F | `ShowAllObjects` / `FrameSelection` (objects-tabs) |
 
 `action_label`s (the `label` argument of `shortcut_text`, as implemented): "New from Model...", "Open Project...", "Save",
 "Save As...", "Export...", "Undo", "Redo", "Delete", "Cancel", "3D", "2D", "Split", "Preview", "Texture on Model", "Wireframe",
 "Frame Model", the tool names "Navigate", "Brush", "Eraser", "Eyedropper", "Fill", "Stamp", "Text", "Transform",
 "Smaller Brush", "Larger Brush", "Softer Brush", "Harder Brush", "New Paint Layer", "Duplicate Layer", "Merge Down",
-"Move Layer Up", "Move Layer Down", "Reset Colors", "Swap Colors". "Redo" resolves to Ctrl+Y (its first entry).
+"Move Layer Up", "Move Layer Down", "Reset Colors", "Swap Colors"; objects-tabs: "Frame Selection", "Isolate Selected",
+"Show All", "Hide Selected" (all `with_doc`, `text_ok` false: H in a focused text field types "h"; Alt+H must be tried by hand
+on Windows — a possible beep of the system menu; fallback Ctrl+Shift+H). "Redo" resolves to Ctrl+Y (its first entry).
 
 ### 8.11 Self-test runner (`selftest/mod.rs` [A1], `selftest/scenarios.rs` [A6], `cli.rs` [A1])
 
@@ -6353,7 +6729,7 @@ impl Runner {
 /// `args` gives scenarios their paths (`args.screenshot` => out stem, `args.path`).
 pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>>;
 pub fn scenario_names() -> &'static [&'static str];
-/// Step / run timeouts of scenarios that need more than 30 s / 180 s (`workflow_path`, `fuzz_path`, `brush_types_path`: 300 s / 3600 s).
+/// Step / run timeouts of scenarios that need more than 30 s / 180 s (`workflow_path`, `fuzz_path`, `brush_types_path`, ..., objects-tabs: `objects_path`, `objects_flow_path`: 300 s / 3600 s).
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)>;
 ```
 - **Determinism** (`raw_input_hook`): drop every real `PointerMoved`, `PointerButton`, `MouseMoved`, `PointerGone`, `MouseWheel`,
@@ -6463,7 +6839,7 @@ the import scenarios write their files with `samples::to_obj` and `encode_png` i
 Round 4: 37 scenarios (25 of round 3, the ten above and the gate's two measuring scenarios `text_preview_path` and
 `brush_hover`); round 5 adds `final_bake_async` (38); round 6 adds `wrap_surface` (39); export-select adds
 `export_selected`, `export_zip` and `export_flow` (42, rows below the table); fix_export adds `export_unsettled`,
-`export_nouv` and `export_errors` (45); polish adds `save_unsettled` (46); accept_fixes adds `export_checks` (47); `scenarios::tests` checks the count. fix_export also extends `export_flow` (the
+`export_nouv` and `export_errors` (45); polish adds `save_unsettled` (46); accept_fixes adds `export_checks` (47); objects-tabs adds `side_tabs`, `objects` and `objects_path` (50) and its critic `objects_flow_path` (51); `scenarios::tests` checks the count. fix_export also extends `export_flow` (the
 dialog's Layers choice switched to Visible and back after "Export this layer"; the toast says "1 file"; everything as
 loose files into `<out>_<model>_loose`, equal to the zip's entries byte for byte; the selection as a zip into `_all`:
 `<base>_selection.zip` next to the unchanged `<base>.zip`, every entry equal to the full package's; Duplicate and Delete
@@ -6480,6 +6856,10 @@ counted down) instead of failing (`export_errors`).
 | `export_nouv` | fix_export item 9 (L3). The UV-less tetrahedron (generated layout), a stroke and a Project stamp; everything exported into `<out>_a`; Save As, Open; everything again into `<out>_b`; then as a zip into `<out>_zip` | the export holds flattened + every visible layer + ORA + PSD; `_a` and `_b` byte-identical; the zip's entries equal the loose files |
 | `export_checks` | accept_fixes item E. `default_content` (Base, Paint 1 with the red and blue strokes, the Logo stamp, the WTE text); Logo hidden, Paint 1 at 50 % opacity in Multiply. (E1) `RunExport` Visible into `<out>_ec_vis` and All (`include_hidden`) into `<out>_ec_all` (flattened PNG + per-layer PNGs, no seam padding); (E2) click Paint 1's name, Shift-click WTE's name, right-click, "Export selected layers... (3)", `Shot("hidden")`, the dialog's options into `<out>_ec_sel`; (E3) `SelectLayer(Base)` + `ToggleLayerSelected(WTE)`, `ShowExportLayers`, the flattened PNG ticked, into `<out>_ec_base` | every check reads the files (stack index from `_L<nn>_` in the name) and compares with `reference_composite`, ARCHITECTURE 6.6 written out in the test (f64, opacity and accumulator quantized to u8, alpha-0 rule) over the per-layer PNGs of `_ec_all`: (E1) Visible writes Base, Paint 1, WTE (no Logo), All also Logo (its layer's pixels); the shared files are equal; both flattened files are byte-identical and leave Logo out (the flattened texture is the visible layers under All too, `ExportOptions::include_hidden`): they differ from the reference with Logo in >= 50 % of its opaque texels; (E4) both flattened files equal the reference of the visible layers within 2/255 in every texel, and differ from the reference with Paint 1 as Normal 100 % in >= 100 texels; (E2) the selection is Paint 1, Logo, WTE; the dialog's list (`ToolProbe::export_files`) marks exactly Logo's line "(hidden)", the caption is the selection one without a flattened file; the folder holds the three layers' PNGs (their pixels, Logo with ink); (E3) the caption is the selection one with the flattened file; the folder holds Base's and WTE's PNGs and a flattened PNG equal to the reference of Base + WTE within 2/255, different from the visible stack (Paint 1 not in it) |
 | `export_errors` | fix_export item 9 (L1, L4). Sphere sample; three exports that cannot work: the folder path under a file, a planned file that is a folder (Files, an old file in the folder), the zip's name a folder; then a folder with a dead process's stage folder, temp zip and temp PNG plus `notes.txt`, exported as a zip | each failure: the "Export failed" message, an error toast (announced), nothing new written, the old file unchanged, no `.tmp-` entry; the last export removes the leftovers and keeps `notes.txt` |
+| `side_tabs` | objects-tabs WP4 / WP5 (plan 8.3; `selftest/scenarios/side_tabs.rs`). The Three Objects sample; the Cube selected and the Ball hidden; a click on each upper strip button (Color, Texture sets, Objects, Tool) with `Shot`s `tab_color`, `tab_sets`, `tab_objects`, `tab_tool`; G1 on the Color tab with the Text, Brush, Stamp tools, the Brush tab below (`tab_brush`), Eraser, Text: a click with no text typed (the focus request), then one placing the text "Tabs" on the Color tab; Transform with the text selected and the Text tab below (`tab_text`); G2 on the Tool tab with the Brush and the Layers (`tab_layers`) and the Brush tab below; Fill / Brush / a Layers tab click (one tab rule); the split dragged 80 pt up, the Brush tab, the Layers tab, a double-click on the edge; the Color tab at 900x600 (`small_900`) and 640x480 (`small_640`); back to 1280x800, the Objects tab | each tab click shows exactly its page (G4: the buttons in one row inside the upper group, the side panel at most 300 pt wide; the Objects page records the three rows and the footer); the Objects rows: Cube selected, Ball hidden; G1 (the whole Color page on screen, at a side panel of 740 pt and more) with every tool and lower tab; a tool change keeps the Color tab; the focus request shows the Tool tab and is served; placing a text keeps the Color tab and selects the text; G2 (the Brush options inside the Tool page) with both lower tabs; Fill shows Layers with `side_tab` kept, Brush brings the Brush tab back; the drag makes the lower group 80 pt taller (at most `layers_area_max`), the Brush tab keeps that height, the double-click returns to the automatic height; at every size the groups lie inside the panel and apart with an upper page of at least 90 pt. Also run started at 900x600 and 640x480 (G1 / G2 then not applied) |
+| `objects` | objects-tabs WP6 (plan 8.1; `selftest/scenarios/objects.rs`). The Three Objects sample (Floor 0, Cube 1, Ball 2; UV regions Floor u >= 0.5, Cube u < 0.5 / v < 0.5, Ball u < 0.5 / v >= 0.5); the Objects tab; Navigate click at the Cube's projected bounds centre (`Shot("selected")`); H; Wireframe on, `Shot("hidden")`, the 2D view `Shot("hidden_2d")`, back to 3D, Wireframe off; Brush (red) stroke along the floor points x -0.45..0.45, z 0 (the hidden Cube's footprint); an image stamp (Project) clicked at the Cube's point; Alt+H (`Shot("shown")`); a click on the Ball's row, Shift+H, Shift+F (`Shot("isolated")`); the Floor's eye; Ctrl-click the Cube's row, Shift-click the Floor's row, the footer's Show all; the Cube's row, H, Save As `<out>.wtep`, Open it; the Objects tab | three objects `Floor`, `Cube`, `Ball` whose counts add up, nothing hidden, the Tool tab; the click selects exactly the Cube and draws its row; the ray through the point hits the Cube, after H the Floor; H changes neither `revision()`, `is_modified()` nor the undo depth; the stroke changes the Floor's region and the 7x7 texels under the Cube (the floor UV of a ray down the Cube's axis), not the Cube's region, one undo entry "Brush Stroke"; the stamp's layer has ink in the Floor's region and none in the Cube's, the Cube's region of the composite is unchanged; Alt+H: nothing hidden, the ray hits the Cube again, the composite unchanged by showing; the Ball's row selects it; Shift+H hides Floor and Cube; Shift+F puts the camera target on the Ball's centre (1e-3 of the diagonal) and brings it closer; the eye shows the Floor and keeps the selection {Ball}; Ctrl gives {Cube, Ball}, Shift {Floor, Cube}; Show all shows everything and keeps the selection; after the reopen the Cube alone is hidden, the selection is empty, the document is not modified and exactly one toast about hidden objects names the Cube; the side panel layout (`assert_side_areas_apart`) |
+| `objects_path` PATH | objects-tabs WP6 (plan 8.2; `selftest/scenarios/objects.rs`). PATH = a model with several objects (gate: `ABeautifulGame.glb`); opened and accepted (`open_and_accept`); the Objects tab; a click on the first row; `object_reveal` of the last row, a Ctrl-click on it; the frame clock reset, Shift+H; Shift+F (`Shot("isolated")`); `object_reveal = Some(0)` (the list back at the top), Navigate, a click on the best-facing grid point (`best_spots`) whose ray hits the last object; Brush (green): a warm-up stroke and, with the frame clock reset, a second stroke (`hit_stroke` 0 and 1); Alt+H | at least two objects (a clear failure otherwise), unique non-empty names, counts add up (the count is logged); at most `list height / ROW_HEIGHT + 2` rows laid out, the footer drawn; the selection is the first and the last object; after Shift+H exactly those two are visible and no frame of UI work took 250 ms or more (`VISIBILITY_FRAME_MS`); Shift+F puts the camera target on the selection's centre; before the pick the last row is out of the list; the pick selects only the last object and its row lies inside the list (revealed); each stroke makes one undo entry, no frame of the second took more than 140 ms (`BRUSH_FRAME_MS`, ROUND5 B4); Alt+H shows everything |
+| `objects_flow_path` PATH | objects-tabs completeness critic (`selftest/scenarios/objects.rs`). PATH = a model with several objects whose largest-footprint object (the board) has a texture set of its own (gate: `ABeautifulGame.glb`). The user's workflow: the board (largest x/z footprint) hidden from its row (revealed) with H; the piece (first object named "pawn", else the largest other one) selected from its row, Shift+F; a Navigate click where only the hidden board is, then on the piece; Brush (green, +2 size steps): a stroke from the piece's centre out to a point whose ray hits the board when shown and nothing now (`Shot("piece_selected")`); a projected image stamp (size 0.4) on the piece; a wrapped stamp with "jump small gaps" low on the piece; a text on the piece; Navigate (`Shot("designed")`), Preview (`Shot("preview")`); Save As, reopen (`Shot("reopened")`); export the piece's paint layer (per-layer PNG) and every set's flattened PNG; Show all; then the piece hidden and a 6 px stroke on its screen centre | the board-only sets exist; rays straight down over the board hit it when shown, none while hidden (also after the reopen); hiding is view state; the miss deselects, the pick selects the piece; the stroke changes the piece's sets and one undo entry; every stamp / text inks the piece's sets and no layer of a board-only set; the wrapped stamp is a new Wrap placement with jump gaps; the board-only sets' composites never change while it is hidden; the tint is shown with Navigate; after the reopen: the board hidden, one toast names it, not modified, nothing selected, structure and composites as saved; the layer PNG equals the layer and has ink; 15 flattened PNGs verified (`verify_export`, the hidden board's set included); Show all brings the board's ray hits back; with the piece hidden the stroke paints the object behind it (sets disjoint from the piece's), leaves the piece's sets unchanged and ends with "Brush Stroke" |
 
 Gate 3 added named mid-run captures (`Step::Shot`) for the report:
 `brush_shape` `_dialog` (the closing dialog), `text_tab` `_page_character` / `_page_warp` / `_page_path`, `text_fonts`
@@ -6564,6 +6944,18 @@ those tests.
   material name, else model name, uniquified); fallback UVs make every triangle paintable and non-overlapping; `uv_hash` stable
   across two runs and different for a changed UV; `uv_layout_image` of `seam_cube` has orange pixels on every island border and
   is deterministic.
+  objects-tabs (6.1 step 9): `objects_follow_their_triangles_through_the_sort`, `object_data_never_changes_the_mesh` (random object
+  data leaves positions, normals, uvs, indices, flags, ranges, sets and `uv_hash` equal to `normalize`, and the wireframe equal
+  apart from `object`), `unnamed_and_duplicate_names`, `objects_without_triangles_disappear`, `no_object_data_is_one_object`,
+  `wire_edges_name_their_object`, `many_objects_with_one_name_are_numbered_in_linear_time` (check of WP1/2: 20,000 objects
+  named "Leaf" plus one explicit "Leaf_3"). Importers: OBJ `o` objects, `g` groups without `o`, `o` wins, faces before the first `o`,
+  re-entered names, no `o`/`g` = one object named after the model, `to_obj_objects` round trip; glTF mesh nodes (named / unnamed
+  with a named mesh / shared mesh / duplicate names, transforms in the bounds); FBX two `Model`s; `Document::sample(Objects)`.
+- **bvh** objects-tabs: `tri_mask_basics`; `a_hidden_triangle_is_skipped_by_every_query` (`cube_on_floor`: raycast,
+  occluded / occluder, query_sphere / query_sphere_dist; everything hidden -> nothing); `no_mask_and_an_empty_mask_answer_identically`
+  (2,000 random rays and spheres on `soup_sets`: plain = `with_hidden(None)` = empty mask field by field; a random half
+  hidden = brute force over the visible triangles); `with_hidden_shares_the_tree`. `document::objects_tests::
+  hiding_drops_cached_wrap_params` (also: a ParamOnly job from an older visibility is not cached).
 - **bvh** [C1]: 10k random rays against brute force (same triangle, `t` within 1e-4); `occluded == raycast.is_some()`;
   `query_sphere` equals brute-force closest-point; analytic `uv_sphere` hits (position on the sphere, normal ~ position / r, UV matches
   the equirect formula); axis-parallel rays (infinite `inv_dir`); ray origin on an AABB face; `Cull::Back`; a hit on a
@@ -7019,8 +7411,9 @@ thread; the first job lands as the last good picture with `due_again`, the next 
 equals the synchronous Preview's pixels; the Final equals the synchronous Final), `esc_or_undo_while_a_wrap_preview_job_runs_keeps_the_old_pixels`,
 `a_wrap_preview_of_another_document_is_dropped`, `a_selected_wrapped_stamp_without_parameterization_gets_it_from_a_param_only_job`
 (after an undo: the Transform tool asks, `after_tools` starts one job, stats and outline come with it, no pixel
-changes, no build on the UI thread), `a_final_waits_for_its_stamps_wrap_preview_job` (then equals the synchronous
-Final), `projected_stamps_keep_their_previews_on_the_ui_thread`; `jobs::tests::a_silent_job_runs_and_delivers_but_is_not_shown_in_the_status_bar`;
+changes, no build on the UI thread), objects-tabs check of WP2: `a_param_only_job_overtaken_by_a_visibility_change_is_asked_for_again`
+and `the_synchronous_wrap_failure_is_retried_after_a_visibility_change` (failure marks per visibility generation),
+`a_final_waits_for_its_stamps_wrap_preview_job` (then equals the synchronous Final), `projected_stamps_keep_their_previews_on_the_ui_thread`; `jobs::tests::a_silent_job_runs_and_delivers_but_is_not_shown_in_the_status_bar`;
 `panels::tool_options::tests::a_relaxed_or_cut_wrap_says_so_under_the_stats_line`. Scenario `wrap_surface` steps 2b,
 6b and 10 (8.11). check:B (the job races): the drag test also reads `wte_core::param_counter` (no build on the UI
 thread); `a_final_waits_for_its_stamps_wrap_preview_job` also checks that the Final reuses the job's parameterization
@@ -7154,6 +7547,80 @@ chosen, two files listed and written), `export_dialog_at_the_smallest_window_and
 the zip checkbox on screen at 900 x 600). Scenarios `export_selected`, `export_zip`, `export_flow` (8.11); `export_run` and
 `workflow_path` now check their folder with `verify_export` (exact listing, pixels, recomposition) instead of "exists and is
 not empty".
+
+objects-tabs WP3a (app state, actions, menu, shortcuts, persistence): `object_ops::tests::{select_toggle_and_range_follow_the_anchor_rules,
+hide_isolate_and_show_all_are_view_state_and_keep_the_selection, a_hide_during_an_open_stroke_is_refused_with_a_warning,
+frame_selection_targets_the_visible_selected_objects, hidden_names_round_trip_and_tolerate_unknown_and_repeated_names,
+validate_drops_objects_the_mesh_does_not_have}` (none changes revision, modified flag or undo depth);
+`io_flows::tests::ui_state_round_trips_and_tolerates_garbage` (`hidden_objects` not written when empty, names round-trip, a
+non-array value or non-string entries ignored without losing the other fields); `shortcuts::tests` (table of 40, the four
+new contract bindings, `object_keys_map_to_their_actions_and_stay_in_text_fields`); `dispatch::tests::guard_covers_document_commands_but_not_selection_or_previews`
+(the four visibility actions are guarded and finish, selection and `FrameSelection` are not);
+`control_sweep::panel_tests::{every_menu_entry_queues_its_action, menu_entries_are_enabled_exactly_when_they_can_act}` (the
+Object menu and File > Open Sample > Three Objects); GPU (ignored): `control_sweep::gpu_tests::hiding_during_a_held_stroke_commits_the_stroke_first`
+(H with the button held: one undo entry, the stroke; the hide adds none; Alt+H shows all).
+
+objects-tabs WP3b (rendering, highlight, picking): `gpu::scene::tests::{visible_draws_hold_every_visible_triangle_once_in_its_group,
+selected_indices_are_the_selected_visible_objects_triangles, object_runs_and_visible_runs,
+wire_lists_of_several_objects_are_grouped_per_object}` and, in `one_pass_uv_wires_match_the_per_set_filter_and_the_geometry_threads_match_the_serial_build`,
+the one-object lists byte-identical to the build without objects with one run per group; `gpu::renderer::tests` (`tint.wgsl`
+valid, its `ViewUniforms` layout, its `VsIn` = the position at location 0, the same `DEPTH_PULL` as the wires);
+`tools::tests::a_navigate_click_picks_an_object_and_a_drag_orbits` (3 pt = a pick with the camera restored and the row
+revealed, 5 pt = an orbit, Ctrl / Shift toggle, a plain click on nothing deselects, a hidden object is passed through,
+Esc forgets the click, no pick in Preview, 2D, with Space+LMB or on a one-object model); GPU (ignored):
+`control_sweep::gpu_tests::hidden_objects_are_not_drawn_and_the_selection_is_tinted` (Three Objects: the cube hidden shows
+the floor behind it, `all_objects` draws it again, the tint makes the cube bluer and is not drawn on a hidden object, the
+hidden cube's wires are gone inside its former screen box) and `perf_visibility_toggle_on_a_heavy_model` (reads
+`WTE_HEAVY_MODEL`; prints the core mask and `sync_objects` times, fails over 250 ms).
+
+objects-tabs check of WP3a/3b: `tools::tests::every_tool_ray_passes_through_a_hidden_object` (Three Objects from above,
+driven through `ToolController` as the 3D view drives it: the eyedropper, an Island fill, a brush stroke, a projected and a
+wrapped image stamp at the cube's centre act on the cube when it is shown and, with the cube hidden, on the floor under it
+and never on a cube texel); GPU (ignored): `control_sweep::gpu_tests::a_document_opens_with_its_stored_hidden_objects`
+(`install_document` with `ui_state.hidden_objects` = a known and an unknown name: the known one hidden, one Info toast
+naming it, not modified, no history, empty selection, the first frames draw without the cube; a list naming nothing of
+the model hides nothing and shows no toast).
+
+objects-tabs WP4 (the two tab groups, plan 6.6; headless through `PanelApp`): `panels::side_groups::tests::{sizing_functions_keep_their_limits,
+tab_names_in_the_prefs}`; `panels::tests::{the_tab_strip_follows_the_one_tab_rule` (the lower height = `tab_area_height(h,
+upper_keep)`), `panels_render_without_a_document_and_for_every_tool` (every upper tab too),
+`the_colour_page_guess_matches_its_measured_height}`; `prefs::tests::side_panel_tabs_and_split_round_trip_and_read_leniently`;
+`control_sweep::panel_tests::{the_picker_and_the_layers_footer_stay_on_screen_with_long_tool_options` (G1-G3: Color and
+Tool tab x every lower tab x Transform / Text / Brush / Stamp x 1280x800, 1600x1000, 900x600, 640x480, with and without a
+selected text), `a_short_layer_list_gives_its_room_to_the_tool_options` (+ the double-click back to automatic),
+`a12_brush_tab_heights_at_1280x800` (the upper group above the lower one; the lower height is `tab_area_height`; G2),
+`colour_section_edits_the_primary_colour_and_the_swatches` and `texture_set_rows_activate_their_set` (on their tabs),
+`the_colour_picker_value_fields` (was `collapsing_headers_and_...`: no collapsible header, the Tool page's heading),
+`idle_panels_with_every_kind_of_selection_queue_nothing` (each upper tab; a tool change keeps it),
+`toolbar_buttons_select_tools_and_colour_chips_swap_and_reset` (the primary chip shows the Color tab),
+`upper_tabs_show_one_page_each` (a strip click through AccessKit draws exactly that page; G4 at 1280x800, 900x600 and
+640x480), `a_tool_change_keeps_the_upper_tab_and_text_focus_shows_the_tool_tab` (toolbar and keys keep Color; the Text
+focus request shows Tool and focuses the field; a stale request changes nothing; Object > Objects Panel),
+`the_split_is_dragged_kept_and_reset}` (drag 80 pt, kept for every lower tab, clamped at 900x600 / 640x480, double-click =
+automatic, `sync_prefs`, a start from a stored split); `control_sweep::text_panel_tests::{text_rows_fit_the_panel,
+the_colour_section_stays_inside_the_panel_on_every_page}` (the upper group; the Color page whole with the Text tab).
+`control_sweep::text_panel_tests::the_side_panel_keeps_its_width_when_the_tool_page_starts_to_scroll` (tool and lower tab
+changes with a selected text at 1280x800, 1280x700, 1600x1000: the panel stays 300 pt; the upper pages' scroll bars
+take none of the content's width, `floating_allocated_width = 0`). `Harness::in_row` takes, of the widgets on the
+label's line, only those whose centres lie nearest to it: AccessKit also lists the clipped widgets of a scrolled upper
+page, which can lie behind the lower group's rows. Scenario `side_tabs` (8.11).
+
+objects-tabs WP5 (the Objects tab, plan 7.2): `panels::objects::tests::{clicks_map_to_their_actions, header_and_numbers,
+the_selection_tint_shows_with_navigate_or_the_objects_tab}`;
+`control_sweep::panel_tests::{object_rows_take_plain_ctrl_and_shift_clicks` (through the `ObjectRow` rects; quick clicks on
+other rows are not double-clicks; a double-click selects and frames; a click below the rows deselects),
+`the_eye_hides_one_object_and_keeps_the_selection`, `objects_footer_buttons_queue_their_actions_and_are_enabled_when_they_can_act`,
+`a_long_object_list_draws_only_the_rows_in_view` (2,000 objects: at most `list height / 22 + 2` rows recorded at 1280x800
+and 640x480, the footer inside the page, `object_reveal = Some(1500)` brings that row into the list within two frames and
+is cleared), `objects_tab_is_idle}`. `control_sweep::apply_actions` applies the object actions through `object_ops`.
+
+objects-tabs WP6 (scenarios, gate): the scenarios `objects` and `objects_path` (8.11, `selftest/scenarios/objects.rs`);
+`scenarios::tests::every_listed_scenario_exists_and_ends_with_a_capture` counts 51 names (the critic added
+`objects_flow_path`). Gate sweep:
+`sh tools/objtabs/sweep.sh EXE OUT tools/objtabs/jobs_gate.txt` (every scenario at 1280x800, the path scenarios on the
+Khronos samples, `brush_tab` / `text_tab` / `layers` / `side_tabs` also at 900x600 and 640x480, `objects_path` on
+ABeautifulGame and Lantern, `objects_flow_path` on ABeautifulGame); `tools/objtabs/compare_views.py` (view-rect identity at 1280x800) and `compare.py` (file by
+file) against the baseline exe's sweep.
 
 ## 10. Work packages
 
@@ -7307,3 +7774,19 @@ entry points (`view::central`, `panels::show_*`, `dialogs::show`, `ToolControlle
 `app-selftest` calls `view::gizmo::gizmo_shape` and `ViewXform::for_view`. Beyond that, **any** wave-2 package may call the
 read-only helpers `shortcuts::{table, shortcut_text}` and `theme::*`, push toasts with `state.toasts.push(..)`, and read
 `Gpu` (`device`, `queue`). Nothing else crosses package borders: commands travel as `AppAction`s, settings live in `AppState`.
+
+### objects-tabs (branch `objects-tabs`, `docs/plans/OBJECTS_TABS_PLAN.md` section 11)
+
+Lean build (HANDOFF section 7): per package one builder, then one check-and-fix pass; notes in `docs/notes/objtabs/`,
+gate report `docs/reports/OBJECTS_TABS_GATE_REPORT.md`.
+
+| # | Package | Main files | Check |
+|---|---|---|---|
+| 0 | Baseline | — | test counts, clippy, reference screenshots and exports of every scenario from the `main` exe (`docs/notes/objtabs/baseline.md`) |
+| 1 | Core objects (1.9, 5.7, 5.21, 6.1 step 9) | `mesh.rs`, `mesh_build.rs`, `import/{mod,obj,gltf,fbx}.rs`, `samples.rs`, `doc_build.rs` | `uv_hash` frozen tests untouched; ABeautifulGame: 49 objects |
+| 2 | Core visibility (5.8, 5.14, 6.2, 6.4-6.5a) | `bvh.rs`, `document.rs`, `doc_build.rs`, `doc_stamps.rs`, `wrap_param.rs`, `tests/objects.rs` | workspace tests; perf tests not slower |
+| 3a | App state, actions, menu, shortcuts, persistence (8.2, 8.3, 8.7 menu, 8.9, 8.10) | `state.rs`, `action.rs`, `dispatch.rs`, `object_ops.rs`, `shortcuts.rs`, `panels/menu_bar.rs`, `io_flows.rs` | hide / show proven by rays through actions |
+| 3b | Rendering, highlight, picking (8.4-8.6) | `gpu/scene.rs`, `gpu/renderer.rs`, `gpu/params.rs`, `gpu/shaders/tint.wgsl`, `view/*`, `dialogs/export.rs`, `tools/mod.rs` | GPU tests; scenarios full-frame identical to the baseline (only the new menu title differs) |
+| 4 | Tab groups (8.7 "Side panel") | `panels/mod.rs`, `panels/side_groups.rs`, `panels/{color,texture_sets,tool_options,toolbar}.rs`, `state.rs`, `prefs.rs`, `app.rs`, the tests of plan 6.6 | all scenarios ok; view-rect identity; screenshots of every tab |
+| 5 | Objects tab (8.7 "Objects tab") | `panels/objects.rs`, `panels/layers.rs` | the tests of plan 7.2 |
+| 6 | Scenarios, docs, gate (8.11, 1.9) | `selftest/scenarios/objects.rs`, `selftest/scenarios/side_tabs.rs`, `tools/objtabs/`, `ARCHITECTURE.md`, `HANDOFF.md`, `dist/HOW_TO_TEST.txt` | the full gate of plan section 9 |

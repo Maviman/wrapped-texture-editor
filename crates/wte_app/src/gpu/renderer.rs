@@ -17,6 +17,7 @@ const LINES_WGSL: &str = include_str!("shaders/lines.wgsl");
 const UVVIEW_WGSL: &str = include_str!("shaders/uvview.wgsl");
 const BACKGROUND_WGSL: &str = include_str!("shaders/background.wgsl");
 const BLIT_WGSL: &str = include_str!("shaders/blit.wgsl");
+const TINT_WGSL: &str = include_str!("shaders/tint.wgsl");
 
 /// `ViewUniforms.params.y` flags.
 pub(crate) const FLAG_LIT: u32 = 1;
@@ -233,7 +234,7 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 enum DepthMode {
     /// `Less`, write on (the mesh).
     Opaque,
-    /// `LessEqual`, no write (3D wires).
+    /// `LessEqual`, no write (3D wires, the selection tint).
     Overlay,
     /// `Always`, no write (backdrop, UV view, UV wires).
     Ignore,
@@ -328,6 +329,8 @@ pub struct Renderer {
     lines3d_pipeline: wgpu::RenderPipeline,
     lines_uv_pipeline: wgpu::RenderPipeline,
     uvview_pipeline: wgpu::RenderPipeline,
+    /// objects-tabs: the selection tint over the selected visible objects (`tint.wgsl`).
+    tint_pipeline: wgpu::RenderPipeline,
     /// Shared view uniforms (group 0) of every render call.
     view_buffer: wgpu::Buffer,
     view_group: wgpu::BindGroup,
@@ -354,6 +357,7 @@ impl Renderer {
         let uvview_module = module("uvview.wgsl", UVVIEW_WGSL);
         let background_module = module("background.wgsl", BACKGROUND_WGSL);
         let blit_module = module("blit.wgsl", BLIT_WGSL);
+        let tint_module = module("tint.wgsl", TINT_WGSL);
 
         let view_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view_layout"),
@@ -436,6 +440,19 @@ impl Renderer {
         };
         let lines3d_pipeline = view_pipeline(device, samples, lines("lines3d", DepthMode::Overlay));
         let lines_uv_pipeline = view_pipeline(device, samples, lines("lines_uv", DepthMode::Ignore));
+        let tint_pipeline = view_pipeline(
+            device,
+            samples,
+            PipelineSpec {
+                label: "tint",
+                module: &tint_module,
+                layout: &view_only,
+                buffers: &mesh_buffers,
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                depth: DepthMode::Overlay,
+                blend: Some(LINE_BLEND),
+            },
+        );
 
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mip_blit"),
@@ -531,6 +548,7 @@ impl Renderer {
             lines3d_pipeline,
             lines_uv_pipeline,
             uvview_pipeline,
+            tint_pipeline,
             view_buffer,
             view_group,
             uv_lines_buffer,
@@ -540,7 +558,8 @@ impl Renderer {
         }
     }
 
-    /// Renders the model into `target` (backdrop, mesh, wireframe / seams, brush ring) and submits.
+    /// Renders the model into `target` (backdrop, mesh, selection tint, wireframe / seams, brush ring) and submits.
+    /// objects-tabs: hidden objects are left out unless `p.all_objects`; the tint is drawn with `p.highlight`.
     pub fn render_3d(&mut self, gpu: &Gpu, scene: &GpuScene, target: &ViewTarget, p: &View3dParams) {
         let size = target.size_px();
         gpu.queue.write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&view_uniforms_3d(p, size)));
@@ -551,11 +570,11 @@ impl Renderer {
             pass.set_pipeline(&self.background_pipeline);
             pass.draw(0..3, 0..1);
 
-            if let Some((vertices, indices)) = scene.mesh_buffers() {
+            if let Some((vertices, indices, draws)) = scene.mesh_draw(p.all_objects) {
                 pass.set_pipeline(&self.mesh_pipeline);
                 pass.set_vertex_buffer(0, vertices.slice(..));
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                for draw in scene.draws() {
+                for draw in draws {
                     let group = match draw.group {
                         DrawGroup::Set(s) => scene.set_texture(s).map(|t| t.bind_group()),
                         DrawGroup::Untextured(m) => scene.untextured_group(m),
@@ -566,17 +585,28 @@ impl Renderer {
                 }
             }
 
+            if p.highlight
+                && let Some((vertices, indices, count)) = scene.highlight()
+            {
+                pass.set_pipeline(&self.tint_pipeline);
+                pass.set_vertex_buffer(0, vertices.slice(..));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..count, 0, 0..1);
+            }
+
             let wires = if p.wireframe {
-                scene.wire_all()
+                scene.wire_all(p.all_objects)
             } else if p.seams {
-                scene.wire_seams()
+                scene.wire_seams(p.all_objects)
             } else {
                 None
             };
-            if let Some((buffer, count)) = wires {
+            if let Some((buffer, ranges)) = wires {
                 pass.set_pipeline(&self.lines3d_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..4, 0..count);
+                for r in ranges {
+                    pass.draw(0..4, r.clone());
+                }
             }
         }
         gpu.queue.submit([encoder.finish()]);
@@ -592,7 +622,8 @@ impl Renderer {
         let tex = set.size();
         let uniforms = view_uniforms_uv(p, tex, size);
         gpu.queue.write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&uniforms));
-        let wires = if p.uv_wire { scene.wire_uv(p.set.index()) } else { None };
+        // objects-tabs: the UV wires of hidden objects are not drawn (the texture itself is shown whole).
+        let wires = if p.uv_wire { scene.wire_uv(p.set.index(), false) } else { None };
         if wires.is_some() {
             let lines = ViewUniforms {
                 view_proj: uv_to_clip(p.center_uv, p.px_per_texel, tex, size).to_cols_array_2d(),
@@ -607,11 +638,13 @@ impl Renderer {
             pass.set_bind_group(0, &self.view_group, &[]);
             pass.set_bind_group(1, set.bind_group(), &[]);
             pass.draw(0..3, 0..1);
-            if let Some((buffer, count)) = wires {
+            if let Some((buffer, ranges)) = wires {
                 pass.set_pipeline(&self.lines_uv_pipeline);
                 pass.set_bind_group(0, &self.uv_lines_group, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..4, 0..count);
+                for r in ranges {
+                    pass.draw(0..4, r.clone());
+                }
             }
         }
         gpu.queue.submit([encoder.finish()]);
@@ -723,12 +756,13 @@ mod tests {
     use crate::gpu::BrushRing;
     use crate::state::ShadingMode;
 
-    const SHADERS: [(&str, &str); 5] = [
+    const SHADERS: [(&str, &str); 6] = [
         ("mesh.wgsl", MESH_WGSL),
         ("lines.wgsl", LINES_WGSL),
         ("uvview.wgsl", UVVIEW_WGSL),
         ("background.wgsl", BACKGROUND_WGSL),
         ("blit.wgsl", BLIT_WGSL),
+        ("tint.wgsl", TINT_WGSL),
     ];
 
     fn parse(name: &str, source: &str) -> naga::Module {
@@ -799,6 +833,13 @@ mod tests {
         assert_eq!(size_of::<LineInstance>(), 28);
         assert_eq!(LINE_ATTRIBUTES.map(|a| a.offset), [0, 12, 24]);
         assert_eq!(std::mem::offset_of!(LineInstance, color), 24);
+        // objects-tabs: the tint pipeline reads the mesh vertex buffer; its shader takes only the position (location 0,
+        // a vec3<f32> at offset 0 of `RenderVertex`), and pulls depth like the wires.
+        let tint = parse("tint.wgsl", TINT_WGSL);
+        let (_, members) = wgsl_struct(&tint, "VsIn").expect("tint.wgsl has VsIn");
+        assert_eq!(members, vec![("pos".to_owned(), 0)]);
+        assert_eq!(MESH_ATTRIBUTES[0].format, wgpu::VertexFormat::Float32x3);
+        assert!(TINT_WGSL.contains("const DEPTH_PULL: f32 = 2e-4;") && LINES_WGSL.contains("const DEPTH_PULL: f32 = 2e-4;"));
     }
 
     #[test]
@@ -867,6 +908,8 @@ mod tests {
             nearest: true,
             backdrop: Backdrop::Checker,
             brush: Some(BrushRing { center: Vec3::new(0.5, 0.0, 0.0), radius: 0.25, hardness: 0.6, side_normal: None }),
+            all_objects: false,
+            highlight: false,
         };
         let u = view_uniforms_3d(&params, [640, 480]);
         assert_eq!(u.params, [2, FLAG_LIT | FLAG_ALPHA_CHECKER | FLAG_NEAREST | FLAG_MATTE, 3, 0]);
@@ -915,6 +958,8 @@ mod tests {
             nearest: false,
             backdrop: Backdrop::Dark,
             brush: Some(ring(side)),
+            all_objects: false,
+            highlight: false,
         };
         let aux = |side: Option<Vec3>| view_uniforms_3d(&params(side), [64, 64]).brush_aux;
 

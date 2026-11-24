@@ -1,7 +1,7 @@
 //! Panel controls without a GPU: menu bar, toolbar, side panel, view-mode strip, shortcuts while typing.
 
 use super::*;
-use crate::state::{Backdrop, CameraPreset, Dialog, PanelHit, ShadingMode, ToolKind, ViewMode};
+use crate::state::{Backdrop, CameraPreset, Dialog, PanelHit, ShadingMode, ToolKind, UpperTab, ViewMode};
 use glam::{Vec2 as GVec2, Vec3};
 use wte_core::{BlendMode, Commit, FillScope, Outline, Placement, Projector, StampId, StampSource, TextAlign, TextSpec};
 
@@ -13,17 +13,18 @@ type ActionCheck = fn(&[AppAction]) -> bool;
 type LayerCheck = fn(&[AppAction], wte_core::LayerId) -> bool;
 
 impl PanelApp {
-    /// Scrolls the settings area (tool options, texture sets) with the wheel until the widget is visible inside it,
-    /// and returns it. A widget of the pinned Color section or of the Layers area does not move with that wheel: it
-    /// is returned once three wheel steps in a row left it where it was (one step may not move anything yet: egui
-    /// spreads a wheel step over a few frames).
+    /// Scrolls the shown page of the upper group (objects-tabs WP4: Tool options, Color, Texture sets) with the wheel
+    /// until the widget is visible inside it, and returns it. A widget of the Layers area does not move with that
+    /// wheel: it is returned once three wheel steps in a row left it where it was (one step may not move anything yet:
+    /// egui spreads a wheel step over a few frames).
     fn reveal(&mut self, find: impl Fn(&Harness) -> Node) -> Node {
         let mut last = String::new();
         let mut before: Option<Rect> = None;
         let mut still = 0;
         for _ in 0..80 {
             let node = find(&self.h);
-            let area = *self.state.panel_rects.get(&PanelHit::SettingsArea).expect("the settings area is drawn");
+            let area = self.state.side_rects.upper_page;
+            assert!(area.is_positive(), "the upper page is drawn: {:?}", self.state.side_rects);
             still = if before == Some(node.rect) { still + 1 } else { 0 };
             if area.expand(1.0).contains_rect(node.rect) || still >= 3 {
                 self.idle(2);
@@ -118,6 +119,7 @@ fn every_menu_entry_queues_its_action() {
         (&["File", "Open Sample", "Sphere"], |a, _| matches!(a, [A::OpenSample(SampleKind::Sphere)])),
         (&["File", "Open Sample", "Cube"], |a, _| matches!(a, [A::OpenSample(SampleKind::Cube)])),
         (&["File", "Open Sample", "Two Materials"], |a, _| matches!(a, [A::OpenSample(SampleKind::TwoMaterial)])),
+        (&["File", "Open Sample", "Three Objects"], |a, _| matches!(a, [A::OpenSample(SampleKind::Objects)])),
         (&["File", "Save"], |a, _| matches!(a, [A::Save])),
         (&["File", "Save As..."], |a, _| matches!(a, [A::SaveAs(None)])),
         (&["File", "Import Image as Stamp..."], |a, _| matches!(a, [A::ImportStampImage(None)])),
@@ -147,6 +149,8 @@ fn every_menu_entry_queues_its_action() {
         (&["Layer", "Delete"], |a, p| matches!(a, [A::DeleteLayer(id)] if *id == p)),
         (&["Layer", "Move Down"], |a, _| matches!(a, [A::MoveActiveLayer(-1)])),
         (&["Layer", "Export Layer..."], |a, p| matches!(a, [A::ShowExportLayers(ids)] if ids.as_slice() == [p])),
+        (&["Object", "Frame Selection"], |a, _| matches!(a, [A::FrameSelection])),
+        (&["Object", "Select All"], |a, _| matches!(a, [A::SelectAllObjects])),
         (&["Help", "Shortcuts"], |a, _| matches!(a, [A::ShowDialog(Dialog::Shortcuts)])),
         (&["Help", "About"], |a, _| matches!(a, [A::ShowDialog(Dialog::About)])),
     ];
@@ -160,6 +164,23 @@ fn every_menu_entry_queues_its_action() {
         let actions = app.menu(&["View", "Background", label]);
         assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(app.state.flags.backdrop, backdrop);
+    }
+
+    // objects-tabs: the Object menu with a selection and a hidden object.
+    let mut app = PanelApp::new(sample_state(SampleKind::Objects));
+    let session = app.state.session.as_mut().unwrap();
+    session.selected_objects = [1].into();
+    session.doc.set_hidden_objects(&[false, false, true]).unwrap();
+    app.idle(1);
+    let cases: Vec<(&[&str], ActionCheck)> = vec![
+        (&["Object", "Hide Selected"], |a| matches!(a, [A::HideSelectedObjects])),
+        (&["Object", "Isolate Selected"], |a| matches!(a, [A::IsolateSelectedObjects])),
+        (&["Object", "Show All"], |a| matches!(a, [A::ShowAllObjects])),
+        (&["Object", "Deselect All"], |a| matches!(a, [A::DeselectObjects])),
+    ];
+    for (path, check) in cases {
+        let actions = app.menu(path);
+        assert!(check(&actions), "{path:?} queued {actions:?}");
     }
 }
 
@@ -262,6 +283,24 @@ fn menu_entries_are_enabled_exactly_when_they_can_act() {
     for path in [&["File", "New from Model..."][..], &["File", "Open Project..."], &["View", "2D"], &["Help", "About"]] {
         assert!(!app.menu_entry(path).disabled, "{path:?} without a document");
     }
+    for path in [&["Object", "Hide Selected"][..], &["Object", "Show All"], &["Object", "Frame Selection"], &["Object", "Select All"]] {
+        assert!(app.menu_entry(path).disabled, "{path:?} without a document");
+    }
+
+    // objects-tabs: Hide / Isolate need a selection, Show All a hidden object, Deselect All a selection.
+    let mut app = PanelApp::new(sample_state(SampleKind::Objects));
+    let hide_isolate_show_deselect = |app: &mut PanelApp| {
+        ["Hide Selected", "Isolate Selected", "Show All", "Deselect All"].map(|e| !app.menu_entry(&["Object", e]).disabled)
+    };
+    assert_eq!(hide_isolate_show_deselect(&mut app), [false, false, false, false]);
+    assert!(!app.menu_entry(&["Object", "Frame Selection"]).disabled);
+    assert!(!app.menu_entry(&["Object", "Select All"]).disabled);
+    app.state.session.as_mut().unwrap().selected_objects = [0].into();
+    app.idle(1);
+    assert_eq!(hide_isolate_show_deselect(&mut app), [true, true, false, true]);
+    app.state.doc_mut().unwrap().set_hidden_objects(&[true]).unwrap();
+    app.idle(1);
+    assert_eq!(hide_isolate_show_deselect(&mut app), [true, true, true, true]);
 }
 
 /// Regression test of finding `merge-down-enabled-onto-locked-base`: on every new document the active "Paint 1" sits
@@ -416,6 +455,14 @@ fn open_recent_opens_the_file_and_clear_recent_empties_the_list() {
 
 #[test]
 fn toolbar_buttons_select_tools_and_colour_chips_swap_and_reset() {
+    // objects-tabs (WP4, plan 6.4): a click on the primary chip shows the Color tab (a setting, no action).
+    let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+    assert_eq!(app.state.upper_tab, UpperTab::Tool);
+    app.click(&app.h.prefix("Primary colour").label.clone());
+    assert!(app.take().is_empty());
+    assert_eq!(app.state.upper_tab, UpperTab::Color);
+    assert!(app.state.side_rects.color.is_positive() && app.state.side_rects.tool_area == Rect::NOTHING);
+
     let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
     app.apply = true;
     for (tool, label) in crate::panels::toolbar::TOOLS {
@@ -870,7 +917,7 @@ fn selected_text_stamp_fields_edit_the_text() {
 #[test]
 fn colour_section_edits_the_primary_colour_and_the_swatches() {
     let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
-    app.state.tool = ToolKind::Navigate; // short tool options: the colour section is on screen
+    app.state.upper_tab = UpperTab::Color; // objects-tabs (WP4): the picker is the Color tab's page
     app.idle(2);
     let secondary = app.state.colors.secondary;
 
@@ -910,7 +957,7 @@ fn colour_section_edits_the_primary_colour_and_the_swatches() {
 #[test]
 fn texture_set_rows_activate_their_set() {
     let mut app = PanelApp::new(sample_state(SampleKind::TwoMaterial));
-    app.state.tool = ToolKind::Navigate;
+    app.state.upper_tab = UpperTab::TextureSets; // objects-tabs (WP4): the set rows are the Texture sets tab's page
     app.idle(2);
     let names: Vec<String> = app.state.doc().unwrap().sets.iter().map(|s| s.name.clone()).collect();
     assert!(names.len() >= 2);
@@ -1152,15 +1199,21 @@ fn escape_in_an_open_popup_only_closes_the_popup() {
 #[test]
 fn idle_panels_with_every_kind_of_selection_queue_nothing() {
     for text in [false, true] {
-        let (mut app, _) = transform_app(text);
-        app.idle(5);
-        assert!(app.take().is_empty());
-        for tool in [ToolKind::Navigate, ToolKind::Brush, ToolKind::Stamp, ToolKind::Text, ToolKind::Transform] {
-            app.state.tool = tool;
-            app.idle(3);
-            // (round 5 R5-3: the font button asks for the samples once per catalog: not an edit.)
+        // objects-tabs (WP4): with each of the four upper tabs shown.
+        for upper in UpperTab::ALL {
+            let (mut app, _) = transform_app(text);
+            app.state.upper_tab = upper;
+            app.idle(5);
             let actions: Vec<AppAction> = app.take().into_iter().filter(|a| !matches!(a, AppAction::LoadFontSamples)).collect();
-            assert!(actions.is_empty(), "{tool:?}: {actions:?}");
+            assert!(actions.is_empty(), "{upper:?}: {actions:?}");
+            for tool in [ToolKind::Navigate, ToolKind::Brush, ToolKind::Stamp, ToolKind::Text, ToolKind::Transform] {
+                app.state.tool = tool;
+                app.idle(3);
+                // (round 5 R5-3: the font button asks for the samples once per catalog: not an edit.)
+                let actions: Vec<AppAction> = app.take().into_iter().filter(|a| !matches!(a, AppAction::LoadFontSamples)).collect();
+                assert!(actions.is_empty(), "{upper:?} {tool:?}: {actions:?}");
+                assert_eq!(app.state.upper_tab, upper, "a tool change keeps the upper tab");
+            }
         }
     }
 }
@@ -1197,19 +1250,21 @@ fn layer_rename_by_keyboard_and_a_save_shortcut_commits_it_first() {
     );
 }
 
+/// objects-tabs (WP4, plan 6.6): the side panel has no collapsing section headers any more (the tabs are the sections):
+/// the Tool page says which tool it shows in a plain heading, the Color page is the picker.
 #[test]
-fn collapsing_headers_and_the_colour_picker_value_fields() {
+fn the_colour_picker_value_fields() {
     let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
     app.state.tool = ToolKind::Navigate;
     app.idle(2);
+    assert!(app.h.nodes.iter().all(|n| n.role != Role::DisclosureTriangle), "no collapsible header on the Tool page");
+    let heading = app.h.get("Navigate options");
+    assert!(heading.role == Role::Label && app.state.side_rects.tool_area.contains_rect(heading.rect), "{heading:?}");
+    assert!(!app.h.has("Hue"), "the picker is not on the Tool page");
+    app.state.upper_tab = UpperTab::Color;
+    app.idle(2);
     assert!(app.h.has("Hue"));
-    let header = |h: &Harness, t: &str| h.all(t).into_iter().find(|n| n.role == Role::DisclosureTriangle).unwrap();
-    app.click_at(header(&app.h, "Color").rect.center());
-    app.idle(30);
-    assert!(!app.h.has("Hue"), "the Color section collapsed");
-    app.click_at(header(&app.h, "Color").rect.center());
-    app.idle(30);
-    assert!(app.h.has("Hue"), "the Color section opened again");
+    assert!(app.h.nodes.iter().all(|n| n.role != Role::DisclosureTriangle), "no collapsible header on the Color page");
     // Round 4: the tab strip took the place of the "Layers" header (FEATURE_BRUSH 6.2); Layers is a tab, not a section
     // that collapses. A click on the Layers tab keeps the list.
     assert!(app.h.all("Layers").iter().all(|n| n.role != Role::DisclosureTriangle), "no Layers header any more");
@@ -1339,9 +1394,12 @@ fn hit_rect(app: &PanelApp, hit: PanelHit) -> Rect {
     *app.state.panel_rects.get(&hit).unwrap_or_else(|| panic!("{hit:?} was not drawn: {:?}", app.state.panel_rects.keys()))
 }
 
-/// At 1280x800, whatever the tool options show, the whole Color section is on screen (nothing of it scrolled away),
-/// the three areas do not overlap, and the Layers footer with its Delete button sits below the list's scroll area.
-/// In a 640x480 window the Color section shrinks and scrolls but stays inside the side panel.
+/// objects-tabs (WP4, guarantees G1-G3 of plan 6.3; before: R3-10, decision 2 of round 3). At 1280x800 and above,
+/// whatever the tool options show and whichever lower tab is chosen: with the Color tab the whole Color page is on
+/// screen (nothing of it scrolled away) with a 140 pt square (G1); with the Tool tab the page keeps room and the five
+/// Brush slider rows are in view (G2). At every size the two groups do not overlap, and with the Layers tab the footer
+/// with its Delete button sits below the list's scroll area inside the panel (G3). In a 640x480 window the Color page
+/// shrinks and scrolls but stays inside the side panel.
 #[test]
 fn the_picker_and_the_layers_footer_stay_on_screen_with_long_tool_options() {
     for text in [false, true] {
@@ -1351,34 +1409,59 @@ fn the_picker_and_the_layers_footer_stay_on_screen_with_long_tool_options() {
             app.state.doc_mut().unwrap().add_raster_layer(TextureSetId(0), None).unwrap();
         }
         assert!(app.state.doc().unwrap().sets[0].layers.len() >= 6);
-        for tool in [ToolKind::Transform, ToolKind::Text, ToolKind::Brush, ToolKind::Stamp] {
-            for (w, h) in [(1280.0, 800.0), (1600.0, 1000.0), (900.0, 600.0), (640.0, 480.0)] {
-                app.state.tool = tool;
-                app.h.size = vec2(w, h);
-                app.idle(4);
-                let what = format!("text {text}, {tool:?}, {w}x{h}");
-                let screen = Rect::from_min_size(Pos2::ZERO, vec2(w, h));
-                let settings = hit_rect(&app, PanelHit::SettingsArea);
-                let color = hit_rect(&app, PanelHit::ColorSection);
-                let content = hit_rect(&app, PanelHit::ColorContent);
-                let list = hit_rect(&app, PanelHit::LayersList);
-                let footer = hit_rect(&app, PanelHit::LayersFooter);
-                let delete = hit_rect(&app, PanelHit::LayersDelete);
-                assert!(screen.contains_rect(color) && screen.contains_rect(footer), "{what}: color {color:?} footer {footer:?}");
-                assert!(settings.bottom() <= color.top() + 0.5, "{what}: settings {settings:?} over color {color:?}");
-                assert!(color.bottom() <= list.top() + 0.5, "{what}: color {color:?} over the list {list:?}");
-                assert!(footer.top() >= list.bottom() - 0.5 && !delete.intersects(list), "{what}: footer {footer:?} list {list:?}");
-                assert!(screen.contains_rect(delete) && footer.expand(0.5).contains_rect(delete), "{what}: delete {delete:?}");
-                if h >= 800.0 {
-                    assert!(color.expand(0.5).contains_rect(content), "{what}: the picker is cut off: {content:?} in {color:?}");
-                    // The square is full size (140 pt) at 1280x800 and above.
-                    let square = Harness::picker_square(&app.h.nodes.iter().filter(|n| color.contains_rect(n.rect)).cloned().collect::<Vec<_>>());
-                    assert!(square.rect.width() >= 139.0, "{what}: square {:?}", square.rect);
-                }
-                assert!(settings.height() >= 90.0, "{what}: the tool options keep some room: {settings:?}, color {color:?}, list {list:?}, footer {footer:?}");
-                if h >= 800.0 {
-                    // The Layers area keeps its default height (40 % of the panel): at least three rows are shown.
-                    assert!(list.height() >= 3.0 * 46.0, "{what}: the layer list is only {list:?}");
+        for upper in [UpperTab::Color, UpperTab::Tool] {
+            for lower in SideTab::ALL {
+                for tool in [ToolKind::Transform, ToolKind::Text, ToolKind::Brush, ToolKind::Stamp] {
+                    for (w, h) in [(1280.0, 800.0), (1600.0, 1000.0), (900.0, 600.0), (640.0, 480.0)] {
+                        app.state.upper_tab = upper;
+                        app.state.side_tab = lower;
+                        app.state.tool = tool;
+                        app.h.size = vec2(w, h);
+                        app.idle(4);
+                        let what = format!("text {text}, {upper:?}, {lower:?}, {tool:?}, {w}x{h}");
+                        let screen = Rect::from_min_size(Pos2::ZERO, vec2(w, h));
+                        let r = app.state.side_rects.clone();
+                        assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{what}: the groups overlap: {r:?}");
+                        assert!(r.panel.expand(0.5).contains_rect(r.upper_area) && r.panel.expand(0.5).contains_rect(r.bottom_area), "{what}: {r:?}");
+                        assert!(r.upper_area.expand(0.5).contains_rect(r.upper_page) && screen.contains_rect(r.upper_page), "{what}: page {r:?}");
+                        assert!(r.upper_page.height() >= 90.0, "{what}: the upper page keeps some room: {r:?}");
+                        if r.brush_tab.is_none() && r.text_tab.is_none() {
+                            let list = hit_rect(&app, PanelHit::LayersList);
+                            let footer = hit_rect(&app, PanelHit::LayersFooter);
+                            let delete = hit_rect(&app, PanelHit::LayersDelete);
+                            assert!(screen.contains_rect(footer) && r.bottom_area.expand(0.5).contains_rect(footer), "{what}: footer {footer:?}");
+                            assert!(footer.top() >= list.bottom() - 0.5 && !delete.intersects(list), "{what}: footer {footer:?} list {list:?}");
+                            assert!(screen.contains_rect(delete) && footer.expand(0.5).contains_rect(delete), "{what}: delete {delete:?}");
+                            if h >= 800.0 {
+                                // The Layers area keeps its default height (40 % of the panel): at least three rows are shown.
+                                assert!(list.height() >= 3.0 * 46.0, "{what}: the layer list is only {list:?}");
+                            }
+                        }
+                        match upper {
+                            UpperTab::Color => {
+                                let color = hit_rect(&app, PanelHit::ColorSection);
+                                let content = hit_rect(&app, PanelHit::ColorContent);
+                                assert!(!app.state.panel_rects.contains_key(&PanelHit::SettingsArea) && r.tool_area == Rect::NOTHING, "{what}");
+                                assert!(screen.contains_rect(color) && color == r.color && color == r.upper_page, "{what}: color {color:?} {r:?}");
+                                if h >= 800.0 {
+                                    // G1.
+                                    assert!(color.expand(0.5).contains_rect(content), "{what}: the picker is cut off: {content:?} in {color:?}");
+                                    let square = Harness::picker_square(&app.h.nodes.iter().filter(|n| color.contains_rect(n.rect)).cloned().collect::<Vec<_>>());
+                                    assert!(square.rect.width() >= 139.0, "{what}: square {:?}", square.rect);
+                                }
+                            }
+                            _ => {
+                                let settings = hit_rect(&app, PanelHit::SettingsArea);
+                                assert!(!app.state.panel_rects.contains_key(&PanelHit::ColorSection) && r.color == Rect::NOTHING, "{what}");
+                                assert!(settings == r.tool_area && settings == r.upper_page, "{what}: settings {settings:?} {r:?}");
+                                if h >= 800.0 && tool == ToolKind::Brush {
+                                    // G2 (with the Layers and with the Brush tab below).
+                                    let spacing = app.h.prefix("Distance between dabs").rect;
+                                    assert!(settings.contains_rect(spacing), "{what}: the Brush options are cut off: {spacing:?} in {settings:?}");
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1388,6 +1471,7 @@ fn the_picker_and_the_layers_footer_stay_on_screen_with_long_tool_options() {
 /// R3-10 review: a short layer list does not keep the Layers area at its 40 % default. Until the user drags its edge
 /// the area hugs its rows and footer, and the room goes to the tool options (Brush options shown whole at 1280x800, as
 /// in round 2); more layers grow it back to the default; a drag of the edge sets the size, which then stays.
+/// objects-tabs (WP4): a double-click on the edge returns to the automatic size.
 #[test]
 fn a_short_layer_list_gives_its_room_to_the_tool_options() {
     let (mut app, _) = transform_app(false);
@@ -1401,7 +1485,7 @@ fn a_short_layer_list_gives_its_room_to_the_tool_options() {
     let list = hit_rect(&app, PanelHit::LayersList);
     let footer = hit_rect(&app, PanelHit::LayersFooter);
     let settings = hit_rect(&app, PanelHit::SettingsArea);
-    let panel = area.bottom() - settings.top();
+    let panel = area.bottom() - app.state.side_rects.upper_area.top();
     assert!(area.bottom() - footer.bottom() < 12.0, "no empty room below the footer: area {area:?} footer {footer:?}");
     assert!(list.height() >= rows as f32 * 40.0, "every row is shown: {list:?}");
     assert!(area.height() < 0.4 * panel - 20.0, "smaller than the 40 % default: {area:?} of {panel}");
@@ -1431,6 +1515,11 @@ fn a_short_layer_list_gives_its_room_to_the_tool_options() {
     }
     app.idle(4);
     assert!((hit_rect(&app, PanelHit::LayersArea).height() - dragged.height()).abs() < 1.0, "the user's size stays");
+
+    // objects-tabs (WP4): a double-click on the edge returns to automatic: the area hugs its rows again.
+    app.double_click_at(hit_rect(&app, PanelHit::LayersArea).center_top());
+    app.idle(4);
+    assert!((hit_rect(&app, PanelHit::LayersArea).height() - area.height()).abs() < 1.0, "automatic again: {:?}", hit_rect(&app, PanelHit::LayersArea));
 }
 
 /// Round 4 (FEATURE_TEXT 6.2, ROUND4_PLAN R4-15; replaces the R3-10 rule): the Text tool always edits the text to
@@ -1776,9 +1865,11 @@ fn a11_brush_tab_panels_are_idle_and_keep_their_width() {
     }
 }
 
-/// A12: at 1280 x 800 with the Brush tool and the Brush tab in its tallest state: the Color section lies inside the side
-/// panel, the fifth slider row (Spacing) ends above the bottom of the tool area, and every row of the tab lies inside
-/// the lower area (nothing of the tab scrolls). Also for the Eraser and for every other state of the tab.
+/// A12: at 1280 x 800 with the Brush tool and the Brush tab in its tallest state: the upper group lies inside the side
+/// panel, above the lower one; the fifth slider row (Spacing) ends above the bottom of the Tool page (G2 of
+/// objects-tabs), and every row of the tab lies inside the lower area (nothing of the tab scrolls). The lower group has
+/// the automatic height `tab_area_height` (the upper group keeps the taller of the brush rows and the Color page). Also
+/// for the Eraser and for every other state of the tab.
 #[test]
 fn a12_brush_tab_heights_at_1280x800() {
     let mut app = PanelApp::new(brush_tab_state());
@@ -1792,7 +1883,11 @@ fn a12_brush_tab_heights_at_1280x800() {
             let ctx = format!("{tool:?}, {what}");
             let r = app.state.side_rects.clone();
             let tab = r.brush_tab.unwrap_or_else(|| panic!("{ctx}: the Brush tab is shown"));
-            assert!(r.panel.expand(0.5).contains_rect(r.color), "{ctx}: Color {:?} outside the panel {:?}", r.color, r.panel);
+            assert!(r.panel.expand(0.5).contains_rect(r.upper_area), "{ctx}: upper group {:?} outside the panel {:?}", r.upper_area, r.panel);
+            assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{ctx}: the groups overlap: {r:?}");
+            let side_groups = crate::panels::side_groups::tab_area_height;
+            let keep = crate::panels::side_groups::upper_keep(app.ps.color_page_full_height());
+            assert!((r.bottom_area.height() - side_groups(r.panel.height(), keep)).abs() < 1.0, "{ctx}: lower group {r:?}, keep {keep}");
             let spacing = app.h.prefix("Distance between dabs").rect;
             assert!(spacing.bottom() <= r.tool_area.bottom() + 0.5, "{ctx}: the Spacing row {spacing:?} ends below the tool area {:?}", r.tool_area);
             let content = app.ps.brush.content.expect("the tab records its content");
@@ -1809,8 +1904,8 @@ fn a12_brush_tab_heights_at_1280x800() {
                 assert!(tab.contains_rect(openings.rect), "{ctx}: the Openings row is inside the tab");
                 // Room for the real window's fonts, which make the rows a little taller than this headless context does.
                 assert!(content.height() + 8.0 <= tab.height(), "{ctx}: only {:.1} pt left in the tab", tab.height() - content.height());
-                eprintln!("A12 {tool:?}: tallest content {:.1} pt, tab area {:.1} pt, lower area {:.1} pt, Color {:.1} pt, tool area {:.1} pt",
-                    content.height(), tab.height(), r.bottom_area.height(), r.color.height(), r.tool_area.height());
+                eprintln!("A12 {tool:?}: tallest content {:.1} pt, tab area {:.1} pt, lower area {:.1} pt, upper group {:.1} pt, tool area {:.1} pt",
+                    content.height(), tab.height(), r.bottom_area.height(), r.upper_area.height(), r.tool_area.height());
             }
         }
     }
@@ -2103,4 +2198,421 @@ fn shows_text(h: &Harness, text: &str) -> bool {
 
 fn wrap(v: f32) -> f32 {
     crate::panels::brush_tab::wrap_deg(v)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// objects-tabs (WP4): the two tab groups of the side panel
+
+/// The upper strip's button of `tab` as AccessKit sees it.
+fn upper_button(app: &PanelApp, tab: UpperTab) -> Node {
+    let area = app.state.side_rects.upper_area;
+    app.h
+        .all(tab.label())
+        .into_iter()
+        .find(|n| n.role == Role::Button && area.expand(0.5).contains_rect(n.rect))
+        .unwrap_or_else(|| panic!("no {tab:?} button in the upper strip {area:?}"))
+}
+
+/// Plan 6.6 `upper_tabs_show_one_page_each` and G4: a click on each strip button (through AccessKit) shows exactly
+/// that page; the four buttons fit in one row of the 300 pt side panel, inside the upper group; the groups never
+/// overlap and no lower strip button lies in the upper group. At 900x600 and 640x480 too.
+#[test]
+fn upper_tabs_show_one_page_each() {
+    let mut app = PanelApp::new(sample_state(SampleKind::Objects));
+    for (w, h) in [(1280.0, 800.0), (900.0, 600.0), (640.0, 480.0)] {
+        app.h.size = vec2(w, h);
+        app.idle(3);
+        for tab in UpperTab::ALL {
+            let button = upper_button(&app, tab);
+            app.click_at(button.rect.center());
+            app.idle(1);
+            let what = format!("{tab:?} at {w}x{h}");
+            assert!(app.take().is_empty(), "{what}: a tab click queues nothing");
+            assert_eq!(app.state.upper_tab, tab, "{what}");
+            let r = app.state.side_rects.clone();
+            let drawn = [r.tool_area.is_positive(), r.color.is_positive(), r.sets_tab.is_some(), r.objects_tab.is_some()];
+            let mut want = [false; 4];
+            want[tab.index()] = true;
+            assert_eq!(drawn, want, "{what}: exactly one page is drawn: {r:?}");
+            let page = [Some(r.tool_area), Some(r.color), r.sets_tab, r.objects_tab][tab.index()].unwrap();
+            assert_eq!(page, r.upper_page, "{what}");
+            assert!(r.upper_area.expand(0.5).contains_rect(r.upper_page) && r.upper_page.height() >= 90.0, "{what}: {r:?}");
+            // G4.
+            let side = app.state.side_panel_rect.unwrap();
+            assert!(side.width() <= 300.5, "{what}: the side panel is {} pt wide", side.width());
+            let b = r.upper_tab_buttons;
+            for (i, rect) in b.iter().enumerate() {
+                assert!(rect.is_positive() && r.upper_area.expand(0.5).contains_rect(*rect), "{what}: button {i} {rect:?} outside {:?}", r.upper_area);
+                assert!((rect.top() - b[0].top()).abs() < 0.5, "{what}: the buttons are not in one row: {b:?}");
+                assert!(rect.right() <= r.panel.right() + 0.5, "{what}: button {i} {rect:?} past the panel {:?}", r.panel);
+                assert_eq!(app.state.panel_rects.get(&PanelHit::UpperTabButton(UpperTab::ALL[i])), Some(rect));
+            }
+            assert!(b.windows(2).all(|p| p[0].right() <= p[1].left()), "{what}: {b:?}");
+            assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{what}: the groups overlap: {r:?}");
+            assert!(r.tab_buttons.iter().all(|t| t.top() >= r.upper_area.bottom() - 0.5), "{what}: a lower tab button in the upper group: {r:?}");
+        }
+    }
+    let b = app.state.side_rects.upper_tab_buttons;
+    eprintln!(
+        "G4: upper tab buttons {:?} pt wide, {:.1} pt from the first left to the last right, panel content {:.1} pt",
+        b.map(|r| r.width()),
+        b[3].right() - b[0].left(),
+        app.state.side_rects.panel.width()
+    );
+}
+
+/// Plan 6.4: a tool change (toolbar button or key) never leaves the shown upper tab; the Text tool's focus request
+/// shows the Tool tab (and focuses the content field); a stale request of another tool is dropped without a tab change;
+/// Object > Objects Panel shows the Objects tab.
+#[test]
+fn a_tool_change_keeps_the_upper_tab_and_text_focus_shows_the_tool_tab() {
+    let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+    app.apply = true;
+    app.state.upper_tab = UpperTab::Color;
+    app.idle(2);
+    for (tool, label) in crate::panels::toolbar::TOOLS {
+        if tool == ToolKind::Text {
+            continue;
+        }
+        let node = app.h.prefix(&format!("{label} ("));
+        app.click_at(node.rect.center());
+        app.idle(1);
+        assert_eq!(app.state.tool, tool);
+        assert_eq!(app.state.upper_tab, UpperTab::Color, "{label}: the Color tab stays");
+        assert!(app.state.side_rects.color.is_positive(), "{label}");
+    }
+    app.press(Key::E, Modifiers::NONE);
+    app.idle(1);
+    assert_eq!((app.state.tool, app.state.upper_tab), (ToolKind::Eraser, UpperTab::Color), "{:?}", app.take());
+    app.take();
+
+    // The Text tool asks for the focus in its content field (after placing a text): the Tool tab is shown.
+    app.state.tool = ToolKind::Text;
+    app.idle(1);
+    assert_eq!(app.state.upper_tab, UpperTab::Color, "choosing the Text tool alone keeps the tab");
+    app.state.focus_text_content = true;
+    app.idle(2);
+    assert_eq!(app.state.upper_tab, UpperTab::Tool);
+    assert!(!app.state.focus_text_content && app.h.ctx.text_edit_focused(), "the content field has the focus");
+    app.h.ctx.memory_mut(|m| m.stop_text_input());
+    app.idle(1);
+
+    // A stale request with another tool changes no tab.
+    app.state.upper_tab = UpperTab::TextureSets;
+    app.state.tool = ToolKind::Brush;
+    app.state.focus_text_content = true;
+    app.idle(2);
+    assert_eq!(app.state.upper_tab, UpperTab::TextureSets);
+    assert!(!app.state.focus_text_content);
+
+    // Object > Objects Panel: a setting, no action.
+    let actions = app.menu(&["Object", "Objects Panel"]);
+    assert!(actions.is_empty(), "{actions:?}");
+    assert_eq!(app.state.upper_tab, UpperTab::Objects);
+    assert!(app.state.side_rects.objects_tab.is_some());
+    app.take();
+}
+
+/// Plan 6.2 / 6.5: the split is dragged (the lower group grows, the upper shrinks, both stay in the panel), the user's
+/// height is kept for every lower tab and clamped in a smaller window, a double-click returns to automatic; the tabs and
+/// the split go to the preferences and come back from them.
+#[test]
+fn the_split_is_dragged_kept_and_reset() {
+    let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+    app.state.tool = ToolKind::Brush;
+    app.idle(4);
+    let auto = app.state.side_rects.clone();
+    let edge = auto.bottom_area.center_top();
+    app.drag(&[edge, edge - vec2(0.0, 20.0), edge - vec2(0.0, 80.0)]);
+    app.idle(2);
+    let r = app.state.side_rects.clone();
+    assert!((r.bottom_area.height() - (auto.bottom_area.height() + 80.0)).abs() < 4.0, "dragged: {r:?} from {auto:?}");
+    assert!(r.upper_area.height() < auto.upper_area.height() - 70.0, "the upper group gave the room: {r:?}");
+    assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5 && r.panel.expand(0.5).contains_rect(r.bottom_area), "{r:?}");
+    let dragged = r.bottom_area.height();
+
+    // Every lower tab keeps the user's height.
+    for tab in [SideTab::Brush, SideTab::Layers] {
+        app.state.side_tab = tab;
+        app.idle(3);
+        assert!((app.state.side_rects.bottom_area.height() - dragged).abs() < 1.0, "{tab:?}: {:?}", app.state.side_rects);
+    }
+    // The preferences get the tabs and the split.
+    app.state.upper_tab = UpperTab::Objects;
+    app.state.side_tab = SideTab::Brush;
+    app.idle(2);
+    crate::panels::sync_prefs(&mut app.state, &app.ps);
+    assert_eq!((app.state.prefs.side_upper_tab, app.state.prefs.side_lower_tab.as_str()), (UpperTab::Objects, "brush"));
+    assert!(app.state.prefs.side_split.is_some_and(|s| (s - dragged).abs() < 1.0), "{:?}", app.state.prefs.side_split);
+    app.state.side_tab = SideTab::Layers;
+
+    // A smaller window clamps the user's height; the groups stay apart and inside the panel.
+    for (w, h) in [(900.0, 600.0), (640.0, 480.0)] {
+        app.h.size = vec2(w, h);
+        app.idle(4);
+        let r = app.state.side_rects.clone();
+        let max = crate::panels::side_groups::layers_area_max(r.panel.height());
+        assert!(r.bottom_area.height() <= max + 0.5, "{w}x{h}: {r:?} (max {max})");
+        assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5 && r.panel.expand(0.5).contains_rect(r.bottom_area), "{w}x{h}: {r:?}");
+        assert!(r.upper_page.height() >= 90.0, "{w}x{h}: {r:?}");
+    }
+    app.h.size = vec2(1280.0, 800.0);
+    app.idle(4);
+
+    // A double-click on the edge: automatic again (the Layers tab hugs its rows as at the start).
+    app.double_click_at(app.state.side_rects.bottom_area.center_top());
+    app.idle(4);
+    assert!((app.state.side_rects.bottom_area.height() - auto.bottom_area.height()).abs() < 1.0, "{:?} vs {auto:?}", app.state.side_rects);
+    crate::panels::sync_prefs(&mut app.state, &app.ps);
+    assert_eq!(app.state.prefs.side_split, None);
+    assert!(app.take().is_empty());
+
+    // A start with a stored split: the lower group has that height, for every tab.
+    let prefs = Prefs { side_split: Some(380.0), side_upper_tab: UpperTab::Color, ..Prefs::default() };
+    let mut state = sample_state(SampleKind::Sphere);
+    state.upper_tab = prefs.side_upper_tab;
+    let mut app = PanelApp { h: Harness::new(1280.0, 800.0), state, ps: PanelState::with_prefs(&prefs), log: Vec::new(), apply: false };
+    app.idle(3);
+    assert!((app.state.side_rects.bottom_area.height() - 380.0).abs() < 1.0, "{:?}", app.state.side_rects);
+    assert!(app.state.side_rects.color.is_positive());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// objects-tabs (WP5): the Objects tab
+
+/// The Three Objects sample (Floor, Cube, Ball) with the Objects tab shown; actions applied.
+fn objects_app() -> PanelApp {
+    let mut state = sample_state(SampleKind::Objects);
+    state.upper_tab = UpperTab::Objects;
+    let mut app = PanelApp::new(state);
+    app.apply = true;
+    app.idle(2);
+    app
+}
+
+fn selected(app: &PanelApp) -> Vec<u32> {
+    app.state.session.as_ref().unwrap().selected_objects.iter().copied().collect()
+}
+
+/// Plan 7.2: plain, Ctrl and Shift clicks on object rows (through their `ObjectRow` rects) and a double-click.
+#[test]
+fn object_rows_take_plain_ctrl_and_shift_clicks() {
+    let mut app = objects_app();
+    let names: Vec<String> = app.state.doc().unwrap().mesh.objects.iter().map(|o| o.name.clone()).collect();
+    assert_eq!(names, ["Floor", "Cube", "Ball"]);
+    let header = crate::panels::objects::header_text(3, 0, u64::from(app.state.doc().unwrap().mesh.tri_count()));
+    assert!(app.h.has(&header), "{header:?} in {:?}", app.h.nodes.iter().map(|n| n.value.clone()).collect::<Vec<_>>());
+    let row = |app: &PanelApp, i: u32| hit_rect(app, PanelHit::ObjectRow(i)).center() + vec2(30.0, 0.0);
+    app.click_at(row(&app, 1));
+    assert!(matches!(app.take()[..], [AppAction::SelectObject(1)]));
+    assert_eq!(selected(&app), [1]);
+    app.h.mods = Modifiers::COMMAND;
+    app.click_at(row(&app, 2));
+    app.h.mods = Modifiers::NONE;
+    assert!(matches!(app.take()[..], [AppAction::ToggleObjectSelected(2)]));
+    assert_eq!(selected(&app), [1, 2]);
+    app.h.mods = Modifiers::COMMAND;
+    app.click_at(row(&app, 1));
+    app.h.mods = Modifiers::NONE;
+    assert!(matches!(app.take()[..], [AppAction::ToggleObjectSelected(1)]), "quick clicks on other rows are not double-clicks");
+    assert_eq!(selected(&app), [2], "Ctrl-click takes it out again");
+    // Shift extends from the anchor (the last plain or Ctrl-clicked row: Cube) to the Floor.
+    app.h.mods = Modifiers::SHIFT;
+    app.click_at(row(&app, 0));
+    app.h.mods = Modifiers::NONE;
+    let actions = app.take();
+    assert!(matches!(actions[..], [AppAction::SelectObjectRange(0)]), "{actions:?}");
+    assert_eq!(selected(&app), [0, 1]);
+    // A double-click selects the row and frames it.
+    app.h.time += 2.0;
+    app.double_click_at(row(&app, 2));
+    let actions = app.take();
+    assert!(matches!(actions[actions.len() - 2..], [AppAction::SelectObject(2), AppAction::FrameSelection]), "{actions:?}");
+    assert_eq!(selected(&app), [2]);
+    // The selected row is drawn with the selection fill; a click on the empty list below the rows deselects.
+    let list = hit_rect(&app, PanelHit::ObjectsList);
+    let last = hit_rect(&app, PanelHit::ObjectRow(2));
+    assert!(list.bottom() > last.bottom() + 30.0, "room below the rows: {list:?} {last:?}");
+    app.click_at(pos2(list.center().x, list.bottom() - 10.0));
+    assert!(matches!(app.take()[..], [AppAction::DeselectObjects]));
+    assert!(selected(&app).is_empty());
+}
+
+/// Plan 7.2: the eye hides one object (and shows it again) and keeps the selection; the row says it is hidden.
+#[test]
+fn the_eye_hides_one_object_and_keeps_the_selection() {
+    let mut app = objects_app();
+    app.click_at(hit_rect(&app, PanelHit::ObjectRow(1)).center() + vec2(30.0, 0.0));
+    app.take();
+    let revision = app.state.doc().unwrap().revision();
+    app.click_at(hit_rect(&app, PanelHit::ObjectEye(1)).center());
+    assert!(matches!(app.take()[..], [AppAction::SetObjectVisible(1, false)]));
+    let doc = app.state.doc().unwrap();
+    assert!(doc.object_hidden(1) && !doc.object_hidden(0) && !doc.object_hidden(2));
+    assert_eq!(doc.revision(), revision, "view state: no revision change");
+    assert_eq!(selected(&app), [1], "the eye does not change the selection");
+    app.idle(1);
+    assert!(app.h.nodes.iter().any(|n| n.value.contains("1 hidden")), "the header counts it");
+    app.click_at(hit_rect(&app, PanelHit::ObjectEye(1)).center());
+    assert!(matches!(app.take()[..], [AppAction::SetObjectVisible(1, true)]));
+    assert!(!app.state.doc().unwrap().object_hidden(1));
+    assert_eq!(selected(&app), [1]);
+}
+
+/// Plan 7.2: the footer's four buttons queue their actions, enabled as their Object menu entries (Hide / Isolate with
+/// a selection, Show all with a hidden object, Frame always); they lie in the footer below the list, inside the page.
+#[test]
+fn objects_footer_buttons_queue_their_actions_and_are_enabled_when_they_can_act() {
+    let mut app = objects_app();
+    app.apply = false;
+    let enabled = |app: &PanelApp| {
+        [PanelHit::ObjectsHide, PanelHit::ObjectsIsolate, PanelHit::ObjectsShowAll, PanelHit::ObjectsFrame]
+            .map(|hit| !app.h.nodes.iter().find(|n| n.role == Role::Button && n.rect == hit_rect(app, hit)).expect("the button").disabled)
+    };
+    assert_eq!(enabled(&app), [false, false, false, true]);
+    let r = app.state.side_rects.clone();
+    let page = r.objects_tab.expect("the Objects page is drawn");
+    let footer = hit_rect(&app, PanelHit::ObjectsFooter);
+    let list = hit_rect(&app, PanelHit::ObjectsList);
+    assert!(page.expand(0.5).contains_rect(footer) && footer.top() >= list.bottom() - 0.5, "footer {footer:?} list {list:?} page {page:?}");
+    // WP4/5 check: the footer keeps clear of the split edge's grab band (a press there made the split the user's).
+    let grab = app.h.ctx.global_style().interaction.resize_grab_radius_side + 3.0;
+    assert!(footer.bottom() + grab < r.bottom_area.top(), "footer {footer:?} in the split's grab band above {:?}", r.bottom_area);
+    for hit in [PanelHit::ObjectsHide, PanelHit::ObjectsIsolate, PanelHit::ObjectsShowAll, PanelHit::ObjectsFrame] {
+        assert!(footer.expand(0.5).contains_rect(hit_rect(&app, hit)), "{hit:?}");
+    }
+    assert!((hit_rect(&app, PanelHit::ObjectsHide).top() - hit_rect(&app, PanelHit::ObjectsFrame).top()).abs() < 0.5, "one row");
+    // (By the recorded rects: the view-mode strip has a "Frame" button too.)
+    app.click_at(hit_rect(&app, PanelHit::ObjectsFrame).center());
+    assert!(matches!(app.take()[..], [AppAction::FrameSelection]));
+
+    let session = app.state.session.as_mut().unwrap();
+    session.selected_objects = [1].into();
+    session.doc.set_hidden_objects(&[false, false, true]).unwrap();
+    app.idle(2);
+    assert_eq!(enabled(&app), [true, true, true, true]);
+    for (button, check) in [
+        (PanelHit::ObjectsHide, (|a: &[AppAction]| matches!(a, [AppAction::HideSelectedObjects])) as ActionCheck),
+        (PanelHit::ObjectsIsolate, |a| matches!(a, [AppAction::IsolateSelectedObjects])),
+        (PanelHit::ObjectsShowAll, |a| matches!(a, [AppAction::ShowAllObjects])),
+        (PanelHit::ObjectsFrame, |a| matches!(a, [AppAction::FrameSelection])),
+    ] {
+        app.h.time += 1.0;
+        app.click_at(hit_rect(&app, button).center());
+        let actions = app.take();
+        assert!(check(&actions), "{button:?}: {actions:?}");
+    }
+    // The hover texts name the shortcuts.
+    let key = crate::shortcuts::shortcut_text(&app.h.ctx, "Hide Selected");
+    assert!(!key.is_empty());
+}
+
+/// Plan 7.2: with 2,000 objects only the rows in view are laid out (and recorded); the footer stays inside the page;
+/// `object_reveal` brings a far row into the list's view within two frames and is then cleared.
+#[test]
+fn a_long_object_list_draws_only_the_rows_in_view() {
+    let raw = wte_core::samples::soup_sets(7, 4_000, 1);
+    let objects = wte_core::RawObjects { tri_object: (0..4_000).map(|t| t / 2).collect(), names: (0..2_000).map(|i| format!("Part {i}")).collect() };
+    let doc = wte_core::testutil::doc_from_raw_objects(raw, &objects, 64);
+    assert_eq!(doc.mesh.object_count(), 2_000);
+    let mut state = sample_state(SampleKind::Sphere);
+    state.session.as_mut().unwrap().doc = doc;
+    state.upper_tab = UpperTab::Objects;
+    for (w, h) in [(1280.0, 800.0), (640.0, 480.0)] {
+        let mut app = PanelApp::new(state);
+        app.h.size = vec2(w, h);
+        app.idle(3);
+        let list = hit_rect(&app, PanelHit::ObjectsList);
+        let rows: Vec<u32> = app.state.panel_rects.keys().filter_map(|k| if let PanelHit::ObjectRow(i) = k { Some(*i) } else { None }).collect();
+        let most = (list.height() / crate::panels::objects::ROW_HEIGHT).floor() as usize + 2;
+        assert!(!rows.is_empty() && rows.len() <= most, "{w}x{h}: {} rows recorded for a list of {list:?} (at most {most})", rows.len());
+        let page = app.state.side_rects.objects_tab.unwrap();
+        let footer = hit_rect(&app, PanelHit::ObjectsFooter);
+        assert!(page.expand(0.5).contains_rect(footer), "{w}x{h}: footer {footer:?} page {page:?}");
+        assert!(app.take().is_empty());
+
+        app.state.session.as_mut().unwrap().object_reveal = Some(1_500);
+        app.idle(2);
+        let row = app.state.panel_rects.get(&PanelHit::ObjectRow(1_500)).copied().expect("row 1500 is laid out");
+        assert!(list.contains_rect(row), "{w}x{h}: row 1500 {row:?} in the list {list:?}");
+        assert_eq!(app.state.session.as_ref().unwrap().object_reveal, None, "the request is served once");
+        // The request does not pin the list: the wheel scrolls on from there.
+        for _ in 0..3 {
+            app.scroll_at(list.center(), vec2(0.0, 5.0));
+        }
+        app.idle(3);
+        let moved = app.state.panel_rects.get(&PanelHit::ObjectRow(1_500)).map_or(f32::INFINITY, |r| r.top() - row.top());
+        assert!(moved > 20.0, "{w}x{h}: the wheel scrolls the list ({moved} pt)");
+        // WP4/5 check: the last row is revealed at the list's bottom, not in the middle of an overscroll (egui springs
+        // an offset past the end back, so the list bounced and showed empty room below the last row).
+        app.state.session.as_mut().unwrap().object_reveal = Some(1_999);
+        app.idle(1);
+        let last = app.state.panel_rects.get(&PanelHit::ObjectRow(1_999)).copied().expect("the last row is laid out");
+        assert!(list.contains_rect(last) && list.bottom() - last.bottom() < 2.0, "{w}x{h}: last row {last:?} in the list {list:?}");
+        state = app.state;
+    }
+}
+
+/// Plan 7.2: an idle Objects tab queues nothing, with a selection and hidden objects, with every tool; without a
+/// document it says so.
+#[test]
+fn objects_tab_is_idle() {
+    let mut app = objects_app();
+    let session = app.state.session.as_mut().unwrap();
+    session.selected_objects = [0, 2].into();
+    session.doc.set_hidden_objects(&[false, true, false]).unwrap();
+    for (tool, _) in crate::panels::toolbar::TOOLS {
+        app.state.tool = tool;
+        app.idle(3);
+        let actions: Vec<AppAction> = app.take().into_iter().filter(|a| !matches!(a, AppAction::LoadFontSamples)).collect();
+        assert!(actions.is_empty(), "{tool:?}: {actions:?}");
+        assert!(app.state.side_rects.objects_tab.is_some(), "{tool:?}");
+    }
+    let header = crate::panels::objects::header_text(3, 1, u64::from(app.state.doc().unwrap().mesh.tri_count()));
+    assert!(app.h.has(&header), "{header:?}");
+    let mut empty = PanelApp::new(AppState::new(Prefs::default(), true));
+    empty.state.upper_tab = UpperTab::Objects;
+    empty.idle(2);
+    assert!(empty.h.has("No document open") && empty.take().is_empty());
+}
+
+/// Check of WP4/5 (finding: the automatic split had a memory). With the Brush or the Text tab below, the upper group
+/// keeps room for the whole Color page. That room came from the page's height as last measured, and the page is
+/// shorter when its square shrank in a small window: back in the larger window the split kept the small room, the
+/// square stayed small, and the page measured small again — so the same window showed a 90 pt or a 140 pt square
+/// depending on the window sizes seen before. Now the room is the page at its full square, so a window shows the same
+/// layout whatever came before.
+#[test]
+fn the_automatic_split_does_not_depend_on_the_window_sizes_seen_before() {
+    let setup = |app: &mut PanelApp| {
+        app.state.tool = ToolKind::Brush;
+        app.state.side_tab = SideTab::Brush;
+        app.state.upper_tab = UpperTab::Color;
+    };
+    let layout = |app: &PanelApp| {
+        let r = &app.state.side_rects;
+        let nodes: Vec<Node> = app.h.nodes.iter().filter(|n| r.color.contains_rect(n.rect)).cloned().collect();
+        (Harness::picker_square(&nodes).rect.width(), r.bottom_area.height())
+    };
+    for (w, h) in [(1280.0, 700.0), (1366.0, 768.0), (1280.0, 800.0)] {
+        let mut fresh = PanelApp::new(sample_state(SampleKind::Sphere));
+        setup(&mut fresh);
+        fresh.h.size = vec2(w, h);
+        fresh.idle(6);
+        let want = layout(&fresh);
+        assert!(want.0 >= 139.0, "{w}x{h}: a fresh start shows the full square: {want:?}");
+
+        let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+        setup(&mut app);
+        app.h.size = vec2(640.0, 480.0);
+        app.idle(6);
+        app.h.size = vec2(w, h);
+        app.idle(6);
+        let got = layout(&app);
+        assert!((got.0 - want.0).abs() < 1.0 && (got.1 - want.1).abs() < 1.0, "{w}x{h}: after 640x480 (square, lower group) {got:?}, fresh {want:?}");
+        // Another upper tab shown in between does not move the split either.
+        app.state.upper_tab = UpperTab::Tool;
+        app.idle(3);
+        assert!((app.state.side_rects.bottom_area.height() - want.1).abs() < 1.0, "{w}x{h}: the Tool tab moved the split: {:?}", app.state.side_rects);
+    }
 }

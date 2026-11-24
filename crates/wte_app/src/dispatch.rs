@@ -13,6 +13,7 @@ use crate::action::AppAction;
 use crate::app::WteApp;
 use crate::dnd::{MODEL_EXTENSIONS, extension_of, is_image_path};
 use crate::io_flows;
+use crate::object_ops;
 use crate::state::{
     AppState, CameraPreset, Dialog, ExportDialogState, OrbitCamera, Pending, SetChoiceUi, ShadingMode, ToolKind,
     UvViewState, ViewId, ViewMode,
@@ -94,7 +95,12 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
         // Round 4: these start a modal bake that takes the pointer away from a held stroke (FEATURE_BRUSH 7.3).
         | A::LoadBrushShape(_)
         | A::AnswerOpenings(Some(_))
-        | A::SetBrushShapeClose(_) => true,
+        | A::SetBrushShapeClose(_)
+        // objects-tabs: a visibility change needs no open stroke (`Document::set_hidden_objects` refuses one).
+        | A::SetObjectVisible(..)
+        | A::HideSelectedObjects
+        | A::IsolateSelectedObjects
+        | A::ShowAllObjects => true,
         A::SetLayerOpacity(_, _, commit)
         | A::UpdateStampSource(_, _, commit)
         | A::UpdateStampPlacement(_, _, commit)
@@ -104,7 +110,8 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
 }
 
 /// The guarded actions that commit a running stroke or gizmo drag (`ToolController::finish`) instead of cancelling it:
-/// Save, Save As and Export write what is on screen at that moment.
+/// Save, Save As and Export write what is on screen at that moment; showing or hiding objects (objects-tabs) is view
+/// state and never throws away what the user painted.
 fn finishes_interaction(action: &AppAction) -> bool {
     matches!(
         action,
@@ -114,6 +121,10 @@ fn finishes_interaction(action: &AppAction) -> bool {
             | AppAction::ShowExport
             | AppAction::ShowExportLayers(_)
             | AppAction::RunExport(_)
+            | AppAction::SetObjectVisible(..)
+            | AppAction::HideSelectedObjects
+            | AppAction::IsolateSelectedObjects
+            | AppAction::ShowAllObjects
     )
 }
 
@@ -810,7 +821,8 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::FrameModel => {
             let mode = app.state.view_mode;
             if let Some(session) = app.state.session.as_mut() {
-                let bounds = session.doc.mesh.bounds;
+                // objects-tabs: the visible objects (the whole model when nothing is hidden).
+                let bounds = session.doc.visible_bounds();
                 match mode {
                     ViewMode::View3D | ViewMode::Split => session.camera.frame(bounds),
                     ViewMode::Preview => session.preview_camera.frame(bounds),
@@ -825,7 +837,7 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
             let mode = app.state.view_mode;
             if let Some(session) = app.state.session.as_mut() {
                 let mut camera = OrbitCamera::default();
-                camera.frame(session.doc.mesh.bounds);
+                camera.frame(session.doc.visible_bounds());
                 if mode == ViewMode::Preview {
                     session.preview_camera = camera;
                 } else {
@@ -954,6 +966,18 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::UpdateStampTint(id, tint, commit) => layer_command(app, |d| d.set_stamp_tint(id, tint, commit)),
         A::DeleteStamp(id) => layer_command(app, |d| d.remove_stamp(id)),
 
+        // ---- objects (objects-tabs) ----
+        A::SelectObject(o) => with_session(app, |s| object_ops::select(s, o)),
+        A::ToggleObjectSelected(o) => with_session(app, |s| object_ops::toggle(s, o)),
+        A::SelectObjectRange(o) => with_session(app, |s| object_ops::select_range(s, o)),
+        A::SelectAllObjects => with_session(app, object_ops::select_all),
+        A::DeselectObjects => with_session(app, object_ops::deselect),
+        A::SetObjectVisible(o, visible) => object_ops::set_visible(&mut app.state, o, visible),
+        A::HideSelectedObjects => object_ops::hide_selected(&mut app.state),
+        A::IsolateSelectedObjects => object_ops::isolate_selected(&mut app.state),
+        A::ShowAllObjects => object_ops::show_all(&mut app.state),
+        A::FrameSelection => object_ops::frame_selection(&mut app.state),
+
         // ---- brush shape and text flows (round 4) ----
         A::LoadBrushShape(p) => crate::brush_flows::load(app, p, frame),
         A::ReloadBrushShape => crate::brush_flows::reload(app),
@@ -967,6 +991,13 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::CloseDialog => close_dialog(app),
         A::CancelJob => app.jobs.cancel_modal(),
         A::Toast(level, text) => app.state.toasts.push(level, text),
+    }
+}
+
+/// Runs `f` on the session; no-op without one.
+fn with_session(app: &mut WteApp, f: impl FnOnce(&mut crate::state::Session)) {
+    if let Some(session) = app.state.session.as_mut() {
+        f(session);
     }
 }
 
@@ -1049,6 +1080,25 @@ mod tests {
         assert!(!needs_interaction_guard(&AppAction::ReloadBrushShape));
         assert!(!needs_interaction_guard(&AppAction::RemoveBrushShape));
         assert!(!needs_interaction_guard(&AppAction::LoadFontSamples));
+        // objects-tabs: a visibility change ends a held stroke by committing it; selecting and framing need nothing.
+        for a in [
+            AppAction::SetObjectVisible(0, false),
+            AppAction::HideSelectedObjects,
+            AppAction::IsolateSelectedObjects,
+            AppAction::ShowAllObjects,
+        ] {
+            assert!(needs_interaction_guard(&a) && finishes_interaction(&a), "{a:?}");
+        }
+        for a in [
+            AppAction::SelectObject(0),
+            AppAction::ToggleObjectSelected(0),
+            AppAction::SelectObjectRange(0),
+            AppAction::SelectAllObjects,
+            AppAction::DeselectObjects,
+            AppAction::FrameSelection,
+        ] {
+            assert!(!needs_interaction_guard(&a), "{a:?}");
+        }
     }
 
     /// The Sphere sample with two more paint layers: [Base, Paint 1, A, B] bottom to top, B active.

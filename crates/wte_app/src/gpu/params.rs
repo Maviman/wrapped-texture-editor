@@ -36,6 +36,11 @@ pub struct View3dParams {
     pub nearest: bool,
     pub backdrop: Backdrop,
     pub brush: Option<BrushRing>,
+    /// objects-tabs: draw the hidden objects too (the export dialog's preview: an export contains every object).
+    pub all_objects: bool,
+    /// objects-tabs: draw the selection tint over the selected visible objects (8.5: Main3D only, with the Navigate
+    /// tool and no open stroke).
+    pub highlight: bool,
 }
 
 /// Parameters of one UV-view render (`Renderer::render_uv`).

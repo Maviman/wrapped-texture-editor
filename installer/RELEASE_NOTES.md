@@ -1,3 +1,13 @@
+## What's new in 0.2.0
+
+- **Objects:** a model with several objects (e.g. a chess set) now keeps them apart. The new **Objects** tab lists
+  them; click one there, or in the 3D view with the Navigate tool, to select it. **Object** menu: Hide (H),
+  Isolate (Shift+H), Show all (Alt+H), Frame selection (Shift+F). Hidden objects are not drawn and do not block
+  painting, fills, stamps or wraps. Projects remember which objects are hidden.
+- **Tabs:** the side panel is now two tab groups, like Photoshop: **Tool | Color | Texture sets | Objects** above and
+  **Layers | Brush | Text** below. Drag the line between them to resize; double-click it to go back to automatic.
+  Click the colour chip in the toolbar to jump to the Color tab.
+
 ## Install
 
 1. Download **WrappedTextureEditor-@VERSION@-Setup.exe** below.

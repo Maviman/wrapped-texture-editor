@@ -7,7 +7,7 @@ use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use crate::action::AppAction;
 use crate::panels::{paint_checker, to_color32};
 use crate::shortcuts::shortcut_text;
-use crate::state::{AppState, ToolKind};
+use crate::state::{AppState, ToolKind, UpperTab};
 use crate::theme;
 
 /// The tools in toolbar order with their `shortcut_text` labels (which are also the tooltip names).
@@ -62,9 +62,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
     state.actions.extend(actions);
 }
 
-/// Primary colour (top left) over the secondary colour (bottom right); clicking the secondary swaps them. Below:
-/// a swap arrow and a black/white reset chip.
-fn color_chip(ui: &mut egui::Ui, state: &AppState, side: f32, actions: &mut Vec<AppAction>) {
+/// Primary colour (top left) over the secondary colour (bottom right); clicking the secondary swaps them, clicking the
+/// primary shows the side panel's Color tab (objects-tabs WP4, a setting). Below: a swap arrow and a black/white reset
+/// chip.
+fn color_chip(ui: &mut egui::Ui, state: &mut AppState, side: f32, actions: &mut Vec<AppAction>) {
     let (area, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
     let chip = (side * 0.62).round();
     let primary = Rect::from_min_size(area.min, vec2(chip, chip));
@@ -80,12 +81,14 @@ fn color_chip(ui: &mut egui::Ui, state: &AppState, side: f32, actions: &mut Vec<
         actions.push(AppAction::SwapColors);
     }
 
-    let pri_resp = ui.interact(primary, egui::Id::unique("wte_primary_chip"), Sense::hover());
+    let pri_resp = ui.interact(primary, egui::Id::unique("wte_primary_chip"), Sense::click());
     paint_checker(ui.painter(), primary);
     ui.painter().rect_filled(primary, 0.0, to_color32(state.colors.primary));
     ui.painter().rect_stroke(primary, 0.0, outline, egui::StrokeKind::Inside);
     ui.painter().rect_stroke(primary.shrink(1.0), 0.0, highlight, egui::StrokeKind::Inside);
-    pri_resp.on_hover_text("Primary colour (edit it in the Color section)");
+    if pri_resp.on_hover_text("Primary colour: click to show the Color tab").clicked() {
+        state.upper_tab = UpperTab::Color;
+    }
 
     ui.add_space(4.0);
     let small = (side * 0.45).round();

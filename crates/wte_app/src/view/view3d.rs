@@ -26,6 +26,13 @@ pub(crate) fn input(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, rect: egui::Rect) {
     route_pointer(ui, cx, ViewId::Main3D, rect, &response);
 }
 
+/// objects-tabs (8.5): the selection tint is drawn when objects are selected, no stroke is open and the Navigate tool is
+/// active or the side panel shows the Objects tab (a tint would falsify the colours while painting with another tab).
+pub(crate) fn highlight_shown(state: &crate::state::AppState) -> bool {
+    (state.tool == crate::state::ToolKind::Navigate || state.upper_tab == crate::state::UpperTab::Objects)
+        && state.session.as_ref().is_some_and(|s| !s.selected_objects.is_empty() && !s.doc.stroke_active())
+}
+
 /// Phase B of the 3D view: render the model with the brush ring, paint it, then the overlays.
 pub(crate) fn render(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, rect: egui::Rect) {
     if rect.width() < 1.0 || rect.height() < 1.0 {
@@ -47,6 +54,8 @@ pub(crate) fn render(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, rect: egui::Rect) {
         nearest: false,
         backdrop: flags.backdrop,
         brush: cx.tools.brush_ring(cx.state),
+        all_objects: false,
+        highlight: highlight_shown(cx.state),
     };
     let target = &mut cx.targets.main3d;
     target.ensure_size(cx.gpu, target_px(ui.ctx(), rect));

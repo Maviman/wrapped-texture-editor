@@ -33,7 +33,8 @@ pub fn next_scene_generation() -> u64 {
 }
 
 /// The app-side view state stored in `Document::ui_state` (7.2: camera, UV view, view mode, active set, colours and
-/// swatches). Every field is optional so that older or foreign values never fail to load.
+/// swatches; objects-tabs: the names of the hidden objects). Every field is optional so that older or foreign values
+/// never fail to load.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct UiState {
@@ -43,6 +44,27 @@ struct UiState {
     view_mode: Option<ViewMode>,
     active_set: Option<u32>,
     colors: Option<ColorState>,
+    /// objects-tabs: names of the hidden objects. Not written when nothing is hidden (a project then has the bytes of
+    /// a build without objects); read leniently: anything but an array of strings counts as nothing hidden and the
+    /// other fields still load.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_names")]
+    hidden_objects: Vec<String>,
+}
+
+/// `UiState::hidden_objects` from any JSON value: the strings of an array, nothing otherwise.
+fn lenient_names<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let names = match value {
+        serde_json::Value::Array(items) => {
+            items.into_iter().filter_map(|v| if let serde_json::Value::String(s) = v { Some(s) } else { None }).collect()
+        }
+        serde_json::Value::Null => Vec::new(),
+        other => {
+            log::warn!("ignoring the stored hidden objects: not a list ({other})");
+            Vec::new()
+        }
+    };
+    Ok(names)
 }
 
 impl UiState {
@@ -55,6 +77,7 @@ impl UiState {
             view_mode: Some(view_mode),
             active_set: Some(session.active_set.0),
             colors: Some(state.colors.clone()),
+            hidden_objects: crate::object_ops::hidden_names(&session.doc),
         }
     }
 }
@@ -258,6 +281,7 @@ fn remember_recent(app: &mut WteApp, path: &Path) {
     }
     crate::prefs::add_recent(&mut app.state.prefs, path);
     crate::brush_flows::sync_prefs(&mut app.state);
+    crate::panels::sync_prefs(&mut app.state, &app.panels);
     crate::prefs::save(&app.state.prefs);
 }
 
@@ -698,6 +722,12 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         _ => None,
     };
     log::info!("document \"{}\": {} set(s), {} stamp(s)", doc.name, doc.sets.len(), doc.stamps.len());
+    // objects-tabs: the objects of the model (names of the first 24).
+    const LOGGED_NAMES: usize = 24;
+    let names: Vec<&str> = doc.mesh.objects.iter().take(LOGGED_NAMES).map(|o| o.name.as_str()).collect();
+    let more = doc.mesh.objects.len().saturating_sub(LOGGED_NAMES);
+    let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+    log::info!("objects: {} ({}{more})", doc.mesh.objects.len(), names.join(", "));
     let mut session = Session {
         doc,
         path,
@@ -710,6 +740,10 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         scene_generation: next_scene_generation(),
         text_gap: None,
         selected_layers: Vec::new(),
+        selected_objects: Default::default(),
+        object_anchor: None,
+        object_selection_rev: 0,
+        object_reveal: None,
     };
     if let Some(ui) = restored {
         if let Some(c) = ui.camera.filter(camera_is_sane) {
@@ -731,6 +765,18 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         if let Some(mut colors) = ui.colors {
             colors.swatches.resize(SWATCH_COUNT, [255, 255, 255, 255]);
             app.state.colors = colors;
+        }
+        // objects-tabs: the hidden objects of the saved view (view state: no history entry, not modified).
+        if !ui.hidden_objects.is_empty() {
+            let hidden = crate::object_ops::hidden_from_names(&session.doc, &ui.hidden_objects);
+            match session.doc.set_hidden_objects(&hidden) {
+                Ok(_) => {
+                    if let Some(text) = crate::object_ops::restored_hidden_text(&session.doc) {
+                        app.state.toasts.info(text);
+                    }
+                }
+                Err(e) => log::warn!("could not restore the hidden objects: {e}"),
+            }
         }
     }
     session.validate();
@@ -854,6 +900,10 @@ mod tests {
             scene_generation: 1,
             text_gap: None,
             selected_layers: Vec::new(),
+            selected_objects: Default::default(),
+            object_anchor: None,
+            object_selection_rev: 0,
+            object_reveal: None,
         };
         let ui = UiState::capture(&state, &session);
         let value = serde_json::to_value(&ui).unwrap();
@@ -863,6 +913,25 @@ mod tests {
         let partial: UiState = serde_json::from_value(serde_json::json!({ "active_set": 3, "unknown": true })).unwrap();
         assert_eq!(partial.active_set, Some(3));
         assert!(partial.camera.is_none());
+        // objects-tabs: nothing hidden is not written at all; hidden names round-trip; a value of another kind is
+        // ignored without losing the other fields; non-string entries are skipped.
+        assert!(serde_json::to_value(&ui).unwrap().get("hidden_objects").is_none());
+        assert!(partial.hidden_objects.is_empty());
+        let mut session = session;
+        session.doc = Document::sample(wte_core::SampleKind::Objects);
+        session.doc.set_hidden_objects(&[false, true, false]).unwrap();
+        let ui = UiState::capture(&state, &session);
+        assert_eq!(ui.hidden_objects, ["Cube"]);
+        let value = serde_json::to_value(&ui).unwrap();
+        assert_eq!(value["hidden_objects"], serde_json::json!(["Cube"]));
+        assert_eq!(serde_json::from_value::<UiState>(value).unwrap(), ui);
+        for garbage in [serde_json::json!(7), serde_json::json!("Cube"), serde_json::json!({ "a": 1 }), serde_json::Value::Null] {
+            let v: UiState = serde_json::from_value(serde_json::json!({ "active_set": 2, "hidden_objects": garbage })).unwrap();
+            assert_eq!(v.active_set, Some(2), "{garbage}");
+            assert!(v.hidden_objects.is_empty(), "{garbage}");
+        }
+        let v: UiState = serde_json::from_value(serde_json::json!({ "hidden_objects": ["Cube", 3, null, "Ball"] })).unwrap();
+        assert_eq!(v.hidden_objects, ["Cube", "Ball"]);
         assert!(!camera_is_sane(&OrbitCamera { distance: f32::NAN, ..OrbitCamera::default() }));
     }
 
@@ -879,6 +948,10 @@ mod tests {
             scene_generation: 1,
             text_gap: None,
             selected_layers: Vec::new(),
+            selected_objects: Default::default(),
+            object_anchor: None,
+            object_selection_rev: 0,
+            object_reveal: None,
         }
     }
 
@@ -946,6 +1019,10 @@ mod tests {
             scene_generation: 1,
             text_gap: None,
             selected_layers: Vec::new(),
+            selected_objects: Default::default(),
+            object_anchor: None,
+            object_selection_rev: 0,
+            object_reveal: None,
         });
         assert_eq!(title_text(&state), "ball - Wrapped Texture Editor");
         let doc = state.doc_mut().unwrap();

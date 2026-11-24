@@ -22,6 +22,7 @@ mod gpu;
 mod gpu_check;
 mod io_flows;
 mod jobs;
+mod object_ops;
 mod panels;
 mod prefs;
 mod selftest;

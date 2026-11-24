@@ -75,8 +75,9 @@ pub struct TransformTool {
     /// Input time of the current frame (`ToolController::set_clock`).
     now: f64,
     /// Round 6: the selected wrapped stamp and placement whose parameterization `ensure_wrap_param` could not make
-    /// (no surface within reach): not tried again every frame.
-    wrap_failed: Option<(StampId, Placement)>,
+    /// (no surface within reach): not tried again every frame. Objects-tabs: with the document's visibility generation
+    /// of the try (showing or hiding objects changes what the stamp can wrap onto, so it is tried again).
+    wrap_failed: Option<(StampId, Placement, u64)>,
 }
 
 /// Seconds without a wheel event after which a wheel gesture is committed.
@@ -270,9 +271,10 @@ impl TransformTool {
         // Round 9 (package B, T8 / T9): a selected 3D stamp has the mesh's shared texels found, a wrapped one also the
         // mesh graph built, off the UI thread.
         state.wrap_jobs.request_warmup(p.mode == SurfaceMode::Wrap);
+        let visibility = state.doc().map_or(0, |d| d.visibility_generation());
         if p.mode != SurfaceMode::Wrap
-            || self.wrap_failed == Some((id, placement))
-            || state.wrap_jobs.param_failed == Some((id, placement))
+            || self.wrap_failed == Some((id, placement, visibility))
+            || state.wrap_jobs.param_failed == Some((id, placement, visibility))
         {
             return false;
         }
@@ -298,7 +300,7 @@ impl TransformTool {
                 true
             }
             None => {
-                self.wrap_failed = Some((id, placement));
+                self.wrap_failed = Some((id, placement, visibility));
                 log::info!("wrap: selected stamp {} has no surface to wrap onto ({ms:.1} ms)", id.0);
                 false
             }

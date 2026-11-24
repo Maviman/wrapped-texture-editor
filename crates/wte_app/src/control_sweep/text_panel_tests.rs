@@ -19,7 +19,7 @@ use crate::action::AppAction;
 use crate::panels::text_block::{self, BufferCall, GapBuffer, content_field_id};
 use crate::panels::text_tab::CIRCLE_TOO_SHORT;
 use crate::panels::tool_options::placement_rotation_deg;
-use crate::state::{AppState, PanelHit, SideTab, TextGapSel, TextPage, ToolKind};
+use crate::state::{AppState, PanelHit, SideTab, TextGapSel, TextPage, ToolKind, UpperTab};
 
 /// Puts the cursor (or a selection `a..b`) into the field `id` the way a click or Shift+arrows would.
 fn set_cursor(ctx: &egui::Context, id: egui::Id, a: usize, b: usize) {
@@ -374,7 +374,7 @@ fn text_rows_fit_the_panel() {
     let check = |app: &PanelApp, what: &str| {
         let r = &app.state.side_rects;
         assert!(r.panel.width() <= 300.5, "{what}: the side panel is {} wide", r.panel.width());
-        assert!(r.panel.contains_rect(r.color), "{what}: the Color section is inside the side panel: {r:?}");
+        assert!(r.panel.contains_rect(r.upper_area), "{what}: the upper group is inside the side panel: {r:?}");
         let top = r.tool_area.min.y;
         let b = bold_button(app);
         assert!(b.rect.max.y - top <= 116.0, "{what}: rows 1 to 3 end {} pt below the top", b.rect.max.y - top);
@@ -413,17 +413,24 @@ fn text_rows_fit_the_panel() {
     assert!(app.h.has("Warp: Shell Lower"));
 }
 
-/// TEXT 8.2 `the_colour_section_stays_inside_the_panel_on_every_page` (1280 x 800, a text of 60 letters).
+/// TEXT 8.2 `the_colour_section_stays_inside_the_panel_on_every_page` (1280 x 800, a text of 60 letters). objects-tabs
+/// (WP4): the upper group stays inside the panel and above the lower one, with the Tool and with the Color tab shown;
+/// the Color page is then on screen whole (G1).
 #[test]
 fn the_colour_section_stays_inside_the_panel_on_every_page() {
     let long: String = "ABCDEFGHIJ".repeat(6);
     let (mut app, _) = text_app(&long, |_| {}, Some(TextPage::Character));
-    for page in [TextPage::Character, TextPage::Warp, TextPage::Path] {
+    for (page, upper) in [TextPage::Character, TextPage::Warp, TextPage::Path].into_iter().flat_map(|p| [(p, UpperTab::Tool), (p, UpperTab::Color)]) {
         app.state.text_page = page;
+        app.state.upper_tab = upper;
         app.idle(3);
         let r = app.state.side_rects.clone();
         let tab = r.text_tab.unwrap_or_else(|| panic!("{page:?}: the Text tab is shown"));
-        assert!(r.panel.contains_rect(r.color), "{page:?}: {r:?}");
+        assert!(r.panel.contains_rect(r.upper_area) && r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{page:?} {upper:?}: {r:?}");
+        if upper == UpperTab::Color {
+            let content = app.state.panel_rects[&PanelHit::ColorContent];
+            assert!(r.panel.contains_rect(r.color) && r.color.expand(0.5).contains_rect(content), "{page:?}: the Color page is cut off: {content:?} in {r:?}");
+        }
         assert!(r.bottom_area.contains_rect(tab), "{page:?}: {r:?}");
         assert!(r.panel.width() <= 300.5, "{page:?}: the side panel is {} wide", r.panel.width());
         assert!(app.take().is_empty(), "{page:?}: an idle page queues nothing");
@@ -1361,4 +1368,40 @@ fn gate_font_picker_with_the_machine_fonts_frame_times() {
     let scrolling: Vec<f64> =
         (0..20).map(|_| timed_frame(&mut app, vec![Harness::wheel(vec2(0.0, -3.0), Modifiers::NONE)])).collect();
     frame_stats("font picker open, scrolling the list", &scrolling, 16.0);
+}
+
+/// objects-tabs (WP4): the side panel stays 300 pt wide when the Tool page starts or stops scrolling. The lower tab,
+/// the tool and the selection change the room and the length of the Tool page; egui reserves a scroll bar's room only
+/// from the frame after it first shows it, and the option grids keep their column widths from the frame before, so a
+/// page that started to overflow grew the panel by 6 pt for good (the `text` and `text_tab` scenarios: 306 and 312 pt).
+/// The upper pages' bars therefore lie over the content's right edge and take none of its width.
+#[test]
+fn the_side_panel_keeps_its_width_when_the_tool_page_starts_to_scroll() {
+    let mut state = sample_state(SampleKind::Sphere);
+    let id = place_text(&mut state, "WTE", |_| {});
+    state.session.as_mut().unwrap().selected_stamp = Some(id);
+    state.tool = ToolKind::Transform;
+    let mut app = PanelApp::new(state);
+    let steps = [
+        (ToolKind::Transform, SideTab::Layers),
+        (ToolKind::Transform, SideTab::Text),
+        (ToolKind::Text, SideTab::Layers),
+        (ToolKind::Text, SideTab::Text),
+        (ToolKind::Brush, SideTab::Brush),
+        (ToolKind::Transform, SideTab::Layers),
+        (ToolKind::Stamp, SideTab::Layers),
+        (ToolKind::Transform, SideTab::Text),
+    ];
+    for (w, h) in [(1280.0, 800.0), (1280.0, 700.0), (1600.0, 1000.0)] {
+        app.h.size = vec2(w, h);
+        for (tool, tab) in steps {
+            app.state.tool = tool;
+            app.state.side_tab = tab;
+            app.idle(4);
+            let side = app.state.side_panel_rect.expect("the side panel is recorded");
+            assert!(side.width() <= 300.5, "{w}x{h}, {tool:?}, {tab:?}: the side panel is {} pt wide", side.width());
+        }
+    }
+    let actions: Vec<AppAction> = app.take().into_iter().filter(|a| !matches!(a, AppAction::LoadFontSamples)).collect();
+    assert!(actions.is_empty(), "{actions:?}");
 }

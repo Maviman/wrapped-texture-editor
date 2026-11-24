@@ -124,6 +124,39 @@ struct OpenSegment {
     count: u32,
     /// The next dab to paint (1-based).
     next: u32,
+    /// A pressure-sized segment (branch `pen-input`, 6.4): the walk by the current radius replaces `step` / `count`.
+    var: Option<VarWalk>,
+}
+
+/// The walk of a pressure-sized segment (ARCHITECTURE.md 6.4 "Spacing and interpolation"); distances are measured
+/// from the segment start.
+#[derive(Copy, Clone)]
+struct VarWalk {
+    /// Where the next dab goes.
+    next_d: f32,
+    /// Where the last dab went (`-start_residual` before the first).
+    last_d: f32,
+    /// The step's lower bound (half a texel).
+    floor: f32,
+}
+
+/// True for a pressure-sized segment (6.4): size dynamics on and a pressure below 1 at either end. Every other segment
+/// (every mouse segment, every stroke without size dynamics) keeps round 4's constant step.
+#[inline]
+fn pressure_sized(brush: &BrushParams, from_pressure: f32, pressure: f32) -> bool {
+    brush.dynamics.size && (from_pressure < 1.0 || pressure < 1.0)
+}
+
+/// The dab step at `pressure` of a pressure-sized segment: the spacing of the current radius, at least `floor`.
+#[inline]
+fn step_at(brush: &BrushParams, pressure: f32, floor: f32) -> f32 {
+    (brush.spacing * 2.0 * brush.radius * brush.dynamics.size_factor(pressure)).max(floor)
+}
+
+/// Upper bound of the dabs of a pressure-sized segment (the guard of 6.4).
+#[inline]
+fn var_bound(brush: &BrushParams, residual: f32, len: f32, from_pressure: f32, pressure: f32, floor: f32) -> f32 {
+    ((residual + len) / step_at(brush, from_pressure.min(pressure), floor)).floor()
 }
 
 /// A stroke is 3D or 2D, decided by its first sample.
@@ -235,6 +268,7 @@ fn sanitize(brush: &BrushParams) -> BrushParams {
         opacity: unit(brush.opacity),
         flow: unit(brush.flow),
         spacing: if brush.spacing.is_nan() { 0.12 } else { brush.spacing.clamp(0.02, 1.0) },
+        dynamics: brush.dynamics.sanitized(),
         ..*brush
     }
 }
@@ -428,8 +462,23 @@ impl Document {
                     };
                     let texel = if texel.is_finite() && texel > 0.0 { texel } else { 1.0 };
                     let step = (session.brush.spacing * 2.0 * radius).max(0.5 * texel);
-                    let (count, residual) = dabs_on_segment(session.residual, len, step);
-                    if count > MAX_DABS_PER_SAMPLE {
+                    // A pressure-sized segment walks by the current radius (6.4); every other keeps the constant step.
+                    let var = pressure_sized(&session.brush, from_pressure, pressure).then(|| VarWalk {
+                        next_d: (step_at(&session.brush, from_pressure, 0.5 * texel) - session.residual).max(0.0),
+                        last_d: -session.residual,
+                        floor: 0.5 * texel,
+                    });
+                    let (count, residual, too_many) = match var {
+                        Some(w) => {
+                            let bound = var_bound(&session.brush, session.residual, len, from_pressure, pressure, w.floor);
+                            (0, 0.0, bound > MAX_DABS_PER_SAMPLE as f32)
+                        }
+                        None => {
+                            let (count, residual) = dabs_on_segment(session.residual, len, step);
+                            (count, residual, count > MAX_DABS_PER_SAMPLE)
+                        }
+                    };
+                    if too_many {
                         session.tip.prev_up = None;
                         self.surface_dab(&mut session, position, normal, facing, pressure);
                         more();
@@ -450,6 +499,7 @@ impl Document {
                             end_residual: residual,
                             count,
                             next: 1,
+                            var,
                         });
                         result = self.run_segment(&mut session, more);
                     }
@@ -481,6 +531,9 @@ impl Document {
     /// when `more()` says no before its last dab. The dab positions are those of round 4's loop, bit for bit.
     fn run_segment(&mut self, session: &mut StrokeSession, more: &mut dyn FnMut() -> bool) -> StrokeStep {
         let Some(mut seg) = session.pace.open.take() else { return StrokeStep::Done };
+        if let Some(walk) = seg.var {
+            return self.run_var_segment(session, seg, walk, more);
+        }
         while seg.next <= seg.count {
             let k = seg.next;
             seg.next += 1;
@@ -498,6 +551,37 @@ impl Document {
             }
         }
         session.residual = seg.end_residual;
+        StrokeStep::Done
+    }
+
+    /// `run_segment` for a pressure-sized segment (6.4): a dab at `next_d`, the next one a step of that dab's own
+    /// radius further; afterwards the residual is the distance since the last dab. Normals and pressure are
+    /// interpolated as in the constant walk; the dab sequence does not depend on `more`.
+    fn run_var_segment(
+        &mut self,
+        session: &mut StrokeSession,
+        mut seg: OpenSegment,
+        mut walk: VarWalk,
+        more: &mut dyn FnMut() -> bool,
+    ) -> StrokeStep {
+        while walk.next_d <= seg.len {
+            let d = walk.next_d;
+            let t = if seg.len > 0.0 { (d / seg.len).clamp(0.0, 1.0) } else { 1.0 };
+            let n = seg.from_normal.lerp(seg.normal, t).normalize_or_zero();
+            let n = if n == Vec3::ZERO { seg.normal } else { n };
+            let f = seg.from_facing.lerp(seg.facing, t).normalize_or_zero();
+            let f = if f == Vec3::ZERO { seg.facing } else { f };
+            let p = seg.from_pressure + (seg.pressure - seg.from_pressure) * t;
+            self.surface_dab(session, seg.from.lerp(seg.to, t), n, f, p);
+            walk.last_d = d;
+            walk.next_d = d + step_at(&session.brush, p, walk.floor);
+            if !more() && walk.next_d <= seg.len {
+                seg.var = Some(walk);
+                session.pace.open = Some(seg);
+                return StrokeStep::Partial;
+            }
+        }
+        session.residual = (seg.len - walk.last_d).max(0.0);
         StrokeStep::Done
     }
 
@@ -521,7 +605,28 @@ impl Document {
                 _ => None,
             };
             let mut bridged = false;
-            if let Some((from, from_pressure)) = bridge {
+            if let Some((from, from_pressure)) = bridge
+                && pressure_sized(&session.brush, from_pressure, pressure)
+            {
+                // A pressure-sized segment (6.4): the walk by the current radius, step floor half a texel.
+                let len = pos_px.distance(from);
+                let brush = session.brush;
+                if len.is_finite()
+                    && var_bound(&brush, session.residual, len, from_pressure, pressure, 0.5) <= MAX_DABS_PER_SAMPLE as f32
+                {
+                    let mut d = (step_at(&brush, from_pressure, 0.5) - session.residual).max(0.0);
+                    let mut last_d = -session.residual;
+                    while d <= len {
+                        let t = if len > 0.0 { (d / len).clamp(0.0, 1.0) } else { 1.0 };
+                        let p = from_pressure + (pressure - from_pressure) * t;
+                        self.texture_dab(&mut session, set, from.lerp(pos_px, t), p);
+                        last_d = d;
+                        d += step_at(&brush, p, 0.5);
+                    }
+                    session.residual = (len - last_d).max(0.0);
+                    bridged = true;
+                }
+            } else if let Some((from, from_pressure)) = bridge {
                 let len = pos_px.distance(from);
                 let step = (session.brush.spacing * 2.0 * session.brush.radius).max(0.5);
                 let (count, residual) = dabs_on_segment(session.residual, len, step);
@@ -686,7 +791,8 @@ impl Document {
         // The tip's values (the field by its `Arc`, so that the session can be lent to `reapply` below).
         let tip = &session.tip.tip;
         let (field, reach, through) = (tip.field().cloned(), tip.reach, tip.through);
-        let r = brush.radius;
+        // Pen pressure sizes the dab (branch `pen-input`): exactly `brush.radius` at pressure 1 or without size dynamics.
+        let r = brush.radius * brush.dynamics.size_factor(pressure);
         let k = r * tip.scale;
         // The frame: A (aligned to the surface or fixed) times the user's rotation U.
         let align = match tip.align {
@@ -736,7 +842,8 @@ impl Document {
                 && let Some(scratch) = self.sets[index].scratch.as_deref_mut()
             {
                 session.pace.counters.set_dabs += 1;
-                let rects = brush::dab_tip(&mesh, &map, scratch, &shape, &list, brush.hardness, brush.flow * pressure);
+                let strength = brush.flow * brush.dynamics.flow_factor(pressure);
+                let rects = brush::dab_tip(&mesh, &map, scratch, &shape, &list, brush.hardness, strength);
                 self.reapply(session, index, &rects);
             }
             session.tip.query.lists[index] = list;
@@ -749,6 +856,7 @@ impl Document {
         use crate::brush::dab_3d;
         let (mesh, bvh) = (Arc::clone(&self.mesh), Arc::clone(&self.bvh));
         let brush = session.brush;
+        let radius = brush.radius * brush.dynamics.size_factor(pressure);
         session.pace.counters.dabs += 1;
         for index in 0..self.sets.len().min(session.sets.len()) {
             let set = TextureSetId(index as u32);
@@ -758,7 +866,7 @@ impl Document {
             let map = Arc::clone(&self.sets[index].texel_map);
             if matches!(session.sets[index], SetState::Untouched) {
                 // The set is touched once a dab finds candidate triangles in it.
-                if !brush::dab_reaches_set(&mesh, &bvh, &map, set, center, normal, brush.radius, brush.same_side_only) {
+                if !brush::dab_reaches_set(&mesh, &bvh, &map, set, center, normal, radius, brush.same_side_only) {
                     continue;
                 }
                 session.sets[index] = self.stroke_target(&mut session.pace.counters, set);
@@ -776,9 +884,9 @@ impl Document {
                 scratch,
                 center,
                 normal,
-                brush.radius,
+                radius,
                 brush.hardness,
-                brush.flow * pressure,
+                brush.flow * brush.dynamics.flow_factor(pressure),
                 brush.same_side_only,
             );
             self.reapply(session, index, &rects);
@@ -801,7 +909,9 @@ impl Document {
         let brush = session.brush;
         let Some(scratch) = self.sets[index].scratch.as_deref_mut() else { return };
         session.pace.counters.set_dabs += 1;
-        let rects = dab_2d(scratch, center_px, brush.radius, brush.hardness, brush.flow * pressure);
+        let radius = brush.radius * brush.dynamics.size_factor(pressure);
+        let strength = brush.flow * brush.dynamics.flow_factor(pressure);
+        let rects = dab_2d(scratch, center_px, radius, brush.hardness, strength);
         self.reapply(session, index, &rects);
     }
 
@@ -2109,5 +2219,268 @@ mod tests {
         };
         let want = paint(true);
         assert!(paint(false) == want, "the pixels differ from round 5's");
+    }
+
+    // ----- Branch `pen-input`, part A: pressure dynamics (PEN_INPUT_PLAN 2.4, ARCHITECTURE 9.1) -----
+
+    use crate::brush::PressureDynamics;
+
+    /// Size and flow dynamics of a pen test.
+    fn pen_dyn(size: bool, size_min: f32, flow: bool, flow_min: f32) -> PressureDynamics {
+        PressureDynamics { size, size_min, flow, flow_min }
+    }
+
+    /// Rows of column `x` whose pixel passes `hit` (the painted height of a horizontal stroke).
+    fn column_height(doc: &Document, layer: LayerId, x: u32, size: u32, hit: impl Fn([u8; 4]) -> bool) -> u32 {
+        (0..size).filter(|&y| hit(px(doc, layer, x, y))).count() as u32
+    }
+
+    /// A straight 2D stroke from x0 to x1 at row y in `n + 1` samples, pressure ramping from p0 to p1.
+    fn ramp_2d(doc: &mut Document, y: f32, (x0, x1): (f32, f32), (p0, p1): (f32, f32), n: u32) {
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            doc.stroke_to_2d(S0, Vec2::new(x0 + (x1 - x0) * t, y), p0 + (p1 - p0) * t);
+        }
+    }
+
+    /// PEN 1: both factors as a table; exactly 1.0 at full pressure, `p` itself for `flow_min == 0`, monotonic.
+    #[test]
+    fn size_and_flow_factors() {
+        for &m in &[0.0f32, 0.1, 0.3, 0.5, 1.0] {
+            let d = pen_dyn(true, m, true, m);
+            assert_eq!(d.size_factor(1.0).to_bits(), 1.0f32.to_bits(), "size at p = 1, min {m}");
+            assert_eq!(d.flow_factor(1.0).to_bits(), 1.0f32.to_bits(), "flow at p = 1, min {m}");
+            assert_eq!(d.size_factor(1.5), 1.0);
+            assert!((d.size_factor(0.0) - m).abs() < 1e-6, "size at p = 0 is the minimum");
+            assert!((d.flow_factor(0.0) - m).abs() < 1e-6, "flow at p = 0 is the minimum");
+            let (mut ps, mut pf) = (-1.0f32, -1.0f32);
+            for i in 0..=100 {
+                let p = i as f32 / 100.0;
+                let (s, f) = (d.size_factor(p), d.flow_factor(p));
+                assert!(s >= ps && f >= pf, "not monotonic at {p}, min {m}");
+                assert!((0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&f));
+                (ps, pf) = (s, f);
+            }
+        }
+        let d = pen_dyn(false, 0.0, true, 0.0);
+        for i in 0..=1000 {
+            let p = i as f32 / 1000.0;
+            assert_eq!(d.flow_factor(p).to_bits(), p.to_bits(), "flow_min 0 must give p itself");
+            assert_eq!(d.size_factor(p), 1.0, "size off");
+            assert_eq!(PressureDynamics::OFF.size_factor(p), 1.0);
+            assert_eq!(PressureDynamics::OFF.flow_factor(p), 1.0);
+        }
+        assert_eq!(PressureDynamics::default(), pen_dyn(false, 0.0, true, 0.0), "the core default is round 3's");
+        assert_eq!(BrushParams::default().dynamics, PressureDynamics::default());
+        // size 0.3 at p 0.5: 1 - 0.7 * 0.5; flow 0.1 at p 0.5: 0.1 + 0.9 * 0.5.
+        assert!((pen_dyn(true, 0.3, true, 0.1).size_factor(0.5) - 0.65).abs() < 1e-6);
+        assert!((pen_dyn(true, 0.3, true, 0.1).flow_factor(0.5) - 0.55).abs() < 1e-6);
+    }
+
+    /// PEN 2 (mouse identity): at pressure 1.0 any dynamics paint exactly what the default paints, 3D and 2D, with
+    /// the same dab count.
+    #[test]
+    fn full_pressure_ignores_the_dynamics() {
+        let three_d = |d: PressureDynamics| {
+            let mut doc = doc_from_raw(samples::seam_cube(1.0), 128);
+            let path = cube_path(&doc);
+            doc.stroke_begin(&BrushParams { dynamics: d, ..cube_brush() }).unwrap();
+            path.iter().for_each(|h| doc.stroke_to_3d(h, 1.0));
+            let dabs = doc.stroke_counters().dabs;
+            assert!(doc.stroke_end());
+            (dabs, doc_state(&mut doc))
+        };
+        let two_d = |d: PressureDynamics| {
+            let (mut doc, _) = transparent_doc(128);
+            let b = BrushParams { radius: 9.0, hardness: 0.6, flow: 0.4, dynamics: d, ..BrushParams::default() };
+            doc.stroke_begin(&b).unwrap();
+            ramp_2d(&mut doc, 40.0, (10.0, 117.0), (1.0, 1.0), 13);
+            ramp_2d(&mut doc, 90.0, (117.0, 20.0), (1.0, 1.0), 7);
+            let dabs = doc.stroke_counters().dabs;
+            assert!(doc.stroke_end());
+            (dabs, doc_state(&mut doc))
+        };
+        let (want3, want2) = (three_d(PressureDynamics::default()), two_d(PressureDynamics::default()));
+        let all = [pen_dyn(true, 0.1, true, 0.2), pen_dyn(true, 0.0, false, 0.0), PressureDynamics::OFF, pen_dyn(false, 0.5, true, 0.5)];
+        for d in all {
+            assert!(three_d(d) == want3, "3D differs at pressure 1 with {d:?}");
+            assert!(two_d(d) == want2, "2D differs at pressure 1 with {d:?}");
+        }
+    }
+
+    /// PEN 4: size dynamics make a 2D stroke as tall as the pressure says; with flow off the centre is full.
+    #[test]
+    fn pressure_sizes_the_stroke_2d() {
+        let (mut doc, layer) = transparent_doc(256);
+        let b = BrushParams { radius: 20.0, hardness: 1.0, dynamics: pen_dyn(true, 0.0, false, 0.0), ..BrushParams::default() };
+        doc.stroke_begin(&b).unwrap();
+        let (x0, x1) = (20.0f32, 236.0f32);
+        ramp_2d(&mut doc, 128.0, (x0, x1), (0.1, 1.0), 54);
+        assert!(doc.stroke_end());
+        for frac in [0.2f32, 0.9] {
+            let x = x0 + (x1 - x0) * frac;
+            let want = 2.0 * 20.0 * (0.1 + 0.9 * frac);
+            let h = column_height(&doc, layer, x as u32, 256, |c| c[3] >= 128) as f32;
+            assert!((h - want).abs() <= 2.0, "column at {frac}: height {h}, want {want}");
+            assert_eq!(px(&doc, layer, x as u32, 128)[3], 255, "flow off: the centre is full at {frac}");
+        }
+    }
+
+    /// PEN 5: at constant pressure 0.25 the dabs are a quarter of the full-size step apart.
+    #[test]
+    fn pressure_spacing_follows_the_radius() {
+        let dabs_at = |p: f32| {
+            let (mut doc, _) = transparent_doc(256);
+            let b = BrushParams { radius: 20.0, flow: 0.1, dynamics: pen_dyn(true, 0.0, false, 0.0), ..BrushParams::default() };
+            doc.stroke_begin(&b).unwrap();
+            doc.stroke_to_2d(S0, Vec2::new(20.0, 100.0), p);
+            let first = doc.stroke_counters().dabs;
+            doc.stroke_to_2d(S0, Vec2::new(220.0, 100.0), p);
+            let n = doc.stroke_counters().dabs - first;
+            doc.stroke_cancel();
+            n as f32
+        };
+        let step = 0.12f32 * 2.0 * 20.0 * 0.25;
+        let (quarter, full) = (dabs_at(0.25), dabs_at(1.0));
+        assert!((quarter - (200.0f32 / step).floor()).abs() <= 1.0, "{quarter} dabs at 0.25, step {step}");
+        assert!((quarter / full - 4.0).abs() < 0.2, "{quarter} vs {full} dabs");
+    }
+
+    /// Pressures of the pen tests' cube path, thin and full mixed.
+    fn pen_pressures(n: usize) -> Vec<f32> {
+        (0..n).map(|i| [0.2f32, 0.55, 1.0, 0.35, 0.8, 0.1][i % 6]).collect()
+    }
+
+    /// What a pressure-sized 3D stroke along the cube path left: dabs, partial calls, masks, document.
+    type PenRun = (u64, u32, Vec<Vec<u16>>, crate::history::testkit::DocState);
+
+    /// A pressure-sized 3D stroke along the cube path, paced by `more(k)` (`None` = unpaced).
+    fn paced_pen_stroke(more: Option<&dyn Fn(usize) -> bool>) -> PenRun {
+        let mut doc = doc_from_raw(samples::seam_cube(1.0), 128);
+        let path = cube_path(&doc);
+        let pressures = pen_pressures(path.len());
+        doc.stroke_begin(&BrushParams { dynamics: pen_dyn(true, 0.1, true, 0.0), ..cube_brush() }).unwrap();
+        let mut partials = 0;
+        let mut calls = 0usize;
+        for (h, &p) in path.iter().zip(&pressures) {
+            match more {
+                None => doc.stroke_to_3d(h, p),
+                Some(more) => {
+                    let mut ask = || {
+                        calls += 1;
+                        more(calls)
+                    };
+                    let mut step = doc.stroke_to_3d_paced(h, p, &mut ask);
+                    while step == StrokeStep::Partial {
+                        partials += 1;
+                        step = doc.stroke_resume(&mut ask);
+                    }
+                }
+            }
+        }
+        let (dabs, masks) = (doc.stroke_counters().dabs, all_masks(&doc));
+        assert!(doc.stroke_end());
+        (dabs, partials, masks, doc_state(&mut doc))
+    }
+
+    /// PEN 6: the dabs of a pressure-sized 3D stroke do not depend on the pacing.
+    #[test]
+    fn pressure_sized_stroke_is_pacing_independent() {
+        let (dabs, _, masks, want) = paced_pen_stroke(None);
+        let never: &dyn Fn(usize) -> bool = &|_| false;
+        let mixed: &dyn Fn(usize) -> bool = &|k| k % 3 != 0;
+        for (name, more) in [("one dab per call", never), ("mixed", mixed)] {
+            let (d, partials, m, state) = paced_pen_stroke(Some(more));
+            assert!(partials > 5, "{name}: the segments were not split ({partials})");
+            assert_eq!(d, dabs, "{name}: dab count");
+            assert!(m == masks, "{name}: masks differ");
+            assert!(state == want, "{name}: pixels differ");
+        }
+        // The walk really ran: thin dabs are closer together than the constant step.
+        let mut doc = doc_from_raw(samples::seam_cube(1.0), 128);
+        let path = cube_path(&doc);
+        doc.stroke_begin(&cube_brush()).unwrap();
+        path.iter().for_each(|h| doc.stroke_to_3d(h, 1.0));
+        assert!(doc.stroke_counters().dabs < dabs, "thin dabs are closer together");
+        doc.stroke_cancel();
+    }
+
+    /// PEN 7: the same pressure-sized stroke inside pools of 1 and 3 threads gives the same pixels.
+    #[test]
+    fn pressure_sized_stroke_is_thread_independent() {
+        let paint = || {
+            let mut doc = doc_from_raw(samples::seam_cube(1.0), 256);
+            let path = cube_path(&doc);
+            let pressures = pen_pressures(path.len());
+            let b = BrushParams { radius: 0.4, hardness: 0.5, dynamics: pen_dyn(true, 0.2, true, 0.3), ..cube_brush() };
+            doc.stroke_begin(&b).unwrap();
+            path.iter().zip(&pressures).for_each(|(h, &p)| doc.stroke_to_3d(h, p));
+            assert!(doc.stroke_end());
+            doc_state(&mut doc)
+        };
+        let pools = [1usize, 3].map(|n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap());
+        let one = pools[0].install(paint);
+        let three = pools[1].install(paint);
+        assert!(one == three, "the pressure-sized stroke depends on the thread count");
+    }
+
+    /// PEN 8: an eraser with size dynamics erases a band as tall as the pressure says.
+    #[test]
+    fn eraser_follows_pressure_size() {
+        let mut doc = doc_from_raw(samples::flat_quad(), 256);
+        let layer = LayerId(1);
+        let b = BrushParams {
+            radius: 20.0,
+            hardness: 1.0,
+            mode: BrushMode::Erase,
+            dynamics: pen_dyn(true, 0.0, false, 0.0),
+            ..BrushParams::default()
+        };
+        doc.stroke_begin(&b).unwrap();
+        let (x0, x1) = (20.0f32, 236.0f32);
+        ramp_2d(&mut doc, 128.0, (x0, x1), (0.1, 1.0), 54);
+        assert!(doc.stroke_end());
+        assert_eq!(doc.undo_label(), Some("Erase"));
+        for frac in [0.2f32, 0.9] {
+            let x = x0 + (x1 - x0) * frac;
+            let want = 2.0 * 20.0 * (0.1 + 0.9 * frac);
+            let h = column_height(&doc, layer, x as u32, 256, |c| c[3] < 128) as f32;
+            assert!((h - want).abs() <= 2.0, "erased column at {frac}: height {h}, want {want}");
+            assert_eq!(px(&doc, layer, x as u32, 128)[3], 0, "the centre is erased at {frac}");
+        }
+    }
+
+    /// PEN 9: NaN and out-of-range minimums behave as clamped (NaN -> 0).
+    #[test]
+    fn flow_min_and_size_min_are_sanitized() {
+        let paint = |d: PressureDynamics| {
+            let (mut doc, _) = transparent_doc(64);
+            doc.stroke_begin(&BrushParams { radius: 8.0, hardness: 0.7, dynamics: d, ..BrushParams::default() }).unwrap();
+            ramp_2d(&mut doc, 32.0, (8.0, 56.0), (0.2, 0.6), 6);
+            let dabs = doc.stroke_counters().dabs;
+            assert!(doc.stroke_end());
+            (dabs, doc_state(&mut doc))
+        };
+        assert!(paint(pen_dyn(true, f32::NAN, true, 7.0)) == paint(pen_dyn(true, 0.0, true, 1.0)));
+        assert!(paint(pen_dyn(true, -3.0, true, f32::NAN)) == paint(pen_dyn(true, 0.0, true, 0.0)));
+        assert!(paint(pen_dyn(true, 9.0, true, -1.0)) == paint(pen_dyn(true, 1.0, true, 0.0)));
+        assert_eq!(pen_dyn(true, f32::INFINITY, false, f32::NEG_INFINITY).sanitized(), pen_dyn(true, 1.0, false, 0.0));
+    }
+
+    /// PEN 10: a tiny pressure over a huge segment hits the dab guard and paints one dab at the sample.
+    #[test]
+    fn too_many_pressure_dabs_fall_back_to_one() {
+        let (mut doc, _) = transparent_doc(64);
+        let b = BrushParams { radius: 1.0, dynamics: pen_dyn(true, 0.0, true, 0.0), ..BrushParams::default() };
+        doc.stroke_begin(&b).unwrap();
+        doc.stroke_to_2d(S0, Vec2::new(0.0, 10.0), 0.01);
+        let t = std::time::Instant::now();
+        doc.stroke_to_2d(S0, Vec2::new(60_000.0, 10.0), 0.01);
+        assert_eq!(doc.stroke_counters().dabs, 2, "one dab at the far sample");
+        assert!(t.elapsed().as_secs() < 5, "the guard did not stop the walk");
+        // The next segment starts at the far sample with residual 0: a short one is walked at the 0.5 px floor.
+        doc.stroke_to_2d(S0, Vec2::new(60_010.0, 10.0), 0.01);
+        assert_eq!(doc.stroke_counters().dabs, 2 + 20, "10 px at a 0.5 px step");
+        doc.stroke_cancel();
     }
 }

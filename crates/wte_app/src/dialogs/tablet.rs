@@ -7,16 +7,20 @@ use crate::state::TabletInput;
 use crate::view::ViewCx;
 
 /// The paragraphs of the dialog (also checked by the tests and the scenario `pen`).
-pub(crate) const TABLET_HELP: [&str; 5] = [
+pub(crate) const TABLET_HELP: [&str; 6] = [
     "Works with any tablet whose driver has Windows Ink turned on (the default): Wacom Tablet Properties > Mapping > \
      \"Use Windows Ink\"; Huion > Pen settings > \"Enable Windows Ink\"; XP-Pen / Pentablet > \"Windows Ink\".",
     "If the stroke does not follow the pressure, turn that option on. Drivers allow it per application: add Wrapped \
      Texture Editor to the driver's application list. Or choose Tablet input: WinTab below.",
     "Pressure options: Tool tab > Brush options (and Eraser options) > Pen pressure. The pressure curve (soft or firm) is \
      set in the tablet driver.",
-    "Turn the pen around to erase. The lower pen button is the right mouse button (orbit in 3D, pan in 2D, context \
-     menus). Other buttons do what the driver maps them to (middle click pans, keys work as shortcuts).",
-    "The status bar shows \"Pen N %\" while the pen touches the tablet.",
+    "Turn the pen around to erase. Hold the lower pen button while the tip touches the tablet for the right mouse \
+     button (orbit in 3D, pan in 2D, context menus). Other buttons do what the driver maps them to (middle click pans, \
+     keys work as shortcuts).",
+    "The status bar shows \"Pen N %\" while the pen touches the tablet (in a narrow window: the Pen line under Pen \
+     pressure).",
+    "On a pen display with touch, a resting hand acts as a mouse: turn touch off in the tablet driver, or turn on \
+     \"Ignore touch input when I'm using my pen\" in the Windows settings under Pen & Windows Ink.",
 ];
 
 /// The line under the Tablet input choice.

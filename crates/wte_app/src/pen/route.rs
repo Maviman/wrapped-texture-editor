@@ -15,6 +15,9 @@ use egui::{Event, Modifiers, PointerButton, Pos2, TouchPhase};
 
 use super::{FEED_CAP, PenFrame, PenKind, PenRecord};
 
+/// Hover moves of a pen closer than this (points) to the last one passed to egui are dropped (`PenRouter::process`).
+pub const HOVER_DEADBAND: f32 = 1.0;
+
 /// The router's state across frames.
 #[derive(Clone, Debug, Default)]
 pub struct PenRouter {
@@ -34,6 +37,9 @@ pub struct PenRouter {
     pressure: f32,
     /// The last pen position (the release of a lost contact goes there).
     last_pos: Option<Pos2>,
+    /// The position of the last pen `PointerMoved` passed to egui while the pen hovers (`HOVER_DEADBAND`); `None`
+    /// after the pointer was gone or another pointer moved.
+    hover_anchor: Option<Pos2>,
     /// The modifiers of the last `ModifiersChanged` / `PointerButton` seen.
     modifiers: Modifiers,
     /// The last pointer event the router passed or made came from the pen.
@@ -105,6 +111,7 @@ impl PenRouter {
                     out.pen(Event::PointerButton { pos: bpos, button, pressed: true, modifiers: mods }, Some(contact_p));
                     self.contact = Some((tid, button));
                     self.last_pos = Some(pos);
+                    self.hover_anchor = None;
                     self.pointer_is_pen = true;
                 }
                 TouchPhase::Move => {
@@ -114,6 +121,14 @@ impl PenRouter {
                     let touching = self.contact.is_some_and(|(c, _)| c == tid);
                     if touching {
                         self.pressure = contact_p;
+                        self.hover_anchor = None;
+                    } else if self.hover_anchor.is_some_and(|a| a.distance(pos) < HOVER_DEADBAND) {
+                        // A hovering pen reports at the digitizer's rate even when held still (with sub-pixel noise);
+                        // every PointerMoved restarts egui's tooltip delay, so tooltips would never show (gate,
+                        // pen-input). Hover moves within the dead band of the last one passed are dropped.
+                        continue;
+                    } else {
+                        self.hover_anchor = Some(pos);
                     }
                     out.pen(Event::PointerMoved(pos), touching.then_some(contact_p));
                     self.last_pos = Some(pos);
@@ -143,6 +158,7 @@ impl PenRouter {
                     }
                     // The pointer is gone already: a later Leave has no hover to clear.
                     self.pointer_is_pen = false;
+                    self.hover_anchor = None;
                     if self.touch_is_pen {
                         // Without the subclass no Leave ever comes: the lifted pen counts as out of range.
                         self.in_range = false;
@@ -227,6 +243,7 @@ impl PenRouter {
             // The hovering pen left: hover highlights go away.
             out.pen(Event::PointerGone, None);
         }
+        self.hover_anchor = None;
     }
 
     /// The state a record says.
@@ -259,11 +276,16 @@ impl PenRouter {
             Event::PointerButton { pressed, modifiers, .. } => {
                 self.modifiers = *modifiers;
                 self.pointer_is_pen = false;
+                self.hover_anchor = None;
                 if *pressed {
                     frame.mouse_press = true;
                 }
             }
-            Event::PointerMoved(_) | Event::PointerGone | Event::MouseMoved(_) => self.pointer_is_pen = false,
+            Event::PointerMoved(_) | Event::PointerGone => {
+                self.pointer_is_pen = false;
+                self.hover_anchor = None;
+            }
+            Event::MouseMoved(_) => self.pointer_is_pen = false,
             _ => {}
         }
     }
@@ -563,6 +585,43 @@ mod tests {
         assert!(frame.pointer.is_empty(), "no pressure notes: every event reads 1.0");
         assert!(frame.mouse_press && !frame.in_range && !frame.seen);
         assert_eq!(frame.pressure, 1.0);
+    }
+
+    /// Gate (pen-input): a pen held still above the tablet keeps reporting (with sub-pixel noise); those hover moves
+    /// must not reach egui, or its tooltip delay restarts with every one and no tooltip ever shows.
+    #[test]
+    fn a_still_hovering_pen_sends_no_moves() {
+        let mut r = PenRouter::default();
+        let hover = |xs: &[f32]| -> (Vec<Event>, VecDeque<PenRecord>) {
+            let events = xs.iter().flat_map(|&x| emulated(TouchPhase::Move, x, None, 0.0)).collect();
+            (events, xs.iter().map(|_| rec(PenKind::Update, false, 0.0)).collect())
+        };
+        let (mut events, mut f) = hover(&[10.0, 10.3, 9.8, 10.6]);
+        let frame = r.process(&mut events, &mut f);
+        assert_eq!(events, vec![moved(10.0)], "noise within the dead band is dropped");
+        assert_eq!(frame.pointer.len(), 1);
+        assert!(frame.in_range && !frame.in_contact);
+        let (mut events, mut f) = hover(&[10.2, 11.5, 11.9]);
+        r.process(&mut events, &mut f);
+        assert_eq!(events, vec![moved(11.5)], "a real move passes, measured from the last one passed");
+        // Contact moves are never dropped, however small.
+        let mut events = emulated(TouchPhase::Start, 11.5, Some(0.5), 11.5);
+        events.extend(emulated(TouchPhase::Move, 11.6, Some(0.5), 11.5));
+        events.extend(emulated(TouchPhase::Move, 11.7, Some(0.5), 11.6));
+        let frame = r.process(&mut events, &mut VecDeque::new());
+        assert_eq!(frame.pointer.len(), 4, "press, its move and both contact moves: {:?}", frame.pointer);
+        // After the tip lifts (PointerGone) the first hover move passes even at the same place.
+        let mut events = emulated(TouchPhase::End, 11.7, None, 11.7);
+        r.process(&mut events, &mut VecDeque::new());
+        let (mut events, mut f) = hover(&[11.7]);
+        r.process(&mut events, &mut f);
+        assert_eq!(events, vec![moved(11.7)]);
+        // After a mouse move the pen's next hover move passes too.
+        let mut events = vec![moved(50.0)];
+        r.process(&mut events, &mut VecDeque::new());
+        let (mut events, mut f) = hover(&[11.8]);
+        r.process(&mut events, &mut f);
+        assert_eq!(events, vec![moved(11.8)]);
     }
 
     #[test]

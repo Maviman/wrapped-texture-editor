@@ -158,13 +158,18 @@ Eraser and back, the barrel button is the right button, Windows Ink's press-and-
 status bar shows "Pen N %", Help > Tablet setup explains the driver settings. Mouse strokes, exports and the central
 view are identical to `main` (checked against a 1b589a1 exe).
 
-**Owed by the user** (the builder had no tablet): the ten hand tests in `dist/HOW_TO_TEST.txt` ("Pen tablets"), with
+**Owed by the user** (the builder had no tablet): the eleven hand tests in `dist/HOW_TO_TEST.txt` ("Pen tablets"), with
 Windows Ink on; the WinTab path (part G, opt-in: Help > Tablet setup > Tablet input: WinTab; `wintab32.dll` loaded at
 run time, pressure and eraser only) can only be checked with a driver whose Windows Ink option is off.
 
 Independent check (2026-11-24, `docs/notes/pen/check.md`): plan complete; five fixes with tests (WinTab eraser press
 ended the eraser override, WinTab stroke-end blob, WinTab lock re-entry, the eraser flipping back after every mouse
 stroke, a second finger without the subclass).
+
+Gate + completeness critic (2026-11-24, `docs/reports/PEN_INPUT_GATE_REPORT.md`, notes `docs/notes/pen/gate.md`):
+**PASS**; one fix (a pen held still above the tablet no longer sends hover moves within 1 pt, so tooltips can show),
+Help > Tablet setup / README made precise (barrel button counts while the tip touches; touch on pen displays), hand
+tests extended to 11 (ring offset on every monitor, tooltips, pen display touch, the WinTab specifics).
 
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 

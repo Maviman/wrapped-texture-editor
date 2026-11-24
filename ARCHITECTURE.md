@@ -423,7 +423,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `dialogs/tablet.rs` | pen-input | Help > Tablet setup (`TABLET_HELP`, the pen line; part G: the Tablet input choice) |
 | `pen/mod.rs` | pen-input | `PenRecord`, `PenKind`, `PenFrame` (pointer notes, `cursor`, `readout`), `PenState` (`AppState::pen`), the eraser override (`eraser_step`, `eraser_override`), `drain_window_records` |
 | `pen/decode.rs` | pen-input | pure decoding of a pointer history entry (`RawPen` -> `PenRecord`), the `POINTER_FLAG_*` / `PEN_FLAG_*` constants |
-| `pen/route.rs` | pen-input | `PenRouter::process`: pairs pen `Touch` events with records, drops them, rewrites the barrel press, synthesizes stuck emulation, notes pressures; `touch_is_pen` without the subclass |
+| `pen/route.rs` | pen-input | `PenRouter::process`: pairs pen `Touch` events with records, drops them, rewrites the barrel press, synthesizes stuck emulation, notes pressures, drops hover moves within `HOVER_DEADBAND` (1 pt) of the last one passed (gate); `touch_is_pen` without the subclass |
 | `pen/wintab.rs` | pen-input part G | opt-in WinTab: pure `wintab_state`, `spread`, `apply` (WinTab pressure over the frame's pointer notes, `WintabRamp`); Windows: run-time loaded `wintab32.dll` (`open`, `close`, `poll`, `status`, `on_message` for `WT_PACKET` / `WT_PROXIMITY` / `WM_ACTIVATE`), `LOGCONTEXTW` (212 bytes), `AXIS`, `Packet` (12 bytes) |
 | `pen/win.rs` | pen-input (Windows only) | the window-procedure subclass (`install`, `pen_wndproc`): pen history -> records (`Shared::push_history`, `leave`, `drain_into`), `WM_TABLET_QUERYSYSTEMGESTURESTATUS`, Ink pen feedback off, `MicrosoftTabletPenServiceProperty`; `POINTER_INFO` / `POINTER_PEN_INFO` (`raw-dylib` user32) |
 | `selftest/scenarios/pen.rs` | pen-input | the scenario `pen` (8.11) |
@@ -4960,7 +4960,9 @@ impl WteApp { pub fn new(cc: &eframe::CreationContext<'_>, args: CliArgs, exit_c
 impl eframe::App for WteApp {
     fn raw_input_hook(&mut self, ctx, raw) {
         // branch pen-input: (1) the self-test's events and its pen records, (2) the window procedure's records,
-        // (3) the router (pen Touch events out, barrel press rewritten, pressures noted in state.pen.frame)
+        // (3) the router (pen Touch events out, barrel press rewritten, pressures noted in state.pen.frame; a hovering
+        //     pen's moves within 1 pt of the last one passed are dropped: a pen held still keeps reporting, and every
+        //     PointerMoved restarts egui's tooltip delay; contact moves are never dropped)
         if let Some(r) = &mut self.selftest { let records = r.raw_input_hook(ctx, raw); self.state.pen.feed.extend(records) }
         pen::drain_window_records(&mut self.state.pen.feed);
         self.state.pen.route(&mut raw.events);
@@ -6322,10 +6324,11 @@ change their own fields directly and push actions; they close only through actio
 `ImportCreate`, `RunExport`, `ConfirmPending`, `SaveThen`, `Cancel`). Dialogs never call `rfd` and never read keys: Esc reaches
 them as `AppAction::Cancel` (`ModalResponse::should_close()` may be used for the click-on-backdrop case of Message / About).
 
-- **Tablet setup** (branch `pen-input`, `dialogs/tablet.rs`, `Dialog::TabletHelp`, Help > Tablet setup): heading, the five
+- **Tablet setup** (branch `pen-input`, `dialogs/tablet.rs`, `Dialog::TabletHelp`, Help > Tablet setup): heading, the six
   paragraphs of `TABLET_HELP` (Windows Ink in the Wacom / Huion / XP-Pen drivers; per-application setting; where the
-  Pen pressure options are and that the curve is the driver's; eraser end, barrel button = right button, other buttons
-  as the driver maps them; the "Pen N %" read-out), the pen line, the combo "Tablet input: Windows Ink (recommended) /
+  Pen pressure options are and that the curve is the driver's; eraser end, barrel button held while the tip touches =
+  right button, other buttons as the driver maps them; the "Pen N %" read-out and the Pen line in a narrow window; a
+  pen display's touch: off in the driver or Windows' "Ignore touch input when I'm using my pen"), the pen line, the combo "Tablet input: Windows Ink (recommended) /
   WinTab" (part G; writes `prefs.tablet_input`, applied at once by `sync_tablet_input`), the line "Use WinTab only if
   your driver's Windows Ink option is off. Takes effect at once." and the WinTab state (`PenState::wintab_line`), Close.
   Closes by Close, a backdrop click or Esc.
@@ -7612,7 +7615,8 @@ and that no frame is asked for while it waits; `esc_after_a_landed_wrap_preview_
   keys and `tablet_input`); `pen::decode::tests` (tip, hover, barrel, third button, eraser, pressure edges, entries
   without a phase); `pen::route::tests` (tap = click without Touch, a move burst keeps every pressure, barrel / third
   button, the eraser end, finger touches unchanged, record / touch mismatch, stuck emulation, Leave in contact and
-  hovering, a mouse-only frame unchanged, the feed cap, `touch_is_pen`, a second finger without the subclass);
+  hovering, a mouse-only frame unchanged, the feed cap, `touch_is_pen`, a second finger without the subclass, a still
+  hovering pen sends no moves (gate));
   `pen::tests` (the cursor, readout and pen line, the eraser override incl. no re-engage after a mouse-press restore, a
   manual tool change drops it); `pen::wintab::tests` (the tip-up frame keeps the last pressure, the WinTab eraser's
   press keeps the Eraser, a message sent while the lock is held does not deadlock); `pen::win::tests` (struct layouts, oldest-first history, Leave vs

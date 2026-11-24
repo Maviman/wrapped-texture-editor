@@ -362,8 +362,8 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
                         help(ui, NAVIGATE_PICK_HINT);
                     }
                 }
-                ToolKind::Brush => brush_options(ui, "brush", &mut state.tools.brush),
-                ToolKind::Eraser => brush_options(ui, "eraser", &mut state.tools.eraser),
+                ToolKind::Brush => brush_options(ui, "brush", &mut state.tools.brush, &state.pen.status_line()),
+                ToolKind::Eraser => brush_options(ui, "eraser", &mut state.tools.eraser, &state.pen.status_line()),
                 ToolKind::Eyedropper => {
                     help(ui, "Click the model or the texture to pick a colour. Holding Alt with the Brush, Eraser or Fill does the same.");
                 }
@@ -435,7 +435,7 @@ fn grid_label(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn brush_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings) {
+fn brush_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings, pen_line: &str) {
     egui::Grid::new(("brush_grid", salt)).num_columns(2).show(ui, |ui| {
         grid_label(ui, "Size");
         let keys = format!("{} / {}", shortcut_text(ui.ctx(), "Smaller Brush"), shortcut_text(ui.ctx(), "Larger Brush"));
@@ -457,7 +457,7 @@ fn brush_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings) {
             .on_hover_text("Distance between dabs, % of the diameter. A thin shape needs a lower value.");
         ui.end_row();
     });
-    pen_pressure_options(ui, salt, b);
+    pen_pressure_options(ui, salt, b, pen_line);
 }
 
 /// Hover text of the "Size" pressure checkbox (branch `pen-input`, PEN_INPUT_PLAN 3.2).
@@ -466,8 +466,8 @@ pub(crate) const PEN_SIZE_HOVER: &str = "Press harder for a wider stroke. A mous
 pub(crate) const PEN_FLOW_HOVER: &str = "Press harder for more paint per dab.";
 
 /// The "Pen pressure" group under Flow and Spacing (branch `pen-input`, ARCHITECTURE 8.7): Size + its minimum, Flow +
-/// its minimum. Brush and eraser each have their own.
-fn pen_pressure_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings) {
+/// its minimum, and the pen line (`PenState::status_line`). Brush and eraser each have their own.
+fn pen_pressure_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings, pen_line: &str) {
     ui.label(egui::RichText::new("Pen pressure").strong());
     egui::Grid::new(("pen_grid", salt)).num_columns(2).show(ui, |ui| {
         ui.allocate_ui_with_layout(vec2(LABEL_WIDTH, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -483,6 +483,7 @@ fn pen_pressure_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings) {
         ui.add_enabled(b.pressure_flow, min_flow).on_hover_text("Min flow: the flow at the lightest touch, % of the brush flow");
         ui.end_row();
     });
+    help(ui, pen_line);
 }
 
 fn stamp_options(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>) {

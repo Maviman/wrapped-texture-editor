@@ -279,14 +279,24 @@ fn show_central(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) -> 
 
 impl eframe::App for WteApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Branch `pen-input` (ARCHITECTURE 8.3): (1) the self-test's injected input and pen records, or (2) the pen
+        // records of the window procedure; (3) the pen router pairs them with the frame's events.
         if let Some(runner) = &mut self.selftest {
-            runner.raw_input_hook(ctx, raw_input);
+            let records = runner.raw_input_hook(ctx, raw_input);
+            self.state.pen.feed.extend(records);
         }
+        crate::pen::drain_window_records(&mut self.state.pen.feed);
+        self.state.pen.route(&mut raw_input.events);
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         frame_profile::frame_begin();
         self.state.frame_work.begin();
+        // Branch `pen-input` (decision D7): the pen's eraser end switches to the Eraser and back, through the normal
+        // `SetTool` dispatch, before the tools and panels see this frame's input.
+        if let Some(tool) = crate::pen::eraser_override(&mut self.state.pen, self.state.tool, self.tools.is_busy()) {
+            dispatch::dispatch(self, AppAction::SetTool(tool), frame);
+        }
         let jobs = frame_profile::scope("jobs");
         for done in self.jobs.poll() {
             io_flows::on_job_output(self, done.output, done.cancel_requested); // may replace the session

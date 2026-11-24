@@ -1216,6 +1216,8 @@ pub struct AppState {
     pub wrap_jobs_pending: bool,
     /// fix_export item 6: the longest frame of UI-thread work (the self-test's freeze check).
     pub frame_work: FrameWork,
+    /// Branch `pen-input` (ARCHITECTURE 8.2): the pen's records, router, this frame's pen input and the eraser override.
+    pub pen: crate::pen::PenState,
 }
 
 /// When the deferred stamp Preview bakes (`Document::bake_stale_previews`) may run next: after a bake that took `t`,
@@ -1310,6 +1312,7 @@ impl AppState {
             wrap_jobs: crate::stamp_bakes::WrapJobs::default(),
             wrap_jobs_pending: false,
             frame_work: FrameWork::default(),
+            pen: crate::pen::PenState::default(),
         }
     }
 

@@ -241,6 +241,29 @@ stays visible in the side panel whatever tool is active" (R3-10, `HANDOFF.md` se
 2026-11-24 choice of Color as one tab of the upper group; mitigations: the toolbar chip, tool changes keep the tab, and
 at 1280x800 and above the whole picker is on screen whenever the Color tab is shown (guarantee G1, 8.7).
 
+### 1.10 Pen input (branch `pen-input`, `docs/plans/PEN_INPUT_PLAN.md`)
+
+Goal: graphics tablets and pen displays (Wacom, Huion, XP-Pen, Surface) work well on Windows 10/11: pressure, eraser end,
+barrel button, pen clicks, no Windows Ink disturbances, a readout and setup help. Notes `docs/notes/pen/`.
+
+| # | Decision |
+|---|---|
+| D1 | A pen is "a mouse with pressure". The pen's `Event::Touch` events are removed from the raw input after their data is taken (`pen::route`); finger touches are left alone. egui therefore never enters its touch-screen mode (drag-to-scroll, long-press = secondary click); tap = click, hover and tooltips come from egui-winit's emulated pointer events. |
+| D2 | Pen flags and exact per-sample pressure come from a window-procedure subclass on the app's HWND (`pen/win.rs`): winit drops the flags and gives every coalesced sample of a message the latest pressure. |
+| D3 | Defaults for Brush and Eraser: pressure -> Size on, minimum size 10 %; pressure -> Flow off, minimum 0 %. |
+| D4 | The core default stays "pressure scales flow, size fixed" (`PressureDynamics::default`); the app always passes its own settings. Every existing core hash keeps its value. |
+| D5 | No pressure curve, tilt, rotation or pressure -> opacity ceiling (the tablet driver has the curve). |
+| D6 | Barrel button + tip = Secondary button, a third pointer button = Middle (Windows Ink semantics): barrel-drag orbits in 3D, pans in 2D, opens context menus. Buttons the driver maps to keys / clicks arrive as ordinary input. |
+| D7 | The eraser end switches any tool to the Eraser while the inverted end is in range or contact, then restores the previous tool. |
+| D8 | WinTab is opt-in (pref "Tablet input"), last separate commit; it supplies only pressure and the eraser flag; positions and buttons always come from the one egui pointer stream. |
+| D9 | The brush ring keeps showing the full (maximum) size. |
+| D10 | No version bump, no release on this branch. |
+
+Traceability: pressure through the core (5.19, 6.4 "Spacing and interpolation"), the settings and prefs (8.2, 8.9), the
+pen module and the frame order (2.2, 8.3), the views and the brush queue (8.5, 8.6), the UI (8.7, 8.8), the self-test
+(8.11 `Step::Pen`, scenario `pen`), the pitfalls (8.13), the tests (9.1, 9.2). A mouse always reports pressure 1.0, where
+both pressure factors are exactly 1.0 and the constant-step spacing is used: mouse strokes are bit-identical to `main`.
+
 ---
 
 ## 2. Workspace layout
@@ -397,6 +420,10 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `panels/font_picker.rs` | T6 (round 4) | the font picker popup of the font button |
 | `dialogs/mod.rs` | A5 | `dialogs::show` dispatcher |
 | `dialogs/import.rs`, `export.rs`, `unsaved.rs`, `progress.rs`, `message.rs`, `about.rs` | A5 | one modal each (`message` = error/warning list, `about` = About + Shortcuts) |
+| `pen/mod.rs` | pen-input | `PenRecord`, `PenKind`, `PenFrame` (pointer notes, `cursor`, `readout`), `PenState` (`AppState::pen`), the eraser override (`eraser_step`, `eraser_override`), `drain_window_records` |
+| `pen/decode.rs` | pen-input | pure decoding of a pointer history entry (`RawPen` -> `PenRecord`), the `POINTER_FLAG_*` / `PEN_FLAG_*` constants |
+| `pen/route.rs` | pen-input | `PenRouter::process`: pairs pen `Touch` events with records, drops them, rewrites the barrel press, synthesizes stuck emulation, notes pressures |
+| `selftest/scenarios/pen.rs` | pen-input | the scenario `pen` (8.11) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
 | `selftest/scenarios.rs` | A6 | canned scenarios (the scaffold stub already contains the action-only smoke scenarios of section 8.11) |
 
@@ -2133,8 +2160,22 @@ pub struct BrushParams {
     pub color: [u8; 4],       // straight sRGB; alpha scales the strength
     pub mode: BrushMode,
     pub same_side_only: bool, // 3D: skip triangles whose geometric normal opposes the stroke's reference normal (default true)
+    pub dynamics: PressureDynamics, // branch pen-input: how pen pressure drives the stroke
 }
-impl Default for BrushParams { /* radius 16, hardness 0.8, opacity 1, flow 1, spacing 0.12, black, Paint, true */ }
+impl Default for BrushParams { /* radius 16, hardness 0.8, opacity 1, flow 1, spacing 0.12, black, Paint, true, PressureDynamics::default() */ }
+
+/// Branch pen-input: how pen pressure (0..=1) drives a stroke. Default = round 3: flow follows pressure, size fixed.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct PressureDynamics { pub size: bool, pub size_min: f32 /* 0..=1 */, pub flow: bool, pub flow_min: f32 /* 0..=1 */ }
+impl Default for PressureDynamics { /* size false, size_min 0, flow true, flow_min 0 */ }
+impl PressureDynamics {
+    pub const OFF: PressureDynamics;                  // size false, flow false
+    /// `if !size || p >= 1 { 1.0 } else { 1 - (1 - size_min) * (1 - p) }`
+    pub fn size_factor(&self, pressure: f32) -> f32;
+    /// `if !flow || p >= 1 { 1.0 } else if flow_min == 0 { p } else { flow_min + (1 - flow_min) * p }`
+    pub fn flow_factor(&self, pressure: f32) -> f32;
+    pub fn sanitized(&self) -> PressureDynamics;      // both minimums clamped to 0..=1, NaN -> 0
+}
 
 /// Brush profile (section 6.4): 1 inside hardness*radius, smooth fall towards the rim, times an anti-aliasing ramp of
 /// width `aa` centred on the rim. Non-zero for dist < radius + aa/2 (the support radius); there is no cut-off at dist == radius.
@@ -2261,6 +2302,16 @@ new sample, `stroke_break`, `stroke_to_2d`, `stroke_end`) first paints the open 
 the pacing (test `one_dab_per_call_gives_the_unpaced_stroke`; the C1 hashes, C2 and `tests\brush_tips.rs` keep their
 values). `stroke_skipped_sets` does not see the sets an unpainted rest of a segment would reach; the app reads it after
 the queues are empty.
+
+Branch `pen-input`. **Pressure dynamics.** `sanitize` keeps `dynamics.sanitized()`. A dab's radius is `brush.radius *
+size_factor(pressure)` (3D: `k = r * tip.scale`, the offset `tip.offset * r`, `DabShape.reach`, `field_reach`; the legacy
+seam and `texture_dab` the same) and its strength `brush.flow * flow_factor(pressure)`. Both factors are exactly 1.0 at
+pressure 1.0, and `flow_factor(p)` is `p` itself for `flow_min == 0`, so the default dynamics paint bit for bit what
+`brush.flow * pressure` painted. Nothing in the dab path is cached per stroke by radius (`DabQuery`'s `aa` / `rho` and
+the round-7 brush index are recomputed per dab or are radius-free), so the radius may change from dab to dab. The open
+segment gains `var: Option<VarWalk { next_d, last_d, floor }>` for a pressure-sized segment (6.4); `run_segment` hands it
+to `run_var_segment`, which asks `more()` after each dab and keeps `next_d` / `last_d` in the segment on `Partial`: the
+dab sequence does not depend on the pacing (test `pressure_sized_stroke_is_pacing_independent`).
 
 **The stroke probe (B-2).** `brush::probe` is a runtime switch (`set_stroke_probe`, an `AtomicBool`, off by default),
 not a test-only `cfg`. Off, every probe point is one relaxed load (`now()` returns `None`; `add` / `count` do nothing);
@@ -3271,6 +3322,16 @@ hardness is meaningless below texel resolution), which keeps that guarantee for 
   the falloff is spherical). Each dab is applied to **every** set with a target (the sphere query filters by set).
 - 2D sample: same along the segment in texel space, `step = max(spacing * 2 * radius, 0.5)`; a sample on a different set starts a new
   segment.
+- Branch `pen-input`: a segment is **pressure-sized** iff `dynamics.size && (from_pressure < 1 || pressure < 1)` (pressures after
+  `unit()`); every other segment (every mouse segment, every stroke without size dynamics) uses the constant step above, unchanged.
+  A pressure-sized segment walks by the current radius: `step_at(p) = max(spacing * 2 * radius * size_factor(p), floor)` with
+  `floor` = `0.5 * texel_world` (3D) or 0.5 (2D); `p(t) = from_pressure + (pressure - from_pressure) * t`; the first dab at
+  `d = max(step_at(from_pressure) - residual, 0)`; while `d <= len`: a dab at `t = clamp(d / len)` (1 for `len == 0`) with
+  `p(t)`, `last_d = d`, `d += step_at(p(t))`; afterwards `residual = max(len - last_d, 0)` (`last_d = -residual` before the
+  first dab). Guard: `floor((residual + len) / step_at(min(from_pressure, pressure))) > 100 000` gives the single-dab fallback
+  (one dab at the sample, residual 0). `residual` keeps its meaning (distance since the last dab), so constant and
+  pressure-sized segments mix in one stroke. The bridge rule keeps the base radius. 3D: in `run_var_segment` (paced);
+  2D: the same walk inline in `stroke_to_2d`.
 - A stroke is 3D or 2D, decided by its first sample; samples of the other kind are ignored.
 - `stroke_break()` clears `last`.
 
@@ -4585,7 +4646,10 @@ pub struct BrushSettings { pub size_px: f32 /* diameter in texels, 1..=2048 */, 
                            pub flow: f32, pub spacing: f32,
                            pub kind: BrushType /* Circular | Sphere */, pub shape: ShapeChoice /* Ball | Cube | Cylinder | File */,
                            pub through: bool, pub turn_deg: f32, pub tilt_deg: f32, pub roll_deg: f32, pub offset: f32,
-                           pub align: wte_core::TipAlign }   // round 4: `same_side_only` removed; Circular = the old "same side only" stroke
+                           pub align: wte_core::TipAlign,   // round 4: `same_side_only` removed; Circular = the old "same side only" stroke
+                           // branch pen-input (Tool tab > Pen pressure): Size on from 10 %, Flow off from 0 % (D3);
+                           // `sanitized` clamps both minimums to 0..=1 (not finite -> default); `dynamics()` -> core
+                           pub pressure_size: bool, pub pressure_size_min: f32, pub pressure_flow: bool, pub pressure_flow_min: f32 }
 pub struct StampSettings { pub source: Option<BlobId>, pub source_name: String,
                            pub size_frac: f32 /* larger side: fraction of model diagonal (3D) or of texture width (2D); 0.15 */,
                            pub rotation_deg: f32, pub project_through: bool,
@@ -4828,6 +4892,14 @@ objects-tabs (WP4, WP5; OBJECTS_TABS_PLAN 6.1, 6.5):
   is shown, `ColorSection` / `ColorContent` only while the Color page is shown.
 - `Prefs` gains `side_upper_tab: UpperTab`, `side_lower_tab: String`, `side_split: Option<f32>` (8.9).
 
+Branch `pen-input`:
+- `AppState::pen: pen::PenState { feed: VecDeque<PenRecord>, router: PenRouter, frame: PenFrame, eraser_restore:
+  Option<ToolKind>, eraser_hold_off: bool }` (2.2, 8.3). `PenFrame { pointer: Vec<(Pos2, Option<f32>)>, in_range, in_contact,
+  inverted, barrel, pressure (1.0 without contact), mouse_press, seen }`.
+- `BrushSettings` gains `pressure_size` (true), `pressure_size_min` (0.10), `pressure_flow` (false), `pressure_flow_min` (0).
+- `Prefs` gains `tablet_input: TabletInput { WindowsInk (default), WinTab }` (8.9; snake_case, a value that does not read is
+  Windows Ink).
+
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
 ```rust
@@ -4843,8 +4915,17 @@ pub struct WteApp {
 impl WteApp { pub fn new(cc: &eframe::CreationContext<'_>, args: CliArgs, exit_code: Arc<AtomicI32>) -> anyhow::Result<WteApp>; }
 
 impl eframe::App for WteApp {
-    fn raw_input_hook(&mut self, ctx, raw) { if let Some(r) = &mut self.selftest { r.raw_input_hook(ctx, raw) } }
+    fn raw_input_hook(&mut self, ctx, raw) {
+        // branch pen-input: (1) the self-test's events and its pen records, (2) the window procedure's records,
+        // (3) the router (pen Touch events out, barrel press rewritten, pressures noted in state.pen.frame)
+        if let Some(r) = &mut self.selftest { let records = r.raw_input_hook(ctx, raw); self.state.pen.feed.extend(records) }
+        pen::drain_window_records(&mut self.state.pen.feed);
+        self.state.pen.route(&mut raw.events);
+    }
     fn logic(&mut self, ctx, frame) {
+        // branch pen-input (D7): the eraser end, through the normal SetTool dispatch, before tools and panels see input
+        if let Some(tool) = pen::eraser_override(&mut self.state.pen, self.state.tool, self.tools.is_busy()) {
+            dispatch::dispatch(self, AppAction::SetTool(tool), frame) }
         for done in self.jobs.poll() { io_flows::on_job_output(self, done.output, done.cancel_requested) } // may replace the session
         self.state.busy = self.jobs.busy();
         if let Some(r) = &mut self.selftest { r.tick(ctx, &mut self.state, &self.gpu, self.tools.is_busy()) }
@@ -5596,11 +5677,16 @@ Rz(roll)`, `offset`, scale 1, `through` (always true for a flat outline); Sphere
 (also while a newer load runs); File without a current shape and a load pending => no stroke, info toast "The brush
 shape is still loading"; File with nothing loaded or loading => the ball, info toast "No brush shape is loaded;
 painting with the ball" once per program run (`BrushShapeState::warned_missing`). `up_hint` = the camera's up at the
-press. `stroke_begin_with(params, tip)`, then the press hit is painted at once (`stroke_to_3d(hit, 1.0)`).
-Drag (stroke pacing, FEATURE_BRUSH 5.10): every pointer position is queued with the `ViewXform` of its frame
-(`unresolved`; a position within 0.001 pt of the last one is dropped). **Resolve**: the screen polyline through the
-queued positions is walked in steps of `max(1 pt, 0.25 * ring radius on screen)`, each step raycast with the transform
-stored with the position it leads to; hit / miss go to `pending`. At most `StrokePace::raycasts_per_frame` = 64
+press. `stroke_begin_with(params, tip)`, then the press hit is painted at once (`stroke_to_3d(hit, p.pressure)`).
+Drag (stroke pacing, FEATURE_BRUSH 5.10): every pointer position is queued with the `ViewXform` of its frame and its pen
+pressure (`unresolved`; a position within 0.001 pt of the last one is dropped). **Resolve**: the screen polyline through the
+queued positions is walked in steps of `max(1 pt, 0.25 * ring radius on screen * factor)`, each step raycast with the
+transform stored with the position it leads to; hit (with the step's pressure) / miss go to `pending`. Branch `pen-input`:
+the step's pressure is `walk_pressure(last_p, target_p, step, len)` (the target's at the target, else linear) and `factor =
+dynamics.size_factor(min(last_p, target_p))` (a thin pen stroke gets surface samples as dense relative to its width as a
+full-size one; the plan said "the pressure at the step's end", the thinner end is used because it is known before the
+step); for a mouse both are exactly 1.0, so the raycasts are those of `main`. `BrushParams::dynamics` comes from the
+settings (`BrushSettings::dynamics`); the 2D stroke passes `p.pressure` to `stroke_to_2d`. At most `StrokePace::raycasts_per_frame` = 64
 raycasts per frame while the button is down, `finish_raycasts` = 4,096 per frame after the release. **Paint**: samples
 are taken from `pending` in order (hit => `stroke_to_3d(hit, 1.0)`, miss => `stroke_break`) until the queue is empty,
 or 10 ms are spent in this frame while the backlog (`pending.len()` x the mean time of the last 16 samples) is at most
@@ -6526,7 +6612,10 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
   group height in points, `None` = automatic; a value that is not a number reads as `None`, `from_json` clamps a finite
   one to `100..=2000`, the panel clamps it to the window again) — read leniently (`lenient_prefs_serde`), so a bad value
   never resets the other keys; written by `panels::sync_prefs` next to `brush_flows::sync_prefs` in `WteApp::on_exit`
-  (never in self-test mode). Older files have none of the keys: Tool + Layers, split automatic.
+  (never in self-test mode). Older files have none of the keys: Tool + Layers, split automatic. Branch `pen-input`: the
+  four pressure keys of `brush` / `eraser` (`pressure_size`, `pressure_size_min`, `pressure_flow`,
+  `pressure_flow_min`; a file without them gives Size on from 10 %, Flow off; out-of-range minimums are clamped) and
+  `tablet_input` (`"windows_ink"` | `"win_tab"`; anything else reads as Windows Ink).
 
 Round 4 (S2): `prefs.json` (round 4): `brush`, `eraser`, `brush_shape_path`, `brush_shape_close` (B5 reads `brush` and `eraser`
 leniently and sanitized). `brush_flows::sync_prefs` copies the tool settings in directly before every write.
@@ -6698,6 +6787,13 @@ pub enum Step {
     /// Round 4 (S2): one `Event::PointerMoved` to the point (normalized in the view rect), no button.
     Hover { view: ViewId, at: [f32; 2] },
     Key(egui::Modifiers, egui::Key),
+    /// Branch pen-input: a recorded Windows Ink pen fed in-process (`pen_frames`): per sample the events egui-winit makes
+    /// for a pen (`Touch` with winit's force, then `PointerMoved` / `PointerButton` / `PointerGone`) and the window
+    /// procedure's `PenRecord`s (`FrameInput::pen`); pressure 0 = hover, the first contact sample is the Down, an Up
+    /// follows the last one, a Leave record (no event) ends the step. Hover runs and contact moves go `points_per_frame`
+    /// to a frame, Down / Up / Leave get a frame each. Fixed touch id / pointer id 77. `at` is normalized in the view
+    /// rect; values outside 0..1 reach the panels (the scenario taps a Layers row this way).
+    Pen { view: ViewId, samples: Vec<PenPoint /* at: [f32; 2], pressure: f32 */>, inverted: bool, barrel: bool, points_per_frame: usize },
     /// Window inner size in physical pixels: one `ViewportCommand::InnerSize(size / pixels_per_point)`, then 10 frames.
     Resize([u32; 2]),
     WaitFrames(u32),
@@ -6722,7 +6818,10 @@ pub enum Step {
 pub struct Runner { /* steps, index, frame counter, scratch, injected events, screenshot receiver, output paths, report, exit code handle */ }
 impl Runner {
     pub fn new(args: &CliArgs, exit_code: Arc<AtomicI32>) -> Option<Runner>;     // None without --screenshot; unknown scenario => error scenario
-    pub fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput);
+    /// Branch pen-input: returns the injected `PenRecord`s of the frame (the app feeds them to the pen router).
+    pub fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) -> Vec<PenRecord>;
+    /// Branch pen-input: in every frame with a pen in contact `tick` adds 1 to the scratch values `pen_contact_frames`
+    /// (and `pen_eraser_frames` when the tool is the Eraser) and sets `pen_readout_ok` when `PenFrame::readout` is "Pen N %".
     pub fn tick(&mut self, ctx: &egui::Context, state: &mut AppState, gpu: &Gpu, tools_busy: bool);
 }
 // selftest/scenarios.rs
@@ -6860,6 +6959,7 @@ counted down) instead of failing (`export_errors`).
 | `objects` | objects-tabs WP6 (plan 8.1; `selftest/scenarios/objects.rs`). The Three Objects sample (Floor 0, Cube 1, Ball 2; UV regions Floor u >= 0.5, Cube u < 0.5 / v < 0.5, Ball u < 0.5 / v >= 0.5); the Objects tab; Navigate click at the Cube's projected bounds centre (`Shot("selected")`); H; Wireframe on, `Shot("hidden")`, the 2D view `Shot("hidden_2d")`, back to 3D, Wireframe off; Brush (red) stroke along the floor points x -0.45..0.45, z 0 (the hidden Cube's footprint); an image stamp (Project) clicked at the Cube's point; Alt+H (`Shot("shown")`); a click on the Ball's row, Shift+H, Shift+F (`Shot("isolated")`); the Floor's eye; Ctrl-click the Cube's row, Shift-click the Floor's row, the footer's Show all; the Cube's row, H, Save As `<out>.wtep`, Open it; the Objects tab | three objects `Floor`, `Cube`, `Ball` whose counts add up, nothing hidden, the Tool tab; the click selects exactly the Cube and draws its row; the ray through the point hits the Cube, after H the Floor; H changes neither `revision()`, `is_modified()` nor the undo depth; the stroke changes the Floor's region and the 7x7 texels under the Cube (the floor UV of a ray down the Cube's axis), not the Cube's region, one undo entry "Brush Stroke"; the stamp's layer has ink in the Floor's region and none in the Cube's, the Cube's region of the composite is unchanged; Alt+H: nothing hidden, the ray hits the Cube again, the composite unchanged by showing; the Ball's row selects it; Shift+H hides Floor and Cube; Shift+F puts the camera target on the Ball's centre (1e-3 of the diagonal) and brings it closer; the eye shows the Floor and keeps the selection {Ball}; Ctrl gives {Cube, Ball}, Shift {Floor, Cube}; Show all shows everything and keeps the selection; after the reopen the Cube alone is hidden, the selection is empty, the document is not modified and exactly one toast about hidden objects names the Cube; the side panel layout (`assert_side_areas_apart`) |
 | `objects_path` PATH | objects-tabs WP6 (plan 8.2; `selftest/scenarios/objects.rs`). PATH = a model with several objects (gate: `ABeautifulGame.glb`); opened and accepted (`open_and_accept`); the Objects tab; a click on the first row; `object_reveal` of the last row, a Ctrl-click on it; the frame clock reset, Shift+H; Shift+F (`Shot("isolated")`); `object_reveal = Some(0)` (the list back at the top), Navigate, a click on the best-facing grid point (`best_spots`) whose ray hits the last object; Brush (green): a warm-up stroke and, with the frame clock reset, a second stroke (`hit_stroke` 0 and 1); Alt+H | at least two objects (a clear failure otherwise), unique non-empty names, counts add up (the count is logged); at most `list height / ROW_HEIGHT + 2` rows laid out, the footer drawn; the selection is the first and the last object; after Shift+H exactly those two are visible and no frame of UI work took 250 ms or more (`VISIBILITY_FRAME_MS`); Shift+F puts the camera target on the selection's centre; before the pick the last row is out of the list; the pick selects only the last object and its row lies inside the list (revealed); each stroke makes one undo entry, no frame of the second took more than 140 ms (`BRUSH_FRAME_MS`, ROUND5 B4); Alt+H shows everything |
 | `objects_flow_path` PATH | objects-tabs completeness critic (`selftest/scenarios/objects.rs`). PATH = a model with several objects whose largest-footprint object (the board) has a texture set of its own (gate: `ABeautifulGame.glb`). The user's workflow: the board (largest x/z footprint) hidden from its row (revealed) with H; the piece (first object named "pawn", else the largest other one) selected from its row, Shift+F; a Navigate click where only the hidden board is, then on the piece; Brush (green, +2 size steps): a stroke from the piece's centre out to a point whose ray hits the board when shown and nothing now (`Shot("piece_selected")`); a projected image stamp (size 0.4) on the piece; a wrapped stamp with "jump small gaps" low on the piece; a text on the piece; Navigate (`Shot("designed")`), Preview (`Shot("preview")`); Save As, reopen (`Shot("reopened")`); export the piece's paint layer (per-layer PNG) and every set's flattened PNG; Show all; then the piece hidden and a 6 px stroke on its screen centre | the board-only sets exist; rays straight down over the board hit it when shown, none while hidden (also after the reopen); hiding is view state; the miss deselects, the pick selects the piece; the stroke changes the piece's sets and one undo entry; every stamp / text inks the piece's sets and no layer of a board-only set; the wrapped stamp is a new Wrap placement with jump gaps; the board-only sets' composites never change while it is hidden; the tint is shown with Navigate; after the reopen: the board hidden, one toast names it, not modified, nothing selected, structure and composites as saved; the layer PNG equals the layer and has ink; 15 flattened PNGs verified (`verify_export`, the hidden board's set included); Show all brings the board's ray hits back; with the piece hidden the stroke paints the object behind it (sets disjoint from the piece's), leaves the piece's sets unchanged and ends with "Brush Stroke" |
+| `pen` | Branch pen-input (`selftest/scenarios/pen.rs`; recorded pen samples through `Step::Pen`, never OS input). The Sphere sample; the brush at 40 texels, hardness 1, flow 1, pressure Size on (min 0), Flow off; in 2D a pen stroke along the row v = 0.5 from u 0.15 to 0.85 with pressure 0.1 -> 1.0 (`Shot("pen_ramp")`); undo; the same path as a mouse `Pointer` and as a pen at pressure 1.0; Size off, Flow on (min 0), flow 0.5: pen strokes at constant 0.2 (v 0.3) and 1.0 (v 0.7); in 3D pen strokes at 0.25 and 1.0, the mouse stroke of the same path, a light stroke beside it (`Shot("pen_3d")`); in 2D a mouse patch, then the inverted pen (two hover samples, a stroke across the patch); a barrel drag in 3D; a pen tap on the name of the Base row; a 3D pen ramp 0.05 -> 1.0 for the final shot | no readout before the pen; the 2D column near 20 % of the ramp is less than half as tall as near 90 % and the end column is 40 +- 3 texels; "Pen N %" was the readout in a contact frame; after the Leave no readout, the pen seen; 2D and 3D: pen at 1.0 == mouse (paint hash); the 0.2 row is fainter than the 1.0 row and not empty; 3D: 0 < texels(0.25) < texels(1.0) / 2; the eraser end: the patch centre has alpha 0, the tool was the Eraser in every contact frame, the history label is "Erase", one frame after the step the Brush is back; the barrel drag turned the camera and painted nothing; the tap selected Base |
 
 Gate 3 added named mid-run captures (`Step::Shot`) for the report:
 `brush_shape` `_dialog` (the closing dialog), `text_tab` `_page_character` / `_page_warp` / `_page_path`, `text_fonts`
@@ -6917,6 +7017,9 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
 14. Shortcuts match logical keys: Shift+`[` is `Key::OpenCurlyBracket`. Order table entries most-specific-first.
 15. Do not use `wgpu::util::TextureBlitter` for mips (nearest minification); use the blit pipeline of 8.4.
 16. No `rfd` call outside `dispatch` / `io_flows` / `main`; no key handling outside `shortcuts::handle`.
+17. Branch `pen-input`: pen `Touch` events must not reach egui (any `Event::Touch` turns on egui's touch-screen mode for the
+    whole run); the router removes them. The pressure of a pointer event is read with `PenFrame::cursor` in event order
+    (egui removes only key and AccessKit events from `i.events`, never pointer events), never by position alone.
 
 ---
 

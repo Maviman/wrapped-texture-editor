@@ -12,7 +12,8 @@ use eframe::{egui, wgpu};
 use crate::action::AppAction;
 use crate::cli::CliArgs;
 use crate::gpu::Gpu;
-use crate::state::{AppState, ViewId};
+use crate::pen::{PenKind, PenRecord};
+use crate::state::{AppState, ToolKind, ViewId};
 
 pub mod scenarios;
 
@@ -62,6 +63,13 @@ pub enum Step {
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
     Hover { view: ViewId, at: [f32; 2] },
     Key(egui::Modifiers, egui::Key),
+    /// Branch `pen-input` (ARCHITECTURE 8.11): a recorded Windows Ink pen fed in-process: per sample exactly the events
+    /// egui-winit makes for the pen (`Touch` with its force, the emulated `PointerMoved` / `PointerButton` /
+    /// `PointerGone`) plus the window procedure's `PenRecord`s (`pen_frames`); never OS input. `samples.at` is
+    /// normalized in the view rect (values outside 0..1 reach the panels); pressure 0 = hover. The first contact sample
+    /// is the Down, the last one is followed by an Up, a Leave record ends the step. `inverted` = the eraser end,
+    /// `barrel` = the barrel button held.
+    Pen { view: ViewId, samples: Vec<PenPoint>, inverted: bool, barrel: bool, points_per_frame: usize },
     /// Window inner size in physical pixels (one `ViewportCommand::InnerSize`), then `RESIZE_FRAMES` frames of waiting.
     Resize([u32; 2]),
     WaitFrames(u32),
@@ -102,6 +110,10 @@ impl Step {
             Step::Scroll { view, at, notches, .. } => format!("Scroll({view:?}, {at:?}, {notches})"),
             Step::Hover { view, at } => format!("Hover({view:?}, {at:?})"),
             Step::Key(mods, key) => format!("Key({mods:?}, {key:?})"),
+            Step::Pen { view, samples, inverted, barrel, .. } => {
+                let contact = samples.iter().filter(|s| s.pressure > 0.0).count();
+                format!("Pen({view:?}, {} samples, {contact} in contact, inverted {inverted}, barrel {barrel})", samples.len())
+            }
             Step::Resize([w, h]) => format!("Resize({w}x{h})"),
             Step::WaitFrames(n) => format!("WaitFrames({n})"),
             Step::WaitIdle => "WaitIdle".to_owned(),
@@ -116,11 +128,20 @@ impl Step {
     }
 }
 
-/// The events injected in one frame and the modifier state of that frame.
+/// One sample of `Step::Pen`: normalized view position and pressure (0 = hovering).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct PenPoint {
+    pub at: [f32; 2],
+    pub pressure: f32,
+}
+
+/// The events injected in one frame, the modifier state of that frame and the pen records of the frame (branch
+/// `pen-input`: what the window procedure would have queued).
 #[derive(Clone, Debug, PartialEq)]
 struct FrameInput {
     events: Vec<egui::Event>,
     modifiers: egui::Modifiers,
+    pen: Vec<PenRecord>,
 }
 
 /// A step that spans several frames.
@@ -230,8 +251,9 @@ impl Runner {
         })
     }
 
-    /// Drops the real pointer / key / wheel events and appends the injected ones (determinism rules of 8.11).
-    pub fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    /// Drops the real pointer / key / wheel events and appends the injected ones (determinism rules of 8.11); returns
+    /// the injected pen records of the frame (branch `pen-input`), which the app hands to the pen router.
+    pub fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) -> Vec<PenRecord> {
         raw.events.retain(|e| {
             !matches!(
                 e,
@@ -268,12 +290,28 @@ impl Runner {
             raw.events.push(egui::Event::ModifiersChanged(modifiers));
             self.modifiers = modifiers;
         }
-        if let Some(input) = input {
-            raw.events.extend(input.events);
-            self.last_inject_frame = Some(self.frame);
-        }
         raw.time = Some(self.frame as f64 / 60.0);
         raw.predicted_dt = 1.0 / 60.0;
+        let Some(input) = input else { return Vec::new() };
+        raw.events.extend(input.events);
+        self.last_inject_frame = Some(self.frame);
+        input.pen
+    }
+
+    /// Branch `pen-input`: what a pen in contact did this frame, for the `pen` scenario's asserts (scratch values
+    /// `pen_contact_frames`, `pen_eraser_frames`, `pen_readout_ok`).
+    fn probe_pen(&mut self, state: &AppState) {
+        let f = &state.pen.frame;
+        if !f.in_contact {
+            return;
+        }
+        *self.scratch.values.entry("pen_contact_frames").or_insert(0) += 1;
+        if state.tool == ToolKind::Eraser {
+            *self.scratch.values.entry("pen_eraser_frames").or_insert(0) += 1;
+        }
+        if f.readout().is_some_and(|t| t.starts_with("Pen ") && t.ends_with(" %")) {
+            self.scratch.values.insert("pen_readout_ok", 1);
+        }
     }
 
     /// Advances the scenario by one frame; called from `App::logic`.
@@ -284,6 +322,7 @@ impl Runner {
         ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
         let frame = self.frame;
         self.frame += 1;
+        self.probe_pen(state);
 
         if frame == 0 {
             ctx.all_styles_mut(|s| s.animation_time = 0.0);
@@ -454,6 +493,13 @@ impl Runner {
             Step::Key(mods, key) => {
                 self.inject.extend(key_frames(key, mods));
                 self.active = Some((Active::Input, name));
+            }
+            Step::Pen { view, samples, inverted, barrel, points_per_frame } => {
+                if let Some(rect) = self.view_rect(state, view, &name) {
+                    let points: Vec<(egui::Pos2, f32)> = samples.iter().map(|s| (to_screen(rect, s.at), s.pressure)).collect();
+                    self.inject.extend(pen_frames(&points, inverted, barrel, points_per_frame));
+                    self.active = Some((Active::Input, name));
+                }
             }
             Step::Resize([w, h]) => {
                 let ppp = ctx.pixels_per_point();
@@ -639,21 +685,23 @@ fn pointer_frames(points: &[egui::Pos2], button: egui::PointerButton, mods: egui
     let Some((&first, rest)) = points.split_first() else { return Vec::new() };
     let last = *points.last().unwrap_or(&first);
     let mut frames = vec![
-        FrameInput { events: vec![egui::Event::PointerMoved(first)], modifiers: mods },
+        FrameInput { events: vec![egui::Event::PointerMoved(first)], modifiers: mods, pen: Vec::new() },
         FrameInput {
             events: vec![
                 egui::Event::PointerMoved(first),
                 egui::Event::PointerButton { pos: first, button, pressed: true, modifiers: mods },
             ],
             modifiers: mods,
+            pen: Vec::new(),
         },
     ];
     for chunk in rest.chunks(points_per_frame.max(1)) {
-        frames.push(FrameInput { events: chunk.iter().map(|p| egui::Event::PointerMoved(*p)).collect(), modifiers: mods });
+        frames.push(FrameInput { events: chunk.iter().map(|p| egui::Event::PointerMoved(*p)).collect(), modifiers: mods, pen: Vec::new() });
     }
     frames.push(FrameInput {
         events: vec![egui::Event::PointerButton { pos: last, button, pressed: false, modifiers: mods }],
         modifiers: mods,
+        pen: Vec::new(),
     });
     frames
 }
@@ -666,7 +714,7 @@ fn click_frames(pos: egui::Pos2, button: egui::PointerButton, mods: egui::Modifi
 /// One `PointerMoved`, then in the next frame the wheel event with a whole number of notches.
 fn scroll_frames(pos: egui::Pos2, notches: f32, mods: egui::Modifiers) -> Vec<FrameInput> {
     vec![
-        FrameInput { events: vec![egui::Event::PointerMoved(pos)], modifiers: egui::Modifiers::NONE },
+        FrameInput { events: vec![egui::Event::PointerMoved(pos)], modifiers: egui::Modifiers::NONE, pen: Vec::new() },
         FrameInput {
             events: vec![egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Line,
@@ -676,19 +724,102 @@ fn scroll_frames(pos: egui::Pos2, notches: f32, mods: egui::Modifiers) -> Vec<Fr
                 modifiers: mods,
             }],
             modifiers: mods,
+            pen: Vec::new(),
         },
     ]
 }
 
 /// One `PointerMoved` to `pos`, no button.
 fn hover_frames(pos: egui::Pos2) -> Vec<FrameInput> {
-    vec![FrameInput { events: vec![egui::Event::PointerMoved(pos)], modifiers: egui::Modifiers::NONE }]
+    vec![FrameInput { events: vec![egui::Event::PointerMoved(pos)], modifiers: egui::Modifiers::NONE, pen: Vec::new() }]
 }
 
 /// Key down in one frame, key up in the next.
 fn key_frames(key: egui::Key, mods: egui::Modifiers) -> Vec<FrameInput> {
     let event = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: mods };
-    vec![FrameInput { events: vec![event(true)], modifiers: mods }, FrameInput { events: vec![event(false)], modifiers: mods }]
+    vec![FrameInput { events: vec![event(true)], modifiers: mods, pen: Vec::new() }, FrameInput { events: vec![event(false)], modifiers: mods, pen: Vec::new() }]
+}
+
+/// The pointer id and touch device of the self-test's pen (`pen_frames`).
+const TEST_PEN_ID: u32 = 77;
+const TEST_PEN_DEVICE: egui::TouchDeviceId = egui::TouchDeviceId(0x7e57);
+
+/// The `Touch` event egui-winit pushes for a sample of the self-test's pen.
+fn pen_touch(phase: egui::TouchPhase, pos: egui::Pos2, force: Option<f32>) -> egui::Event {
+    egui::Event::Touch { device_id: TEST_PEN_DEVICE, id: egui::TouchId(u64::from(TEST_PEN_ID)), phase, pos, force }
+}
+
+/// Frames of a recorded pen (branch `pen-input`): per sample the events egui-winit makes for a Windows Ink pen
+/// (`on_touch`: `Touch` with winit's force, then the mouse emulation) and the record the window procedure would queue.
+/// Hover samples (pressure 0) and contact moves go `points_per_frame` to a frame; the Down, the Up and the final Leave
+/// (a record only: winit sends no touch for it) each get a frame of their own, as `pointer_frames` gives the press and
+/// the release theirs.
+fn pen_frames(points: &[(egui::Pos2, f32)], inverted: bool, barrel: bool, points_per_frame: usize) -> Vec<FrameInput> {
+    let per = points_per_frame.max(1);
+    let record = |kind: PenKind, pressure: f32| PenRecord {
+        pointer_id: TEST_PEN_ID,
+        kind,
+        in_contact: matches!(kind, PenKind::Down | PenKind::Update) && pressure > 0.0,
+        pressure,
+        barrel,
+        third: false,
+        inverted,
+    };
+    let none = egui::Modifiers::NONE;
+    let mut frames: Vec<FrameInput> = Vec::new();
+    let mut open: Option<FrameInput> = None;
+    let (mut contact, mut last) = (false, None);
+    for &(pos, p) in points {
+        if p > 0.0 && !contact {
+            frames.extend(open.take());
+            frames.push(FrameInput {
+                events: vec![
+                    pen_touch(egui::TouchPhase::Start, pos, Some(p)),
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: none },
+                ],
+                modifiers: none,
+                pen: vec![record(PenKind::Down, p)],
+            });
+            contact = true;
+        } else {
+            if p <= 0.0 && contact {
+                frames.extend(open.take());
+                frames.push(pen_up(last.unwrap_or(pos), record(PenKind::Up, 0.0)));
+                contact = false;
+            }
+            let f = open.get_or_insert_with(|| FrameInput { events: Vec::new(), modifiers: none, pen: Vec::new() });
+            f.events.push(pen_touch(egui::TouchPhase::Move, pos, (p > 0.0).then_some(p)));
+            f.events.push(egui::Event::PointerMoved(pos));
+            f.pen.push(record(PenKind::Update, p.max(0.0)));
+            if f.pen.len() >= per {
+                frames.extend(open.take());
+            }
+        }
+        last = Some(pos);
+    }
+    frames.extend(open.take());
+    if contact && let Some(pos) = last {
+        frames.push(pen_up(pos, record(PenKind::Up, 0.0)));
+    }
+    if !points.is_empty() {
+        frames.push(FrameInput { events: Vec::new(), modifiers: none, pen: vec![record(PenKind::Leave, 0.0)] });
+    }
+    frames
+}
+
+/// The Up frame of `pen_frames`: `Touch(End)`, the release at the last pointer position and `PointerGone`.
+fn pen_up(pos: egui::Pos2, up: PenRecord) -> FrameInput {
+    let none = egui::Modifiers::NONE;
+    FrameInput {
+        events: vec![
+            pen_touch(egui::TouchPhase::End, pos, None),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: none },
+            egui::Event::PointerGone,
+        ],
+        modifiers: none,
+        pen: vec![up],
+    }
 }
 
 /// The JSON report of a run.
@@ -772,6 +903,50 @@ mod tests {
         assert!(frames.iter().all(|f| f.modifiers == egui::Modifiers::SHIFT));
         assert!(pointer_frames(&[], egui::PointerButton::Primary, egui::Modifiers::NONE, 1).is_empty());
         assert_eq!(click_frames(pts[1], egui::PointerButton::Secondary, egui::Modifiers::NONE).len(), 3);
+    }
+
+    /// Branch `pen-input`: the recorded pen gives what egui-winit and the window procedure give, and through the
+    /// router the same pointer events as a mouse drag of the same points (Touch events gone, pressures noted).
+    #[test]
+    fn pen_frames_hover_down_moves_up_leave() {
+        let pts: Vec<(egui::Pos2, f32)> = [(0.0, 0.0), (0.0, 0.5), (1.0, 0.6), (2.0, 0.7), (3.0, 0.8)]
+            .iter()
+            .map(|&(x, p)| (egui::pos2(x, 0.0), p))
+            .collect();
+        let frames = pen_frames(&pts, false, false, 2);
+        // hover, Down, 2 move frames (2 + 1), Up, Leave
+        assert_eq!(frames.len(), 6);
+        assert!(matches!(frames[0].events[0], egui::Event::Touch { phase: egui::TouchPhase::Move, force: None, .. }));
+        assert_eq!(frames[1].pen[0].kind, PenKind::Down);
+        assert_eq!(frames[2].pen.len(), 2);
+        assert_eq!(frames[3].pen.len(), 1);
+        assert_eq!(frames[4].pen[0].kind, PenKind::Up);
+        assert!(frames[5].events.is_empty() && frames[5].pen[0].kind == PenKind::Leave);
+        // Through the router: the mouse drag of `pointer_frames` plus the final PointerGone, with the pressures.
+        let mut router = crate::pen::PenRouter::default();
+        let mut routed = Vec::new();
+        let mut notes = Vec::new();
+        for f in &frames {
+            let mut events = f.events.clone();
+            let mut feed = f.pen.iter().copied().collect();
+            let frame = router.process(&mut events, &mut feed);
+            routed.extend(events);
+            notes.extend(frame.pointer.iter().map(|(_, p)| *p));
+        }
+        let mouse: Vec<egui::Pos2> = pts.iter().map(|(p, _)| *p).collect();
+        let mut want: Vec<egui::Event> = pointer_frames(&mouse[1..], egui::PointerButton::Primary, egui::Modifiers::NONE, 2)
+            .into_iter()
+            .flat_map(|f| f.events)
+            .collect();
+        want.push(egui::Event::PointerGone);
+        assert_eq!(routed, want);
+        assert_eq!(notes, vec![None, Some(0.5), Some(0.5), Some(0.6), Some(0.7), Some(0.8), Some(0.8)]);
+        // Inverted / barrel go into every record; a sample back at pressure 0 lifts the pen.
+        let frames = pen_frames(&[(egui::pos2(0.0, 0.0), 0.4), (egui::pos2(1.0, 0.0), 0.0)], true, true, 4);
+        assert!(frames.iter().flat_map(|f| &f.pen).all(|r| r.inverted && r.barrel));
+        let kinds: Vec<PenKind> = frames.iter().flat_map(|f| f.pen.iter().map(|r| r.kind)).collect();
+        assert_eq!(kinds, vec![PenKind::Down, PenKind::Up, PenKind::Update, PenKind::Leave]);
+        assert!(pen_frames(&[], false, false, 1).is_empty());
     }
 
     #[test]

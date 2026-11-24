@@ -27,10 +27,9 @@ pub(crate) fn input(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, rect: egui::Rect) {
 }
 
 /// objects-tabs (8.5): the selection tint is drawn when objects are selected, no stroke is open and the Navigate tool is
-/// active (a tint would falsify the colours while painting). The plan's "or the Objects tab is shown" joins with the
-/// side panel tabs (WP4).
+/// active or the side panel shows the Objects tab (a tint would falsify the colours while painting with another tab).
 pub(crate) fn highlight_shown(state: &crate::state::AppState) -> bool {
-    state.tool == crate::state::ToolKind::Navigate
+    (state.tool == crate::state::ToolKind::Navigate || state.upper_tab == crate::state::UpperTab::Objects)
         && state.session.as_ref().is_some_and(|s| !s.selected_objects.is_empty() && !s.doc.stroke_active())
 }
 

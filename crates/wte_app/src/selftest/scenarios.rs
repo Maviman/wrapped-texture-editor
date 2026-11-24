@@ -24,10 +24,12 @@ use crate::cli::CliArgs;
 use crate::selftest::{Scratch, Step};
 use crate::state::{
     AppState, BrushSettings, BrushType, CameraPreset, Dialog, PanelHit, Pending, ShadingMode, ShapeChoice, SideTab,
-    TextGapSel, TextPage, ToolKind, ViewId, ViewMode,
+    TextGapSel, TextPage, ToolKind, UpperTab, ViewId, ViewMode,
 };
 use crate::tools::{Surface, ViewXform};
 use crate::view::gizmo::{self, GizmoShape};
+
+mod side_tabs;
 
 /// Every scenario `scenario` accepts, in the order of the 8.11 table.
 const NAMES: &[&str] = &[
@@ -78,6 +80,7 @@ const NAMES: &[&str] = &[
     "export_nouv",
     "export_errors",
     "export_checks",
+    "side_tabs",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -150,6 +153,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "export_nouv" => export_nouv(),
         "export_errors" => export_errors(),
         "export_checks" => export_checks(),
+        "side_tabs" => side_tabs::side_tabs(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -3519,22 +3523,31 @@ fn layers() -> Vec<Step> {
     ]
 }
 
-/// R3-10 (decision 2 of round 3, finding F9): the Color section's area lies inside the side panel; the Layers footer
-/// and its Delete button lie inside the side panel, below the list's scroll area (not in it). In a window of 1280x800
-/// or more (side panel at least 740 points high) the whole Color section is on screen, nothing of it scrolled away.
+/// objects-tabs (WP4; before: R3-10, decision 2 of round 3, finding F9): the two tab groups lie inside the side panel,
+/// the upper one above the lower one, and the upper strip's buttons inside the upper group; the Layers footer and its
+/// Delete button lie inside the side panel, below the list's scroll area (not in it). With the Color page shown in a
+/// window of 1280x800 or more (side panel at least 740 points high) the whole page is on screen, nothing of it
+/// scrolled away (G1); with the Tool page shown the page keeps at least 90 pt.
 fn assert_side_panel_layout(s: &AppState, _: &Scratch) -> Result<(), String> {
     let side = s.side_panel_rect.ok_or("the side panel rect was not recorded")?.expand(0.5);
-    let color = panel_rect(s, PanelHit::ColorSection)?;
-    let content = panel_rect(s, PanelHit::ColorContent)?;
+    let r = &s.side_rects;
     let footer = panel_rect(s, PanelHit::LayersFooter)?;
     let list = panel_rect(s, PanelHit::LayersList)?;
-    let settings = panel_rect(s, PanelHit::SettingsArea)?;
-    log::info!("side panel {side:?}: settings {settings:?}, color {color:?} (content {content:?}), list {list:?}, footer {footer:?}");
-    if !side.contains_rect(color) {
-        return Err(format!("the Color section {color:?} is not inside the side panel {side:?}"));
+    log::info!(
+        "side panel {side:?}: upper group {:?} ({:?} page {:?}), lower group {:?}, list {list:?}, footer {footer:?}",
+        r.upper_area,
+        s.upper_tab,
+        r.upper_page,
+        r.bottom_area
+    );
+    if !side.contains_rect(r.upper_area) || !side.contains_rect(r.bottom_area) {
+        return Err(format!("a group is not inside the side panel {side:?}: upper {:?}, lower {:?}", r.upper_area, r.bottom_area));
     }
-    if settings.bottom() > color.top() + 0.5 || color.bottom() > list.top() + 0.5 {
-        return Err(format!("the areas overlap: settings {settings:?}, color {color:?}, layers list {list:?}"));
+    if r.upper_area.bottom() > r.bottom_area.top() + 0.5 || r.upper_area.bottom() > list.top() + 0.5 {
+        return Err(format!("the groups overlap: upper {:?}, lower {:?}, layers list {list:?}", r.upper_area, r.bottom_area));
+    }
+    if let Some(b) = r.upper_tab_buttons.iter().find(|b| !r.upper_area.expand(0.5).contains_rect(**b)) {
+        return Err(format!("the upper tab button {b:?} is not inside the upper group {:?}", r.upper_area));
     }
     if !side.contains_rect(footer) || footer.top() < list.bottom() - 0.5 {
         return Err(format!("the Layers footer {footer:?} is not below the list {list:?} inside the side panel {side:?}"));
@@ -3546,8 +3559,18 @@ fn assert_side_panel_layout(s: &AppState, _: &Scratch) -> Result<(), String> {
     } else if doc_of(s)?.sets.iter().any(|set| set.active.is_some()) {
         return Err("the Delete button is not drawn".to_owned());
     }
-    if side.height() >= 740.0 && !color.expand(0.5).contains_rect(content) {
-        return Err(format!("the Color section is cut off: content {content:?} in the area {color:?}"));
+    if s.upper_tab == UpperTab::Color {
+        let color = panel_rect(s, PanelHit::ColorSection)?;
+        let content = panel_rect(s, PanelHit::ColorContent)?;
+        if side.height() >= 740.0 && !color.expand(0.5).contains_rect(content) {
+            return Err(format!("the Color page is cut off: content {content:?} in the page {color:?}"));
+        }
+    }
+    if s.upper_tab == UpperTab::Tool {
+        let settings = panel_rect(s, PanelHit::SettingsArea)?;
+        if settings.height() < 90.0 {
+            return Err(format!("the Tool page is only {:.0} pt high: {settings:?}", settings.height()));
+        }
     }
     // The list shows at least two whole rows (46 pt each) at 1280x800 and above.
     if side.height() >= 740.0 && list.height() < 92.0 {
@@ -3556,29 +3579,29 @@ fn assert_side_panel_layout(s: &AppState, _: &Scratch) -> Result<(), String> {
     Ok(())
 }
 
-/// accept_fixes item B: the three areas of the side panel lie one below the other without overlapping, at any length
-/// of the tool options: the tool options' scroll area ends above the Color section, the Color section above the
-/// lower area (tab strip Layers | Brush | Text), and no tab button reaches into the Color section or the tool area.
-/// Then the checks of `assert_side_panel_layout`.
+/// accept_fixes item B (objects-tabs WP4: two groups in place of three areas): the groups of the side panel lie one
+/// below the other without overlapping, at any length of the tool options: the upper group (strip and page) ends above
+/// the lower group (tab strip Layers | Brush | Text), the shown upper page lies inside the upper group, and no lower
+/// tab button lies above the upper group's bottom. Then the checks of `assert_side_panel_layout`.
 fn assert_side_areas_apart(s: &AppState, sc: &Scratch) -> Result<(), String> {
     let r = &s.side_rects;
     log::info!(
-        "side areas: panel {:?}, tool area {:?}, tool options {:?}, color {:?}, lower area {:?}, tabs {:?}",
-        r.panel, r.tool_area, r.tool_options, r.color, r.bottom_area, r.tab_buttons
+        "side groups: panel {:?}, upper group {:?}, page {:?}, tool area {:?}, tool options {:?}, lower group {:?}, tabs {:?}",
+        r.panel, r.upper_area, r.upper_page, r.tool_area, r.tool_options, r.bottom_area, r.tab_buttons
     );
-    let (tool, color, lower) = (r.tool_area, r.color, r.bottom_area);
-    if [tool, color, lower].iter().any(|a| !a.is_finite() || a.height() <= 0.0) {
-        return Err(format!("an area was not drawn: tool {tool:?}, color {color:?}, lower {lower:?}"));
+    let (upper, page, lower) = (r.upper_area, r.upper_page, r.bottom_area);
+    if [upper, page, lower].iter().any(|a| !a.is_finite() || a.height() <= 0.0) {
+        return Err(format!("a group was not drawn: upper {upper:?}, page {page:?}, lower {lower:?}"));
     }
-    if tool.bottom() > color.top() + 0.5 {
-        return Err(format!("the tool options ({tool:?}) run {:.1} pt into the Color section ({color:?})", tool.bottom() - color.top()));
+    if upper.bottom() > lower.top() + 0.5 {
+        return Err(format!("the upper group ({upper:?}) runs {:.1} pt into the lower group ({lower:?})", upper.bottom() - lower.top()));
     }
-    if color.bottom() > lower.top() + 0.5 {
-        return Err(format!("the Color section ({color:?}) runs {:.1} pt into the lower area ({lower:?})", color.bottom() - lower.top()));
+    if !upper.expand(0.5).contains_rect(page) {
+        return Err(format!("the upper page {page:?} is not inside the upper group {upper:?}"));
     }
     for tab in r.tab_buttons.iter().filter(|t| t.is_finite()) {
-        if tab.top() < color.bottom() - 0.5 || tab.top() < tool.bottom() - 0.5 {
-            return Err(format!("the tab button {tab:?} lies under the Color section {color:?} or the tool area {tool:?}"));
+        if tab.top() < upper.bottom() - 0.5 {
+            return Err(format!("the tab button {tab:?} lies in the upper group {upper:?}"));
         }
     }
     assert_side_panel_layout(s, sc)
@@ -6452,8 +6475,8 @@ fn brush_tab_layout(s: &AppState, what: &str) -> Result<(), String> {
     let tab = r.brush_tab.ok_or_else(|| format!("{what}: the Brush tab is not shown"))?;
     let content = r.brush_tab_content.ok_or_else(|| format!("{what}: the tab's content was not recorded"))?;
     let side = s.side_panel_rect.ok_or("the side panel rect was not recorded")?;
-    if !side.expand(0.5).contains_rect(r.color) {
-        return Err(format!("{what}: the Color section {:?} is not inside the side panel {side:?}", r.color));
+    if !side.expand(0.5).contains_rect(r.upper_area) || r.upper_area.bottom() > r.bottom_area.top() + 0.5 {
+        return Err(format!("{what}: the upper group {:?} is not inside the side panel {side:?} above the lower one {:?}", r.upper_area, r.bottom_area));
     }
     // Gate 1: the pixel budget of test A12 (300 pt wide, the slider rows inside the tool area, the tab without
     // scrolling) is defined for a window of 1280 x 800 or larger (FEATURE_BRUSH A12, ROUND4_PLAN 3.3). In a smaller
@@ -6467,10 +6490,10 @@ fn brush_tab_layout(s: &AppState, what: &str) -> Result<(), String> {
             return Err(format!("{what}: the tab {tab:?} is not inside the lower area {:?}", r.bottom_area));
         }
         log::info!(
-            "{what}: small window, A12 budget not applied: side panel {side:?}; tool area {:?} (options {:?}); Color {:?}; lower area {:?}; tab {tab:?}; content {content:?}",
+            "{what}: small window, A12 budget not applied: side panel {side:?}; tool area {:?} (options {:?}); upper group {:?}; lower area {:?}; tab {tab:?}; content {content:?}",
             r.tool_area,
             r.tool_options,
-            r.color,
+            r.upper_area,
             r.bottom_area
         );
         return Ok(());
@@ -6478,7 +6501,8 @@ fn brush_tab_layout(s: &AppState, what: &str) -> Result<(), String> {
     if (side.width() - 300.0).abs() > 0.5 {
         return Err(format!("{what}: the side panel is {} pt wide", side.width()));
     }
-    if r.tool_options.bottom() > r.tool_area.bottom() + 0.5 {
+    // G2 (objects-tabs): checked while the Tool page is shown (with another upper tab there is no tool area).
+    if r.tool_area.is_positive() && r.tool_options.bottom() > r.tool_area.bottom() + 0.5 {
         return Err(format!("{what}: the brush sliders {:?} end below the tool area {:?}", r.tool_options, r.tool_area));
     }
     if !r.bottom_area.expand(0.5).contains_rect(tab) || !tab.expand(0.5).contains_rect(content) {
@@ -6488,7 +6512,7 @@ fn brush_tab_layout(s: &AppState, what: &str) -> Result<(), String> {
         "{what}: side panel {side:?}; tool area {:?} (options {:?}); Color {:?}; lower area {:?}; tab {tab:?}; content {content:?} ({:.0} of {:.0} pt)",
         r.tool_area,
         r.tool_options,
-        r.color,
+        r.upper_area,
         r.bottom_area,
         content.height(),
         tab.height()
@@ -7336,12 +7360,12 @@ fn text_tab_pages(shots: bool) -> Vec<Step> {
     steps
 }
 
-/// The Text tab is shown, the Color section is inside the side panel and the side panel is at most 300 pt wide.
+/// The Text tab is shown, the upper group is inside the side panel and the side panel is at most 300 pt wide.
 fn text_page_layout(s: &AppState, what: &str) -> Result<(), String> {
     let r = &s.side_rects;
     let tab = r.text_tab.ok_or_else(|| format!("{what}: the Text tab is not shown"))?;
-    if !r.panel.expand(0.5).contains_rect(r.color) {
-        return Err(format!("{what}: the Color section {:?} is not inside the side panel {:?}", r.color, r.panel));
+    if !r.panel.expand(0.5).contains_rect(r.upper_area) {
+        return Err(format!("{what}: the upper group {:?} is not inside the side panel {:?}", r.upper_area, r.panel));
     }
     if !r.bottom_area.expand(0.5).contains_rect(tab) {
         return Err(format!("{what}: the tab {tab:?} is not inside the lower area {:?}", r.bottom_area));
@@ -7350,7 +7374,7 @@ fn text_page_layout(s: &AppState, what: &str) -> Result<(), String> {
     if side.width() > 300.5 {
         return Err(format!("{what}: the side panel is {} pt wide", side.width()));
     }
-    log::info!("{what} ({:?}): tab {tab:?}, color {:?}, side panel {side:?}", s.text_page, r.color);
+    log::info!("{what} ({:?}): tab {tab:?}, upper group {:?}, side panel {side:?}", s.text_page, r.upper_area);
     Ok(())
 }
 
@@ -8706,11 +8730,7 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
                 );
                 Ok(())
             }),
-            // The Color section is collapsed, so the screenshot shows the whole Transform options of S.
-            Step::Dyn("collapse the Color section", |s, _| {
-                let r = panel_rect(s, PanelHit::ColorSection)?;
-                Ok(vec![Step::ScreenPointer { path: vec![r.min + egui::vec2(24.0, 9.0)] }])
-            }),
+            // objects-tabs (WP4): the Transform options of S have the whole Tool page (no Color section to collapse).
             Step::WaitIdle,
             Step::WaitFrames(3),
         ]),
@@ -8763,19 +8783,16 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
         }),
         Step::WaitIdle,
         Step::Setup("(10) log the wrap (Jump small gaps on)", |s, sc| ws_log_path_stamp(s, sc, "on")),
-        // Round 8: the Color section collapsed, so the screenshot shows the stamp's whole Transform options with the
-        // stats lines ("Wrapped over N triangles", "Fitted to the curved surface ...", "Cut where ...").
-        Step::Dyn("(10) collapse the Color section", |s, _| {
-            let r = panel_rect(s, PanelHit::ColorSection)?;
-            Ok(vec![Step::ScreenPointer { path: vec![r.min + egui::vec2(24.0, 9.0)] }])
-        }),
+        // Round 8: the screenshot shows the stamp's whole Transform options with the stats lines ("Wrapped over N
+        // triangles", "Fitted to the curved surface ...", "Cut where ..."); objects-tabs (WP4): they have the whole
+        // Tool page, nothing to collapse.
         Step::WaitIdle,
         Step::WaitFrames(3),
         // Round 9 (package B, plan 7.2): the third log state (the panel's lines: shared texels, the part of a picture
         // longer than the way round). Stable (fix-wrap, item 2): logged before the asserts, so a model that fails
         // one of them (nonmanifold, noisy400, tiles300) still logs what its panel says.
         Step::Setup("(10) log the panel lines (Jump small gaps on)", ws_log_panel_lines),
-        Step::Assert("(10) the side panel's areas do not overlap (long tool options, Color collapsed)", assert_side_areas_apart),
+        Step::Assert("(10) the side panel's groups do not overlap (long tool options)", assert_side_areas_apart),
         Step::Assert("(10) ink <= 1.3, dup <= 3 %, scatter <= 5 % with Jump small gaps off and on", |_, sc| {
             let mut bad = Vec::new();
             for (jump, keys) in [("off", WS_Q_OFF), ("on", WS_Q_ON)] {
@@ -9251,7 +9268,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 47);
+        assert_eq!(scenario_names().len(), 48);
     }
 
     #[test]
@@ -9262,20 +9279,22 @@ mod tests {
         let mut state = AppState::new(crate::state::Prefs::default(), true);
         // The 900 x 600 frame of the failed run: the tool options reach below the tool area.
         state.side_panel_rect = Some(r(623.0, 25.0, 900.0, 575.0));
+        state.side_rects.upper_area = r(632.0, 27.0, 892.0, 330.0);
         state.side_rects.tool_area = r(609.0, 27.0, 886.0, 139.5);
         state.side_rects.tool_options = r(609.0, 27.0, 838.5, 167.0);
-        state.side_rects.color = r(632.0, 140.0, 892.0, 330.0);
         state.side_rects.bottom_area = r(632.0, 340.0, 892.0, 570.0);
         state.side_rects.brush_tab = Some(r(632.0, 370.0, 892.0, 570.0));
         state.side_rects.brush_tab_content = Some(r(632.0, 370.0, 892.0, 610.0));
         assert!(brush_tab_layout(&state, "small").is_ok());
-        state.side_rects.color = r(632.0, 140.0, 920.0, 330.0);
-        assert!(brush_tab_layout(&state, "small").is_err(), "Color outside the panel fails at every size");
+        state.side_rects.upper_area = r(632.0, 27.0, 920.0, 330.0);
+        assert!(brush_tab_layout(&state, "small").is_err(), "an upper group outside the panel fails at every size");
+        state.side_rects.upper_area = r(632.0, 27.0, 892.0, 350.0);
+        assert!(brush_tab_layout(&state, "small").is_err(), "overlapping groups fail at every size");
         // The same overflow at 1280 x 800 fails as before.
         state.side_panel_rect = Some(r(980.0, 25.0, 1280.0, 775.0));
+        state.side_rects.upper_area = r(989.0, 27.0, 1272.0, 493.5);
         state.side_rects.tool_area = r(989.0, 27.0, 1266.0, 139.5);
         state.side_rects.tool_options = r(989.0, 27.0, 1218.5, 167.0);
-        state.side_rects.color = r(989.0, 175.0, 1272.0, 493.5);
         state.side_rects.bottom_area = r(989.0, 500.0, 1272.0, 770.0);
         state.side_rects.brush_tab = Some(r(989.0, 525.0, 1272.0, 770.0));
         state.side_rects.brush_tab_content = Some(r(989.0, 525.0, 1272.0, 760.0));

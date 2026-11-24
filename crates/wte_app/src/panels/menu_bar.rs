@@ -9,7 +9,7 @@ use wte_core::SampleKind;
 
 use crate::action::AppAction;
 use crate::shortcuts::shortcut_text;
-use crate::state::{AppState, Backdrop, CameraPreset, Dialog, ShadingMode, ViewMode};
+use crate::state::{AppState, Backdrop, CameraPreset, Dialog, ShadingMode, UpperTab, ViewMode};
 
 /// A menu entry: label, the `shortcut_text` label it shows ("" = none), enabled, selected, action.
 fn item(ui: &mut egui::Ui, label: &str, shortcut: &str, enabled: bool, selected: bool) -> bool {
@@ -288,5 +288,10 @@ fn object_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAct
     }
     if item(ui, "Deselect All", "", has_selection, false) {
         actions.push(AppAction::DeselectObjects);
+    }
+    ui.separator();
+    // objects-tabs (WP4): shows the side panel's Objects tab (a setting, like the Background entries).
+    if item(ui, "Objects Panel", "", true, state.upper_tab == UpperTab::Objects) {
+        state.upper_tab = UpperTab::Objects;
     }
 }

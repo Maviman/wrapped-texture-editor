@@ -15,13 +15,16 @@ use egui::{Color32, Pos2, Rect, Stroke, vec2};
 use wte_core::{BlobId, Commit, Document, LayerId, PixelBuf, StampId, TextureSetId};
 
 use crate::action::AppAction;
-use crate::state::{AppState, PanelHit, SideRects, SideTab, ToolKind};
+use crate::state::{AppState, Prefs, SideTab, ToolKind};
+use side_groups::{COLOR_FIXED_HEIGHT_GUESS, COLOR_SQUARE_MAX, LAYERS_FOOTER_HEIGHT_GUESS};
 
 pub mod brush_tab;
 pub mod color;
 pub mod font_picker;
 pub mod layers;
 pub mod menu_bar;
+pub mod objects;
+pub mod side_groups;
 pub mod status_bar;
 pub mod text_block;
 pub mod text_tab;
@@ -81,9 +84,9 @@ pub struct PanelState {
     pub(crate) text: text_block::TextPanelState,
     /// UI state of the Brush tab (round 4, B4).
     pub(crate) brush: brush_tab::BrushTabState,
-    /// Height of the open Color section without its saturation/value square, measured in the last frame (points).
+    /// Height of the Color page without its saturation/value square, measured when the page was last shown (points).
     color_fixed_height: f32,
-    /// Height of the Color section's content in the last frame (points).
+    /// Height of the Color page's content when it was last shown (points); the automatic split keeps room for it.
     color_content_height: f32,
     /// Height of the Layers footer in the last frame (points).
     layers_footer_height: f32,
@@ -97,8 +100,13 @@ pub struct PanelState {
     /// The Layers area's rect in the last frame (for the resize-edge press).
     layers_area_rect: Option<Rect>,
     /// The user dragged the Layers area's edge: from then on the area keeps the size they chose (kept across
-    /// documents); before that it hugs its content.
+    /// documents); before that it hugs its content. A double-click on the edge clears it (objects-tabs WP4).
     layers_user_sized: bool,
+    /// The user's split from the preferences (`Prefs::side_split`): the lower group's first height while
+    /// `layers_user_sized` (egui keeps the size from then on).
+    split_start: Option<f32>,
+    /// UI state of the Objects tab (objects-tabs WP5).
+    pub(crate) objects: objects::ObjectsTabState,
 }
 
 impl Default for PanelState {
@@ -132,7 +140,20 @@ impl PanelState {
             layers_list_overflow: 0.0,
             layers_area_rect: None,
             layers_user_sized: false,
+            split_start: None,
+            objects: objects::ObjectsTabState::default(),
         }
+    }
+
+    /// The Color page's content height when it was last shown (points): the automatic split keeps room for it.
+    #[cfg(test)]
+    pub(crate) fn measured_color_page(&self) -> f32 {
+        self.color_content_height
+    }
+
+    /// Empty caches and the split the user left in the preferences (objects-tabs WP4: `Prefs::side_split`).
+    pub fn with_prefs(prefs: &Prefs) -> PanelState {
+        PanelState { layers_user_sized: prefs.side_split.is_some(), split_start: prefs.side_split, ..PanelState::new() }
     }
 
     /// Per-frame bookkeeping: drops every cache when the document object changed, prunes thumbnails of layers and
@@ -140,7 +161,14 @@ impl PanelState {
     fn begin_frame(&mut self, state: &AppState) {
         let generation = state.session.as_ref().map(|s| s.scene_generation);
         if generation != self.generation {
-            *self = PanelState { generation, layers_user_sized: self.layers_user_sized, ..PanelState::new() };
+            *self = PanelState {
+                generation,
+                layers_user_sized: self.layers_user_sized,
+                split_start: self.split_start,
+                color_fixed_height: self.color_fixed_height,
+                color_content_height: self.color_content_height,
+                ..PanelState::new()
+            };
         }
         self.thumb_budget = THUMBS_PER_FRAME;
         self.set_thumb_done = false;
@@ -287,145 +315,19 @@ pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
     toolbar::show(ui, state);
 }
 
-/// The right side panel, three areas from top to bottom (decision 2 of round 3):
-/// - Tool options and Texture sets in one scroll area with a visible scroll bar; it gets the room the other two leave;
-/// - the Color section, pinned below them: as tall as its content, so at 1280x800 the whole picker is on screen
-///   whatever the tool options show; when the room is short its square shrinks (down to `COLOR_SQUARE_MIN`), then
-///   the section scrolls, leaving the tool options about 96 pt (`SETTINGS_MIN_HEIGHT`);
-/// - the Layers section at the bottom in its own resizable area: the layer list scrolls inside it, the footer buttons
-///   stay below the list (`layers::show`).
-///
-/// The areas are records of `state.panel_rects` (`PanelHit::SettingsArea`, `ColorSection`, `ColorContent`,
-/// `LayersList`, `LayersFooter`, `LayersDelete`) for the self-test.
-///
-/// Round 4: the lower area starts with the tab strip Layers | Brush | Text in place of the "Layers" header and shows
-/// the tab `shown_tab` gives (the one tab rule of ROUND4_PLAN 2.2 item 10). With the Layers tab the area hugs its rows
-/// as in round 3; with the Brush or the Text tab it has the computed height of FEATURE_BRUSH 6.1 (`tab_area_height`);
-/// a size the user dragged is kept for every tab. Every frame records `state.side_rects`.
+/// The right side panel: two tab groups with a draggable split (objects-tabs WP4, `side_groups.rs`): the upper strip
+/// Tool | Color | Texture sets | Objects with the page of `state.upper_tab`, and the lower strip Layers | Brush | Text
+/// (the one tab rule of `shown_tab`) in its resizable area. Records `state.panel_rects` (`SettingsArea`,
+/// `ColorSection`, `ColorContent` while their page is shown, `LayersList`, `LayersFooter`, `LayersDelete`,
+/// `UpperTabButton`, the Objects tab's rows and buttons) and `state.side_rects` for the self-test.
 pub fn show_side_panel(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState) {
-    ps.begin_frame(state);
-    state.panel_rects.clear();
-    let mut rects = SideRects { panel: ui.max_rect(), ..SideRects::default() };
-    let shown = shown_tab(state);
-    if shown != SideTab::Text {
-        text_tab::clear_gap_status(state); // T6 (round 4): the status line of a selected gap goes with the Text tab
-    }
-    let height = ui.available_height().max(1.0);
-    // A press on the Layers area's resize edge: the user takes over its size.
-    if !ps.layers_user_sized
-        && let Some(area) = ps.layers_area_rect
-    {
-        let grab = ui.style().interaction.resize_grab_radius_side + 3.0;
-        ps.layers_user_sized = ui.input(|i| {
-            i.pointer.primary_pressed()
-                && i.pointer.press_origin().is_some_and(|p| (p.y - area.top()).abs() <= grab && area.x_range().contains(p.x))
-        });
-    }
-    let min = LAYERS_MIN_HEIGHT.min(height * 0.5);
-    let panel = egui::Panel::bottom("side_layers_area")
-        .resizable(true)
-        .frame(egui::Frame::new().inner_margin(egui::Margin { top: 4, ..egui::Margin::ZERO }));
-    let panel = if ps.layers_user_sized {
-        panel.default_size(layers_area_height(height)).size_range(min..=layers_area_max(height))
-    } else if shown == SideTab::Layers {
-        // Until the user sizes it, the area hugs its rows and footer, at most its default (40 %, R3-10 review): the
-        // room a short list does not need goes to the tool options and the Color section.
-        panel.exact_size(layers_area_fit(height, ps.layers_natural_height))
-    } else {
-        // The Brush and the Text tab: the computed height of FEATURE_BRUSH 6.1 (the five brush slider rows stay
-        // visible above the Color section, the tab gets the rest).
-        panel.exact_size(tab_area_height(height, ps.color_content_height + COLOR_AREA_MARGIN))
-    };
-    ps.layers_list_overflow = 0.0;
-    ps.layers_content_bottom = None;
-    let layers_area = panel.show(ui, |ui| {
-        // A panel's size is the size of its content: the area keeps its full height even when the list (which
-        // shrinks to its rows) and the footer need less, or it would shrink a little every frame.
-        ui.set_min_height(ui.available_height());
-        with_visible_scroll_bars(ui);
-        rects.tab_buttons = tab_strip(ui, state, shown);
-        match shown {
-            SideTab::Layers => layers::show(ui, state, ps),
-            SideTab::Brush => {
-                rects.brush_tab = Some(tab_content(ui, "side_brush_tab_scroll", |ui| brush_tab::show(ui, state, ps)));
-                rects.brush_tab_content = ps.brush.content;
-            }
-            SideTab::Text => rects.text_tab = Some(tab_content(ui, "side_text_tab_scroll", |ui| text_tab::show(ui, state, ps))),
-        }
-    });
-    let area = layers_area.response.rect;
-    rects.bottom_area = area;
-    state.panel_rects.insert(PanelHit::LayersArea, area);
-    ps.layers_area_rect = Some(area);
-    if let Some(bottom) = ps.layers_content_bottom {
-        // 2 pt of slack: an area exactly as tall as its rows could flip the list's scroll bar on a rounding difference.
-        let natural = (bottom - area.top() + ps.layers_list_overflow + 2.0).ceil();
-        if ps.layers_natural_height.is_none_or(|n| (n - natural).abs() > 0.5) {
-            ui.ctx().request_repaint();
-        }
-        ps.layers_natural_height = Some(natural);
-    }
-
-    // The Color section's room: what the Layers area left, minus the minimum of the tool options. The area is as tall as
-    // its content was in the last frame (a scroll area cannot grow a panel by itself), at most the room.
-    let room = (ui.available_height() - SETTINGS_MIN_HEIGHT).max(COLOR_MIN_HEIGHT);
-    let square = color_square_side(ui.available_width(), room - COLOR_AREA_MARGIN, ps.color_fixed_height);
-    let color = egui::Panel::bottom("side_color_area")
-        .resizable(false)
-        .show_separator_line(true)
-        .exact_size((ps.color_content_height + COLOR_AREA_MARGIN).min(room))
-        .frame(egui::Frame::new().inner_margin(egui::Margin { top: 4, bottom: 2, ..egui::Margin::ZERO }))
-        .show(ui, |ui| {
-            with_visible_scroll_bars(ui);
-            // accept_fixes item B: no minimum height. egui's default (64 pt) is more than a collapsed Color section
-            // (about 28 pt): the frame then reported a taller rect, which the exact-size panel cut to its size from
-            // the bottom, so it told the area above that the Color section began 43 pt lower than drawn and the tool
-            // options ran over its header and the Layers tab strip.
-            let out = egui::ScrollArea::vertical()
-                .id_salt("side_color_scroll")
-                .min_scrolled_height(0.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| color::show(ui, state, ps, square));
-            let content = Rect::from_min_size(out.inner_rect.min - out.state.clamped_offset(), out.content_size);
-            if (out.content_size.y - ps.color_content_height).abs() > 0.5 {
-                ui.ctx().request_repaint();
-            }
-            ps.color_content_height = out.content_size.y;
-            if let Some(square) = out.inner {
-                // Open: remember the height of everything but the square for the next frame's fit.
-                ps.color_fixed_height = (out.content_size.y - square).max(0.0);
-            }
-            content
-        });
-    state.panel_rects.insert(PanelHit::ColorSection, color.response.rect);
-    state.panel_rects.insert(PanelHit::ColorContent, color.inner);
-    rects.color = color.response.rect;
-
-    with_visible_scroll_bars(ui);
-    // No minimum height either (accept_fixes item B): in a short window the area takes only the room that is left.
-    let settings = egui::ScrollArea::vertical()
-        .id_salt("side_settings_scroll")
-        .min_scrolled_height(0.0)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let options = tool_options::show(ui, state, ps);
-            texture_sets::show(ui, state, ps);
-            options
-        });
-    state.panel_rects.insert(PanelHit::SettingsArea, settings.inner_rect);
-    rects.tool_area = settings.inner_rect;
-    rects.tool_options = settings.inner;
-    state.side_rects = rects;
-    ps.end_frame(ui.ctx(), state);
+    side_groups::show(ui, state, ps);
 }
 
-/// Height of the tab strip of the lower area (FEATURE_BRUSH 6.2).
-const TAB_STRIP_HEIGHT: f32 = 24.0;
-/// Height of the Brush options in the tool area (header and five slider rows, FEATURE_BRUSH 6.1).
-const BRUSH_OPTIONS_HEIGHT: f32 = 144.0;
-/// Limits of the computed height of the lower area while the Brush or the Text tab is shown (FEATURE_BRUSH 6.1).
-const TAB_AREA_MIN: f32 = 160.0;
-const TAB_AREA_MAX: f32 = 420.0;
+/// Copies the side panel's tabs and split into the preferences (directly before `prefs::save` at exit).
+pub fn sync_prefs(state: &mut AppState, ps: &PanelState) {
+    side_groups::sync_prefs(state, ps);
+}
 
 /// The Brush tab can be shown: the tool is the Brush or the Eraser (ROUND4_PLAN 2.2 item 10).
 pub(crate) fn brush_tab_enabled(state: &AppState) -> bool {
@@ -446,95 +348,6 @@ pub(crate) fn shown_tab(state: &AppState) -> SideTab {
         SideTab::Text if text_tab_enabled(state) => SideTab::Text,
         _ => SideTab::Layers,
     }
-}
-
-/// Height of the lower area while the Brush or the Text tab is shown, for a side panel of `height` points and a Color
-/// section of `color` points (FEATURE_BRUSH 6.1): `height - color - 144 - 4`, limited to `160..=420` and to what the
-/// tool options and the Color area must keep.
-fn tab_area_height(height: f32, color: f32) -> f32 {
-    let wanted = if color.is_finite() { height - color - BRUSH_OPTIONS_HEIGHT - 4.0 } else { layers_area_height(height) };
-    wanted.clamp(TAB_AREA_MIN.min(height * 0.5), TAB_AREA_MAX).min(layers_area_max(height))
-}
-
-/// The tab strip: one row of three selectable buttons in place of the "Layers" header. A tab that cannot be used is
-/// greyed out with a hover text that says why. A click writes `state.side_tab` directly (a setting, not an action).
-/// Returns the buttons' rects (indexed by `SideTab::index`).
-fn tab_strip(ui: &mut egui::Ui, state: &mut AppState, shown: SideTab) -> [Rect; 3] {
-    let mut rects = [Rect::NOTHING; 3];
-    ui.horizontal(|ui| {
-        ui.set_min_height(TAB_STRIP_HEIGHT);
-        for tab in SideTab::ALL {
-            let (enabled, why) = match tab {
-                SideTab::Layers => (true, ""),
-                SideTab::Brush => (brush_tab_enabled(state), "Select the Brush or the Eraser"),
-                SideTab::Text => (text_tab_enabled(state), "Choose the Text tool, or select a text with the Transform tool"),
-            };
-            let button = egui::Button::selectable(shown == tab, tab.label()).min_size(vec2(0.0, TAB_STRIP_HEIGHT - 4.0));
-            let resp = ui.add_enabled(enabled, button).on_disabled_hover_text(why);
-            if resp.clicked() {
-                state.side_tab = tab;
-            }
-            rects[tab.index()] = resp.rect;
-        }
-    });
-    rects
-}
-
-/// The content of the Brush or the Text tab in its own scroll area (the tab is taller than the area in a small
-/// window); returns the visible rect of the content.
-fn tab_content(ui: &mut egui::Ui, salt: &'static str, add: impl FnOnce(&mut egui::Ui)) -> Rect {
-    let out = egui::ScrollArea::vertical().id_salt(salt).auto_shrink([false, false]).show(ui, add);
-    out.inner_rect
-}
-
-/// Smallest height of the Layers area: header, opacity row, two whole rows and the two-line footer (at 640x480 the
-/// Layers area gets this; 160 pt left 1.6 rows once the footer moved out of the list's scroll area).
-const LAYERS_MIN_HEIGHT: f32 = 200.0;
-/// Height kept for the Tool options / Texture sets area while the Color section fits itself in (about 96 pt of it stay
-/// visible once the spacing and separator lines of the areas are taken off).
-const SETTINGS_MIN_HEIGHT: f32 = 112.0;
-/// Smallest height of the Color section's area (it scrolls below that).
-const COLOR_MIN_HEIGHT: f32 = 60.0;
-/// Top and bottom margin of the Color area's frame (6 pt) plus 2 pt of slack: an area exactly as tall as its content
-/// could show the scroll bar on a rounding difference, which narrows the swatches, which shortens the content, which
-/// hides the bar again — a layout that flips every frame.
-const COLOR_AREA_MARGIN: f32 = 8.0;
-/// Largest and smallest side of the colour picker's saturation/value square (= the width of its bars).
-const COLOR_SQUARE_MAX: f32 = 140.0;
-const COLOR_SQUARE_MIN: f32 = 72.0;
-/// First-frame guesses of measured heights (corrected after one frame).
-const COLOR_FIXED_HEIGHT_GUESS: f32 = 180.0;
-const LAYERS_FOOTER_HEIGHT_GUESS: f32 = 52.0;
-
-/// Default height of the Layers area for a side panel of `height` points: about 40 %, at least room for three rows.
-fn layers_area_height(height: f32) -> f32 {
-    (height * 0.4).clamp(LAYERS_MIN_HEIGHT.min(height * 0.5), 420.0)
-}
-
-/// Height of the Layers area before the user sizes it: what its rows and footer need (`natural`, measured in the last
-/// frame), at least `LAYERS_MIN_HEIGHT` and at most the default `layers_area_height`; the default until measured.
-fn layers_area_fit(height: f32, natural: Option<f32>) -> f32 {
-    let max = layers_area_height(height);
-    natural.map_or(max, |n| n.clamp(LAYERS_MIN_HEIGHT.min(height * 0.5).min(max), max))
-}
-
-/// Largest height of the Layers area: 85 % of the panel, and never so much that the tool options and the Color area
-/// lose their minimum (a Layers area sized in a large window keeps its size when the window shrinks, clamped to this).
-fn layers_area_max(height: f32) -> f32 {
-    (height * 0.85).min(height - SETTINGS_MIN_HEIGHT - COLOR_MIN_HEIGHT).max(LAYERS_MIN_HEIGHT)
-}
-
-/// Side of the colour picker's square: as large as the panel width allows (at most `COLOR_SQUARE_MAX`) and as the
-/// section's `room` allows given the rest of the section (`fixed`), never below `COLOR_SQUARE_MIN` (then it scrolls).
-fn color_square_side(width: f32, room: f32, fixed: f32) -> f32 {
-    let by_width = (width - 24.0).clamp(COLOR_SQUARE_MIN, COLOR_SQUARE_MAX);
-    (room - fixed).floor().clamp(COLOR_SQUARE_MIN, by_width)
-}
-
-/// Thin scroll bars that stay visible while the content overflows (egui's default floating bars are invisible until
-/// hovered, so a cut-off section gave no cue that it scrolls).
-fn with_visible_scroll_bars(ui: &mut egui::Ui) {
-    ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
 }
 
 /// The status bar: hint, hover read-out, texture size, zoom, undo label, job progress.
@@ -669,7 +482,7 @@ pub(crate) fn parse_hex(text: &str) -> Option<[u8; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{OrbitCamera, Prefs, Session, UvViewState};
+    use crate::state::{OrbitCamera, PanelHit, Session, UpperTab, UvViewState};
     use wte_core::SampleKind;
 
     pub(crate) fn sample_state(kind: SampleKind) -> AppState {
@@ -737,6 +550,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = sample_state(SampleKind::Sphere);
         let mut ps = PanelState::new();
+        // objects-tabs (WP4): the set thumbnails are made by the Texture sets page.
+        state.upper_tab = UpperTab::TextureSets;
         run_panels(&ctx, &mut state, &mut ps, screen(1280.0, 800.0));
         assert!(state.actions.is_empty(), "{:?}", state.actions);
         // Two layers (Base, Paint 1): both thumbnails within the per-frame budget, the set thumbnail too.
@@ -950,8 +765,12 @@ mod tests {
         let ctx = egui::Context::default();
         let mut empty = AppState::new(Prefs::default(), true);
         let mut ps = PanelState::new();
-        run_panels(&ctx, &mut empty, &mut ps, screen(1280.0, 800.0));
-        assert!(empty.actions.is_empty());
+        for upper in UpperTab::ALL {
+            empty.upper_tab = upper;
+            run_panels(&ctx, &mut empty, &mut ps, screen(1280.0, 800.0));
+            assert!(empty.actions.is_empty(), "{upper:?}");
+        }
+        empty.upper_tab = UpperTab::Tool;
         // The tabs work without a document too (FEATURE_BRUSH 6.2).
         for (tool, tab) in [(ToolKind::Brush, SideTab::Brush), (ToolKind::Text, SideTab::Text)] {
             empty.tool = tool;
@@ -976,10 +795,14 @@ mod tests {
             state.tool = tool;
             for tab in SideTab::ALL {
                 state.side_tab = tab;
-                run_panels(&ctx, &mut state, &mut ps, screen(900.0, 600.0));
-                // (round 5 R5-3: the font button asks for the samples once per catalog.)
-                state.actions.retain(|a| !matches!(a, AppAction::LoadFontSamples));
-                assert!(state.actions.is_empty(), "{tool:?} {tab:?}: {:?}", state.actions);
+                // objects-tabs (WP4): every page of the upper group too.
+                for upper in UpperTab::ALL {
+                    state.upper_tab = upper;
+                    run_panels(&ctx, &mut state, &mut ps, screen(900.0, 600.0));
+                    // (round 5 R5-3: the font button asks for the samples once per catalog.)
+                    state.actions.retain(|a| !matches!(a, AppAction::LoadFontSamples));
+                    assert!(state.actions.is_empty(), "{tool:?} {tab:?} {upper:?}: {:?}", state.actions);
+                }
             }
         }
     }
@@ -1008,11 +831,13 @@ mod tests {
         let r = state.side_rects.clone();
         let tab = r.brush_tab.expect("the Brush tab is shown with the Brush");
         assert!(r.text_tab.is_none() && !state.panel_rects.contains_key(&PanelHit::LayersFooter), "no Layers rows");
-        assert!(r.bottom_area.contains_rect(tab) && r.panel.contains_rect(r.color), "{r:?}");
-        let expected = r.panel.height() - r.color.height() - BRUSH_OPTIONS_HEIGHT - 4.0;
-        assert!((r.bottom_area.height() - expected.clamp(TAB_AREA_MIN, TAB_AREA_MAX)).abs() < 8.0, "computed height: {r:?}");
+        assert!(r.bottom_area.contains_rect(tab) && r.panel.contains_rect(r.upper_area), "{r:?}");
+        // objects-tabs (WP4): the upper group keeps its strip and the taller of the brush rows and the Color page.
+        let expected = side_groups::tab_area_height(r.panel.height(), side_groups::upper_keep(ps.color_content_height));
+        assert!((r.bottom_area.height() - expected).abs() < 8.0, "computed height {expected}: {r:?}");
         assert!(r.bottom_area.height() > layers_area.height(), "two layers need less than a tab");
-        assert!(r.tool_area.height() >= BRUSH_OPTIONS_HEIGHT - 8.0, "the brush sliders keep their room: {r:?}");
+        assert!(r.tool_area.height() >= side_groups::BRUSH_OPTIONS_HEIGHT - 8.0, "the brush sliders keep their room: {r:?}");
+        eprintln!("1280x800: Color page content {:.1} pt, of it {:.1} pt beside the square", ps.color_content_height, ps.color_fixed_height);
 
         // Another tool: Layers again, `side_tab` unchanged; the Brush comes back without a click.
         state.tool = ToolKind::Fill;
@@ -1035,5 +860,22 @@ mod tests {
         // (round 5 R5-3: the font button asks for the samples once per catalog.)
         state.actions.retain(|a| !matches!(a, AppAction::LoadFontSamples));
         assert!(state.actions.is_empty(), "{:?}", state.actions);
+    }
+
+    /// objects-tabs (WP4): the first-frame guess of the Color page's height (used by the automatic split until the page
+    /// is first shown) is what the page measures at 1280 x 800, so the split does not move when the Color tab is first
+    /// opened.
+    #[test]
+    fn the_colour_page_guess_matches_its_measured_height() {
+        let ctx = egui::Context::default();
+        let mut state = sample_state(SampleKind::Sphere);
+        let mut ps = PanelState::new();
+        state.upper_tab = UpperTab::Color;
+        for _ in 0..3 {
+            run_panels(&ctx, &mut state, &mut ps, screen(1280.0, 800.0));
+        }
+        eprintln!("Color page: {:.1} pt, of it {:.1} pt beside the square", ps.color_content_height, ps.color_fixed_height);
+        assert!((ps.color_fixed_height - COLOR_FIXED_HEIGHT_GUESS).abs() <= 2.0, "measured {}", ps.color_fixed_height);
+        assert!((ps.color_content_height - (COLOR_FIXED_HEIGHT_GUESS + COLOR_SQUARE_MAX)).abs() <= 2.0, "measured {}", ps.color_content_height);
     }
 }

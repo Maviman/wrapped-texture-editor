@@ -142,6 +142,9 @@ impl Harness {
     }
 
     /// The widget of `role` in the row of the label `row_label` (same line, right of the label); `nth` counts from 0.
+    /// objects-tabs (WP4): of the widgets that overlap the label's centre line only those whose centres lie nearest to
+    /// it (within 2 pt) count: AccessKit also lists the clipped widgets of a scrolled page, and those of the upper page
+    /// can lie behind the rows of the lower group, a few points off their centre line.
     pub fn in_row(&self, row_label: &str, role: Role, nth: usize) -> Node {
         let label = self
             .nodes
@@ -156,6 +159,9 @@ impl Harness {
             .filter(|n| n.role == role && n.rect.min.y <= y && n.rect.max.y >= y && n.rect.min.x > label.rect.min.x)
             .cloned()
             .collect();
+        let off = |n: &Node| (n.rect.center().y - y).abs();
+        let nearest = found.iter().map(off).fold(f32::INFINITY, f32::min);
+        found.retain(|n| off(n) <= nearest + 2.0);
         found.sort_by(|a, b| a.rect.min.x.total_cmp(&b.rect.min.x));
         found.get(nth).cloned().unwrap_or_else(|| panic!("no {role:?} #{nth} in row {row_label:?}: {:?}", self.labels()))
     }
@@ -347,6 +353,16 @@ pub(crate) fn apply_actions(state: &mut AppState, actions: &[AppAction]) {
             AppAction::SwapColors => std::mem::swap(&mut state.colors.primary, &mut state.colors.secondary),
             AppAction::SetActiveSet(s) => state.session.as_mut().unwrap().active_set = *s,
             AppAction::SelectStamp(id) => state.session.as_mut().unwrap().selected_stamp = *id,
+            // objects-tabs (WP5): the object selection and visibility (view state, `object_ops`).
+            AppAction::SelectObject(o) => crate::object_ops::select(state.session.as_mut().unwrap(), *o),
+            AppAction::ToggleObjectSelected(o) => crate::object_ops::toggle(state.session.as_mut().unwrap(), *o),
+            AppAction::SelectObjectRange(o) => crate::object_ops::select_range(state.session.as_mut().unwrap(), *o),
+            AppAction::SelectAllObjects => crate::object_ops::select_all(state.session.as_mut().unwrap()),
+            AppAction::DeselectObjects => crate::object_ops::deselect(state.session.as_mut().unwrap()),
+            AppAction::SetObjectVisible(o, visible) => crate::object_ops::set_visible(state, *o, *visible),
+            AppAction::HideSelectedObjects => crate::object_ops::hide_selected(state),
+            AppAction::IsolateSelectedObjects => crate::object_ops::isolate_selected(state),
+            AppAction::ShowAllObjects => crate::object_ops::show_all(state),
             _ => {}
         }
         let Some(doc) = state.doc_mut() else { continue };

@@ -309,7 +309,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 
 | File | Owner | Owns |
 |---|---|---|
-| `state.rs` | S | `AppState`, `Session` (objects-tabs: `selected_objects`, `object_anchor`, `object_selection_rev`, `object_reveal`), `ViewMode`, `ViewId`, `ViewFlags`, `ShadingMode`, `Backdrop`, `CameraPreset`, `ToolKind`, tool settings (round 4: `BrushType`, `ShapeChoice`, `BrushSettings::sanitized`), `ColorState`, `HoverInfo`, `OrbitCamera`, `UvViewState`, `Dialog`, `Pending`, `Prefs`, `BusyInfo`; round 4: `SideTab`, `TextPage`, `SideRects`, `BrushShapeState`, `ReadyShape`, `PendingShape`, `OpeningsDialogState`, `TextGapSel`, `FontSampleState`, `FontSampleCell`, `ToolProbe` (types + `Default`s + `Session::validate`) |
+| `state.rs` | S | `AppState`, `Session` (objects-tabs: `selected_objects`, `object_anchor`, `object_selection_rev`, `object_reveal`), `ViewMode`, `ViewId`, `ViewFlags`, `ShadingMode`, `Backdrop`, `CameraPreset`, `ToolKind`, tool settings (round 4: `BrushType`, `ShapeChoice`, `BrushSettings::sanitized`), `ColorState`, `HoverInfo`, `OrbitCamera`, `UvViewState`, `Dialog`, `Pending`, `Prefs`, `BusyInfo`; round 4: `SideTab`, `TextPage`, `SideRects` (objects-tabs: `UpperTab`, the upper group's rects), `BrushShapeState`, `ReadyShape`, `PendingShape`, `OpeningsDialogState`, `TextGapSel`, `FontSampleState`, `FontSampleCell`, `ToolProbe` (types + `Default`s + `Session::validate`) |
 | `action.rs` | S | `AppAction`, `ToastLevel` (types only) |
 | `main.rs` | A1 | logging to file, panic hook, startup-failure message box, `NativeOptions`, `eframe::run_native`, exit code |
 | `crash.rs` | A1 | native crash recorder (vectored handler + unhandled filter, report + minidump), ring of recent log lines / actions, startup diagnostics (graphics env vars, hook modules), `WTE_DEBUG_NATIVE_CRASH` test hook (8.3) |
@@ -346,7 +346,9 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `tools/stamp_place.rs` | A3; round 4 T7 | image-stamp and text-stamp placement; the see-through text under the pointer |
 | `tools/transform.rs` | A3; round 4 T7 | select / move / scale / rotate stamps |
 | `tools/text_path.rs` | T7 (round 4) | the round points of a text on a Curve (drag in the view) |
-| `panels/mod.rs` | A4; round 4 S2, B4 | `panels::show_*` entry points; the side panel's tab strip Layers / Brush / Text and `side_rects` |
+| `panels/mod.rs` | A4; round 4 S2, B4; objects-tabs WP4 | `panels::show_*` entry points, `PanelState`, `sync_prefs`, the one tab rule (`shown_tab`) |
+| `panels/side_groups.rs` | objects-tabs WP4 | the side panel as two tab groups (8.7 "Side panel"): upper strip Tool / Color / Texture sets / Objects and its pages, the lower group Layers / Brush / Text, the split (drag, double-click = automatic), the sizing functions (`layers_area_*`, `upper_keep`, `tab_area_height`, `color_square_side`), `side_rects` |
+| `panels/objects.rs` | objects-tabs WP5 | the Objects tab (8.7): header line, virtualized rows with eyes, click / Ctrl / Shift / double-click, footer Hide / Isolate / Show all / Frame, reveal |
 | `panels/menu_bar.rs`, `toolbar.rs`, `tool_options.rs`, `layers.rs`, `texture_sets.rs`, `color.rs`, `status_bar.rs` | A4; round 4 B4 | one panel each (`layers.rs`: multi-select and the row menu "Export this layer..." / "Export selected layers... (N)", 8.7) |
 | `panels/brush_tab.rs` | B4 (round 4) | the Brush tab |
 | `panels/text_block.rs` | T6 (round 4) | the Text block of the tool options: `target`, `show` (four rows), the spec helpers `current_spec` / `draft_spec` / `write_draft` / `live_edit` / `click_edit`, the font rules `candidates` / `resolve_face` / `resolve_font` / `style_click`, `TextPanelState`, `GapBuffer` with its history |
@@ -4622,7 +4624,9 @@ pub struct Prefs { pub recent: Vec<PathBuf> /* max 10 */, pub last_dir: Option<P
                    pub swatches: Vec<[u8; 4]> }   // Serialize + Deserialize + Default, every field #[serde(default)]
 /// A clickable control of the Layers list (8.7); `AppState::panel_rects` maps it to its rect of the last frame.
 pub enum PanelHit { LayerRow(LayerId), LayerEye(LayerId), LayerThumb(LayerId), LayerName(LayerId), LayerLock(LayerId),
-                    LayerAlphaLock(LayerId) }
+                    LayerAlphaLock(LayerId), /* ... later rounds, see below; objects-tabs: */ UpperTabButton(UpperTab),
+                    ObjectRow(u32), ObjectEye(u32), ObjectsList, ObjectsFooter, ObjectsHide, ObjectsIsolate,
+                    ObjectsShowAll, ObjectsFrame }
 
 pub struct BusyInfo { pub title: String, pub stage: String, pub fraction: f32, pub modal: bool }
 
@@ -4766,6 +4770,19 @@ Round 4 (scaffold S2):
 - `AppAction` gains `LoadBrushShape(Option<PathBuf>)`, `ReloadBrushShape`, `RemoveBrushShape`,
   `AnswerOpenings(Option<CloseMode>)` (`None` = Cancel), `SetBrushShapeClose(CloseMode)` (the Brush tab's "Openings"),
   `LoadFontSamples`.
+
+objects-tabs (WP4, WP5; OBJECTS_TABS_PLAN 6.1, 6.5):
+- `UpperTab { Tool (default), Color, TextureSets, Objects }` (`Serialize` / `Deserialize`, snake_case; `ALL`, `index`,
+  `label`: "Tool", "Color", "Texture sets", "Objects"). `AppState::upper_tab: UpperTab` (from `Prefs::side_upper_tab` at
+  start; a tool change never writes it, 8.7). `AppState::side_tab` now starts from `Prefs::side_lower_tab`
+  (`SideTab::pref_name` / `from_pref_name`: "layers" | "brush" | "text"; `SideTab` itself stays non-serde).
+- `SideRects` keeps its field names with the meanings of 8.7 "Side panel" and gains `upper_area`, `upper_tab_buttons:
+  [Rect; 4]`, `upper_page`, `sets_tab: Option<Rect>`, `objects_tab: Option<Rect>`; `tool_area` / `tool_options` /
+  `color` are `Rect::NOTHING` in frames where their page is not shown.
+- `PanelHit` gains `UpperTabButton(UpperTab)`, `ObjectRow(u32)`, `ObjectEye(u32)`, `ObjectsList`, `ObjectsFooter`,
+  `ObjectsHide`, `ObjectsIsolate`, `ObjectsShowAll`, `ObjectsFrame`. `SettingsArea` is recorded only while the Tool page
+  is shown, `ColorSection` / `ColorContent` only while the Color page is shown.
+- `Prefs` gains `side_upper_tab: UpperTab`, `side_lower_tab: String`, `side_split: Option<f32>` (8.9).
 
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
@@ -5439,8 +5456,8 @@ impl ToolController {
 ```
 
 **Objects in the views** (objects-tabs, plan 5.3-5.5). Main3D: `all_objects: false`, `highlight:
-view3d::highlight_shown(state)` = objects are selected, no stroke is open and the tool is Navigate (a tint would falsify
-the colours while painting; WP4 adds "or the Objects tab is shown"). Preview mode: `all_objects: false`, no highlight.
+view3d::highlight_shown(state)` = objects are selected, no stroke is open and the tool is Navigate or the side panel shows
+the Objects tab (`upper_tab == Objects`, WP4; a tint would falsify the colours while painting with another tab shown). Preview mode: `all_objects: false`, no highlight.
 The export dialog's preview (`ViewId::ExportPreview`): `all_objects: true` (an export contains every object), no
 highlight. The 2D view shows the texture whole and leaves out the UV wires of hidden objects; painting in 2D is not
 masked; no highlight in 2D. `view::locate_px` (texel -> surface point: the UV-stamp outline traced onto the model
@@ -5663,7 +5680,8 @@ release commits the last accepted point (no entry when none was accepted).
 
 ```rust
 pub struct PanelState { /* layer thumbnails keyed by (LayerId, Layer::version), set thumbnails, rename-in-progress, drag state */ }
-impl PanelState { pub fn new() -> PanelState; }
+impl PanelState { pub fn new() -> PanelState; pub fn with_prefs(prefs: &Prefs) -> PanelState /* objects-tabs: the stored split */; }
+pub fn sync_prefs(state: &mut AppState, ps: &PanelState);   // objects-tabs: tabs + split into `state.prefs` (at exit)
 pub fn show_menu_bar(ui: &mut egui::Ui, state: &mut AppState);
 pub fn show_toolbar(ui: &mut egui::Ui, state: &mut AppState);
 pub fn show_side_panel(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState);
@@ -5686,7 +5704,8 @@ carries a catalog face).
   layer, => `ShowExportLayers(session.layer_selection())` (export-select, 1.8). Object (objects-tabs, between Layer and
   Help): Hide Selected (H) and Isolate Selected (Shift+H), enabled with a non-empty object selection; Show All (Alt+H),
   enabled when `hidden_object_count() > 0`; Frame Selection (Shift+F), enabled with a document; Select All (with a
-  document) / Deselect All (with a selection). Help: Shortcuts,
+  document) / Deselect All (with a selection); below a separator "Objects Panel" (always enabled, checked while shown):
+  sets `state.upper_tab = Objects` (a setting, like the Background entries; WP4). Help: Shortcuts,
   About. Shortcut texts come from `shortcuts::shortcut_text`. Entries are enabled exactly when they can act (review round 2,
   finding merge-down-enabled-onto-locked-base): Merge Down (menu and Layers footer alike) = `panels::layers::can_merge_down`
   (the active layer is unlocked and directly above an unlocked paint layer: the checks of `Document::merge_down`, so on a new
@@ -5695,36 +5714,85 @@ carries a catalog face).
   selected stamp, else the active layer) is not protected by a lock. Ctrl+M stays a shortcut without a disabled state (a refused
   merge shows the warning toast).
 - **Toolbar** (left, 44 pt): vector-painted icon buttons from `theme`, tooltips with shortcuts; below them the primary/secondary
-  colour chip with swap.
-- **Side panel** (right), three areas from top to bottom (fix round 3, R3-10, user decision 2; `panels::show_side_panel`):
-  1. one scroll area with the collapsing sections Tool options and Texture sets; it gets the room the other two leave and
-     shows a thin scroll bar whenever it overflows (`ScrollStyle::thin()` for all side panel scroll areas: egui's default
-     floating bars are invisible until hovered, which hid that anything was cut off);
-  2. the *Color* section pinned below it (`egui::Panel::bottom("side_color_area")`, not resizable, `exact_size` = its content height of the last frame
-     plus the frame margins and 2 pt of slack — a scroll area cannot grow a panel by itself, and without the slack a
-     rounding difference shows the scroll bar, which narrows the swatches and flips the layout every frame):
-     at a 1280x800 window or larger the whole picker (RGB row, colour bar, saturation/value square, hue bar, hex field, both
-     swatch rows) is on screen whatever tool is active and whatever is selected. Its room is what the Layers area leaves
-     minus 112 pt kept for the tool options (about 96 pt of them visible after the areas' spacing); when that is short the square (`slider_width`, 140 pt at most) shrinks to fit,
-     down to 72 pt, then the section scrolls in its own scroll area (`side_color_scroll`). The height of the open section
-     without the square is measured each frame (`PanelState::color_fixed_height`) for the next frame's fit;
-  3. a resizable bottom area (`egui::Panel::bottom("side_layers_area")`, default 40 % of the panel height (at most
-     420 pt), at least 200 pt (header, opacity row, two whole rows, footer), at most 85 % and at most the panel height minus 112 + 60 pt for the
-     tool options and the Color area — a size set in a large window is clamped to that when the window shrinks). Until the
-     user drags its edge (`PanelState::layers_user_sized`, set by a primary press within the resize grab radius of the
-     area's top edge, kept across documents) the area hugs its content (`layers_area_fit`: header + rows + footer measured
-     in the last frame, `layers_natural_height`, between 200 pt and the default), so a short list gives its room to the
-     tool options and the Color section (R3-10 review: at 1280x800 the Brush options are whole again); with more layers
-     it grows back to the default and the list scrolls. It holds the *Layers* section: opacity / blend row, then the layer list in its own scroll area
-     (`side_layers_scroll`, as tall as the area minus the footer measured in the last frame), then the footer buttons below
-     it, outside the scroll area, so New / Duplicate / Merge Down / Rasterize / Delete stay on screen with any number of
-     layers (finding F9: with 5 layers they scrolled out of sight).
-  `state.panel_rects` records, besides the layer row controls, the visible settings area (`PanelHit::SettingsArea`), the
-  Color area (`ColorSection`) and its unclipped content (`ColorContent`; inside `ColorSection` = nothing scrolled away), the
-  list's visible rect (`LayersList`), the footer (`LayersFooter`) and its Delete button (`LayersDelete`), the whole Layers
-  area (`LayersArea`); `panel_rects` is
-  cleared at the start of `show_side_panel`. New areas (e.g. the Brush tab planned for round 4) go in as further panels
-  there. The sections:
+  colour chip with swap. objects-tabs (WP4): a click on the primary chip shows the side panel's Color tab (`upper_tab =
+  Color`, a setting; hover "Primary colour: click to show the Color tab").
+- **Side panel** (right): two Photoshop-style tab groups with a draggable split (objects-tabs WP4,
+  `docs/plans/OBJECTS_TABS_PLAN.md` section 6; `panels::show_side_panel` -> `panels/side_groups.rs`). It replaces the
+  round-3 "three areas" (tool options / pinned Color section / Layers area; R3-10, user decision 2) and with it the
+  round-3 rule "the whole colour picker is on screen whatever tool is active" (user decision 2026-11-24: Color is one tab
+  of the upper group; mitigations below: the toolbar chip, tool changes keep the tab, G1).
+  ```
+  | Tool | Color | Texture sets | Objects |   upper strip, 24 pt
+  | page of the shown upper tab           |   own vertical scroll area per page (thin visible bars)
+  |=======================================|   the split: the lower group's resize edge
+  | Layers | Brush | Text                 |   lower strip, 24 pt (one tab rule unchanged)
+  | page of the shown lower tab           |
+  ```
+  1. **Lower group** = the round-4 resizable bottom panel `egui::Panel::bottom("side_layers_area")`, unchanged rules:
+     tab strip Layers | Brush | Text (`shown_tab`, below), default 40 % of the panel height (at most 420 pt), at least
+     200 pt (`LAYERS_MIN_HEIGHT`), at most `layers_area_max = (h * 0.85).min(h - UPPER_MIN_HEIGHT).max(200)` with
+     `UPPER_MIN_HEIGHT = 24 + 112` (strip + page minimum; a size set in a large window is clamped to that when the window
+     shrinks). Until the user drags the edge (`PanelState::layers_user_sized`) its height is automatic: with the Layers tab
+     it hugs its content (`layers_area_fit`: header + rows + footer measured in the last frame, between 200 pt and the
+     default), so a short list gives its room to the upper page; with the Brush or the Text tab
+     `tab_area_height(h, upper_keep)` = `(h - upper_keep).clamp(160.min(h/2), 420).min(layers_area_max(h))` with
+     `upper_keep = 24 + 4 + max(144, Color page height + 8)` (`BRUSH_OPTIONS_HEIGHT` = heading + five brush slider rows;
+     the Color page height measured when it was last shown, first guess `COLOR_FIXED_HEIGHT_GUESS + 140` = 284 pt, the
+     value measured at 1280x800), so G1 and G2 hold whichever upper tab is shown and switching upper tabs never moves the
+     split. The Layers tab: opacity / blend row, the layer list in its own scroll area (`side_layers_scroll`, as tall as the
+     area minus the footer measured in the last frame), then the footer buttons below it, outside the scroll area, so New /
+     Duplicate / Merge Down / Rasterize / Delete stay on screen with any number of layers (finding F9).
+  2. **The split**: a primary press within the resize grab radius of the lower group's top edge sets `layers_user_sized`
+     (read from the raw pointer input; the panel's own resize handle takes the drag); from then on the height applies to
+     every lower tab, clamped to `200.min(h/2)..=layers_area_max(h)`, and is kept across documents. A **double-click on
+     the edge** (`button_double_clicked` with the pointer on the edge) returns to automatic.
+  3. **Upper group** = the room the lower group leaves: the strip (`upper_tab_strip`, same widget style as the lower
+     strip: `Button::selectable`, all four always enabled, a click writes `state.upper_tab`, a setting), 4 pt, then the
+     page of `state.upper_tab`, each in its own scroll area with no minimum height. The pages' thin bars lie over the
+     content's right edge (`floating_allocated_width = 0`; visible while the page overflows) instead of taking 6 pt of
+     its width: egui reserves a bar's room only from the frame after it first shows it while the option grids keep
+     their column widths from the frame before, so a page that started to overflow grew the side panel by 6 pt for good
+     (egui keeps a side panel's width; the `text` / `text_tab` scenarios ended at 306 / 312 pt):
+     - Tool: `tool_options::show` in `side_settings_scroll` (same id as before). The page starts with the plain strong
+       heading "<Tool> options" (not collapsible: the tab is the section) and keeps the options' 18-pt indent of the
+       round-3 collapsing header (every width budget of the Text block and the stamp rows was set for it).
+     - Color: `color::show(ui, state, ps, square)` in `side_color_scroll` (no collapsing header);
+       `square = color_square_side(width, page height - 8, color_fixed_height)` (140 pt at most, shrinks down to 72 pt,
+       then the page scrolls); `PanelState::color_fixed_height` (the page without its square) and `color_content_height`
+       are measured while the page is shown.
+     - Texture sets: `texture_sets::show` in `side_sets_scroll` (no collapsing header).
+     - Objects: `objects::show` (WP5, below).
+     Without a document each page shows what it showed before ("No document open" in Texture sets, Objects and Layers).
+  **Tab behaviour** (plan 6.4). Lower group unchanged (the one tab rule; a tool change never writes `side_tab`). Upper
+  group: a tool change never writes `upper_tab` (colour changes are the most frequent trip: a jump to the Tool tab on every
+  B / E press would throw the user out of the Color tab). Exceptions: `state.focus_text_content` with the Text tool sets
+  `upper_tab = Tool` at the start of `show_side_panel` (the content field is on the Tool page; a stale request of another
+  tool is dropped there without a tab change); a click on the toolbar's primary colour chip sets `upper_tab = Color`;
+  Object > Objects Panel sets `upper_tab = Objects`. The wrong-view hint's status line is kept current every frame
+  (`tool_options::sync_wrong_view_status`), whichever page is shown.
+  **Guarantees** (replace the round-3 "three areas" ones; at a window of 1280x800 or larger, side panel at least 740 pt
+  high, split automatic): **G1** with the Color tab, any tool, any selection and any lower tab, the whole Color page is on
+  screen without scrolling (`ColorContent` inside `ColorSection`) and the square is 140 pt; **G2** with the Tool tab and the
+  Brush or Eraser, the five slider rows (Size ... Spacing) are inside `tool_area`, with the Layers and with the Brush tab
+  below; **G3** (unchanged) the Layers footer and Delete lie below the list, inside the panel; the Brush tab's rows inside
+  the lower area (A12); the side panel at most 300 pt wide; **G4** the four upper tab buttons fit in one row at 300 pt
+  (measured: 259.4 pt of the 283 pt content width, so "Texture sets" keeps its name), the groups never overlap, no strip
+  button lies outside its group. At 900x600 and 640x480 the groups stay inside the panel and apart, the upper page keeps
+  at least 90 pt, the pages scroll, the Color square shrinks to 72 pt before the page scrolls.
+  **Records.** `state.panel_rects` (cleared at the start of `show_side_panel`) holds, besides the layer row controls:
+  `UpperTabButton(tab)`; `SettingsArea` (the visible Tool page) only while the Tool page is shown; `ColorSection` (the
+  visible Color page) and `ColorContent` (its unclipped content) only while the Color page is shown; `LayersList`,
+  `LayersFooter`, `LayersDelete`, `LayersArea`; the Objects tab's records (below). `state.side_rects` (`SideRects`):
+  `panel`; `upper_area` (strip + page), `upper_tab_buttons[UpperTab::index]`, `upper_page` (the visible page);
+  `tool_area` (= `upper_page`) and `tool_options` (the Tool page's content as laid out) in frames where the Tool page is
+  shown, else `Rect::NOTHING`; `color` (= `upper_page`) likewise for the Color page; `sets_tab` / `objects_tab` = `Some(page)`
+  in frames where that page is shown; `bottom_area`, `tab_buttons`, `brush_tab`, `brush_tab_content`, `text_tab` as in
+  round 4.
+  **Preferences** (8.9): `Prefs::side_upper_tab`, `side_lower_tab`, `side_split` are read at start (`AppState::new` copies
+  the tabs, `PanelState::with_prefs` starts user-sized at `side_split`) and written at exit (`panels::sync_prefs`, next to
+  `brush_flows::sync_prefs` in `WteApp::on_exit`; never in self-test mode, which starts from `Prefs::default()`: Tool +
+  Layers, split automatic).
+  The pages:
   - *Tool options* for `state.tool`: Brush/Eraser (size, hardness, opacity, flow, spacing; round 4: "Same side only" removed, the Brush tab's Type replaces it); Fill (scope);
     Stamp (source thumbnail + Choose... => `ImportStampImage(None)`, size, rotation, project-through); Text (multiline content —
     focused when `state.focus_text_content` is set, which the panel then clears —, family and style combos from `state.fonts`
@@ -5789,7 +5857,30 @@ carries a catalog face).
     default 100 pt they widened the panel by ~30 pt as soon as the Text tool was chosen, so the model jumped under the
     cursor (a click computed or aimed before the switch landed beside the model, with no stamp placed).
   - *Color*: `color_picker_color32(ui, &mut c, Alpha::Opaque)`, hex field, 24 swatches (click = set, right-click = store).
-  - *Texture sets*: name, resolution, thumbnail (`doc.set_thumbnail`), UV coverage; click => `SetActiveSet`.
+  - *Texture sets*: name, resolution, thumbnail (`doc.set_thumbnail`), UV coverage; click => `SetActiveSet`. (Set
+    thumbnails are made only while this page is shown.)
+  - *Objects* (objects-tabs WP5, `panels/objects.rs`, plan section 7; `PanelState::objects: ObjectsTabState`): one weak
+    header line "32 objects · 3 hidden · 1,523,104 triangles" (`objects::header_text`: "1 object", no "hidden" part when
+    none is, thousands separators) — "No document open" without a document; the list in
+    `ScrollArea::vertical().id_salt("side_objects_scroll").auto_shrink([false, false]).max_height(page - header - footer)`
+    with `show_rows(ROW_HEIGHT = 22, object_count)` (row gap 1 pt): only the rows in view are laid out, so thousands of
+    objects cost nothing per frame. A row: allocated, then `ui.interact(rect, Sense::click())`, then the 20-pt eye on its
+    left registered after it (so the eye wins its click; `layers::paint_eye`); the name elided with "…" to the room before
+    the right-aligned weak triangle count; selected rows get the selection fill (x0.6, strong name), hidden rows a closed
+    eye and a weak name; hover text: full name, triangle count, "Hidden", and the click help. Clicks
+    (`objects::row_click_action`): plain => `SelectObject`, Ctrl => `ToggleObjectSelected`, Shift => `SelectObjectRange`;
+    a plain double-click on the same row as the click before (`ObjectsTabState::last_click`: egui counts two quick clicks
+    anywhere as a double-click) => `SelectObject` + `FrameSelection`; the eye => `SetObjectVisible(i, hidden)` (the
+    selection is kept); a click on the empty list below the rows => `DeselectObjects` (with a selection). The footer,
+    pinned below the list (its height measured in the last frame): Hide (`HideSelectedObjects`), Isolate
+    (`IsolateSelectedObjects`), Show all (`ShowAllObjects`), Frame (`FrameSelection`), enabled as their Object menu
+    entries (Frame always with a document), hover texts with the shortcut (`shortcut_text`). Reveal: while
+    `session.object_reveal` is `Some(i)` (a pick in the 3D view) the list's offset is set so that row `i` is in the
+    middle (`vertical_scroll_offset`, clamped) and the request is cleared — when the Objects page is drawn, so a pick made
+    with another tab shown is revealed when the tab is opened. Records: `ObjectRow(i)` / `ObjectEye(i)` for the rows laid
+    out in this frame only, `ObjectsList` (the visible list), `ObjectsFooter`, `ObjectsHide`, `ObjectsIsolate`,
+    `ObjectsShowAll`, `ObjectsFrame`. The page never changes the document: everything is an `AppAction`; it only clears
+    `object_reveal`.
   - *Layers* of the active set, top row = top layer: eye toggle, 40-px thumbnail, kind badge ("Paint", "3D stamp",
     "2D stamp", "3D text", "2D text": `layers::kind_badge(doc, layer)`; 3D = `Placement::Projected`, 2D = `Placement::Uv`;
     hover text says which view edits it) plus a small "3D" / "2D" tag over the thumbnail's lower left corner of stamp and text
@@ -5847,7 +5938,8 @@ or Eraser; Text while `text_block::target(state)` is `Some` (the tool is Text, o
 stamp is a text). A disabled tab is greyed out with a hover text; the area shows `shown_tab(state)` = `side_tab` when
 its tab is enabled, else Layers. A click writes `state.side_tab` directly; `SetTool` never writes it. With Layers the
 area hugs its rows as in round 3; with Brush or Text it has the computed height `panel height - Color height - 144 -
-4`, limited to 160..420 pt (FEATURE_BRUSH 6.1); a size the user dragged is kept for every tab. The Brush and the Text
+4`, limited to 160..420 pt (FEATURE_BRUSH 6.1; objects-tabs WP4: `tab_area_height(h, upper_keep)`, see "Side panel"
+above); a size the user dragged is kept for every tab. The Brush and the Text
 tab draw in their own scroll area (`brush_tab::show`, `text_tab::show`). Every frame the panel writes
 `state.side_rects`.
 
@@ -6380,7 +6472,12 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
 - Prefs (`prefs.rs`): `load() -> Prefs`, `save(&Prefs)`; JSON at `%APPDATA%\WrappedTextureEditor\prefs.json` (a few KB; failures
   are logged and ignored; never read or written in self-test mode). eframe's `persistence` feature is not used. Round 4:
   `brush`, `eraser` (written through `brush_flows::sync_prefs` at every write), `brush_shape_path`, `brush_shape_close`
-  (the closing choice per shape file, at most 32).
+  (the closing choice per shape file, at most 32). objects-tabs (WP4): `side_upper_tab` (a value that does not read is
+  Tool), `side_lower_tab` (anything but "layers" / "brush" / "text" reads as "layers"), `side_split` (the user-sized lower
+  group height in points, `None` = automatic; a value that is not a number reads as `None`, `from_json` clamps a finite
+  one to `100..=2000`, the panel clamps it to the window again) — read leniently (`lenient_prefs_serde`), so a bad value
+  never resets the other keys; written by `panels::sync_prefs` next to `brush_flows::sync_prefs` in `WteApp::on_exit`
+  (never in self-test mode). Older files have none of the keys: Tool + Layers, split automatic.
 
 Round 4 (S2): `prefs.json` (round 4): `brush`, `eraser`, `brush_shape_path`, `brush_shape_close` (B5 reads `brush` and `eraser`
 leniently and sanitized). `brush_flows::sync_prefs` copies the tool settings in directly before every write.
@@ -6703,6 +6800,7 @@ counted down) instead of failing (`export_errors`).
 | `export_nouv` | fix_export item 9 (L3). The UV-less tetrahedron (generated layout), a stroke and a Project stamp; everything exported into `<out>_a`; Save As, Open; everything again into `<out>_b`; then as a zip into `<out>_zip` | the export holds flattened + every visible layer + ORA + PSD; `_a` and `_b` byte-identical; the zip's entries equal the loose files |
 | `export_checks` | accept_fixes item E. `default_content` (Base, Paint 1 with the red and blue strokes, the Logo stamp, the WTE text); Logo hidden, Paint 1 at 50 % opacity in Multiply. (E1) `RunExport` Visible into `<out>_ec_vis` and All (`include_hidden`) into `<out>_ec_all` (flattened PNG + per-layer PNGs, no seam padding); (E2) click Paint 1's name, Shift-click WTE's name, right-click, "Export selected layers... (3)", `Shot("hidden")`, the dialog's options into `<out>_ec_sel`; (E3) `SelectLayer(Base)` + `ToggleLayerSelected(WTE)`, `ShowExportLayers`, the flattened PNG ticked, into `<out>_ec_base` | every check reads the files (stack index from `_L<nn>_` in the name) and compares with `reference_composite`, ARCHITECTURE 6.6 written out in the test (f64, opacity and accumulator quantized to u8, alpha-0 rule) over the per-layer PNGs of `_ec_all`: (E1) Visible writes Base, Paint 1, WTE (no Logo), All also Logo (its layer's pixels); the shared files are equal; both flattened files are byte-identical and leave Logo out (the flattened texture is the visible layers under All too, `ExportOptions::include_hidden`): they differ from the reference with Logo in >= 50 % of its opaque texels; (E4) both flattened files equal the reference of the visible layers within 2/255 in every texel, and differ from the reference with Paint 1 as Normal 100 % in >= 100 texels; (E2) the selection is Paint 1, Logo, WTE; the dialog's list (`ToolProbe::export_files`) marks exactly Logo's line "(hidden)", the caption is the selection one without a flattened file; the folder holds the three layers' PNGs (their pixels, Logo with ink); (E3) the caption is the selection one with the flattened file; the folder holds Base's and WTE's PNGs and a flattened PNG equal to the reference of Base + WTE within 2/255, different from the visible stack (Paint 1 not in it) |
 | `export_errors` | fix_export item 9 (L1, L4). Sphere sample; three exports that cannot work: the folder path under a file, a planned file that is a folder (Files, an old file in the folder), the zip's name a folder; then a folder with a dead process's stage folder, temp zip and temp PNG plus `notes.txt`, exported as a zip | each failure: the "Export failed" message, an error toast (announced), nothing new written, the old file unchanged, no `.tmp-` entry; the last export removes the leftovers and keeps `notes.txt` |
+| `side_tabs` | objects-tabs WP4 / WP5 (plan 8.3; `selftest/scenarios/side_tabs.rs`). The Three Objects sample; the Cube selected and the Ball hidden; a click on each upper strip button (Color, Texture sets, Objects, Tool) with `Shot`s `tab_color`, `tab_sets`, `tab_objects`, `tab_tool`; G1 on the Color tab with the Text, Brush, Stamp tools, the Brush tab below (`tab_brush`), Eraser, Text: a click with no text typed (the focus request), then one placing the text "Tabs" on the Color tab; Transform with the text selected and the Text tab below (`tab_text`); G2 on the Tool tab with the Brush and the Layers (`tab_layers`) and the Brush tab below; Fill / Brush / a Layers tab click (one tab rule); the split dragged 80 pt up, the Brush tab, the Layers tab, a double-click on the edge; the Color tab at 900x600 (`small_900`) and 640x480 (`small_640`); back to 1280x800, the Objects tab | each tab click shows exactly its page (G4: the buttons in one row inside the upper group, the side panel at most 300 pt wide; the Objects page records the three rows and the footer); the Objects rows: Cube selected, Ball hidden; G1 (the whole Color page on screen, at a side panel of 740 pt and more) with every tool and lower tab; a tool change keeps the Color tab; the focus request shows the Tool tab and is served; placing a text keeps the Color tab and selects the text; G2 (the Brush options inside the Tool page) with both lower tabs; Fill shows Layers with `side_tab` kept, Brush brings the Brush tab back; the drag makes the lower group 80 pt taller (at most `layers_area_max`), the Brush tab keeps that height, the double-click returns to the automatic height; at every size the groups lie inside the panel and apart with an upper page of at least 90 pt. Also run started at 900x600 and 640x480 (G1 / G2 then not applied) |
 
 Gate 3 added named mid-run captures (`Step::Shot`) for the report:
 `brush_shape` `_dialog` (the closing dialog), `text_tab` `_page_character` / `_page_warp` / `_page_path`, `text_fonts`
@@ -7423,6 +7521,39 @@ and never on a cube texel); GPU (ignored): `control_sweep::gpu_tests::a_document
 (`install_document` with `ui_state.hidden_objects` = a known and an unknown name: the known one hidden, one Info toast
 naming it, not modified, no history, empty selection, the first frames draw without the cube; a list naming nothing of
 the model hides nothing and shows no toast).
+
+objects-tabs WP4 (the two tab groups, plan 6.6; headless through `PanelApp`): `panels::side_groups::tests::{sizing_functions_keep_their_limits,
+tab_names_in_the_prefs}`; `panels::tests::{the_tab_strip_follows_the_one_tab_rule` (the lower height = `tab_area_height(h,
+upper_keep)`), `panels_render_without_a_document_and_for_every_tool` (every upper tab too),
+`the_colour_page_guess_matches_its_measured_height}`; `prefs::tests::side_panel_tabs_and_split_round_trip_and_read_leniently`;
+`control_sweep::panel_tests::{the_picker_and_the_layers_footer_stay_on_screen_with_long_tool_options` (G1-G3: Color and
+Tool tab x every lower tab x Transform / Text / Brush / Stamp x 1280x800, 1600x1000, 900x600, 640x480, with and without a
+selected text), `a_short_layer_list_gives_its_room_to_the_tool_options` (+ the double-click back to automatic),
+`a12_brush_tab_heights_at_1280x800` (the upper group above the lower one; the lower height is `tab_area_height`; G2),
+`colour_section_edits_the_primary_colour_and_the_swatches` and `texture_set_rows_activate_their_set` (on their tabs),
+`the_colour_picker_value_fields` (was `collapsing_headers_and_...`: no collapsible header, the Tool page's heading),
+`idle_panels_with_every_kind_of_selection_queue_nothing` (each upper tab; a tool change keeps it),
+`toolbar_buttons_select_tools_and_colour_chips_swap_and_reset` (the primary chip shows the Color tab),
+`upper_tabs_show_one_page_each` (a strip click through AccessKit draws exactly that page; G4 at 1280x800, 900x600 and
+640x480), `a_tool_change_keeps_the_upper_tab_and_text_focus_shows_the_tool_tab` (toolbar and keys keep Color; the Text
+focus request shows Tool and focuses the field; a stale request changes nothing; Object > Objects Panel),
+`the_split_is_dragged_kept_and_reset}` (drag 80 pt, kept for every lower tab, clamped at 900x600 / 640x480, double-click =
+automatic, `sync_prefs`, a start from a stored split); `control_sweep::text_panel_tests::{text_rows_fit_the_panel,
+the_colour_section_stays_inside_the_panel_on_every_page}` (the upper group; the Color page whole with the Text tab).
+`control_sweep::text_panel_tests::the_side_panel_keeps_its_width_when_the_tool_page_starts_to_scroll` (tool and lower tab
+changes with a selected text at 1280x800, 1280x700, 1600x1000: the panel stays 300 pt; the upper pages' scroll bars
+take none of the content's width, `floating_allocated_width = 0`). `Harness::in_row` takes, of the widgets on the
+label's line, only those whose centres lie nearest to it: AccessKit also lists the clipped widgets of a scrolled upper
+page, which can lie behind the lower group's rows. Scenario `side_tabs` (8.11).
+
+objects-tabs WP5 (the Objects tab, plan 7.2): `panels::objects::tests::{clicks_map_to_their_actions, header_and_numbers,
+the_selection_tint_shows_with_navigate_or_the_objects_tab}`;
+`control_sweep::panel_tests::{object_rows_take_plain_ctrl_and_shift_clicks` (through the `ObjectRow` rects; quick clicks on
+other rows are not double-clicks; a double-click selects and frames; a click below the rows deselects),
+`the_eye_hides_one_object_and_keeps_the_selection`, `objects_footer_buttons_queue_their_actions_and_are_enabled_when_they_can_act`,
+`a_long_object_list_draws_only_the_rows_in_view` (2,000 objects: at most `list height / 22 + 2` rows recorded at 1280x800
+and 640x480, the footer inside the page, `object_reveal = Some(1500)` brings that row into the list within two frames and
+is cleared), `objects_tab_is_idle}`. `control_sweep::apply_actions` applies the object actions through `object_ops`.
 
 ## 10. Work packages
 

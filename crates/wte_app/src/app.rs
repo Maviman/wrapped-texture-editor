@@ -159,6 +159,7 @@ impl WteApp {
             state.push(AppAction::OpenPath(path));
         }
 
+        let panel_state = panels::PanelState::with_prefs(&state.prefs);
         let mut app = WteApp {
             state,
             gpu,
@@ -166,7 +167,7 @@ impl WteApp {
             scene: None,
             targets,
             tools: ToolController::new(),
-            panels: panels::PanelState::new(),
+            panels: panel_state,
             dialogs: dialogs::DialogsState::new(),
             jobs: Jobs::new(),
             selftest: runner,
@@ -365,6 +366,7 @@ impl eframe::App for WteApp {
         }
         if !self.state.selftest {
             crate::brush_flows::sync_prefs(&mut self.state);
+            panels::sync_prefs(&mut self.state, &self.panels);
             prefs::save(&self.state.prefs);
         }
         log::info!("exit (exit code {})", self.exit_code.load(std::sync::atomic::Ordering::SeqCst));

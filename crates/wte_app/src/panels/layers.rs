@@ -631,7 +631,7 @@ fn icon_color(ui: &egui::Ui, resp: &egui::Response) -> Color32 {
 }
 
 /// An open eye, or a crossed-out one.
-fn paint_eye(painter: &egui::Painter, rect: Rect, open: bool, color: Color32) {
+pub(super) fn paint_eye(painter: &egui::Painter, rect: Rect, open: bool, color: Color32) {
     let c = rect.center();
     let w = ICON_SIDE * 0.42;
     let h = ICON_SIDE * 0.22;

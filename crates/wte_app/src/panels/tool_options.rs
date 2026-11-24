@@ -307,96 +307,100 @@ fn doc_value(value: &mut f32, range: std::ops::RangeInclusive<f32>) -> DragValue
     DragValue::new(value).range(range).clamp_existing_to_range(false)
 }
 
-/// Draws the options of the active tool, or the properties of the selected stamp. Returns the rect of the section
-/// (header and body as laid out) for `AppState::side_rects`.
+/// A selected stamp that the current view cannot edit (3D stamp in the 2D view or the other way round) says so in the
+/// status bar (and on the Tool page), instead of the gizmo silently not appearing. objects-tabs: called by the side
+/// panel every frame, whichever upper tab is shown, so the status line never keeps a stale hint.
+pub(super) fn sync_wrong_view_status(state: &mut AppState) {
+    let stale = |h: &str| h.starts_with(WRONG_VIEW_PREFIX);
+    match wrong_view_hint(state) {
+        Some((text, _)) => state.status_hint = text,
+        None if stale(&state.status_hint) => state.status_hint.clear(),
+        None => {}
+    }
+}
+
+/// Draws the Tool page: the heading "<Tool> options" (a plain label: objects-tabs WP4, the tab is the section) and the
+/// options of the active tool, or the properties of the selected stamp. Returns the rect of the page's content (heading
+/// and options as laid out) for `AppState::side_rects`.
 pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState) -> egui::Rect {
     if state.tool != ToolKind::Text {
         state.focus_text_content = false;
     }
     // Round 6: set again below by whichever options show the two Wrap controls in this frame.
     state.tool_probe.wrap_controls = None;
-    let mut header = egui::CollapsingHeader::new(format!("{} options", tool_name(state.tool)))
-        .id_salt("side_tool_options")
-        .default_open(true);
-    if state.focus_text_content {
-        header = header.open(Some(true));
-    }
-    // A selected stamp that the current view cannot edit (3D stamp in the 2D view or the other way round) says so,
-    // here and in the status bar, instead of the gizmo silently not appearing.
     let hint = wrong_view_hint(state);
-    let stale = |h: &str| h.starts_with(WRONG_VIEW_PREFIX);
-    match &hint {
-        Some((text, _)) => state.status_hint.clone_from(text),
-        None if stale(&state.status_hint) => state.status_hint.clear(),
-        None => {}
-    }
     let text_target = text_block::target(state);
-    let out = header.show(ui, |ui| {
-        let mut actions = Vec::new();
-        // The Text block first (FEATURE_TEXT 6.1): with the Text tool the text to place, with the Transform tool the
-        // selected text (above its Name, Tint and placement fields).
-        if let Some(target) = text_target {
-            text_block::show(ui, state, ps, target, &mut actions);
-            if hint.is_some() {
+    let out = ui.vertical(|ui| {
+        ui.label(egui::RichText::new(format!("{} options", tool_name(state.tool))).strong());
+        // The options keep the indent they had under the round-3 collapsing header (every width budget of the Text
+        // block and the stamp rows, TEXT 8.2, was set for it).
+        ui.indent("side_tool_options", |ui| {
+            let mut actions = Vec::new();
+            // The Text block first (FEATURE_TEXT 6.1): with the Text tool the text to place, with the Transform tool the
+            // selected text (above its Name, Tint and placement fields).
+            if let Some(target) = text_target {
+                text_block::show(ui, state, ps, target, &mut actions);
+                if hint.is_some() {
+                    ui.separator();
+                }
+            }
+            if let Some((text, mode)) = &hint {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
+                    let label = if *mode == ViewMode::View3D { "Show 3D view" } else { "Show 2D view" };
+                    if ui.button(label).clicked() {
+                        actions.push(AppAction::SetViewMode(*mode));
+                    }
+                });
                 ui.separator();
             }
-        }
-        if let Some((text, mode)) = &hint {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(ui.visuals().warn_fg_color, text.as_str());
-                let label = if *mode == ViewMode::View3D { "Show 3D view" } else { "Show 2D view" };
-                if ui.button(label).clicked() {
-                    actions.push(AppAction::SetViewMode(*mode));
+            match state.tool {
+                ToolKind::Navigate => {
+                    help(ui, "Drag: orbit (3D) or pan (2D). Right-drag: orbit. Middle-drag or Space+drag: pan. Wheel: zoom.");
+                    // objects-tabs (8.6): the click that picks an object (models with two or more objects only).
+                    if state.doc().is_some_and(|d| d.mesh.object_count() >= 2) {
+                        help(ui, NAVIGATE_PICK_HINT);
+                    }
                 }
-            });
-            ui.separator();
-        }
-        match state.tool {
-            ToolKind::Navigate => {
-                help(ui, "Drag: orbit (3D) or pan (2D). Right-drag: orbit. Middle-drag or Space+drag: pan. Wheel: zoom.");
-                // objects-tabs (8.6): the click that picks an object (models with two or more objects only).
-                if state.doc().is_some_and(|d| d.mesh.object_count() >= 2) {
-                    help(ui, NAVIGATE_PICK_HINT);
+                ToolKind::Brush => brush_options(ui, "brush", &mut state.tools.brush),
+                ToolKind::Eraser => brush_options(ui, "eraser", &mut state.tools.eraser),
+                ToolKind::Eyedropper => {
+                    help(ui, "Click the model or the texture to pick a colour. Holding Alt with the Brush, Eraser or Fill does the same.");
                 }
+                ToolKind::Fill => {
+                    ui.horizontal(|ui| {
+                        ui.label("Fill");
+                        ui.radio_value(&mut state.tools.fill_scope, FillScope::Island, "UV island")
+                            .on_hover_text("Fills the UV island under the cursor (and its seam padding)");
+                        ui.radio_value(&mut state.tools.fill_scope, FillScope::Layer, "Whole layer");
+                    });
+                    help(ui, "Fills the active layer with the primary colour.");
+                }
+                ToolKind::Stamp => stamp_options(ui, state, ps, &mut actions),
+                // The Text block above is the whole of the Text options.
+                ToolKind::Text => {}
+                ToolKind::Transform => match selected_stamp(state) {
+                    Some(stamp) => stamp_properties(ui, state, ps, stamp, &mut actions),
+                    None => help(ui, "Click a stamp or a text on the model to select it, or select its layer in the Layers list."),
+                },
             }
-            ToolKind::Brush => brush_options(ui, "brush", &mut state.tools.brush),
-            ToolKind::Eraser => brush_options(ui, "eraser", &mut state.tools.eraser),
-            ToolKind::Eyedropper => {
-                help(ui, "Click the model or the texture to pick a colour. Holding Alt with the Brush, Eraser or Fill does the same.");
-            }
-            ToolKind::Fill => {
+            // Every tool but Transform, the Text tool included (FEATURE_TEXT 6.2): the selected stamp and the way to edit it.
+            if state.tool != ToolKind::Transform
+                && let Some(stamp) = selected_stamp(state)
+            {
+                ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("Fill");
-                    ui.radio_value(&mut state.tools.fill_scope, FillScope::Island, "UV island")
-                        .on_hover_text("Fills the UV island under the cursor (and its seam padding)");
-                    ui.radio_value(&mut state.tools.fill_scope, FillScope::Layer, "Whole layer");
+                    ui.label(format!("Selected: {}", stamp.name));
+                    let key = shortcut_text(ui.ctx(), "Transform");
+                    if ui.button("Edit").on_hover_text(format!("Transform tool ({key})")).clicked() {
+                        actions.push(AppAction::SetTool(ToolKind::Transform));
+                    }
                 });
-                help(ui, "Fills the active layer with the primary colour.");
             }
-            ToolKind::Stamp => stamp_options(ui, state, ps, &mut actions),
-            // The Text block above is the whole of the Text options.
-            ToolKind::Text => {}
-            ToolKind::Transform => match selected_stamp(state) {
-                Some(stamp) => stamp_properties(ui, state, ps, stamp, &mut actions),
-                None => help(ui, "Click a stamp or a text on the model to select it, or select its layer in the Layers list."),
-            },
-        }
-        // Every tool but Transform, the Text tool included (FEATURE_TEXT 6.2): the selected stamp and the way to edit it.
-        if state.tool != ToolKind::Transform
-            && let Some(stamp) = selected_stamp(state)
-        {
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(format!("Selected: {}", stamp.name));
-                let key = shortcut_text(ui.ctx(), "Transform");
-                if ui.button("Edit").on_hover_text(format!("Transform tool ({key})")).clicked() {
-                    actions.push(AppAction::SetTool(ToolKind::Transform));
-                }
-            });
-        }
-        state.actions.extend(actions);
+            state.actions.extend(actions);
+        });
     });
-    out.body_response.as_ref().map_or(out.header_response.rect, |b| out.header_response.rect.union(b.rect))
+    out.response.rect
 }
 
 /// Start of every wrong-view hint (so a stale one in the status bar is recognised and cleared).

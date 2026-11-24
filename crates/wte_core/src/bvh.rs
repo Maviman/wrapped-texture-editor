@@ -1,8 +1,11 @@
 // Owner: core-geometry (C1). Bounding volume hierarchy and its queries (ARCHITECTURE.md 5.8, algorithm 6.2):
-// nearest-hit raycast, any-hit occlusion test and the sphere query of the brush and stamp bakes.
+// nearest-hit raycast, any-hit occlusion test and the sphere query of the brush and stamp bakes. Objects-tabs: a
+// `TriMask` of hidden triangles that every query skips (the tree itself is shared and never rebuilt for it).
 
 // Range checks are written as `!(value >= limit)` on purpose: a NaN then takes the rejecting branch.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
+
+use std::sync::Arc;
 
 use glam::{Vec2, Vec3};
 
@@ -58,10 +61,59 @@ struct BvhNode {
     count: u32,
 }
 
-/// Bounding volume hierarchy over the triangles of one `MeshData`. Send + Sync.
-pub struct Bvh {
+/// A set of triangles as a bit set (objects-tabs: the hidden triangles of a `Bvh`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriMask {
+    bits: Vec<u64>,
+    /// Number of triangles the mask covers; `get` is false beyond it.
+    len: u32,
+    /// Number of set bits.
+    count: u32,
+}
+
+impl TriMask {
+    /// The triangles `0..tri_count` for which `f` is true.
+    pub fn from_fn(tri_count: u32, f: impl Fn(TriId) -> bool) -> TriMask {
+        let mut bits = vec![0u64; (tri_count as usize).div_ceil(64)];
+        let mut count = 0u32;
+        for t in 0..tri_count {
+            if f(t) {
+                bits[(t >> 6) as usize] |= 1u64 << (t & 63);
+                count += 1;
+            }
+        }
+        TriMask { bits, len: tri_count, count }
+    }
+
+    /// True when triangle `t` is in the set; false beyond the covered range.
+    #[inline]
+    pub fn get(&self, t: TriId) -> bool {
+        t < self.len && (self.bits[(t >> 6) as usize] >> (t & 63)) & 1 != 0
+    }
+
+    /// Number of triangles in the set.
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// True when the set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
+/// The hierarchy proper: shared by every `Bvh` made from it with `with_hidden`.
+struct BvhTree {
     nodes: Vec<BvhNode>,
     tri_order: Vec<u32>,
+}
+
+/// Bounding volume hierarchy over the triangles of one `MeshData`, plus an optional set of hidden triangles that every
+/// query skips (objects-tabs). Send + Sync.
+pub struct Bvh {
+    tree: Arc<BvhTree>,
+    /// `None` = nothing hidden (never an empty mask).
+    hidden: Option<Arc<TriMask>>,
 }
 
 /// A triangle during the build.
@@ -336,10 +388,27 @@ impl Bvh {
             })
             .collect();
         if prims.is_empty() {
-            return Bvh { nodes: Vec::new(), tri_order: Vec::new() };
+            return Bvh { tree: Arc::new(BvhTree { nodes: Vec::new(), tri_order: Vec::new() }), hidden: None };
         }
         let nodes = build_parallel(&mut prims, 0);
-        Bvh { nodes, tri_order: prims.iter().map(|p| p.tri).collect() }
+        Bvh { tree: Arc::new(BvhTree { nodes, tri_order: prims.iter().map(|p| p.tri).collect() }), hidden: None }
+    }
+
+    /// The same tree with another hidden set (`None` or an empty mask = nothing hidden). O(1): the tree is shared.
+    /// Every query of the result skips the hidden triangles (rays pass through them, sphere queries omit them).
+    pub fn with_hidden(&self, hidden: Option<Arc<TriMask>>) -> Bvh {
+        Bvh { tree: Arc::clone(&self.tree), hidden: hidden.filter(|m| !m.is_empty()) }
+    }
+
+    /// The hidden set; `None` when nothing is hidden.
+    pub fn hidden(&self) -> Option<&TriMask> {
+        self.hidden.as_deref()
+    }
+
+    /// True when triangle `t` is hidden.
+    #[inline]
+    pub fn is_hidden(&self, t: TriId) -> bool {
+        self.hidden.as_deref().is_some_and(|m| m.get(t))
     }
 
     /// Core traversal: nearest (or, with `any`, the first found) triangle hit with `t` in `[t_min, t_max]`.
@@ -353,24 +422,29 @@ impl Bvh {
         cull: Cull,
         any: bool,
     ) -> Option<(TriId, f32, f32, f32)> {
-        if self.nodes.is_empty() || !(t_min <= t_max) {
+        let (nodes, tri_order) = (&self.tree.nodes, &self.tree.tri_order);
+        if nodes.is_empty() || !(t_min <= t_max) {
             return None;
         }
+        let hidden = self.hidden.as_deref();
         let prep = RayPrep::new(ray);
         let (o, d) = (ray.origin, ray.dir);
         let mut best: Option<(TriId, f32, f32, f32)> = None;
         let mut best_t = t_max;
         let mut stack = [(0u32, 0.0f32); STACK];
         let mut sp = 0usize;
-        let mut current = match prep.enter(&self.nodes[0], t_min, best_t) {
+        let mut current = match prep.enter(&nodes[0], t_min, best_t) {
             Some(_) => 0u32,
             None => return None,
         };
         loop {
-            let node = &self.nodes[current as usize];
+            let node = &nodes[current as usize];
             if node.count > 0 {
                 let first = node.left_first as usize;
-                for &tri in &self.tri_order[first..first + node.count as usize] {
+                for &tri in &tri_order[first..first + node.count as usize] {
+                    if hidden.is_some_and(|m| m.get(tri)) {
+                        continue;
+                    }
                     let [a, b, c] = mesh.tri_positions(tri);
                     let Some((t, u, v)) = ray_triangle(o, d, a, b, c, cull) else { continue };
                     if !(t >= t_min && t <= best_t) {
@@ -387,8 +461,8 @@ impl Bvh {
                 }
             } else {
                 let (c0, c1) = (node.left_first, node.left_first + 1);
-                let h0 = prep.enter(&self.nodes[c0 as usize], t_min, best_t);
-                let h1 = prep.enter(&self.nodes[c1 as usize], t_min, best_t);
+                let h0 = prep.enter(&nodes[c0 as usize], t_min, best_t);
+                let h1 = prep.enter(&nodes[c1 as usize], t_min, best_t);
                 match (h0, h1) {
                     (Some(e0), Some(e1)) => {
                         // Near child first; the far one waits on the stack with its entry distance.
@@ -462,12 +536,14 @@ impl Bvh {
         }
     }
 
-    /// The tree walk of the sphere queries: calls `found(tri, d2)` for every triangle whose closest point to
+    /// The tree walk of the sphere queries: calls `found(tri, d2)` for every visible triangle whose closest point to
     /// `center` is within `radius` (`d2 <= radius * radius`), in tree order.
     fn walk_sphere(&self, mesh: &MeshData, center: Vec3, radius: f32, mut found: impl FnMut(TriId, f32)) {
-        if self.nodes.is_empty() || !center.is_finite() || !(radius >= 0.0) {
+        let (nodes, tri_order) = (&self.tree.nodes, &self.tree.tri_order);
+        if nodes.is_empty() || !center.is_finite() || !(radius >= 0.0) {
             return;
         }
+        let hidden = self.hidden.as_deref();
         let r2 = radius * radius;
         let c = center.to_array();
         let box_dist2 = |n: &BvhNode| -> f32 {
@@ -478,7 +554,7 @@ impl Bvh {
             }
             d2
         };
-        if !(box_dist2(&self.nodes[0]) <= r2) {
+        if !(box_dist2(&nodes[0]) <= r2) {
             return;
         }
         // Both children are pushed, so the stack holds at most one sibling per level plus the current pair.
@@ -486,10 +562,13 @@ impl Bvh {
         let mut sp = 1usize;
         while sp > 0 {
             sp -= 1;
-            let node = &self.nodes[stack[sp] as usize];
+            let node = &nodes[stack[sp] as usize];
             if node.count > 0 {
                 let first = node.left_first as usize;
-                for &tri in &self.tri_order[first..first + node.count as usize] {
+                for &tri in &tri_order[first..first + node.count as usize] {
+                    if hidden.is_some_and(|m| m.get(tri)) {
+                        continue;
+                    }
                     let [a, b, c] = mesh.tri_positions(tri);
                     let d2 = (closest_point_on_triangle(center, a, b, c) - center).length_squared();
                     if d2 <= r2 {
@@ -498,7 +577,7 @@ impl Bvh {
                 }
             } else {
                 for child in [node.left_first + 1, node.left_first] {
-                    if box_dist2(&self.nodes[child as usize]) <= r2 {
+                    if box_dist2(&nodes[child as usize]) <= r2 {
                         stack[sp] = child;
                         sp += 1;
                     }
@@ -509,7 +588,7 @@ impl Bvh {
 
     /// Number of nodes of the hierarchy.
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.tree.nodes.len()
     }
 }
 
@@ -601,13 +680,13 @@ mod tests {
     impl Bvh {
         /// (deepest leaf level with the root at 1, triangles referenced by leaves, largest leaf)
         fn shape(&self) -> (usize, usize, usize) {
-            if self.nodes.is_empty() {
+            if self.tree.nodes.is_empty() {
                 return (0, 0, 0);
             }
             let (mut depth, mut tris, mut largest) = (0, 0, 0);
             let mut stack = vec![(0u32, 1usize)];
             while let Some((i, level)) = stack.pop() {
-                let n = &self.nodes[i as usize];
+                let n = &self.tree.nodes[i as usize];
                 if n.count > 0 {
                     depth = depth.max(level);
                     tris += n.count as usize;
@@ -623,9 +702,9 @@ mod tests {
         /// Every node's box contains its triangles and its children's boxes; every triangle is in exactly one leaf.
         fn check(&self, mesh: &MeshData) {
             let mut seen = vec![0u32; mesh.tri_count() as usize];
-            for n in &self.nodes {
+            for n in &self.tree.nodes {
                 if n.count > 0 {
-                    for &t in &self.tri_order[n.left_first as usize..(n.left_first + n.count) as usize] {
+                    for &t in &self.tree.tri_order[n.left_first as usize..(n.left_first + n.count) as usize] {
                         seen[t as usize] += 1;
                         for p in mesh.tri_positions(t) {
                             for a in 0..3 {
@@ -635,7 +714,7 @@ mod tests {
                     }
                 } else {
                     for c in [n.left_first, n.left_first + 1] {
-                        let child = &self.nodes[c as usize];
+                        let child = &self.tree.nodes[c as usize];
                         for a in 0..3 {
                             assert!(n.min[a] <= child.min[a] && child.max[a] <= n.max[a]);
                         }
@@ -738,7 +817,7 @@ mod tests {
         bvh.check(&mesh);
         // Deterministic whatever the scheduling.
         let again = Bvh::build(&mesh);
-        assert_eq!(bvh.tri_order, again.tri_order);
+        assert_eq!(bvh.tree.tri_order, again.tree.tri_order);
         assert_eq!(bvh.node_count(), again.node_count());
 
         let mut rng = XorShift::new(77);
@@ -1198,5 +1277,128 @@ mod tests {
             let n = (b - a).cross(c - a).normalize();
             assert!((q - a).dot(n).abs() < 1e-5);
         }
+    }
+
+    // ----- objects-tabs WP2: hidden triangles -----
+
+    impl Bvh {
+        /// True when both share one tree (`with_hidden` never copies it).
+        fn shares_tree_with(&self, other: &Bvh) -> bool {
+            Arc::ptr_eq(&self.tree, &other.tree)
+        }
+    }
+
+    #[test]
+    fn tri_mask_basics() {
+        let m = TriMask::from_fn(130, |t| t % 3 == 0 || t == 127);
+        assert_eq!(m.count(), 45);
+        assert!(m.get(0) && m.get(63) && m.get(127) && m.get(129) && !m.get(1) && !m.get(128));
+        assert!(!m.get(130) && !m.get(u32::MAX), "false beyond the covered range");
+        assert!(TriMask::from_fn(10, |_| false).is_empty());
+        assert!(TriMask::from_fn(0, |_| true).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_triangle_is_skipped_by_every_query() {
+        // `cube_on_floor`: the floor's two triangles have corners at |x| = 5; the twelve others are the cube.
+        let mesh = mesh_of(samples::cube_on_floor());
+        let floor = |t: TriId| mesh.tri_positions(t).iter().any(|p| p.x.abs() > 4.0);
+        let plain = Bvh::build(&mesh);
+        let cube_hidden = plain.with_hidden(Some(Arc::new(TriMask::from_fn(mesh.tri_count(), |t| !floor(t)))));
+        assert_eq!(cube_hidden.hidden().map(TriMask::count), Some(12));
+        assert!((0..mesh.tri_count()).all(|t| cube_hidden.is_hidden(t) != floor(t)));
+        assert!((0..mesh.tri_count()).all(|t| !plain.is_hidden(t)));
+
+        let down = Ray::new(Vec3::new(0.1, 5.0, 0.2), Vec3::NEG_Y);
+        let hit = plain.raycast(&mesh, &down, 0.0, f32::INFINITY, Cull::None).unwrap();
+        assert!(!floor(hit.tri) && (hit.position.y - 1.0).abs() < 1e-5, "the cube's top first");
+        let through = cube_hidden.raycast(&mesh, &down, 0.0, f32::INFINITY, Cull::None).unwrap();
+        assert!(floor(through.tri) && through.position.y.abs() < 1e-5, "through the hidden cube onto the floor");
+        // Any-hit queries: the cube no longer occludes the floor.
+        assert!(plain.occluded(&mesh, &down, 0.0, 4.5));
+        assert!(!cube_hidden.occluded(&mesh, &down, 0.0, 4.5));
+        assert_eq!(cube_hidden.occluder(&mesh, &down, 0.0, 4.5), None);
+        assert!(cube_hidden.occluder(&mesh, &down, 0.0, 6.0).is_some_and(floor));
+        // Sphere queries omit the hidden triangles.
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        plain.query_sphere(&mesh, Vec3::new(0.0, 0.5, 0.0), 1.0, &mut a);
+        cube_hidden.query_sphere(&mesh, Vec3::new(0.0, 0.5, 0.0), 1.0, &mut b);
+        assert_eq!(a.len(), 14);
+        assert_eq!(b, a.iter().copied().filter(|&t| floor(t)).collect::<Vec<_>>());
+        let mut d = Vec::new();
+        cube_hidden.query_sphere_dist(&mesh, Vec3::new(0.0, 0.5, 0.0), 1.0, &mut d);
+        assert_eq!(d.iter().map(|e| e.0).collect::<Vec<_>>(), b);
+        // Everything hidden: nothing is found.
+        let none = plain.with_hidden(Some(Arc::new(TriMask::from_fn(mesh.tri_count(), |_| true))));
+        assert!(none.raycast(&mesh, &down, 0.0, f32::INFINITY, Cull::None).is_none());
+        assert!(!none.occluded(&mesh, &down, 0.0, f32::INFINITY));
+        none.query_sphere(&mesh, Vec3::ZERO, 100.0, &mut a);
+        assert!(a.is_empty());
+        none.query_sphere_dist(&mesh, Vec3::ZERO, 100.0, &mut d);
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn no_mask_and_an_empty_mask_answer_identically() {
+        let mesh = mesh_of(samples::soup_sets(9, 3000, 3));
+        let plain = Bvh::build(&mesh);
+        let none = plain.with_hidden(None);
+        let empty = plain.with_hidden(Some(Arc::new(TriMask::from_fn(mesh.tri_count(), |_| false))));
+        assert!(none.hidden().is_none() && empty.hidden().is_none(), "an empty mask is stored as none");
+        // A random half hidden: the masked tree answers like brute force over the visible triangles.
+        let mut rng = XorShift::new(77);
+        let half = Arc::new(TriMask::from_fn(mesh.tri_count(), |t| (t.wrapping_mul(2_654_435_761) >> 7) & 1 == 0));
+        let masked = plain.with_hidden(Some(Arc::clone(&half)));
+        let b = mesh.bounds;
+        let (mut s0, mut s1, mut s2) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..2000 {
+            let origin = b.min + (b.max - b.min) * Vec3::new(rng.next_f32(), rng.next_f32(), rng.next_f32()) * 1.4
+                - (b.max - b.min) * 0.2;
+            let ray = Ray::new(origin, random_dir(&mut rng));
+            let cull = if i % 2 == 0 { Cull::None } else { Cull::Back };
+            let want = format!("{:?}", plain.raycast(&mesh, &ray, 0.0, f32::INFINITY, cull));
+            assert_eq!(format!("{:?}", none.raycast(&mesh, &ray, 0.0, f32::INFINITY, cull)), want);
+            assert_eq!(format!("{:?}", empty.raycast(&mesh, &ray, 0.0, f32::INFINITY, cull)), want);
+            assert_eq!(empty.occluder(&mesh, &ray, 0.0, 10.0), plain.occluder(&mesh, &ray, 0.0, 10.0));
+            // Masked: the nearest visible triangle (brute force; ties to the smaller id, as `intersect`).
+            let mut best: Option<(TriId, f32)> = None;
+            for tri in (0..mesh.tri_count()).filter(|&t| !half.get(t)) {
+                let [a, b, c] = mesh.tri_positions(tri);
+                if let Some((t, _, _)) = ray_triangle(ray.origin, ray.dir, a, b, c, cull)
+                    && t >= 0.0
+                    && best.is_none_or(|(bt_tri, bt)| t < bt || (t == bt && tri < bt_tri))
+                {
+                    best = Some((tri, t));
+                }
+            }
+            let got = masked.raycast(&mesh, &ray, 0.0, f32::INFINITY, cull).map(|h| (h.tri, h.t));
+            match (got, best) {
+                (Some((gt, gd)), Some((wt, wd))) => assert!(gt == wt || (gd - wd).abs() <= 1e-4 * wd.max(1.0), "ray {i}"),
+                (g, w) => assert_eq!(g.map(|x| x.0), w.map(|x| x.0), "ray {i}"),
+            }
+            assert!(got.is_none_or(|(t, _)| !half.get(t)));
+            // Spheres: plain, none and empty equal; masked = plain without the hidden triangles.
+            let r = rng.next_f32() * 0.3 * b.diagonal();
+            plain.query_sphere_dist(&mesh, origin, r, &mut s0);
+            empty.query_sphere_dist(&mesh, origin, r, &mut s1);
+            assert_eq!(s0, s1);
+            none.query_sphere_dist(&mesh, origin, r, &mut s1);
+            assert_eq!(s0, s1);
+            masked.query_sphere_dist(&mesh, origin, r, &mut s2);
+            s0.retain(|e| !half.get(e.0));
+            assert_eq!(s0, s2, "sphere {i}");
+        }
+    }
+
+    #[test]
+    fn with_hidden_shares_the_tree() {
+        let mesh = mesh_of(samples::uv_sphere(24, 12, 1.0));
+        let plain = Bvh::build(&mesh);
+        let masked = plain.with_hidden(Some(Arc::new(TriMask::from_fn(mesh.tri_count(), |t| t < 10))));
+        let back = masked.with_hidden(None);
+        assert_eq!(masked.node_count(), plain.node_count());
+        assert!(masked.shares_tree_with(&plain) && back.shares_tree_with(&plain));
+        assert!(back.hidden().is_none() && masked.hidden().is_some_and(|m| m.count() == 10));
+        assert!(!plain.shares_tree_with(&Bvh::build(&mesh)), "a new build is a new tree");
     }
 }

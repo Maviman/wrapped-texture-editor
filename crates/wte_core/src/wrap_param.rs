@@ -2765,7 +2765,13 @@ fn collect_grown(mesh: &MeshData, bvh: &Bvh, g: &WrapMesh, p: &Projector, radius
         Some((_, t)) => t,
         None => near.iter().copied().filter(|&t| !g.collapsed(t)).min()?,
     };
+    // Objects-tabs (6.5a): a hidden triangle is never entered (the BVH queries above already skip them; the growth over
+    // the welded graph below is the one path that is not a BVH query). The Jump branch floods only over `mark == 1`
+    // triangles, which all come from the masked sphere query.
     let in_sphere = |t: TriId| -> Option<f32> {
+        if bvh.is_hidden(t) {
+            return None;
+        }
         let [a, b, c] = mesh.tri_positions(t);
         let d2 = (closest_point_on_triangle(center, a, b, c) - center).length_squared();
         (d2 <= r2).then_some(d2)

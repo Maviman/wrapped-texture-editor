@@ -241,7 +241,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `document.rs` | S | `Document`, `DocumentSnapshot`, `Commit`, lookup accessors, id allocation, revision tracking, `guard_no_stroke`, `mark_layer_dirty`, `debug_check_structure` |
 | `testutil.rs` | S | test-only helpers: temp dir under `target/`, image comparison (PSNR), deterministic RNG, `doc_from_raw`, `imported_from_raw` (and their `_objects` forms) |
 | `mesh_build.rs` | C1 | `normalize`, UV tile normalisation, normals, fallback UVs, `wire_edges`, `render_vertices`, `uv_hash`, `uv_layout_image`; objects-tabs: `normalize_with_objects` (6.1 step 9) |
-| `bvh.rs` | C1 | `Bvh`, `Hit`, `Cull`, raycast / occluded / sphere query |
+| `bvh.rs` | C1 | `Bvh`, `Hit`, `Cull`, raycast / occluded / sphere query; objects-tabs: `TriMask`, `Bvh::with_hidden` (every query skips hidden triangles) |
 | `texel_map.rs` | C1 | `TexelMap`, `Fragment`, `raster_tri`, gutter build, `locate` |
 | `samples.rs` | C1; round-4 additions S | procedural meshes and images, `to_obj`; the brush fixtures of FEATURE_BRUSH 8 and the writers `to_gltf`, `to_glb`, `to_fbx_ascii`; objects-tabs: `object_trio`, `to_obj_objects` |
 | `pixel_ops.rs` | C1 | `PremulMips`, sampling, resize, content / non-zero bounds, crop, thumbnail, `dilate_islands` |
@@ -303,6 +303,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `tests/end_to_end.rs` | C7 | the whole-pipeline test of section 9.1 ("end to end") |
 | `tests/project_roundtrip.rs` | C7; round 4 T5 | project tests that need painted, stamped and text content plus re-bake on load (section 9.1) |
 | `tests/brush_tips.rs` | B3 (round 4) | end-to-end tests of brush tips (FEATURE_BRUSH 8.1, 8.5): C3, C5, C10, C11, C14, C15, C20 to C22, C24, C26, `strokes_save_identically_through_both_entry_points` |
+| `tests/objects.rs` | objects-tabs WP2 | hidden objects on the "Three Objects" sample: view state, rays, brush, projected stamp + depth fit, wrap (with and without Jump), bake jobs keep their visibility, thread-count determinism with a mask |
 
 ### 2.2 `crates/wte_app/src`
 
@@ -1099,9 +1100,25 @@ impl Hit {
     pub fn surface_normal(&self) -> Vec3;
 }
 
-pub struct Bvh { /* private: nodes, tri_order */ }             // Send + Sync
+/// objects-tabs: a set of triangles as a bit set (the hidden triangles of a `Bvh`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriMask { /* private: bits: Vec<u64>, len: u32, count: u32 */ }
+impl TriMask {
+    pub fn from_fn(tri_count: u32, f: impl Fn(TriId) -> bool) -> TriMask;
+    pub fn get(&self, t: TriId) -> bool;                      // false beyond len
+    pub fn count(&self) -> u32;
+    pub fn is_empty(&self) -> bool;
+}
+
+pub struct Bvh { /* private: tree: Arc<BvhTree { nodes, tri_order }>, hidden: Option<Arc<TriMask>> */ }   // Send + Sync
 impl Bvh {
-    pub fn build(mesh: &MeshData) -> Bvh;
+    pub fn build(mesh: &MeshData) -> Bvh;                     // hidden: None
+    /// objects-tabs: the same tree with another hidden set (`None` or an empty mask = nothing hidden, stored as `None`).
+    /// O(1): the tree is shared. **Every query below skips the hidden triangles** (rays pass through them, any-hit
+    /// queries ignore them, sphere queries omit them); with `None` the results are bit-identical to a plain tree.
+    pub fn with_hidden(&self, hidden: Option<Arc<TriMask>>) -> Bvh;
+    pub fn hidden(&self) -> Option<&TriMask>;
+    pub fn is_hidden(&self, t: TriId) -> bool;
     /// Nearest hit with t in [t_min, t_max].
     pub fn raycast(&self, mesh: &MeshData, ray: &Ray, t_min: f32, t_max: f32, cull: Cull) -> Option<Hit>;
     /// Any-hit with early out.
@@ -1714,6 +1731,7 @@ pub struct Document {
 // (6.5a "Reuse"): derived data, not in snapshots, not saved, not part of the structure state; at most 16 entries, least
 // recently used dropped first; an entry is used only when it `serves` the stamp's placement; `remove_stamp` drops its
 // entry and every insertion drops entries of stamps that no longer exist. (In `bakes` so that `Document` keeps its size.)
+// objects-tabs: `WrapCache::clear()` drops every entry; `set_hidden_objects` calls it on a change.
 // Round 8: `BakeSets` also holds `defer_wrap_previews: bool` (`set_defer_wrap_previews`) and `edit_serial: u64` (bumped
 // when the first stamp joins `preview_baked`, i.e. per pending edit; a wrap Preview job's output applies only in the
 // edit it was made in).
@@ -1732,7 +1750,7 @@ impl Document {                                     // implemented by the scaffo
     pub fn stamp_locked(&self, id: StampId) -> bool;                              // any linked layer is locked (5.20)
     pub fn texel_maps(&self) -> Vec<Arc<TexelMap>>;                               // index == set id
     pub fn texel_world_size(&self, set: TextureSetId) -> f32;                     // texel_map.stats.texel_world
-    pub fn raycast(&self, ray: &Ray) -> Option<Hit>;                              // nearest hit, Cull::None, t in [1e-5*diag, INF)
+    pub fn raycast(&self, ray: &Ray) -> Option<Hit>;                              // nearest hit, Cull::None, t in [1e-5*diag, INF); passes hidden objects
     pub fn revision(&self) -> u64;                                                // bumped by every content mutation, undo and redo
     pub fn history_state(&self) -> u64;                                           // id of the current history state (6.7)
     pub fn is_modified(&self) -> bool;                                            // history_state() != saved_revision (the saved state id)
@@ -1752,6 +1770,39 @@ impl Document {                                     // implemented by the scaffo
     /// flush_pending_edit and from_parts; a no-op in release builds.
     pub(crate) fn debug_check_structure(&self);
 }
+
+// objects-tabs (docs/plans/OBJECTS_TABS_PLAN.md 3.2): hidden objects. Private fields `hidden_objects: Vec<bool>` (one per
+// `mesh.objects`) and `visibility_generation: u64`, set in `from_parts` (all false, 0); not in `DocumentSnapshot`,
+// `StructureSnapshot`, the history or the manifest (the app keeps hidden object *names* in `ui_state`, 8.9).
+impl Document {
+    pub fn hidden_objects(&self) -> &[bool];                  // all false in a new or loaded document
+    pub fn object_hidden(&self, object: u32) -> bool;         // false for an unknown index
+    pub fn hidden_object_count(&self) -> usize;
+    pub fn visibility_generation(&self) -> u64;               // 0 new; +1 at every set_hidden_objects that changed something
+    /// Replaces the hidden flags (a slice of another length is padded with false / cut). Ok(false) = nothing changed.
+    /// Err(StrokeInProgress) while a stroke is open (guard_no_stroke). View state: no history entry, no revision change,
+    /// is_modified unaffected. Swaps `self.bvh` for `bvh.with_hidden(mask)` (mask = TriMask::from_fn(tri_count, hidden
+    /// of tri_object_of(t)); None when nothing is hidden) and clears the wrap cache (`WrapCache::clear`: `serves` does not
+    /// know about visibility). The pending edit is left alone (its later bake uses the new mask).
+    pub fn set_hidden_objects(&mut self, hidden: &[bool]) -> Result<bool, EditError>;
+    pub fn visible_bounds(&self) -> Aabb;                     // union of visible objects; mesh.bounds when none or all are hidden
+    pub fn objects_bounds(&self, objects: &[u32]) -> Option<Aabb>;   // union of the listed visible objects; None when none
+}
+```
+**Rules for hidden objects** (objects-tabs plan 3.4; the contract):
+
+| Operation | Behaviour with hidden objects |
+|---|---|
+| Pick / hover / eyedropper / fill seed / stamp and text placement / gizmo drag / text-path points in the 3D view | the ray passes through hidden objects and hits what is behind them (`Document::raycast`, every BVH ray query) |
+| Brush and eraser in 3D | hidden triangles are never dab candidates: no paint, no shadowing of "Same side" (6.4). Objects that share texels (instanced meshes, mirrored UVs) still share paint: a property of the UVs |
+| Projected stamp / text bake | hidden triangles receive nothing and do not occlude; `fit_stamp_depth` fits to visible surfaces (6.5) |
+| Wrap | hidden triangles are never part of the patch, never the anchor, never a Jump target (6.5a) |
+| When a stamp is (re)baked | against the visibility at the moment the bake job is made (the job's `Arc<Bvh>`). Changing visibility never re-bakes existing stamps; undo / redo restore stored pixels; `project::load` keeps saved caches, and the rare load-time re-bake of a damaged cache runs with everything visible (the app restores visibility after `load` returns) |
+| Fill (Layer / Island scope), 2D (UV) brush, UV stamps | texture-space operations: not masked (the seed comes from a visible surface) |
+| Export, composite, save, thumbnails | unaffected |
+| Undo / redo / revision / modified flag | unaffected by hide / show / select |
+
+```rust
 
 /// Immutable copy for background save/export. Send + Sync + 'static.
 #[derive(Clone)]
@@ -2291,8 +2342,11 @@ impl StampBakeJob {
     pub fn run(self) -> StampBakeOutput;            // on the calling thread's rayon pool (the synchronous path); never creates a pool
     pub fn run_isolated(self) -> StampBakeOutput;   // `pool.install(|| self.run())` in the core's bake pool (4.6); what the app's worker calls
 }
-/// Result of a job. Send + 'static. Carries the job's identity (id, object, mesh and map Arcs), the baked buffers
+/// objects-tabs: a job carries the BVH (and so the hidden objects) of the moment it is made; it bakes against that
+/// visibility whenever it runs.
+/// Result of a job. Send + 'static. Carries the job's identity (id, object, mesh, bvh and map Arcs), the baked buffers
 /// `Vec<(TextureSetId, SparseBuf)>` or the error, for a drawn text its picture (spec, mips, frame, full), and `elapsed()`.
+/// objects-tabs: its wrap parameterization is cached only while `Arc::ptr_eq(out.bvh, doc.bvh)` (6.5a).
 pub struct StampBakeOutput { /* ... */ }
 impl StampBakeOutput { pub fn stamp(&self) -> StampId; pub fn is_text(&self) -> bool; pub fn elapsed(&self) -> Duration; pub fn is_error(&self) -> bool; }
 pub enum FinalBake { Applied { id: StampId, empty: bool }, Failed { id: StampId }, Stale, Busy(Box<StampBakeOutput>) }
@@ -2931,6 +2985,12 @@ uses it (one `wire_edges` per set made ABeautifulGame's 13 sets x 1.5 M triangle
   barycentric blend of vertex normals (`geo_normal` if the blend is degenerate), **negated iff `!front_face`** — the flip is decided
   by the winding alone, so `surface_normal()` recovers the stored shading normal exactly; `uv` = barycentric blend unless `NO_UV`.
 - **Sphere query**: descend into nodes whose point-to-AABB squared distance <= r^2; at leaves use `closest_point_on_triangle`. Sort.
+- **Hidden triangles** (objects-tabs): `intersect` (every ray query) and `walk_sphere` (every sphere query) take the mask
+  once (`self.hidden.as_deref()`) and skip a hidden triangle in the leaf loop before its triangle test. Node boxes are not
+  rebuilt: a ray simply finds nothing in hidden leaves. One predictable branch per leaf triangle (no measurable cost:
+  `docs/notes/objtabs/wp2.md`). The mask lives in the BVH rather than as a query parameter because about 50 production call
+  sites query it, several on worker threads through a cloned `Arc<Bvh>`: a job sees the visibility of the moment it cloned
+  the `Arc` (a snapshot by construction), and a toggle costs one mask build instead of a BVH rebuild.
 
 ### 6.3 TexelMap and the surface rasterizer [C1]
 
@@ -3019,7 +3079,8 @@ structure snapshots do not pin raster pixels, section 6.7).
 **One 3D dab** at centre `c`, reference normal `n`, radius `r` (`dab_3d`); `aa = texel_world_size(set)` and the **support radius**
 is `r_s = r + 0.5 * aa`:
 1. `bvh.query_sphere(c, r_s)`; keep triangles of this set that are not `NO_UV`; if `same_side_only`, drop triangles with
-   `dot(geo_normal(tri), n) < -0.2`.
+   `dot(geo_normal(tri), n) < -0.2`. (objects-tabs: the query skips hidden triangles, so a hidden object is never a dab
+   candidate and never takes part in any side or occlusion test.)
 2. Per candidate triangle: `d` = signed distance from `c` to the triangle plane; skip if `|d| >= r_s`.
    `rho = sqrt(max(0, r_s^2 - d^2))`. With the triangle's 3D-to-UV-pixel affine map (gradients `grad_u`, `grad_v` in px per world
    unit) the clip box is `uv_px(c projected onto the plane) +/- (rho*|grad_u| + gutter + 1, rho*|grad_v| + gutter + 1)`. Without it a
@@ -3186,6 +3247,10 @@ The app bounds the work per frame (at most 64 surface samples per frame, section
 
 ### 6.5 Stamp / text bake [C4]
 
+objects-tabs: every geometric query of a bake (candidates, occluders, the depth fit) goes through the job's BVH, so hidden
+triangles receive nothing, do not occlude and are not fitted to; the job's `Arc<Bvh>` fixes the visibility of the moment
+the job was made (5.14 rules).
+
 Source pixels: for an image stamp, the blob is decoded once (`decode_image`, max side 8192) and turned into `PremulMips`, cached in
 `Document::image_mips`; for a text stamp, `rasterize_text` output is cached in `Document::text_mips` together with the `TextSpec` it
 was built from (re-rasterized only when the spec changes). Font lookup: `FontCache::get` for `spec.font`, plus `FontCache::fallback`;
@@ -3344,6 +3409,13 @@ the lowest remaining set id, else the stamp is removed. `merge_down` on a stamp/
 layer's id, name, opacity and blend (exact when the lower layer is Normal at 100%; otherwise an accepted approximation).
 
 ### 6.5a Wrap bake (round 6, `wrap_param.rs`, `wrap_bake.rs`)
+
+objects-tabs: hidden triangles are never patch members, never the anchor and never a Jump target. Every BVH query of the
+parameterization skips them; the one path that is not a BVH query, `collect_grown`'s growth over the welded graph
+(`WrapMesh::vtris`), treats a hidden triangle as outside the reach sphere (`in_sphere` returns `None`). The Jump branch
+floods only over triangles marked by the masked sphere query, and `wrap_relax` / `wrap_bake` only walk the collected patch.
+A parameterization is cached only while the document still has the BVH it was made with (`StampBakeOutput::bvh`,
+`Arc::ptr_eq`): a job made before a visibility change still applies its pixels but does not refill the cache.
 
 A wrapped stamp (`Projector::mode == Wrap`) gets a **local parameterization**: every vertex near it gets stamp-local
 coordinates (world units along `right` / `up` of the projector, origin at the anchor); a texel's barycentrics give its
@@ -6619,6 +6691,11 @@ those tests.
   `wire_edges_name_their_object`. Importers: OBJ `o` objects, `g` groups without `o`, `o` wins, faces before the first `o`,
   re-entered names, no `o`/`g` = one object named after the model, `to_obj_objects` round trip; glTF mesh nodes (named / unnamed
   with a named mesh / shared mesh / duplicate names, transforms in the bounds); FBX two `Model`s; `Document::sample(Objects)`.
+- **bvh** objects-tabs: `tri_mask_basics`; `a_hidden_triangle_is_skipped_by_every_query` (`cube_on_floor`: raycast,
+  occluded / occluder, query_sphere / query_sphere_dist; everything hidden -> nothing); `no_mask_and_an_empty_mask_answer_identically`
+  (2,000 random rays and spheres on `soup_sets`: plain = `with_hidden(None)` = empty mask field by field; a random half
+  hidden = brute force over the visible triangles); `with_hidden_shares_the_tree`. `document::objects_tests::
+  hiding_drops_cached_wrap_params` (also: a ParamOnly job from an older visibility is not cached).
 - **bvh** [C1]: 10k random rays against brute force (same triangle, `t` within 1e-4); `occluded == raycast.is_some()`;
   `query_sphere` equals brute-force closest-point; analytic `uv_sphere` hits (position on the sphere, normal ~ position / r, UV matches
   the equirect formula); axis-parallel rays (infinite `inv_dir`); ray origin on an AABB face; `Cull::Back`; a hit on a

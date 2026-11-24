@@ -336,6 +336,7 @@ impl Document {
             });
         }
 
+        let object_count = mesh.objects.len();
         let document = Document {
             name,
             mesh: Arc::new(mesh),
@@ -363,6 +364,8 @@ impl Document {
             image_mips: HashMap::new(),
             text_mips: HashMap::new(),
             text_caches: Box::default(),
+            hidden_objects: vec![false; object_count],
+            visibility_generation: 0,
         };
         document.debug_check_structure();
         progress.report(1.0, "Compositing layers");

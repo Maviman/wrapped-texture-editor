@@ -6,13 +6,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blob::BlobStore;
-use crate::bvh::{Bvh, Cull, Hit};
+use crate::bvh::{Bvh, Cull, Hit, TriMask};
 use crate::error::{EditError, ImportWarning};
 use crate::history::History;
 use crate::ids::{BlobId, LayerId, StampId, TextureSetId};
 use crate::import::{ImportOptions, SourceBundle};
 use crate::layer::{Layer, LayerKind, TextureSet};
-use crate::math::{IRect, Ray};
+use crate::math::{Aabb, IRect, Ray};
 use crate::mesh::MeshData;
 use crate::pixel_ops::PremulMips;
 use crate::stamp::{StampObject, StampSource};
@@ -72,6 +72,10 @@ pub struct Document {
     pub(crate) text_mips: HashMap<StampId, (TextSpec, Arc<PremulMips>)>,
     /// The round-4 text caches (FEATURE_TEXT 5.11, 5.13, 5.14); boxed so that `Document` stays small.
     pub(crate) text_caches: Box<TextCaches>,
+    /// Objects-tabs: one flag per object (`mesh.objects`). View state: not in history, snapshots or the manifest.
+    pub(crate) hidden_objects: Vec<bool>,
+    /// Objects-tabs: +1 at every `set_hidden_objects` that changed something.
+    pub(crate) visibility_generation: u64,
 }
 
 /// Most parameterizations a document keeps (least recently used dropped first).
@@ -114,6 +118,11 @@ impl WrapCache {
 
     pub(crate) fn remove(&mut self, id: StampId) {
         self.entries.retain(|e| e.0 != id);
+    }
+
+    /// Drops every entry (objects-tabs: the hidden objects changed; `serves` does not know about visibility).
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
     }
 }
 
@@ -233,10 +242,79 @@ impl Document {
         self.set(set).map_or(1.0, |s| s.texel_map.stats.texel_world)
     }
 
-    /// Nearest surface hit: `Cull::None`, `t` in `[1e-5 * diag, INF)`.
+    /// Nearest surface hit: `Cull::None`, `t` in `[1e-5 * diag, INF)`. Hidden objects are passed through.
     pub fn raycast(&self, ray: &Ray) -> Option<Hit> {
         let t_min = 1e-5 * self.mesh.diag();
         self.bvh.raycast(&self.mesh, ray, t_min, f32::INFINITY, Cull::None)
+    }
+
+    // ----- objects-tabs: hidden objects (ARCHITECTURE.md 5.14) -----
+
+    /// One flag per object (`mesh.objects`), all false in a new or loaded document.
+    pub fn hidden_objects(&self) -> &[bool] {
+        &self.hidden_objects
+    }
+
+    /// True when `object` is hidden (false for an unknown index).
+    pub fn object_hidden(&self, object: u32) -> bool {
+        self.hidden_objects.get(object as usize).copied().unwrap_or(false)
+    }
+
+    /// Number of hidden objects.
+    pub fn hidden_object_count(&self) -> usize {
+        self.hidden_objects.iter().filter(|&&h| h).count()
+    }
+
+    /// 0 in a new document; +1 at every call of `set_hidden_objects` that changed something.
+    pub fn visibility_generation(&self) -> u64 {
+        self.visibility_generation
+    }
+
+    /// Replaces the hidden flags (a slice of another length is padded with false / cut). `Ok(false)` = nothing changed.
+    /// `Err(EditError::StrokeInProgress)` while a stroke is open. View state: no history entry, no revision change,
+    /// `is_modified` unaffected. Swaps `self.bvh` for `bvh.with_hidden(..)` (every ray and sphere query then skips the
+    /// hidden triangles) and drops every cached wrap parameterization. A pending edit is left alone; bakes made from
+    /// now on see the new visibility, jobs made before keep the BVH they cloned.
+    pub fn set_hidden_objects(&mut self, hidden: &[bool]) -> Result<bool, EditError> {
+        self.guard_no_stroke()?;
+        let n = self.mesh.objects.len();
+        let mut flags: Vec<bool> = hidden.iter().copied().take(n).collect();
+        flags.resize(n, false);
+        if flags == self.hidden_objects {
+            return Ok(false);
+        }
+        let mask = flags.iter().any(|&h| h).then(|| {
+            let mesh = &self.mesh;
+            Arc::new(TriMask::from_fn(mesh.tri_count(), |t| flags.get(mesh.tri_object_of(t) as usize).copied().unwrap_or(false)))
+        });
+        self.bvh = Arc::new(self.bvh.with_hidden(mask));
+        self.hidden_objects = flags;
+        self.visibility_generation += 1;
+        self.bakes.wrap_params.clear();
+        Ok(true)
+    }
+
+    /// Union of the bounds of the visible objects; `mesh.bounds` when nothing is hidden or everything is.
+    pub fn visible_bounds(&self) -> Aabb {
+        let all: Vec<u32> = (0..self.mesh.object_count()).collect();
+        match self.objects_bounds(&all) {
+            Some(b) if self.hidden_object_count() > 0 => b,
+            _ => self.mesh.bounds,
+        }
+    }
+
+    /// Union of the bounds of the listed objects that are visible; `None` when there is none (unknown indices are
+    /// ignored).
+    pub fn objects_bounds(&self, objects: &[u32]) -> Option<Aabb> {
+        let mut out: Option<Aabb> = None;
+        for &o in objects {
+            let Some(info) = self.mesh.objects.get(o as usize) else { continue };
+            if self.object_hidden(o) || info.bounds.is_empty() {
+                continue;
+            }
+            out = Some(out.map_or(info.bounds, |b| b.union(&info.bounds)));
+        }
+        out
     }
 
     /// Bumped by every content mutation, undo and redo.
@@ -492,4 +570,49 @@ pub struct SetSnapshot {
     pub layers: Vec<Layer>,
     pub active: Option<LayerId>,
     pub texel_map: Arc<TexelMap>,
+}
+
+#[cfg(test)]
+mod objects_tests {
+    use glam::{Vec2, Vec3};
+
+    use super::*;
+    use crate::doc_build::SampleKind;
+    use crate::image_io::{PngLevel, encode_png};
+    use crate::pixel::PixelBuf;
+    use crate::stamp::{Placement, Projector, StampSource, SurfaceMode, WrapOptions};
+
+    /// Objects-tabs WP2 (3.2): a visibility change drops every cached wrap parameterization (`WrapParam::serves` does
+    /// not know about visibility); the next `ensure_wrap_param` builds a fresh one. A ParamOnly job made before a
+    /// change is not cached when it lands after it.
+    #[test]
+    fn hiding_drops_cached_wrap_params() {
+        let mut doc = Document::sample(SampleKind::Objects);
+        let img = PixelBuf::filled(16, 16, [255; 4]);
+        let blob = doc.add_image_blob("w.png", Arc::from(encode_png(16, 16, &img.data, PngLevel::Fast).unwrap())).unwrap();
+        let p = Projector::from_surface(Vec3::new(-0.9, 0.0, 0.0), Vec3::Y, Vec3::NEG_Z, Vec2::new(1.2, 0.6), 0.6);
+        let p = Projector { mode: SurfaceMode::Wrap, wrap: WrapOptions { jump_gaps: true, overlap: false }, ..p };
+        let id = doc.add_stamp("W", StampSource::Image { blob }, Placement::Projected(p), TextureSetId(0)).unwrap();
+        let (cached, fresh) = doc.wrap_cache_probe(id);
+        assert!(cached.is_some());
+        assert!(doc.set_hidden_objects(&[false, true, false]).unwrap());
+        assert!(doc.wrap_cache_probe(id).0.is_none(), "dropped by the visibility change");
+        assert!(doc.stamp_wrap_stats(id).is_none());
+        assert!(doc.ensure_wrap_param(id).is_some());
+        assert_eq!(doc.wrap_cache_probe(id).1, fresh + 1, "one fresh build");
+        assert!(doc.wrap_cache_probe(id).0.is_some());
+        // No change: the cache stays.
+        assert!(!doc.set_hidden_objects(&[false, true, false]).unwrap());
+        assert!(doc.wrap_cache_probe(id).0.is_some());
+        // A late ParamOnly job from the old visibility is not cached.
+        assert!(doc.set_hidden_objects(&[]).unwrap());
+        let job = doc.wrap_param_job(id).expect("nothing cached: a ParamOnly job");
+        assert!(doc.set_hidden_objects(&[false, true, false]).unwrap());
+        assert!(!doc.apply_wrap_param(job.run()));
+        assert!(doc.wrap_cache_probe(id).0.is_none());
+        // One made with the current visibility is.
+        let job = doc.wrap_param_job(id).unwrap();
+        assert!(doc.apply_wrap_param(job.run()));
+        assert!(doc.wrap_cache_probe(id).0.is_some());
+    }
 }

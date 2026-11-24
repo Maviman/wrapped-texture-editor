@@ -92,6 +92,9 @@ pub struct StampBakeOutput {
     pub(crate) id: StampId,
     pub(crate) object: StampObject,
     pub(crate) mesh: Arc<MeshData>,
+    /// Objects-tabs: the BVH (and so the hidden objects) the job baked against. A parameterization in `wrap` is cached
+    /// only while the document still has this BVH (`Document::set_hidden_objects` replaces it).
+    pub(crate) bvh: Arc<Bvh>,
     pub(crate) maps: Vec<Arc<TexelMap>>,
     pub(crate) result: Result<Vec<(TextureSetId, SparseBuf)>, EditError>,
     pub(crate) picture: Option<DrawnText>,
@@ -204,7 +207,7 @@ impl StampBakeJob {
                 }
             })
         })();
-        StampBakeOutput { id, object, mesh, maps, result, picture: drawn, elapsed: started.elapsed(), wrap: used, kind, serial }
+        StampBakeOutput { id, object, mesh, bvh, maps, result, picture: drawn, elapsed: started.elapsed(), wrap: used, kind, serial }
     }
 
     /// `run` inside the core's bake pool (`available_parallelism - 1` threads, at least 1): the bake's data-parallel

@@ -309,7 +309,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 
 | File | Owner | Owns |
 |---|---|---|
-| `state.rs` | S | `AppState`, `Session`, `ViewMode`, `ViewId`, `ViewFlags`, `ShadingMode`, `Backdrop`, `CameraPreset`, `ToolKind`, tool settings (round 4: `BrushType`, `ShapeChoice`, `BrushSettings::sanitized`), `ColorState`, `HoverInfo`, `OrbitCamera`, `UvViewState`, `Dialog`, `Pending`, `Prefs`, `BusyInfo`; round 4: `SideTab`, `TextPage`, `SideRects`, `BrushShapeState`, `ReadyShape`, `PendingShape`, `OpeningsDialogState`, `TextGapSel`, `FontSampleState`, `FontSampleCell`, `ToolProbe` (types + `Default`s + `Session::validate`) |
+| `state.rs` | S | `AppState`, `Session` (objects-tabs: `selected_objects`, `object_anchor`, `object_selection_rev`, `object_reveal`), `ViewMode`, `ViewId`, `ViewFlags`, `ShadingMode`, `Backdrop`, `CameraPreset`, `ToolKind`, tool settings (round 4: `BrushType`, `ShapeChoice`, `BrushSettings::sanitized`), `ColorState`, `HoverInfo`, `OrbitCamera`, `UvViewState`, `Dialog`, `Pending`, `Prefs`, `BusyInfo`; round 4: `SideTab`, `TextPage`, `SideRects`, `BrushShapeState`, `ReadyShape`, `PendingShape`, `OpeningsDialogState`, `TextGapSel`, `FontSampleState`, `FontSampleCell`, `ToolProbe` (types + `Default`s + `Session::validate`) |
 | `action.rs` | S | `AppAction`, `ToastLevel` (types only) |
 | `main.rs` | A1 | logging to file, panic hook, startup-failure message box, `NativeOptions`, `eframe::run_native`, exit code |
 | `crash.rs` | A1 | native crash recorder (vectored handler + unhandled filter, report + minidump), ring of recent log lines / actions, startup diagnostics (graphics env vars, hook modules), `WTE_DEBUG_NATIVE_CRASH` test hook (8.3) |
@@ -323,6 +323,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `toasts.rs` | A1 | `Toasts` queue (`push`, `error_count`) and drawing |
 | `theme.rs` | A1 | visuals, runtime window icon, vector tool icons |
 | `dnd.rs` | A1 | file drag-and-drop routing |
+| `object_ops.rs` | objects-tabs WP3a | the object commands as plain functions (8.3 "Objects"): select / toggle / range / all / none on `Session`; `set_hidden`, `set_visible`, `hide_selected`, `isolate_selected`, `show_all`, `frame_selection` on `AppState`; `hidden_names` / `hidden_from_names` / `restored_hidden_text` for `UiState` (8.9) |
 | `brush_flows.rs` | B5 (round 4) | the brush shape loaded from a model file: Load / quiet reload / Remove, the bake job and its request numbers, the event table of FEATURE_BRUSH 4.4, the closing-openings question (`Dialog::CloseOpenings`, `AnswerOpenings`, the choice per file), `startup`, `sync_prefs` |
 | `text_ops.rs` | T7 (round 4) | the font-sample job of the font picker and its atlas textures |
 | `gpu/mod.rs` | A2 | `Gpu` (device, queue, egui renderer handle) |
@@ -4240,7 +4241,9 @@ impl From<&Placement> for PlacementEntry {}    impl PlacementEntry { pub fn to_p
 ```
 Plain arrays instead of glam serde keep the JSON stable. A manually chosen texture is linked to its set by the key of its
 `extras` entry (`textures/set<NN>/<name>`, 5.15); `SetEntry` therefore needs no separate reference field. `ui_state` is written by the app (camera, UV view, view mode, active set,
-colours, swatches) and ignored by the core.
+colours, swatches; objects-tabs: `hidden_objects`, the names of the hidden objects, written only when one is hidden) and
+ignored by the core. No version change (7.3): older builds ignore the unknown key and show everything; older projects load
+with nothing hidden.
 
 A text without round-4 features is written with exactly the keys of version 1. Names
 (`style`, `kind`) are strings, so an unknown name never fails a file; a wrong JSON type inside `fx` fails the
@@ -4578,10 +4581,16 @@ pub struct Session {
     pub scene_generation: u64,                 // process-wide unique; changes whenever the document object is replaced
                                                // => GpuScene rebuild; also identifies the session a Save job belongs to
     pub selected_layers: Vec<LayerId>,         // export-select (1.8): the Layers list's selection, raw (may be stale)
+    // objects-tabs: the object selection. App state only: not in the document, not in history, not saved.
+    pub selected_objects: BTreeSet<u32>,       // indices into doc.mesh.objects
+    pub object_anchor: Option<u32>,            // the row a Shift-click extends from (the last plain / Ctrl-clicked object)
+    pub object_selection_rev: u64,             // +1 at every change of selected_objects (the GPU highlight follows it)
+    pub object_reveal: Option<u32>,            // request: the Objects list scrolls this row into view once (3D pick)
 }
 impl Session {
     /// Re-validates app-side selection after any document change (called by dispatch, section 8.3): clears
-    /// `selected_stamp` if `doc.stamp(id)` is None, clamps `active_set` to an existing set.
+    /// `selected_stamp` if `doc.stamp(id)` is None, clamps `active_set` to an existing set; objects-tabs: drops selected
+    /// objects `>= object_count` (bumping `object_selection_rev`) and a stale anchor / reveal.
     pub fn validate(&mut self);
     /// The selected layers of the active set, bottom to top, normalised on every read: ids that are gone or belong to
     /// another set are dropped; when the active layer is not among them the selection is the active layer alone; no
@@ -4710,6 +4719,11 @@ pub enum AppAction {
     ReplaceStampImage(StampId, Option<PathBuf>),       // "Choose..." of a selected image stamp
     SelectStamp(Option<StampId>), UpdateStampSource(StampId, StampSource, Commit),
     UpdateStampPlacement(StampId, Placement, Commit), UpdateStampTint(StampId, [u8; 4], Commit), DeleteStamp(StampId),
+    // objects (objects-tabs; `object_ops.rs`)
+    SelectObject(u32) /* plain click */, ToggleObjectSelected(u32) /* Ctrl-click; Ctrl/Shift-click in 3D */,
+    SelectObjectRange(u32) /* Shift-click in the list */, SelectAllObjects, DeselectObjects,
+    SetObjectVisible(u32, bool) /* the eye of a row */, HideSelectedObjects, IsolateSelectedObjects, ShowAllObjects,
+    FrameSelection,
     // ui
     ShowDialog(Dialog), CloseDialog, CancelJob, Toast(ToastLevel, String),
 }
@@ -4932,7 +4946,11 @@ Notes:
   but whose paint still trails (FEATURE_BRUSH 5.10, "finishing") is the user's completed stroke: `cancel` and `finish`
   complete it (one history entry) before the command runs; only `discard` (Undo, Esc) throws it away. The guarded
   actions include `LoadBrushShape`, `AnswerOpenings(Some(_))` and `SetBrushShapeClose` (they start a modal bake), not
-  `ReloadBrushShape`, `RemoveBrushShape`, `AnswerOpenings(None)` or `LoadFontSamples`.
+  `ReloadBrushShape`, `RemoveBrushShape`, `AnswerOpenings(None)` or `LoadFontSamples`. objects-tabs: `SetObjectVisible`,
+  `HideSelectedObjects`, `IsolateSelectedObjects` and `ShowAllObjects` are guarded (the core refuses a visibility change
+  during an open stroke) and **finish** the interaction like Save (hiding is view state and never throws away what the
+  user painted: H with the button still held commits the stroke, one history entry, then hides). The selection actions and
+  `FrameSelection` are not guarded.
 - `Undo` / `Redo`: `doc.undo()` / `doc.redo()`; `Some(label)` => info toast "Undo: <label>" / "Redo: <label>".
 - **After every document-changing action**: `session.validate()` (clears a `selected_stamp` that no longer exists, clamps
   `active_set`). Tools and panels must in any case treat a `selected_stamp` for which `doc.stamp(id)` is `None` as "no selection".
@@ -4972,8 +4990,20 @@ Notes:
   highlights, not on the original under it.
 - `SetViewMode(Preview)`: `tools.cancel` + `doc.flush_pending_edit()`; remember the previous mode in `last_edit_mode`.
   `SetViewMode(other)` and `SetTool(..)` also `tools.cancel`.
-- `FrameModel`: 3D views frame `mesh.bounds`; the 2D view fits the texture (both in Split). `ToggleTexture`: `Textured <-> Clay`
+- `FrameModel`: 3D views frame `doc.visible_bounds()` (objects-tabs: the visible objects; `mesh.bounds` when nothing is
+  hidden); the 2D view fits the texture (both in Split). `ResetCamera` frames `visible_bounds()` too. `ToggleTexture`: `Textured <-> Clay`
   (from `UvChecker` it goes to `Textured`). `ResetColors`: primary black, secondary white.
+- **Objects** (objects-tabs, `object_ops.rs`; no document change, no history entry, no revision change, `is_modified`
+  untouched — the same as camera and layer multi-selection): `SelectObject(o)` = `{o}`, anchor `o`; `ToggleObjectSelected(o)`
+  adds / takes out `o`, anchor `o`; `SelectObjectRange(o)` = the range anchor..=o (no valid anchor: a plain select), the
+  anchor stays; `SelectAllObjects`, `DeselectObjects` (also clears the anchor); unknown indices are ignored;
+  `object_selection_rev` +1 when the set changed. `SetObjectVisible(o, v)` flips one flag (the selection is not touched);
+  `HideSelectedObjects` hides the selected objects (they stay selected, so the eye or Show All brings them back in place);
+  `IsolateSelectedObjects` shows the selected and hides every other object; both are no-ops with an empty selection;
+  `ShowAllObjects`. They all go through `Document::set_hidden_objects` (5.14); an `Err` (open stroke) is a warning toast;
+  no toast otherwise; no-ops without a session. `FrameSelection`: `doc.objects_bounds(selected)` (visible selected objects)
+  else `visible_bounds()`, framed with `OrbitCamera::frame` on `session.camera` in 3D / Split, `session.preview_camera` in
+  Preview, nothing in 2D. `Cancel` (Esc) does not clear the object selection.
 - `ShowExport`: `tools.cancel` + `doc.flush_pending_edit()` (so the dialog and its preview show Full-quality stamps), then
   `Dialog::Export` with the defaults of 8.8.
 - `RunExport(opts)`: `doc.flush_pending_edit()`, remember `opts.dir` in `prefs.last_export_dir`, `start_export` (8.9).
@@ -5590,13 +5620,16 @@ cache; Stamp tool source preview) and `doc.register_font` / `doc.default_font` (
 carries a catalog face).
 
 - **Menu bar**. File: New from Model... (Ctrl+N), Open Project... (Ctrl+O), Open Recent >, Open Sample > (Sphere, Cube, Two
-  Materials), Save (Ctrl+S), Save As... (Ctrl+Shift+S), Import Image as Stamp... (`ImportStampImage(None)`), Export... (Ctrl+E),
+  Materials, Three Objects), Save (Ctrl+S), Save As... (Ctrl+Shift+S), Import Image as Stamp... (`ImportStampImage(None)`), Export... (Ctrl+E),
   Extract Original Files... (`ExtractSources(None)`; enabled with any open document, saved or not), Exit. Edit: Undo / Redo with
   the entry label, Delete (`DeleteSelection`). View: 3D / 2D / Split / Preview, Texture on Model (T), Shading > (Textured, Clay,
   UV Checker), Wireframe (W), UV Seams, UV Wireframe in 2D, Alpha Checker, Lit, Frame Model (F), Reset Camera, camera presets.
   Layer: New Paint Layer, Duplicate, Merge Down, Delete, Rasterize, Move Up / Down (the `*Active*` actions); below a
   separator "Export Layer..." (one layer selected) or "Export Selected Layers... (N)" (several), enabled with an active
-  layer, => `ShowExportLayers(session.layer_selection())` (export-select, 1.8). Help: Shortcuts,
+  layer, => `ShowExportLayers(session.layer_selection())` (export-select, 1.8). Object (objects-tabs, between Layer and
+  Help): Hide Selected (H) and Isolate Selected (Shift+H), enabled with a non-empty object selection; Show All (Alt+H),
+  enabled when `hidden_object_count() > 0`; Frame Selection (Shift+F), enabled with a document; Select All (with a
+  document) / Deselect All (with a selection). Help: Shortcuts,
   About. Shortcut texts come from `shortcuts::shortcut_text`. Entries are enabled exactly when they can act (review round 2,
   finding merge-down-enabled-onto-locked-base): Merge Down (menu and Layers footer alike) = `panels::layers::can_merge_down`
   (the active layer is unlocked and directly above an unlocked paint layer: the checks of `Document::merge_down`, so on a new
@@ -6242,7 +6275,10 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
   - *Open Sample*: unsaved check -> `Document::sample(kind)` synchronously -> `install_document`.
 - `install_document`: `tools.cancel`; replaces `state.session` (fresh camera framed on `mesh.bounds`, `uv_view` fit on first
   draw — the session starts with `UvViewState::default()` and the 2D view calls `fit` in the first frame in which
-  `session.uv_view` still equals that default; there is no separate flag —, `ui_state` restored when present, `selected_stamp = None`, a new process-wide unique `scene_generation`); resets the
+  `session.uv_view` still equals that default; there is no separate flag —, `ui_state` restored when present — objects-tabs: `UiState::hidden_objects` (names; unknown names ignored, anything but an
+  array of strings counts as none) is applied with `doc.set_hidden_objects(hidden_from_names(..))` before the session is
+  stored, with one Info toast "1 object is hidden: Cube (Object > Show All)" / "N objects are hidden: A, B (Object > Show
+  All)" (names up to three) when any is hidden; the object selection starts empty —, `selected_stamp = None`, a new process-wide unique `scene_generation`); resets the
   document-bound tool settings **`tools.stamp.source = None; tools.stamp.source_name.clear()`** (a `BlobId` of the previous
   document must never be used with the new one); closes dialogs.
 - Close (`handle_close_request`, on `i.viewport().close_requested()`): a modal job is running => `ViewportCommand::CancelClose`
@@ -6389,7 +6425,8 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
    `flush_pending_edit`, which finalizes Preview-baked stamps (5.20).
 5. **Order.** `Modifiers::matches_logically` ignores extra Shift and Alt, so `consume_shortcut` for `Ctrl+S` also matches
    Ctrl+Shift+S. The table lists the more specific binding of every such pair first: Ctrl+Shift+S before Ctrl+S, Ctrl+Shift+N
-   before Ctrl+N, Ctrl+Shift+Z before Ctrl+Z, Shift+X before X. A unit test checks that no entry is shadowed by an earlier one.
+   before Ctrl+N, Ctrl+Shift+Z before Ctrl+Z, Shift+X before X; objects-tabs: Shift+F before F, Shift+H and Alt+H before H.
+   A unit test checks that no entry is shadowed by an earlier one. The table has 40 entries.
 6. **Brackets.** `consume_shortcut` matches the *logical* key: Shift+`[` arrives as `Key::OpenCurlyBracket`, Shift+`]` as
    `Key::CloseCurlyBracket`. Hardness is bound to `KeyboardShortcut::new(Modifiers::SHIFT, Key::OpenCurlyBracket)` /
    `Key::CloseCurlyBracket` with `display: Some("Shift+[")` / `Some("Shift+]")`; size to `Key::OpenBracket` / `CloseBracket` with
@@ -6406,12 +6443,15 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
 | Ctrl+J / Ctrl+M | `DuplicateActiveLayer` / `MergeActiveDown` | Delete | `DeleteSelection` |
 | Ctrl+`]` / Ctrl+`[` | `MoveActiveLayer(+1 / -1)` | D / Shift+X | `ResetColors` / `SwapColors` |
 | Esc | `Cancel` | Space+drag, MMB | Pan (read by the views as "Space held"; not a table entry) |
+| H / Shift+H | `HideSelectedObjects` / `IsolateSelectedObjects` (objects-tabs) | Alt+H / Shift+F | `ShowAllObjects` / `FrameSelection` (objects-tabs) |
 
 `action_label`s (the `label` argument of `shortcut_text`, as implemented): "New from Model...", "Open Project...", "Save",
 "Save As...", "Export...", "Undo", "Redo", "Delete", "Cancel", "3D", "2D", "Split", "Preview", "Texture on Model", "Wireframe",
 "Frame Model", the tool names "Navigate", "Brush", "Eraser", "Eyedropper", "Fill", "Stamp", "Text", "Transform",
 "Smaller Brush", "Larger Brush", "Softer Brush", "Harder Brush", "New Paint Layer", "Duplicate Layer", "Merge Down",
-"Move Layer Up", "Move Layer Down", "Reset Colors", "Swap Colors". "Redo" resolves to Ctrl+Y (its first entry).
+"Move Layer Up", "Move Layer Down", "Reset Colors", "Swap Colors"; objects-tabs: "Frame Selection", "Isolate Selected",
+"Show All", "Hide Selected" (all `with_doc`, `text_ok` false: H in a focused text field types "h"; Alt+H must be tried by hand
+on Windows — a possible beep of the system menu; fallback Ctrl+Shift+H). "Redo" resolves to Ctrl+Y (its first entry).
 
 ### 8.11 Self-test runner (`selftest/mod.rs` [A1], `selftest/scenarios.rs` [A6], `cli.rs` [A1])
 
@@ -7293,6 +7333,18 @@ chosen, two files listed and written), `export_dialog_at_the_smallest_window_and
 the zip checkbox on screen at 900 x 600). Scenarios `export_selected`, `export_zip`, `export_flow` (8.11); `export_run` and
 `workflow_path` now check their folder with `verify_export` (exact listing, pixels, recomposition) instead of "exists and is
 not empty".
+
+objects-tabs WP3a (app state, actions, menu, shortcuts, persistence): `object_ops::tests::{select_toggle_and_range_follow_the_anchor_rules,
+hide_isolate_and_show_all_are_view_state_and_keep_the_selection, a_hide_during_an_open_stroke_is_refused_with_a_warning,
+frame_selection_targets_the_visible_selected_objects, hidden_names_round_trip_and_tolerate_unknown_and_repeated_names,
+validate_drops_objects_the_mesh_does_not_have}` (none changes revision, modified flag or undo depth);
+`io_flows::tests::ui_state_round_trips_and_tolerates_garbage` (`hidden_objects` not written when empty, names round-trip, a
+non-array value or non-string entries ignored without losing the other fields); `shortcuts::tests` (table of 40, the four
+new contract bindings, `object_keys_map_to_their_actions_and_stay_in_text_fields`); `dispatch::tests::guard_covers_document_commands_but_not_selection_or_previews`
+(the four visibility actions are guarded and finish, selection and `FrameSelection` are not);
+`control_sweep::panel_tests::{every_menu_entry_queues_its_action, menu_entries_are_enabled_exactly_when_they_can_act}` (the
+Object menu and File > Open Sample > Three Objects); GPU (ignored): `control_sweep::gpu_tests::hiding_during_a_held_stroke_commits_the_stroke_first`
+(H with the button held: one undo entry, the stroke; the hide adds none; Alt+H shows all).
 
 ## 10. Work packages
 

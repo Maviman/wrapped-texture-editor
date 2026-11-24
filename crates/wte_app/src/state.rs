@@ -748,11 +748,21 @@ pub struct Session {
     /// The layers selected in the Layers list (Ctrl / Shift-click), raw and possibly stale: read it through
     /// `layer_selection`, which normalises it. App state only: not in the document, not in history, not saved.
     pub selected_layers: Vec<LayerId>,
+    /// objects-tabs: the selected objects (indices into `doc.mesh.objects`). App state only: not in the document, not
+    /// in history, not saved.
+    pub selected_objects: std::collections::BTreeSet<u32>,
+    /// The object a Shift-click in the Objects list extends from (the last plain / Ctrl-clicked object).
+    pub object_anchor: Option<u32>,
+    /// +1 at every change of `selected_objects` (the GPU highlight buffer follows it).
+    pub object_selection_rev: u64,
+    /// Request: the Objects list scrolls this row into view once (set by a pick in the 3D view).
+    pub object_reveal: Option<u32>,
 }
 
 impl Session {
     /// Re-validates the app-side selection after any document change (called by dispatch, section 8.3): clears
-    /// `selected_stamp` if `doc.stamp(id)` is `None` and clamps `active_set` to an existing set.
+    /// `selected_stamp` if `doc.stamp(id)` is `None`, clamps `active_set` to an existing set and drops selected objects
+    /// that the mesh does not have.
     pub fn validate(&mut self) {
         if let Some(id) = self.selected_stamp
             && self.doc.stamp(id).is_none()
@@ -762,6 +772,18 @@ impl Session {
         let set_count = self.doc.sets.len();
         if self.active_set.index() >= set_count {
             self.active_set = TextureSetId(set_count.saturating_sub(1) as u32);
+        }
+        // objects-tabs: selected objects beyond the mesh's objects are dropped, a stale anchor / reveal cleared.
+        let objects = self.doc.mesh.object_count();
+        if self.selected_objects.last().is_some_and(|&o| o >= objects) {
+            self.selected_objects.retain(|&o| o < objects);
+            self.object_selection_rev += 1;
+        }
+        if self.object_anchor.is_some_and(|o| o >= objects) {
+            self.object_anchor = None;
+        }
+        if self.object_reveal.is_some_and(|o| o >= objects) {
+            self.object_reveal = None;
         }
     }
 
@@ -1523,6 +1545,10 @@ mod tests {
             scene_generation: 1,
             text_gap: None,
             selected_layers: Vec::new(),
+            selected_objects: Default::default(),
+            object_anchor: None,
+            object_selection_rev: 0,
+            object_reveal: None,
         };
 
         // Nothing to fix.

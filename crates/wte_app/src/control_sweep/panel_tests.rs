@@ -118,6 +118,7 @@ fn every_menu_entry_queues_its_action() {
         (&["File", "Open Sample", "Sphere"], |a, _| matches!(a, [A::OpenSample(SampleKind::Sphere)])),
         (&["File", "Open Sample", "Cube"], |a, _| matches!(a, [A::OpenSample(SampleKind::Cube)])),
         (&["File", "Open Sample", "Two Materials"], |a, _| matches!(a, [A::OpenSample(SampleKind::TwoMaterial)])),
+        (&["File", "Open Sample", "Three Objects"], |a, _| matches!(a, [A::OpenSample(SampleKind::Objects)])),
         (&["File", "Save"], |a, _| matches!(a, [A::Save])),
         (&["File", "Save As..."], |a, _| matches!(a, [A::SaveAs(None)])),
         (&["File", "Import Image as Stamp..."], |a, _| matches!(a, [A::ImportStampImage(None)])),
@@ -147,6 +148,8 @@ fn every_menu_entry_queues_its_action() {
         (&["Layer", "Delete"], |a, p| matches!(a, [A::DeleteLayer(id)] if *id == p)),
         (&["Layer", "Move Down"], |a, _| matches!(a, [A::MoveActiveLayer(-1)])),
         (&["Layer", "Export Layer..."], |a, p| matches!(a, [A::ShowExportLayers(ids)] if ids.as_slice() == [p])),
+        (&["Object", "Frame Selection"], |a, _| matches!(a, [A::FrameSelection])),
+        (&["Object", "Select All"], |a, _| matches!(a, [A::SelectAllObjects])),
         (&["Help", "Shortcuts"], |a, _| matches!(a, [A::ShowDialog(Dialog::Shortcuts)])),
         (&["Help", "About"], |a, _| matches!(a, [A::ShowDialog(Dialog::About)])),
     ];
@@ -160,6 +163,23 @@ fn every_menu_entry_queues_its_action() {
         let actions = app.menu(&["View", "Background", label]);
         assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(app.state.flags.backdrop, backdrop);
+    }
+
+    // objects-tabs: the Object menu with a selection and a hidden object.
+    let mut app = PanelApp::new(sample_state(SampleKind::Objects));
+    let session = app.state.session.as_mut().unwrap();
+    session.selected_objects = [1].into();
+    session.doc.set_hidden_objects(&[false, false, true]).unwrap();
+    app.idle(1);
+    let cases: Vec<(&[&str], ActionCheck)> = vec![
+        (&["Object", "Hide Selected"], |a| matches!(a, [A::HideSelectedObjects])),
+        (&["Object", "Isolate Selected"], |a| matches!(a, [A::IsolateSelectedObjects])),
+        (&["Object", "Show All"], |a| matches!(a, [A::ShowAllObjects])),
+        (&["Object", "Deselect All"], |a| matches!(a, [A::DeselectObjects])),
+    ];
+    for (path, check) in cases {
+        let actions = app.menu(path);
+        assert!(check(&actions), "{path:?} queued {actions:?}");
     }
 }
 
@@ -262,6 +282,24 @@ fn menu_entries_are_enabled_exactly_when_they_can_act() {
     for path in [&["File", "New from Model..."][..], &["File", "Open Project..."], &["View", "2D"], &["Help", "About"]] {
         assert!(!app.menu_entry(path).disabled, "{path:?} without a document");
     }
+    for path in [&["Object", "Hide Selected"][..], &["Object", "Show All"], &["Object", "Frame Selection"], &["Object", "Select All"]] {
+        assert!(app.menu_entry(path).disabled, "{path:?} without a document");
+    }
+
+    // objects-tabs: Hide / Isolate need a selection, Show All a hidden object, Deselect All a selection.
+    let mut app = PanelApp::new(sample_state(SampleKind::Objects));
+    let hide_isolate_show_deselect = |app: &mut PanelApp| {
+        ["Hide Selected", "Isolate Selected", "Show All", "Deselect All"].map(|e| !app.menu_entry(&["Object", e]).disabled)
+    };
+    assert_eq!(hide_isolate_show_deselect(&mut app), [false, false, false, false]);
+    assert!(!app.menu_entry(&["Object", "Frame Selection"]).disabled);
+    assert!(!app.menu_entry(&["Object", "Select All"]).disabled);
+    app.state.session.as_mut().unwrap().selected_objects = [0].into();
+    app.idle(1);
+    assert_eq!(hide_isolate_show_deselect(&mut app), [true, true, false, true]);
+    app.state.doc_mut().unwrap().set_hidden_objects(&[true]).unwrap();
+    app.idle(1);
+    assert_eq!(hide_isolate_show_deselect(&mut app), [true, true, true, true]);
 }
 
 /// Regression test of finding `merge-down-enabled-onto-locked-base`: on every new document the active "Paint 1" sits

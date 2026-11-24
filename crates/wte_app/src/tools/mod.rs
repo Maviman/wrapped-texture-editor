@@ -602,6 +602,10 @@ pub(crate) mod test_support {
             scene_generation: 1,
             text_gap: None,
             selected_layers: Vec::new(),
+            selected_objects: Default::default(),
+            object_anchor: None,
+            object_selection_rev: 0,
+            object_reveal: None,
         });
         state
     }

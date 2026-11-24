@@ -306,6 +306,10 @@ pub(crate) fn sample_state(kind: SampleKind) -> AppState {
         scene_generation: 7,
         text_gap: None,
         selected_layers: Vec::new(),
+        selected_objects: Default::default(),
+        object_anchor: None,
+        object_selection_rev: 0,
+        object_reveal: None,
     });
     state
 }

@@ -120,6 +120,28 @@ pub enum AppAction {
     UpdateStampTint(StampId, [u8; 4], Commit),
     DeleteStamp(StampId),
 
+    // ---- objects (objects-tabs; logic in `object_ops.rs`) ----
+    /// Plain click: this object only.
+    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
+    SelectObject(u32),
+    /// Ctrl-click (list) / Ctrl- or Shift-click (3D view): add the object to the selection or take it out.
+    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
+    ToggleObjectSelected(u32),
+    /// Shift-click in the list: the range from `Session::object_anchor` to this row.
+    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
+    SelectObjectRange(u32),
+    SelectAllObjects,
+    DeselectObjects,
+    /// The eye of one row: show (`true`) or hide the object.
+    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
+    SetObjectVisible(u32, bool),
+    HideSelectedObjects,
+    /// Hide every object that is not selected (and show the selected ones).
+    IsolateSelectedObjects,
+    ShowAllObjects,
+    /// Frame the selected visible objects in the 3D view (the visible model when nothing visible is selected).
+    FrameSelection,
+
     // ---- brush shape (round 4; flows in `brush_flows.rs`) ----
     /// The Brush tab's "Load...": load a model file as the brush shape (`None` = ask with the file dialog); a modal
     /// background job. The tool that was active (Brush or Eraser) gets the shape.

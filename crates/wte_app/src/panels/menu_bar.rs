@@ -1,4 +1,4 @@
-// Owner: app-panels (A4). The menu bar of ARCHITECTURE.md 8.7: File, Edit, View, Layer, Help. Every entry pushes an
+// Owner: app-panels (A4). The menu bar of ARCHITECTURE.md 8.7: File, Edit, View, Layer, Object (objects-tabs), Help. Every entry pushes an
 // `AppAction` (or changes a view setting); shortcut texts come from `shortcuts::shortcut_text`.
 
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: &str, enabled: bool, selected:
     ui.add_enabled(enabled, button).clicked()
 }
 
-/// Draws the menu bar: File, Edit, View, Layer, Help.
+/// Draws the menu bar: File, Edit, View, Layer, Object, Help.
 pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let mut actions: Vec<AppAction> = Vec::new();
     egui::MenuBar::new().ui(ui, |ui| {
@@ -26,6 +26,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
         ui.menu_button("Edit", |ui| edit_menu(ui, state, &mut actions));
         ui.menu_button("View", |ui| view_menu(ui, state, &mut actions));
         ui.menu_button("Layer", |ui| layer_menu(ui, state, &mut actions));
+        ui.menu_button("Object", |ui| object_menu(ui, state, &mut actions));
         ui.menu_button("Help", |ui| {
             if item(ui, "Shortcuts", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::Shortcuts));
@@ -48,7 +49,12 @@ fn file_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
     }
     ui.menu_button("Open Recent", |ui| recent_menu(ui, state, actions));
     ui.menu_button("Open Sample", |ui| {
-        for (label, kind) in [("Sphere", SampleKind::Sphere), ("Cube", SampleKind::Cube), ("Two Materials", SampleKind::TwoMaterial)] {
+        for (label, kind) in [
+            ("Sphere", SampleKind::Sphere),
+            ("Cube", SampleKind::Cube),
+            ("Two Materials", SampleKind::TwoMaterial),
+            ("Three Objects", SampleKind::Objects),
+        ] {
             if item(ui, label, "", true, false) {
                 actions.push(AppAction::OpenSample(kind));
             }
@@ -254,5 +260,33 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     let label = if selection.len() > 1 { format!("Export Selected Layers... ({})", selection.len()) } else { "Export Layer...".to_owned() };
     if item(ui, &label, "", has_active && !selection.is_empty(), false) {
         actions.push(AppAction::ShowExportLayers(selection));
+    }
+}
+
+/// objects-tabs (ARCHITECTURE.md 8.7): hide / isolate / show the objects of the model, frame and select them.
+fn object_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
+    let session = state.session.as_ref();
+    let has_doc = session.is_some();
+    let has_selection = session.is_some_and(|s| !s.selected_objects.is_empty());
+    let any_hidden = session.is_some_and(|s| s.doc.hidden_object_count() > 0);
+    if item(ui, "Hide Selected", "Hide Selected", has_selection, false) {
+        actions.push(AppAction::HideSelectedObjects);
+    }
+    if item(ui, "Isolate Selected", "Isolate Selected", has_selection, false) {
+        actions.push(AppAction::IsolateSelectedObjects);
+    }
+    if item(ui, "Show All", "Show All", any_hidden, false) {
+        actions.push(AppAction::ShowAllObjects);
+    }
+    ui.separator();
+    if item(ui, "Frame Selection", "Frame Selection", has_doc, false) {
+        actions.push(AppAction::FrameSelection);
+    }
+    ui.separator();
+    if item(ui, "Select All", "", has_doc, false) {
+        actions.push(AppAction::SelectAllObjects);
+    }
+    if item(ui, "Deselect All", "", has_selection, false) {
+        actions.push(AppAction::DeselectObjects);
     }
 }

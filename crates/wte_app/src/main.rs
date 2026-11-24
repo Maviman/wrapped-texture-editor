@@ -21,6 +21,7 @@ mod dnd;
 mod gpu;
 mod io_flows;
 mod jobs;
+mod object_ops;
 mod panels;
 mod prefs;
 mod selftest;

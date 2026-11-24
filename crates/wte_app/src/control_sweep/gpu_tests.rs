@@ -788,6 +788,56 @@ fn export_dialog_at_the_smallest_window_and_with_several_sets() {
     assert_eq!(a.dialog_name(), "None");
 }
 
+/// objects-tabs (plan 4.7): H during a held brush stroke ends the stroke first by committing it (one undo entry, the
+/// stroke) and then hides the selected object, which adds no undo entry, no revision and no modified mark.
+#[test]
+#[ignore = "needs a GPU"]
+fn hiding_during_a_held_stroke_commits_the_stroke_first() {
+    use crate::state::ToolKind;
+    use crate::tools::{Surface, ViewXform};
+    let mut a = FullApp::new(Some(SampleKind::Objects));
+    a.app.state.tool = ToolKind::Brush;
+    a.app.state.session.as_mut().unwrap().selected_objects = [1].into();
+    a.idle(2);
+    let xf = ViewXform::for_view(a.state(), ViewId::Main3D).expect("the 3D view is laid out");
+    let doc = a.state().doc().unwrap();
+    let cube = doc.mesh.objects[1].bounds.center();
+    let at = xf.world_to_screen(cube).expect("the cube is in front of the camera");
+    let Surface::Model(hit) = xf.surface_at(doc, TextureSetId(0), at) else { panic!("nothing under the cube's centre") };
+    assert_eq!(doc.mesh.tri_object_of(hit.tri), 1, "the cube is under its centre");
+    let undo = doc.history.undo_len();
+
+    // Press and move: the stroke is held.
+    a.hover(at);
+    a.frame(vec![Harness::button(at, egui::PointerButton::Primary, true, Modifiers::NONE)]);
+    for k in 1..=6 {
+        let p = at + egui::vec2(3.0 * k as f32, 0.0);
+        a.h.pointer = p;
+        a.frame(vec![Event::PointerMoved(p)]);
+    }
+    assert!(a.app.tools.is_busy(), "the stroke is held");
+    assert!(a.state().doc().unwrap().stroke_active());
+    let revision_before_hide = a.state().doc().unwrap().revision();
+
+    a.press(Key::H, Modifiers::NONE);
+    let doc = a.state().doc().unwrap();
+    assert!(!a.app.tools.is_busy(), "the stroke was ended");
+    assert!(!doc.stroke_active());
+    assert_eq!(doc.hidden_objects(), [false, true, false], "the cube is hidden");
+    assert_eq!(doc.history.undo_len(), undo + 1, "one undo entry: the stroke");
+    assert_eq!(doc.undo_label(), Some("Brush Stroke"));
+    assert!(doc.revision() > revision_before_hide, "the stroke was committed");
+    let (revision, modified) = (doc.revision(), doc.is_modified());
+
+    // The release after the hide does nothing more; Alt+H shows everything again without a history entry.
+    let end = a.h.pointer;
+    a.frame(vec![Harness::button(end, egui::PointerButton::Primary, false, Modifiers::NONE)]);
+    a.press(Key::H, Modifiers::ALT);
+    let doc = a.state().doc().unwrap();
+    assert_eq!(doc.hidden_object_count(), 0);
+    assert_eq!((doc.history.undo_len(), doc.revision(), doc.is_modified()), (undo + 1, revision, modified));
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The brush ring's side filter (FEATURE_BRUSH 5.11, 6.5; test A15), on the renderer alone.
 

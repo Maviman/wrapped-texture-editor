@@ -31,6 +31,8 @@ pub(crate) const ENDS_MEET_HOVER: &str = "Ends meet: the middle part shows, the 
 pub(crate) const OVERLAP_HOVER: &str = "Overlap: keeps winding like tape, the end on top";
 /// Hover text of "Project through" while it is greyed out (Wrap).
 const THROUGH_WRAP_HOVER: &str = "Used in Project mode: a wrapped stamp lies on the surface itself";
+/// objects-tabs (8.6): the Navigate options' line on a model with two or more objects.
+pub(crate) const NAVIGATE_PICK_HINT: &str = "Click an object to select it; Ctrl- or Shift-click adds or removes it.";
 
 /// The selector "On the model: Project | Wrap" (round 6). Returns the mode clicked when it differs from `mode`.
 pub(crate) fn mode_selector(ui: &mut egui::Ui, mode: SurfaceMode) -> Option<SurfaceMode> {
@@ -352,6 +354,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
         match state.tool {
             ToolKind::Navigate => {
                 help(ui, "Drag: orbit (3D) or pan (2D). Right-drag: orbit. Middle-drag or Space+drag: pan. Wheel: zoom.");
+                // objects-tabs (8.6): the click that picks an object (models with two or more objects only).
+                if state.doc().is_some_and(|d| d.mesh.object_count() >= 2) {
+                    help(ui, NAVIGATE_PICK_HINT);
+                }
             }
             ToolKind::Brush => brush_options(ui, "brush", &mut state.tools.brush),
             ToolKind::Eraser => brush_options(ui, "eraser", &mut state.tools.eraser),

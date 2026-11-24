@@ -295,6 +295,8 @@ pub(crate) fn sync_scene(cx: &mut ViewCx<'_>, force_mips: bool) -> bool {
     }
     let Some(scene) = cx.scene.as_mut() else { return false };
     scene.sync(cx.gpu, cx.renderer, &mut session.doc, force_mips);
+    // objects-tabs (8.4): the visible index buffer / wire ranges and the highlight follow visibility and selection.
+    scene.sync_objects(cx.gpu, &session.doc, &session.selected_objects, session.object_selection_rev);
     cx.state.gpu_mips_stale = scene.mips_stale();
     true
 }
@@ -516,7 +518,7 @@ fn fill_hover(state: &mut AppState, xf: &ViewXform, p: &ViewPointer) {
     state.hover = hover;
 }
 
-/// The surface point (world) of continuous texel coordinates of a set, if a triangle owns that texel.
+/// The surface point (world) of continuous texel coordinates of a set, if a visible triangle owns that texel.
 pub(crate) fn locate_px(doc: &Document, set: TextureSetId, px: Vec2) -> Option<Vec3> {
     let s = doc.set(set)?;
     if !px.is_finite() || s.width == 0 || s.height == 0 {
@@ -524,7 +526,9 @@ pub(crate) fn locate_px(doc: &Document, set: TextureSetId, px: Vec2) -> Option<V
     }
     let x = (px.x.floor() as i64).rem_euclid(s.width as i64) as u32;
     let y = (px.y.floor() as i64).rem_euclid(s.height as i64) as u32;
-    s.texel_map.locate(&doc.mesh, x, y).map(|sp| sp.position)
+    // objects-tabs: a texel owned by a hidden object has no visible surface point (outline traces, the brush ring of a
+    // 2D cursor and the hover position skip it).
+    s.texel_map.locate(&doc.mesh, x, y).filter(|sp| !doc.object_hidden(doc.mesh.tri_object_of(sp.tri))).map(|sp| sp.position)
 }
 
 /// Strokes of overlay outlines: a dark shadow under a light line.

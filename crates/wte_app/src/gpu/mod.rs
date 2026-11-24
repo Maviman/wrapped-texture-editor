@@ -191,6 +191,8 @@ mod gpu_tests {
             nearest: false,
             backdrop: Backdrop::Dark,
             brush: None,
+            all_objects: false,
+            highlight: false,
         }
     }
 

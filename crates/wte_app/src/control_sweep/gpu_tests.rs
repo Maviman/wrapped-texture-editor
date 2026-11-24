@@ -910,6 +910,8 @@ fn the_ring_at_a_cube_corner_follows_the_side_normal() {
         nearest: false,
         backdrop: Backdrop::Dark,
         brush: None,
+        all_objects: false,
+        highlight: false,
     };
     let mut render = |side_normal: Option<Vec3>, ring: bool| {
         let brush = ring.then_some(BrushRing { center: corner, radius, hardness: 1.0, side_normal });
@@ -973,4 +975,166 @@ fn the_ring_at_a_cube_corner_follows_the_side_normal() {
     for t in [main3d, main2d, preview, export_preview] {
         t.destroy(&gpu);
     }
+}
+
+/// objects-tabs (plan 5.6): the renderer leaves hidden objects out (mesh and wires) unless `all_objects`, and the
+/// highlight tints the selected visible object. The Three Objects sample: Floor 0, Cube 1, Ball 2.
+#[test]
+#[ignore = "needs a GPU"]
+fn hidden_objects_are_not_drawn_and_the_selection_is_tinted() {
+    use crate::gpu::{GpuScene, Renderer, View3dParams, ViewTargets};
+    use crate::state::{OrbitCamera, ShadingMode};
+    use std::collections::BTreeSet;
+
+    let gpu = headless_gpu();
+    let mut renderer = Renderer::new(&gpu);
+    let mut targets = ViewTargets::new(&gpu);
+    let mut doc = Document::sample(SampleKind::Objects);
+    let mut scene = GpuScene::new(&gpu, &renderer, &mut doc, 1);
+    let (w, h) = (320u32, 240u32);
+    let target = &mut targets.main3d;
+    target.ensure_size(&gpu, [w, h]);
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32));
+    let mut camera = OrbitCamera { yaw: 0.5, pitch: 0.6, ..OrbitCamera::default() };
+    camera.frame(doc.mesh.bounds);
+    let radius = camera.scene_radius(&doc.mesh.bounds);
+    let base = View3dParams {
+        view_proj: camera.view_proj(rect.aspect_ratio(), radius),
+        eye: camera.eye(),
+        shading: ShadingMode::Clay,
+        lit: true,
+        alpha_checker: false,
+        matte: None,
+        wireframe: false,
+        seams: false,
+        nearest: false,
+        backdrop: Backdrop::Dark,
+        brush: None,
+        all_objects: false,
+        highlight: false,
+    };
+    let mut rev = 0;
+    let mut render = |doc: &mut Document, hidden: [bool; 3], selected: &[u32], p: &View3dParams| {
+        doc.set_hidden_objects(&hidden).unwrap();
+        rev += 1;
+        scene.sync_objects(&gpu, doc, &selected.iter().copied().collect::<BTreeSet<u32>>(), rev);
+        renderer.render_3d(&gpu, &scene, target, p);
+        read_target(&gpu, target)
+    };
+    let wire = View3dParams { wireframe: true, ..base.clone() };
+    let full = render(&mut doc, [false; 3], &[], &base);
+    let no_cube = render(&mut doc, [false, true, false], &[], &base);
+    let floor_only = render(&mut doc, [false, true, true], &[], &base);
+    let all_objects = render(&mut doc, [false, true, false], &[], &View3dParams { all_objects: true, ..base.clone() });
+    let full_wire = render(&mut doc, [false; 3], &[], &wire);
+    let no_cube_wire = render(&mut doc, [false, true, false], &[], &wire);
+    let floor_only_wire = render(&mut doc, [false, true, true], &[], &wire);
+    let selected = render(&mut doc, [false; 3], &[1], &base);
+    let tinted = render(&mut doc, [false; 3], &[1], &View3dParams { highlight: true, ..base.clone() });
+    let tinted_hidden = render(&mut doc, [false, true, false], &[1], &View3dParams { highlight: true, ..base.clone() });
+
+    let px = |img: &[u8], p: egui::Pos2| -> [u8; 4] {
+        let i = ((p.y as u32 * w + p.x as u32) * 4) as usize;
+        [img[i], img[i + 1], img[i + 2], img[i + 3]]
+    };
+    let cube = doc.mesh.objects[1].bounds;
+    let centre = camera.project(cube.center(), rect, radius).expect("the cube is in view");
+    // Hidden: the pixel at the cube's centre shows what is behind it (here the floor), as without the ball.
+    assert_ne!(px(&full, centre), px(&no_cube, centre), "the cube is drawn when shown");
+    assert_eq!(px(&no_cube, centre), px(&floor_only, centre), "the floor behind the hidden cube");
+    assert_eq!(all_objects, full, "all_objects draws the hidden cube (the export preview)");
+    // Nothing selected and highlight off: the selection alone changes nothing.
+    assert_eq!(selected, full);
+    let [r0, _, b0, _] = px(&full, centre);
+    let [r1, _, b1, _] = px(&tinted, centre);
+    assert!(b1 as i32 - r1 as i32 > b0 as i32 - r0 as i32 + 20, "the tint is bluer: {:?} -> {:?}", px(&full, centre), px(&tinted, centre));
+    assert_eq!(tinted_hidden, no_cube, "a hidden selected object is not tinted");
+
+    // Wires: inside the cube's screen box, where the ball does not change the picture, the hidden cube's wires are
+    // gone (the image equals the floor-only one); with the cube shown its wires are there.
+    let corners: Vec<egui::Pos2> = (0..8)
+        .filter_map(|k| {
+            let c = glam::Vec3::new(
+                if k & 1 == 0 { cube.min.x } else { cube.max.x },
+                if k & 2 == 0 { cube.min.y } else { cube.max.y },
+                if k & 4 == 0 { cube.min.z } else { cube.max.z },
+            );
+            camera.project(c, rect, radius)
+        })
+        .collect();
+    let bx = egui::Rect::from_points(&corners).intersect(rect.shrink(1.0));
+    let (mut compared, mut cube_wire_px) = (0, 0);
+    for y in bx.min.y as u32..bx.max.y as u32 {
+        for x in bx.min.x as u32..bx.max.x as u32 {
+            let p = egui::pos2(x as f32, y as f32);
+            if px(&no_cube, p) != px(&floor_only, p) {
+                continue; // the ball is here
+            }
+            compared += 1;
+            assert_eq!(px(&no_cube_wire, p), px(&floor_only_wire, p), "a wire of the hidden cube at {p:?}");
+            cube_wire_px += usize::from(px(&full_wire, p) != px(&full, p) && px(&full_wire, p) != px(&no_cube_wire, p));
+        }
+    }
+    assert!(compared > 500, "{compared} pixels compared");
+    assert!(cube_wire_px > 50, "the shown cube has wires there ({cube_wire_px} pixels)");
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/selftest");
+    std::fs::create_dir_all(&dir).expect("create target/selftest");
+    for (name, img) in [("full", &full), ("no_cube_wire", &no_cube_wire), ("tinted", &tinted)] {
+        let png = wte_core::encode_png(w, h, img, wte_core::PngLevel::Fast).expect("encode png");
+        std::fs::write(dir.join(format!("gpu_objects_{name}.png")), png).expect("write png");
+    }
+    let ViewTargets { main3d, main2d, preview, export_preview } = targets;
+    for t in [main3d, main2d, preview, export_preview] {
+        t.destroy(&gpu);
+    }
+}
+
+/// objects-tabs (plan 5.1, risk 4): the cost of a visibility change on a heavy model (ABeautifulGame: 1.5 M triangles,
+/// 49 objects; budget 250 ms for the whole frame): the core's mask (`set_hidden_objects`) and the scene's visible index
+/// buffer, wire ranges and highlight (`sync_objects`). The model comes from `WTE_HEAVY_MODEL`; without it the test only
+/// says so. Prints the times (run with `--nocapture`).
+#[test]
+#[ignore = "needs a GPU and WTE_HEAVY_MODEL"]
+fn perf_visibility_toggle_on_a_heavy_model() {
+    use crate::gpu::{GpuScene, Renderer};
+    use std::collections::BTreeSet;
+    let Ok(path) = std::env::var("WTE_HEAVY_MODEL") else {
+        eprintln!("WTE_HEAVY_MODEL is not set: nothing measured");
+        return;
+    };
+    let model = wte_core::import::import_from_path(std::path::Path::new(&path), &wte_core::ImportOptions::default(), &wte_core::NoProgress)
+        .expect("the heavy model imports");
+    let choices = vec![wte_core::TextureChoice::Detected; model.mesh.sets.len()];
+    let mut doc = Document::from_import(model, choices, &wte_core::NoProgress).expect("the document builds");
+    let gpu = headless_gpu();
+    let renderer = Renderer::new(&gpu);
+    let mut scene = GpuScene::new(&gpu, &renderer, &mut doc, 1);
+    scene.sync_objects(&gpu, &doc, &BTreeSet::new(), 0);
+    let n = doc.mesh.object_count() as usize;
+    assert!(n >= 2, "the heavy model has {n} object(s)");
+    let mut rev = 0;
+    let mut worst: f64 = 0.0;
+    // Isolate two objects, hide one, show all; each with the two objects selected.
+    let selected: BTreeSet<u32> = [0, 1].into();
+    let isolate: Vec<bool> = (0..n).map(|o| o > 1).collect();
+    let mut one = vec![false; n];
+    one[0] = true;
+    for (label, hidden) in [("isolate 2", isolate), ("hide 1", one), ("show all", vec![false; n])] {
+        let t0 = Instant::now();
+        assert!(doc.set_hidden_objects(&hidden).unwrap());
+        let t1 = Instant::now();
+        rev += 1;
+        scene.sync_objects(&gpu, &doc, &selected, rev);
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll failed");
+        let t2 = Instant::now();
+        let (mask, sync) = ((t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3);
+        eprintln!(
+            "visibility toggle \"{label}\" on {} triangles / {n} objects: core mask {mask:.1} ms, scene sync {sync:.1} ms, total {:.1} ms",
+            doc.mesh.tri_count(),
+            mask + sync
+        );
+        worst = worst.max(mask + sync);
+    }
+    assert!(worst < 250.0, "a visibility change took {worst:.0} ms (budget 250 ms)");
 }

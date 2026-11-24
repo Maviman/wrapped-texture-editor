@@ -69,6 +69,10 @@ pub fn preview_widget(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, id: ViewId, rect: 
             nearest: preview.nearest,
             backdrop: preview.backdrop,
             brush: None,
+            // objects-tabs (8.5): the Preview mode leaves hidden objects out; the export dialog's preview shows every
+            // object (an export contains them all). No selection tint in either.
+            all_objects: id == ViewId::ExportPreview,
+            highlight: false,
         };
         cx.renderer.render_3d(cx.gpu, scene, cx.targets.get_mut(id), &params);
     } else {

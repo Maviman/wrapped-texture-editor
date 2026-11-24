@@ -330,16 +330,16 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `gpu/params.rs` | S | `View3dParams`, `ViewUvParams`, `BrushRing` (plain data crossing the view/gpu boundary; imports `ShadingMode` / `Backdrop` from `state.rs`) |
 | `gpu/targets.rs` | A2 | `ViewTarget` (offscreen colour + MSAA + depth, egui texture id) |
 | `gpu/textures.rs` | A2 | `SetTexture` (dirty-rect upload, mip regeneration with the mip blit pipeline) |
-| `gpu/scene.rs` | A2 | `GpuScene` (mesh buffers, wire instance buffers, per-set textures), `sync` |
-| `gpu/renderer.rs` | A2; round 4 B6 | `Renderer`: pipelines, uniforms, `render_3d`, `render_uv`; the ring's side filter |
-| `gpu/shaders/mesh.wgsl`, `lines.wgsl`, `uvview.wgsl`, `background.wgsl`, `blit.wgsl` | A2 | shaders (`include_str!`) |
+| `gpu/scene.rs` | A2; objects-tabs WP3b | `GpuScene` (mesh buffers, wire instance buffers, per-set textures), `sync`; objects-tabs: `sync_objects` (visible index buffer, wire runs per object, highlight index buffer), the pure helpers `visible_draws`, `selected_indices`, `object_runs`, `visible_runs`, `WireList` |
+| `gpu/renderer.rs` | A2; round 4 B6; objects-tabs WP3b | `Renderer`: pipelines, uniforms, `render_3d`, `render_uv`; the ring's side filter; objects-tabs: the tint pipeline |
+| `gpu/shaders/mesh.wgsl`, `lines.wgsl`, `uvview.wgsl`, `background.wgsl`, `blit.wgsl`, `tint.wgsl` | A2; `tint.wgsl` objects-tabs WP3b | shaders (`include_str!`; `tint.wgsl` = the selection tint) |
 | `view/mod.rs` | A3 | `ViewCx`, `central` (layout, two-phase update), view tab strip |
 | `view/camera.rs` | A3 | `impl OrbitCamera` (matrices, rays, orbit/pan/zoom, framing, projection) |
 | `view/view3d.rs` | A3 | 3D view: input routing, hover raycast, overlays |
 | `view/view2d.rs` | A3 | UV view: pan/zoom, cursor -> UV, overlays |
 | `view/preview.rs` | A3 | `preview_widget` (clean, self-contained orbit view; also embedded in the export dialog), Preview mode strip |
 | `view/gizmo.rs` | A3 | stamp gizmo geometry, hit-testing and drawing (3D and UV) |
-| `tools/mod.rs` | A3 | `Tool` trait, `ToolController`, `ViewXform`, `ViewPointer`, `Surface`, `Interaction` |
+| `tools/mod.rs` | A3; objects-tabs WP3b | `Tool` trait, `ToolController`, `ViewXform`, `ViewPointer`, `Surface`, `Interaction`; objects-tabs: the Navigate click that picks an object (`NavClick`, `pick_object`) |
 | `tools/brush.rs` | A3; round 4 B7 | brush + eraser: the tip of the settings, stroke pacing, the shape cursor, the wheel gestures |
 | `tools/eyedropper.rs` | A3 | eyedropper |
 | `tools/fill.rs` | A3 | fill |
@@ -5066,6 +5066,8 @@ pub struct View3dParams {
     pub matte: Option<[u8; 3]>,
     pub wireframe: bool, pub seams: bool, pub nearest: bool,
     pub backdrop: Backdrop, pub brush: Option<BrushRing>,
+    pub all_objects: bool,   // objects-tabs: draw hidden objects too (the export dialog's preview; 8.5)
+    pub highlight: bool,     // objects-tabs: draw the selection tint (Main3D only, rule in 8.5)
 }
 pub struct ViewUvParams {
     pub set: TextureSetId,
@@ -5111,8 +5113,43 @@ impl GpuScene {
     /// stale sets according to the throttling rule below (`force_mips` = regenerate now); one submit.
     pub fn sync(&mut self, gpu: &Gpu, renderer: &Renderer, doc: &mut Document, force_mips: bool);
     pub fn mips_stale(&self) -> bool;                        // any set whose level 0 is newer than its mip chain
+    /// objects-tabs: rebuilds the visible index buffer and the visible wire ranges when `doc.visibility_generation()`
+    /// changed, and the highlight index buffer when that or `selection_rev` changed; two integer compares otherwise.
+    /// `view::sync_scene` calls it every frame after `sync` with the session's `selected_objects` / `object_selection_rev`.
+    /// Logs "objects: visible geometry rebuilt in N ms (...)" on a change.
+    pub fn sync_objects(&mut self, gpu: &Gpu, doc: &Document, selected: &BTreeSet<u32>, selection_rev: u64);
+    /// Vertex buffer, index buffer and draws of a render: the visible triangles, or all with `all_objects`; `None` for an
+    /// empty mesh or when every triangle is hidden.
+    pub(crate) fn mesh_draw(&self, all_objects: bool) -> Option<(&wgpu::Buffer, &wgpu::Buffer, &[Draw])>;
+    pub(crate) fn highlight(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)>;   // vertices, indices, index count
+    /// The wire buffers and the instance ranges to draw (the visible objects' runs, or `0..n` with `all_objects`).
+    pub(crate) fn wire_all(&self, all_objects: bool) -> Option<(&wgpu::Buffer, &[Range<u32>])>;   // also wire_seams
+    pub(crate) fn wire_uv(&self, set: usize, all_objects: bool) -> Option<(&wgpu::Buffer, &[Range<u32>])>;
 }
+// objects-tabs pure helpers (unit-tested without a GPU):
+pub(crate) fn visible_draws(mesh: &MeshData, draws: &[Draw], hidden: &[bool]) -> (Vec<u32>, Vec<Draw>); // compacted per draw, empty draws dropped
+pub(crate) fn selected_indices(mesh: &MeshData, hidden: &[bool], selected: &BTreeSet<u32>) -> Vec<u32>; // mesh order
+pub(crate) fn object_runs(objects: &[u32]) -> Vec<(u32, Range<u32>)>;          // of a list sorted by object
+pub(crate) fn visible_runs(runs: &[(u32, Range<u32>)], hidden: &[bool]) -> Vec<Range<u32>>; // neighbours merged
+pub(crate) struct WireList { pub instances: Vec<LineInstance>, pub runs: Vec<(u32, Range<u32>)> }
 ```
+**Objects on the GPU** (objects-tabs, plan 5.1-5.2). `wire_instances_3d` / `wire_instances_uv_all` return `WireList`s:
+each group they build (3D all: interior, then seams + boundaries; 3D seams; UV per set: interior, then seams) is
+stable-sorted by `WireEdge::object` before it is appended, and its `object_runs` are kept (offset to the buffer). With one
+object the instance bytes are those of the build without objects (tested). The draw order of wires of different objects
+can therefore differ from earlier builds on multi-object models (plan risk 5). While nothing is hidden the mesh is drawn
+from the full index buffer with `build_draws`, and each wire buffer with one `0..n` instance range, exactly as before.
+While objects are hidden: a compacted index buffer of the visible triangles (`visible_draws`, one pass over the triangles,
+a subset of the full buffer so it always fits) with its own draws; wires are drawn as one `draw(0..4, range)` per visible
+run (neighbours merged); the UV view draws only the visible objects' UV wires (the texture is shown whole). The highlight
+is an index buffer of the selected visible objects' triangles (`selected_indices`), drawn by the **tint pipeline**
+(`tint.wgsl`: `view_only` layout, the mesh vertex buffer layout, `TriangleList`, `DepthMode::Overlay` = `LessEqual` without
+depth write, `LINE_BLEND`; the vertex shader pulls depth by the wires' `DEPTH_PULL` = 2e-4 so the tint wins against the
+mesh's own depth; the fragment colour is the constant `(0.25, 0.61, 1.0, 0.30)` in the wires' sRGB-byte convention).
+`render_3d`: backdrop, mesh from `mesh_draw(p.all_objects)`, then the tint when `p.highlight` and `highlight()` is
+`Some`, then the wires as ranges. Measured on ABeautifulGame (1.5 M triangles, 49 objects, release build, RTX 5070):
+isolating 2 objects costs 2.9 ms (core mask) + 33 ms (`sync_objects` incl. the 18 MB upload); hiding one 1.5 + 19 ms;
+Show All 2 ms (`control_sweep::gpu_tests::perf_visibility_toggle_on_a_heavy_model`, budget 250 ms).
 **Deferred stamp Preview bakes** (review round 2, finding SP-1). `io_flows::install_document` turns on
 `Document::set_defer_preview_bakes(true)`, so a gizmo drag frame, a wheel notch, a tint / size slider frame or a keystroke in a
 text stamp's content field only updates the stamp object. `view::sync_scene` calls `view::bake_stale_previews(doc,
@@ -5401,10 +5438,30 @@ impl ToolController {
 }
 ```
 
+**Objects in the views** (objects-tabs, plan 5.3-5.5). Main3D: `all_objects: false`, `highlight:
+view3d::highlight_shown(state)` = objects are selected, no stroke is open and the tool is Navigate (a tint would falsify
+the colours while painting; WP4 adds "or the Objects tab is shown"). Preview mode: `all_objects: false`, no highlight.
+The export dialog's preview (`ViewId::ExportPreview`): `all_objects: true` (an export contains every object), no
+highlight. The 2D view shows the texture whole and leaves out the UV wires of hidden objects; painting in 2D is not
+masked; no highlight in 2D. `view::locate_px` (texel -> surface point: the UV-stamp outline traced onto the model
+`uv_outline_in_3d`, the brush ring of a 2D cursor, the hover position of the 2D view) returns `None` for a texel owned by
+a hidden object, so no outline point, ring or position lands on a hidden triangle. Everything hidden: the 3D view shows
+the backdrop and tools hit nothing.
+
 **Routing (identical for both views; subject to the input gate of 8.5).** Presses are detected with
 `i.pointer.button_pressed(b) && response.contains_pointer()` (`Sense::DRAG` captures immediately, so the first dab lands on
 mouse-down). On press:
 1. RMB => Orbit (3D) / Pan (2D). MMB or Space+LMB => Pan. Tool `Navigate` + LMB => Orbit (3D) / Pan (2D).
+   objects-tabs: **a Navigate click picks an object** — a press of the logical primary button (Space+LMB is a pan) with
+   the Navigate tool in `Main3D` on a model with two or more objects remembers `NavClick { origin, mods, camera, travel }`;
+   the orbit adds each pointer delta's length to `travel`; at the release with `travel < NAV_CLICK_TRAVEL` (4 pt) the
+   camera is put back (the sub-4-pt orbit is undone) and a ray is cast at `origin` (hidden objects are passed through):
+   a hit => `SelectObject(tri_object_of(hit.tri))`, with Ctrl or Shift `ToggleObjectSelected`, and
+   `session.object_reveal = Some(object)`; a miss without a modifier => `DeselectObjects` (pushed through
+   `state.push`). `go_idle` (cancel, discard) forgets the click. Painting tools keep every click; one-object models, the
+   Preview views and the 2D view never pick, so a Navigate click there is the old zero-length orbit. The Navigate tool
+   options add the line "Click an object to select it; Ctrl- or Shift-click adds or removes it." on a model with two or
+   more objects.
 2. Otherwise LMB => `tool.press`; `true` => `Interaction::Tool`.
 Motion during a tool drag uses **every** `Event::PointerMoved` in `i.events` of the frame, not only the latest position.
 Hover: each frame the pointer is over a view, compute `Surface` once (one raycast in 3D), fill `state.hover`, call `tool.hover`.
@@ -7345,6 +7402,19 @@ new contract bindings, `object_keys_map_to_their_actions_and_stay_in_text_fields
 `control_sweep::panel_tests::{every_menu_entry_queues_its_action, menu_entries_are_enabled_exactly_when_they_can_act}` (the
 Object menu and File > Open Sample > Three Objects); GPU (ignored): `control_sweep::gpu_tests::hiding_during_a_held_stroke_commits_the_stroke_first`
 (H with the button held: one undo entry, the stroke; the hide adds none; Alt+H shows all).
+
+objects-tabs WP3b (rendering, highlight, picking): `gpu::scene::tests::{visible_draws_hold_every_visible_triangle_once_in_its_group,
+selected_indices_are_the_selected_visible_objects_triangles, object_runs_and_visible_runs,
+wire_lists_of_several_objects_are_grouped_per_object}` and, in `one_pass_uv_wires_match_the_per_set_filter_and_the_geometry_threads_match_the_serial_build`,
+the one-object lists byte-identical to the build without objects with one run per group; `gpu::renderer::tests` (`tint.wgsl`
+valid, its `ViewUniforms` layout, its `VsIn` = the position at location 0, the same `DEPTH_PULL` as the wires);
+`tools::tests::a_navigate_click_picks_an_object_and_a_drag_orbits` (3 pt = a pick with the camera restored and the row
+revealed, 5 pt = an orbit, Ctrl / Shift toggle, a plain click on nothing deselects, a hidden object is passed through,
+Esc forgets the click, no pick in Preview, 2D, with Space+LMB or on a one-object model); GPU (ignored):
+`control_sweep::gpu_tests::hidden_objects_are_not_drawn_and_the_selection_is_tinted` (Three Objects: the cube hidden shows
+the floor behind it, `all_objects` draws it again, the tint makes the cube bluer and is not drawn on a hidden object, the
+hidden cube's wires are gone inside its former screen box) and `perf_visibility_toggle_on_a_heavy_model` (reads
+`WTE_HEAVY_MODEL`; prints the core mask and `sync_objects` times, fails over 250 ms).
 
 ## 10. Work packages
 

@@ -721,6 +721,12 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         _ => None,
     };
     log::info!("document \"{}\": {} set(s), {} stamp(s)", doc.name, doc.sets.len(), doc.stamps.len());
+    // objects-tabs: the objects of the model (names of the first 24).
+    const LOGGED_NAMES: usize = 24;
+    let names: Vec<&str> = doc.mesh.objects.iter().take(LOGGED_NAMES).map(|o| o.name.as_str()).collect();
+    let more = doc.mesh.objects.len().saturating_sub(LOGGED_NAMES);
+    let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+    log::info!("objects: {} ({}{more})", doc.mesh.objects.len(), names.join(", "));
     let mut session = Session {
         doc,
         path,

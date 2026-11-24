@@ -122,18 +122,16 @@ pub enum AppAction {
 
     // ---- objects (objects-tabs; logic in `object_ops.rs`) ----
     /// Plain click: this object only.
-    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
     SelectObject(u32),
     /// Ctrl-click (list) / Ctrl- or Shift-click (3D view): add the object to the selection or take it out.
-    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
     ToggleObjectSelected(u32),
     /// Shift-click in the list: the range from `Session::object_anchor` to this row.
-    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
+    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5)")]
     SelectObjectRange(u32),
     SelectAllObjects,
     DeselectObjects,
     /// The eye of one row: show (`true`) or hide the object.
-    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5) and the 3D pick (WP3b)")]
+    #[allow(dead_code, reason = "objects-tabs contract: queued by the Objects tab (WP5)")]
     SetObjectVisible(u32, bool),
     HideSelectedObjects,
     /// Hide every object that is not selected (and show the selected ones).

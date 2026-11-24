@@ -518,9 +518,14 @@ pub(super) fn objects_path(has_path: bool) -> Vec<Step> {
         }),
         Step::Do(AppAction::SetTool(ToolKind::Navigate)),
         Step::WaitFrames(3),
-        Step::Assert("the last row is out of view", |s, _| {
+        Step::Assert("the last row is out of view (when the list scrolls)", |s, _| {
             let last = last_object(s)?;
             let list = panel_rect(s, PanelHit::ObjectsList)?;
+            // A short list (Lantern: 3 objects) shows every row: nothing to reveal, the pick is still checked.
+            if (last as f32 + 1.0) * crate::panels::objects::ROW_HEIGHT <= list.height() {
+                log::info!("objects_path: all {} rows fit in the list; the reveal is not tested", last + 1);
+                return Ok(());
+            }
             match s.panel_rects.get(&PanelHit::ObjectRow(last)) {
                 Some(r) if list.contains_rect(*r) => Err(format!("the last row {r:?} is still inside the list {list:?}")),
                 _ => Ok(()),

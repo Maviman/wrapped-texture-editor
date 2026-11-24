@@ -62,7 +62,7 @@ jobs:
 
       - name: Unit tests of the packaging-related code
         shell: cmd
-        run: .\cargo-gnu.cmd test --release --locked -p wte_app --bin wrapped_texture_editor -- gpu_check cli::
+        run: .\cargo-gnu.cmd test --release --locked -p wte_app --bin wrapped_texture_editor -- gpu_check cli::tests
 
       - name: Graphics check on the build machine (information only)
         shell: pwsh

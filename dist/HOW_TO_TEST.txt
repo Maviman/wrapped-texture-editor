@@ -146,6 +146,9 @@ On the PC (Help > Tablet companion...):
  10. Forget the tablet in the dialog: the next connection asks again.
  11. Turn every link off: the chip disappears; the editor behaves as
      before (nothing listens).
+ 12. Windows display scaling at 125 % or 150 %, editor maximized: the
+     brush outline and hovered buttons sit exactly under the S Pen tip,
+     also near the window corners.
 Please note the tablet model, the link and the app versions with anything
 that does not work, and send the log (see below).
 

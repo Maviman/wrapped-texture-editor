@@ -18,8 +18,8 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use wte_core::{
     BlobId, CloseMode, DEFAULT_FONT_FAMILY, DEFAULT_FONT_STYLE, Document, ExportOptions, FillScope, FontCatalog,
-    ImportedModel, LayerId, PixelBuf, SampleKind, StampId, SurfaceMode, TextAlign, TextPath, TextureSetId, TipAlign,
-    TipField, UvStats, Warp, WrapOptions,
+    ImportedModel, LayerId, PixelBuf, PressureDynamics, SampleKind, StampId, SurfaceMode, TextAlign, TextPath,
+    TextureSetId, TipAlign, TipField, UvStats, Warp, WrapOptions,
 };
 
 use crate::action::AppAction;
@@ -247,11 +247,20 @@ pub struct BrushSettings {
     pub offset: f32,
     /// "Follow surface" or "Fixed in space".
     pub align: TipAlign,
+    /// Branch `pen-input` (Brush tab > Pen pressure): pen pressure drives the size (default on) ...
+    pub pressure_size: bool,
+    /// ... from this fraction of the size at the lightest touch, `0..=1` (default 0.10);
+    pub pressure_size_min: f32,
+    /// pen pressure drives the flow (default off) ...
+    pub pressure_flow: bool,
+    /// ... from this fraction of the flow, `0..=1` (default 0). A mouse always paints at pressure 1.0, where both
+    /// factors are exactly 1 (ARCHITECTURE 5.19).
+    pub pressure_flow_min: f32,
 }
 
 impl Default for BrushSettings {
     /// 32 texels, hardness 0.8, opacity 1, flow 1, spacing 0.12, Circular, Ball, Solid, no rotation, no offset, Follow
-    /// surface.
+    /// surface; pen pressure drives the size from 10 % and not the flow (PEN_INPUT_PLAN D3).
     fn default() -> BrushSettings {
         BrushSettings {
             size_px: 32.0,
@@ -267,6 +276,10 @@ impl Default for BrushSettings {
             roll_deg: 0.0,
             offset: 0.0,
             align: TipAlign::Surface,
+            pressure_size: true,
+            pressure_size_min: 0.10,
+            pressure_flow: false,
+            pressure_flow_min: 0.0,
         }
     }
 }
@@ -274,7 +287,7 @@ impl Default for BrushSettings {
 impl BrushSettings {
     /// Every value forced into the range of FEATURE_BRUSH 1.4; a value that is not finite becomes the default: size
     /// `1..=2048`, hardness `0..=1`, opacity and flow `0.01..=1`, spacing `0.02..=1`, angles wrapped into `-180..=180`,
-    /// offset `-1..=1`.
+    /// offset `-1..=1`, the two pressure minimums `0..=1`.
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
     pub fn sanitized(self) -> BrushSettings {
         let d = BrushSettings::default();
@@ -300,9 +313,32 @@ impl BrushSettings {
             tilt_deg: angle(self.tilt_deg),
             roll_deg: angle(self.roll_deg),
             offset: clamp(self.offset, d.offset, -1.0, 1.0),
+            pressure_size_min: clamp(self.pressure_size_min, d.pressure_size_min, 0.0, 1.0),
+            pressure_flow_min: clamp(self.pressure_flow_min, d.pressure_flow_min, 0.0, 1.0),
             ..self
         }
     }
+
+    /// The core's pressure dynamics of these settings (branch `pen-input`).
+    pub fn dynamics(&self) -> PressureDynamics {
+        PressureDynamics {
+            size: self.pressure_size,
+            size_min: self.pressure_size_min,
+            flow: self.pressure_flow,
+            flow_min: self.pressure_flow_min,
+        }
+    }
+}
+
+/// Branch `pen-input` (PEN_INPUT_PLAN D8): where the pen pressure comes from. Windows Ink is the default and the only
+/// source unless the user picks WinTab in Help > Tablet setup. Kept in the preferences (`Prefs::tablet_input`; a value
+/// that does not read is Windows Ink).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabletInput {
+    #[default]
+    WindowsInk,
+    WinTab,
 }
 
 /// The tab of the lower area of the side panel (FEATURE_BRUSH 6.2, FEATURE_TEXT 6.1, ROUND4_PLAN 2.2 item 10). Starts
@@ -1051,6 +1087,10 @@ pub struct Prefs {
     /// not a number reads as `None`; `prefs::from_json` keeps only a finite value in `100..=2000`.
     #[serde(deserialize_with = "lenient_prefs_serde::split")]
     pub side_split: Option<f32>,
+    /// Branch `pen-input`: the pressure source (Help > Tablet setup). Read leniently: a value that does not read is
+    /// Windows Ink.
+    #[serde(deserialize_with = "lenient_prefs_serde::tablet_input")]
+    pub tablet_input: TabletInput,
 }
 
 impl Default for Prefs {
@@ -1072,6 +1112,7 @@ impl Default for Prefs {
             side_upper_tab: UpperTab::Tool,
             side_lower_tab: SideTab::Layers.pref_name().to_owned(),
             side_split: None,
+            tablet_input: TabletInput::WindowsInk,
         }
     }
 }
@@ -1321,7 +1362,7 @@ mod lenient_prefs_serde {
     use serde_json::Value;
     use wte_core::CloseMode;
 
-    use super::{BrushSettings, SideTab, UpperTab};
+    use super::{BrushSettings, SideTab, TabletInput, UpperTab};
 
     /// Brush or eraser settings: every key is taken on its own; a key whose value does not read keeps its default.
     /// Sanitized (`BrushSettings::sanitized`).
@@ -1348,6 +1389,11 @@ mod lenient_prefs_serde {
 
     /// The upper tab: a value that does not read is Tool.
     pub fn upper_tab<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UpperTab, D::Error> {
+        Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
+    }
+
+    /// The pressure source: a value that does not read is Windows Ink.
+    pub fn tablet_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<TabletInput, D::Error> {
         Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
     }
 

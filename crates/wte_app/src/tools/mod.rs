@@ -690,9 +690,20 @@ pub(crate) mod test_support {
 
     /// The pointer at `pos` in the view of `xf`, resolved to a surface.
     pub(crate) fn pointer(state: &AppState, xf: &ViewXform, pos: egui::Pos2, mods: egui::Modifiers) -> ViewPointer {
+        pointer_p(state, xf, pos, mods, 1.0)
+    }
+
+    /// `pointer` with a pen pressure (branch `pen-input`).
+    pub(crate) fn pointer_p(
+        state: &AppState,
+        xf: &ViewXform,
+        pos: egui::Pos2,
+        mods: egui::Modifiers,
+        pressure: f32,
+    ) -> ViewPointer {
         let session = state.session.as_ref().expect("session");
         let surface = xf.surface_at(&session.doc, session.active_set, pos);
-        ViewPointer { view: xf.view, pos, surface, pressure: 1.0, mods }
+        ViewPointer { view: xf.view, pos, surface, pressure, mods }
     }
 
     /// The screen position of a normalized position inside the view.

@@ -457,6 +457,32 @@ fn brush_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings) {
             .on_hover_text("Distance between dabs, % of the diameter. A thin shape needs a lower value.");
         ui.end_row();
     });
+    pen_pressure_options(ui, salt, b);
+}
+
+/// Hover text of the "Size" pressure checkbox (branch `pen-input`, PEN_INPUT_PLAN 3.2).
+pub(crate) const PEN_SIZE_HOVER: &str = "Press harder for a wider stroke. A mouse always paints at full size.";
+/// Hover text of the "Flow" pressure checkbox.
+pub(crate) const PEN_FLOW_HOVER: &str = "Press harder for more paint per dab.";
+
+/// The "Pen pressure" group under Flow and Spacing (branch `pen-input`, ARCHITECTURE 8.7): Size + its minimum, Flow +
+/// its minimum. Brush and eraser each have their own.
+fn pen_pressure_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings) {
+    ui.label(egui::RichText::new("Pen pressure").strong());
+    egui::Grid::new(("pen_grid", salt)).num_columns(2).show(ui, |ui| {
+        ui.allocate_ui_with_layout(vec2(LABEL_WIDTH, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.checkbox(&mut b.pressure_size, "Size").on_hover_text(PEN_SIZE_HOVER);
+        });
+        let min_size = percent_slider(&mut b.pressure_size_min, 0.0, 100.0).max_decimals(0).prefix("min ");
+        ui.add_enabled(b.pressure_size, min_size).on_hover_text("Min size: the size at the lightest touch, % of the brush size");
+        ui.end_row();
+        ui.allocate_ui_with_layout(vec2(LABEL_WIDTH, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.checkbox(&mut b.pressure_flow, "Flow").on_hover_text(PEN_FLOW_HOVER);
+        });
+        let min_flow = percent_slider(&mut b.pressure_flow_min, 0.0, 100.0).max_decimals(0).prefix("min ");
+        ui.add_enabled(b.pressure_flow, min_flow).on_hover_text("Min flow: the flow at the lightest touch, % of the brush flow");
+        ui.end_row();
+    });
 }
 
 fn stamp_options(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>) {

@@ -1,5 +1,10 @@
-## Unreleased (branch `companion`)
+## What's new in 0.3.0
 
+- **Pen tablets and pen displays:** pen pressure now changes the brush size (and, if you choose, the flow) in 3D and
+  2D, for painting and erasing. Turn the pen around to erase; the previous tool comes back when you turn it again.
+  Hold the lower pen button and drag to orbit (3D) or pan (2D). Settings: Tool tab > Brush options > Pen pressure.
+  Works with Windows Ink (the default in most tablet drivers); for older drivers, Help > Tablet setup > Tablet
+  input: WinTab. Mouse painting is unchanged.
 - **Tablet companion:** draw into the editor from an Android tablet (USB cable, Wi-Fi or Bluetooth). The tablet shows
   this window live and sends the pen with pressure, your fingers and the keyboard back. Help > Tablet companion...
   The tablet app "Tablet Companion" is downloaded separately from

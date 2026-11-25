@@ -1,0 +1,24 @@
+# STICKER_PLAN 8.5 regression set ("identity checks"): run with the P0 exe for the baseline and after every package.
+# sh tools/objtabs/sweep.sh EXE OUTDIR tools/sticker/jobs_identity.txt ; python -E -P tools/sticker/compare_baseline.py BASE NEW
+# Format: scenario|model|tag|size (see tools/objtabs/sweep.sh).
+smoke|-|
+default|-|
+paint3d|-|
+paint2d|-|
+stamp|-|
+text|-|
+preview|-|
+export|-|
+export_run|-|
+roundtrip|-|
+undo|-|
+layers|-|
+workflow_path|@SAMPLES@/ABeautifulGame.glb|
+wrap_surface|-|
+text_warp|-|
+export_flow|-|
+export_checks|-|
+side_tabs|-|
+objects|-|
+pen|-|
+companion|-|

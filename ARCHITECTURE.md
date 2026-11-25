@@ -7637,6 +7637,15 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `flow_min_and_size_min_are_sanitized`, `too_many_pressure_dabs_fall_back_to_one`. The existing hashes (C1, C2,
   `tests\brush_tips.rs`, `one_dab_per_call_gives_the_unpaced_stroke`, `pressure_scales_the_flow`) are unchanged.
 
+- Branch `stickers`, P0 (STICKER_PLAN 8.3, 8.5): **PSD fixtures** in `crates/wte_core/tests/fixtures/psd/` (f1-f11, 64 x 48,
+  made with PhotoCraft v0.2.0's `photocraft-cli.exe`, headless; each with PhotoCraft's merged PNG and per-layer PNGs; f1's
+  input is written by `export::write_psd` through `gen_f1/`, a separate workspace that `cargo test` never builds). Their
+  `README.md` gives every command line and what each file holds; `tools/sticker/psd_dump.py` prints a PSD's structure.
+  Read by the `psd/` tests of P5. Identity baseline (8.5): `tools/sticker/jobs_identity.txt` (the regression set) run with
+  `tools/objtabs/sweep.sh` and the P0 exe into `target\sticker\baseline\` (git-ignored), compared with
+  `tools/sticker/compare_baseline.py` (exports byte for byte, `.wtep` layer PNGs and manifest stamps / layers, screenshots
+  inside the central view rectangle); numbers in `docs/notes/sticker/baseline.md`.
+
 ### 9.2 `wte_app` tests
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
@@ -8164,3 +8173,11 @@ Desktop builder D0-D11 (notes `docs/notes/companion/`), then the Android builder
 | D7 | dialog, menu item, status chip, actions, Fit to tablet | `dialogs/companion.rs`, `panels/{menu_bar,status_bar}.rs`, `action.rs`, `dispatch.rs`, `state.rs` |
 | D8-D9 | adb watcher (checked against the emulator only); RFCOMM (compiled, never run) | `companion/{adb,bt_win}.rs` |
 | D10-D11 | `Step::Until`, scenarios `companion` / `companion_host`, docs | `selftest/*`, `ARCHITECTURE.md`, `HANDOFF.md`, `README.md`, `dist/HOW_TO_TEST.txt` |
+
+### stickers (branch `stickers`, `docs/plans/STICKER_PLAN.md` section 7)
+
+One builder and one checker per package, in order; notes `docs/notes/sticker/build-P<n>.md` and `check-P<n>.md`.
+
+| Package | Content | Main files | Check |
+|---|---|---|---|
+| P0 | baseline (tests, clippy, exe hash, the 8.5 regression outputs), `.gitattributes`, PSD fixtures f1-f11, `licenses/photocraft-MIT.txt`, the CLI-vs-GUI save comparison | `crates/wte_core/tests/fixtures/psd/`, `tools/sticker/`, `docs/notes/sticker/{baseline,pc-save-paths}.md` | only fixtures added under `crates/`, notes LF, fixtures < 400 KB, README lines reproduce them |

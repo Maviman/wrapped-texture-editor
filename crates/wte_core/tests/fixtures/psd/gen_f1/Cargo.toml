@@ -1,0 +1,17 @@
+# Generator of PSD fixture f1's input (see ../README.md). Its own workspace: not a member of the WTE workspace,
+# never built by `cargo test --workspace`.
+[package]
+name = "gen_f1"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "gen_f1"
+path = "main.rs"
+
+[dependencies]
+wte_core = { path = "../../../.." }
+fontdue = "0.9.5"
+
+[workspace]

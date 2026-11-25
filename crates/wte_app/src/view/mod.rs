@@ -339,27 +339,35 @@ pub(crate) fn wheel_events(ui: &egui::Ui) -> Vec<(f32, egui::Modifiers)> {
     })
 }
 
-/// The pointer events of this pass that the routing needs, in order.
+/// The pointer events of this pass that the routing needs, in order, each with its pen pressure (1.0 for a mouse;
+/// branch `pen-input`, `PenFrame::cursor`).
 enum PointerEvent {
-    Moved(egui::Pos2),
-    Pressed(egui::Pos2, egui::PointerButton, egui::Modifiers),
-    Released(egui::Pos2, egui::PointerButton),
+    Moved(egui::Pos2, f32),
+    Pressed(egui::Pos2, egui::PointerButton, egui::Modifiers, f32),
+    Released(egui::Pos2, egui::PointerButton, f32),
 }
 
 /// Pointer routing of an editing view (8.6), identical for `Main3D` and `Main2D`: presses, every motion event of a
 /// drag, releases, wheel and hover. `set` is the texture set a 2D view shows.
 pub(crate) fn route_pointer(ui: &egui::Ui, cx: &mut ViewCx<'_>, view: ViewId, rect: egui::Rect, response: &egui::Response) {
     let _p = crate::app::frame_profile::scope("pointer/tools/hover");
+    // Branch `pen-input`: every pointer event takes its pressure from this frame's pen notes, in order (one walker per
+    // view, so Split works); calls without an event of their own take the held contact pressure.
+    let pen = &cx.state.pen.frame;
+    let held = pen.held_pressure();
     let (events, space, mods, latest, down) = ui.input(|i| {
+        let mut walk = pen.cursor();
         let events: Vec<PointerEvent> = i
             .events
             .iter()
             .filter_map(|e| match e {
-                egui::Event::PointerMoved(pos) => Some(PointerEvent::Moved(*pos)),
+                egui::Event::PointerMoved(pos) => Some(PointerEvent::Moved(*pos, walk.take(*pos))),
                 egui::Event::PointerButton { pos, button, pressed: true, modifiers } => {
-                    Some(PointerEvent::Pressed(*pos, *button, *modifiers))
+                    Some(PointerEvent::Pressed(*pos, *button, *modifiers, walk.take(*pos)))
                 }
-                egui::Event::PointerButton { pos, button, pressed: false, .. } => Some(PointerEvent::Released(*pos, *button)),
+                egui::Event::PointerButton { pos, button, pressed: false, .. } => {
+                    Some(PointerEvent::Released(*pos, *button, walk.take(*pos)))
+                }
                 _ => None,
             })
             .collect();
@@ -375,14 +383,14 @@ pub(crate) fn route_pointer(ui: &egui::Ui, cx: &mut ViewCx<'_>, view: ViewId, re
     if !gated {
         for event in events {
             match event {
-                PointerEvent::Moved(pos) if mine(cx.tools) => {
-                    if let Some((xf, p)) = pointer_at(cx.state, view, pos, mods) {
+                PointerEvent::Moved(pos, pressure) if mine(cx.tools) => {
+                    if let Some((xf, p)) = pointer_at(cx.state, view, pos, mods, pressure) {
                         cx.tools.drag(cx.state, &xf, &p);
                         moved = true;
                     }
                 }
-                PointerEvent::Moved(_) => {}
-                PointerEvent::Pressed(pos, button, modifiers) => {
+                PointerEvent::Moved(..) => {}
+                PointerEvent::Pressed(pos, button, modifiers, pressure) => {
                     if contains && rect.contains(pos) {
                         // A released brush stroke that is still being painted is completed first, so the press is not
                         // lost to the busy check (FEATURE_BRUSH 5.10).
@@ -393,17 +401,17 @@ pub(crate) fn route_pointer(ui: &egui::Ui, cx: &mut ViewCx<'_>, view: ViewId, re
                     }
                     let logical =
                         if button == egui::PointerButton::Primary && space { egui::PointerButton::Middle } else { button };
-                    if let Some((xf, p)) = pointer_at(cx.state, view, pos, modifiers) {
+                    if let Some((xf, p)) = pointer_at(cx.state, view, pos, modifiers, pressure) {
                         cx.tools.press(cx.state, &xf, &p, logical);
                         if mine(cx.tools) {
                             cx.tools.set_drag_button(button);
                         }
                     }
                 }
-                PointerEvent::Released(pos, button) => {
+                PointerEvent::Released(pos, button, pressure) => {
                     if mine(cx.tools)
                         && cx.tools.drag_button() == button
-                        && let Some((xf, p)) = pointer_at(cx.state, view, pos, mods)
+                        && let Some((xf, p)) = pointer_at(cx.state, view, pos, mods, pressure)
                     {
                         cx.tools.release(cx.state, &xf, &p);
                     }
@@ -412,7 +420,7 @@ pub(crate) fn route_pointer(ui: &egui::Ui, cx: &mut ViewCx<'_>, view: ViewId, re
         }
         if mine(cx.tools)
             && let Some(pos) = latest
-            && let Some((xf, p)) = pointer_at(cx.state, view, pos, mods)
+            && let Some((xf, p)) = pointer_at(cx.state, view, pos, mods, held)
         {
             // A drag without motion this frame still continues (the brush carries its raycast budget over).
             if !moved {
@@ -429,7 +437,7 @@ pub(crate) fn route_pointer(ui: &egui::Ui, cx: &mut ViewCx<'_>, view: ViewId, re
         if contains {
             for (notches, modifiers) in wheel_events(ui) {
                 let Some(pos) = latest else { break };
-                let Some((xf, p)) = pointer_at(cx.state, view, pos, modifiers) else { break };
+                let Some((xf, p)) = pointer_at(cx.state, view, pos, modifiers, held) else { break };
                 let tool_first = modifiers.ctrl || modifiers.command || modifiers.shift;
                 if tool_first && cx.tools.scroll(cx.state, &xf, &p, notches) {
                     continue;
@@ -443,7 +451,7 @@ pub(crate) fn route_pointer(ui: &egui::Ui, cx: &mut ViewCx<'_>, view: ViewId, re
     if let Some(pos) = latest
         && rect.contains(pos)
         && (contains || mine(cx.tools))
-        && let Some((xf, p)) = pointer_at(cx.state, view, pos, mods)
+        && let Some((xf, p)) = pointer_at(cx.state, view, pos, mods, held)
     {
         fill_hover(cx.state, &xf, &p);
         if !gated && !cx.tools.is_busy() {
@@ -472,12 +480,18 @@ fn hover_cursor(ui: &egui::Ui, state: &AppState) {
     ui.ctx().set_cursor_icon(icon);
 }
 
-/// The view transform and the resolved pointer at `pos`.
-fn pointer_at(state: &AppState, view: ViewId, pos: egui::Pos2, mods: egui::Modifiers) -> Option<(ViewXform, ViewPointer)> {
+/// The view transform and the resolved pointer at `pos` with its pen pressure (1.0 for a mouse).
+fn pointer_at(
+    state: &AppState,
+    view: ViewId,
+    pos: egui::Pos2,
+    mods: egui::Modifiers,
+    pressure: f32,
+) -> Option<(ViewXform, ViewPointer)> {
     let xf = ViewXform::for_view(state, view)?;
     let session = state.session.as_ref()?;
     let surface = xf.surface_at(&session.doc, session.active_set, pos);
-    Some((xf, ViewPointer { view, pos, surface, pressure: 1.0, mods }))
+    Some((xf, ViewPointer { view, pos, surface, pressure, mods }))
 }
 
 /// Wheel zoom of an editing view: the 3D camera distance, or the 2D zoom about the cursor.

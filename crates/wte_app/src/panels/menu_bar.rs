@@ -31,6 +31,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             if item(ui, "Shortcuts", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::Shortcuts));
             }
+            // Branch `pen-input`: drawing tablets.
+            if item(ui, "Tablet setup", "", true, false) {
+                actions.push(AppAction::ShowDialog(Dialog::TabletHelp));
+            }
             if item(ui, "About", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::About));
             }

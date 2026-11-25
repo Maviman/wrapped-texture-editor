@@ -24,6 +24,7 @@ mod io_flows;
 mod jobs;
 mod object_ops;
 mod panels;
+mod pen;
 mod prefs;
 mod selftest;
 mod shortcuts;

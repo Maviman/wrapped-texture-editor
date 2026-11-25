@@ -50,10 +50,64 @@ pub struct BrushParams {
     pub mode: BrushMode,
     /// 3D: skip triangles whose geometric normal opposes the stroke's reference normal (default true).
     pub same_side_only: bool,
+    /// How pen pressure drives the stroke (branch `pen-input`); the default is round 3's "flow follows pressure".
+    pub dynamics: PressureDynamics,
+}
+
+/// How pen pressure (0..=1) drives a stroke (branch `pen-input`, ARCHITECTURE.md 5.19). Default = round 3 behaviour:
+/// flow follows pressure, size fixed. Both factors are exactly 1.0 at pressure 1.0, so a mouse (always 1.0) paints the
+/// same whatever the dynamics.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct PressureDynamics {
+    /// The radius follows the pressure.
+    pub size: bool,
+    /// 0..=1: fraction of the radius at pressure 0.
+    pub size_min: f32,
+    /// The per-dab strength follows the pressure.
+    pub flow: bool,
+    /// 0..=1: fraction of the flow at pressure 0.
+    pub flow_min: f32,
+}
+
+impl Default for PressureDynamics {
+    /// Size fixed, flow follows pressure from 0 (round 3).
+    fn default() -> PressureDynamics {
+        PressureDynamics { size: false, size_min: 0.0, flow: true, flow_min: 0.0 }
+    }
+}
+
+impl PressureDynamics {
+    /// Pressure changes nothing.
+    pub const OFF: PressureDynamics = PressureDynamics { size: false, size_min: 0.0, flow: false, flow_min: 0.0 };
+
+    /// The radius multiplier at `pressure`: exactly 1.0 when `!size` or `pressure >= 1.0`, else
+    /// `1 - (1 - size_min) * (1 - pressure)`.
+    #[inline]
+    pub fn size_factor(&self, pressure: f32) -> f32 {
+        if !self.size || pressure >= 1.0 { 1.0 } else { 1.0 - (1.0 - self.size_min) * (1.0 - pressure) }
+    }
+
+    /// The flow multiplier at `pressure`: exactly 1.0 when `!flow` or `pressure >= 1.0`; `pressure` itself (bit for
+    /// bit) when `flow_min == 0`, else `flow_min + (1 - flow_min) * pressure`.
+    #[inline]
+    pub fn flow_factor(&self, pressure: f32) -> f32 {
+        if !self.flow || pressure >= 1.0 {
+            1.0
+        } else if self.flow_min == 0.0 {
+            pressure
+        } else {
+            self.flow_min + (1.0 - self.flow_min) * pressure
+        }
+    }
+
+    /// Both minimums clamped to 0..=1 (NaN -> 0).
+    pub fn sanitized(&self) -> PressureDynamics {
+        PressureDynamics { size_min: unit(self.size_min), flow_min: unit(self.flow_min), ..*self }
+    }
 }
 
 impl Default for BrushParams {
-    /// Radius 16, hardness 0.8, opacity 1, flow 1, spacing 0.12, black, Paint, same side only.
+    /// Radius 16, hardness 0.8, opacity 1, flow 1, spacing 0.12, black, Paint, same side only, default dynamics.
     fn default() -> BrushParams {
         BrushParams {
             radius: 16.0,
@@ -64,6 +118,7 @@ impl Default for BrushParams {
             color: [0, 0, 0, 255],
             mode: BrushMode::Paint,
             same_side_only: true,
+            dynamics: PressureDynamics::default(),
         }
     }
 }

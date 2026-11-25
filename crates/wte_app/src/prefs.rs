@@ -226,6 +226,11 @@ mod tests {
             roll_deg: 170.0,
             offset: -0.5,
             align: wte_core::TipAlign::World,
+            // Branch `pen-input`: the pressure settings round-trip too.
+            pressure_size: false,
+            pressure_size_min: 0.35,
+            pressure_flow: true,
+            pressure_flow_min: 0.2,
             ..BrushSettings::default()
         };
         let eraser = BrushSettings { shape: ShapeChoice::Cylinder, kind: BrushType::Sphere, ..BrushSettings::default() };
@@ -235,6 +240,7 @@ mod tests {
             brush: brush.clone(),
             eraser: eraser.clone(),
             brush_shape_path: Some(shape.clone()),
+            tablet_input: crate::state::TabletInput::WinTab,
             ..Prefs::default()
         };
         remember_close(&mut prefs, &shape, CloseMode::RoundedCaps);
@@ -250,6 +256,16 @@ mod tests {
         assert_eq!((old.brush.clone(), old.eraser.clone()), (BrushSettings::default(), BrushSettings::default()));
         assert_eq!(old.recent, vec![PathBuf::from(r"E:\p\a.wtep")]);
         assert!(old.keep_backup && old.brush_shape_path.is_none() && old.brush_shape_close.is_empty());
+        // Branch `pen-input`: without the pressure keys, Size on from 10 %, Flow off; Windows Ink.
+        assert!(old.brush.pressure_size && !old.brush.pressure_flow);
+        assert_eq!((old.brush.pressure_size_min, old.brush.pressure_flow_min), (0.10, 0.0));
+        assert_eq!(old.tablet_input, crate::state::TabletInput::WindowsInk);
+        let ink = from_json(r#"{ "tablet_input": "win_tab", "brush": { "pressure_flow": true } }"#).unwrap();
+        assert_eq!(ink.tablet_input, crate::state::TabletInput::WinTab);
+        assert!(ink.brush.pressure_flow && ink.brush.pressure_size);
+        for odd in [r#"{ "tablet_input": "pressure_pad" }"#, r#"{ "tablet_input": 3 }"#, r#"{ "tablet_input": null }"#] {
+            assert_eq!(from_json(odd).unwrap().tablet_input, crate::state::TabletInput::WindowsInk, "{odd}");
+        }
 
         // A word of a later version: that brush is the default, the rest of the file is kept.
         let later = from_json(r#"{ "recent": ["x.wtep"], "brush": { "kind": "spiral" }, "eraser": { "size_px": 12 } }"#).unwrap();
@@ -260,6 +276,11 @@ mod tests {
         // Out of range: forced into range.
         let wild = from_json(r#"{ "brush": { "size_px": 10000000, "hardness": -3, "turn_deg": 900, "offset": 7 } }"#).unwrap();
         assert_eq!((wild.brush.size_px, wild.brush.hardness, wild.brush.turn_deg, wild.brush.offset), (2048.0, 0.0, 180.0, 1.0));
+        let wild = from_json(r#"{ "eraser": { "pressure_size_min": 5, "pressure_flow_min": -2, "pressure_size": "yes" } }"#).unwrap();
+        assert_eq!((wild.eraser.pressure_size_min, wild.eraser.pressure_flow_min), (1.0, 0.0));
+        assert!(wild.eraser.pressure_size, "a value that does not read keeps its default");
+        let odd = BrushSettings { pressure_size_min: f32::NAN, pressure_flow_min: f32::INFINITY, ..BrushSettings::default() };
+        assert_eq!((odd.clone().sanitized().pressure_size_min, odd.sanitized().pressure_flow_min), (0.10, 0.0));
 
         // An unknown key loads; an unknown closing mode drops only its own entry; "refuse" is never stored.
         let extra = from_json(

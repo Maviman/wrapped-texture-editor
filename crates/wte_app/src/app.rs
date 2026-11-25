@@ -154,6 +154,14 @@ impl WteApp {
             "new 3D stamps: {}",
             if state.tools.stamp.mode == wte_core::SurfaceMode::Wrap { "Wrap (WTE_STAMP_MODE=wrap)" } else { "Project" }
         );
+        // Branch `pen-input` (part D): the window-procedure subclass for pen flags, per-sample pressure and no Ink
+        // feedback; in a self-test run only with WTE_PEN_SUBCLASS=1 (to show that it does no harm). Without it an
+        // interactive run takes every touch for a pen with winit's pressure.
+        let pen_subclass = std::env::var("WTE_PEN_SUBCLASS").is_ok_and(|v| v.trim() == "1");
+        if !selftest_mode || pen_subclass {
+            let installed = crate::pen::install(cc);
+            state.pen.router.touch_is_pen = !installed && !selftest_mode;
+        }
         let runner = selftest::Runner::new(&args, Arc::clone(&exit_code));
         if let Some(path) = args.path.clone() {
             state.push(AppAction::OpenPath(path));
@@ -279,14 +287,37 @@ fn show_central(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) -> 
 
 impl eframe::App for WteApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Branch `pen-input` (ARCHITECTURE 8.3): (1) the self-test's injected input and pen records, or (2) the pen
+        // records of the window procedure; (3) the pen router pairs them with the frame's events.
         if let Some(runner) = &mut self.selftest {
-            runner.raw_input_hook(ctx, raw_input);
+            let records = runner.raw_input_hook(ctx, raw_input);
+            self.state.pen.feed.extend(records);
+            // A real pen must not reach a scenario (`WTE_PEN_SUBCLASS=1` installs the subclass in a self-test run).
+            crate::pen::discard_window_records();
+        } else {
+            crate::pen::drain_window_records(&mut self.state.pen.feed);
+        }
+        self.state.pen.route(&mut raw_input.events);
+        // Part G: the opt-in WinTab pressure (interactive runs only; nothing unless its context gives packets).
+        if self.selftest.is_none() {
+            self.state.pen.apply_wintab(&raw_input.events);
         }
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         frame_profile::frame_begin();
         self.state.frame_work.begin();
+        // Branch `pen-input` (decision D7): the pen's eraser end switches to the Eraser and back, through the normal
+        // `SetTool` dispatch, before the tools and panels see this frame's input.
+        if let Some(tool) = crate::pen::eraser_override(&mut self.state.pen, self.state.tool, self.tools.is_busy()) {
+            dispatch::dispatch(self, AppAction::SetTool(tool), frame);
+        }
+        // Part G: the "Tablet input" preference takes effect at once (never in a self-test run).
+        if !self.state.selftest
+            && let Some(text) = self.state.pen.sync_tablet_input(self.state.prefs.tablet_input)
+        {
+            self.state.toasts.info(text);
+        }
         let jobs = frame_profile::scope("jobs");
         for done in self.jobs.poll() {
             io_flows::on_job_output(self, done.output, done.cancel_requested); // may replace the session

@@ -25,6 +25,20 @@ Silent install: `Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART [/COMPONENTS
 [`.github/workflows/installer.yml`](.github/workflows/installer.yml) when a `v<version>` tag matching `Cargo.toml` is
 pushed; the installer script is [`installer/WrappedTextureEditor.iss`](installer/WrappedTextureEditor.iss).
 
+## Pen tablets
+
+- Graphics tablets and pen displays (Wacom, Huion, XP-Pen, Surface) work through **Windows Ink**: keep it on in the
+  driver (Wacom: Mapping > "Use Windows Ink"; Huion: "Enable Windows Ink"; XP-Pen: "Windows Ink"), or add the editor
+  to the driver's application list with it on.
+- Press harder for a wider stroke; Tool tab > Brush options (and Eraser options) > **Pen pressure** sets whether
+  pressure drives the size and / or the flow and their minimums. The pressure curve is set in the tablet driver.
+- Turn the pen around to erase; hold the lower pen button while the tip touches for the right mouse button (orbit in
+  3D, pan in 2D, menus). On a pen display with touch, turn touch off in the driver (or Windows' "Ignore touch input
+  when I'm using my pen"), or a resting hand acts as a mouse.
+- The status bar shows "Pen N %" while the pen touches the tablet; **Help > Tablet setup** has the details.
+- A driver without Windows Ink: Help > Tablet setup > Tablet input: **WinTab** (pressure and eraser from WinTab).
+- A mouse paints exactly as before: it always paints at full pressure.
+
 ## Develop
 
 - Build: `cargo build --release -p wte_app` → `target/release/wrapped_texture_editor.exe`

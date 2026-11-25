@@ -23,7 +23,7 @@ use std::time::Instant;
 use eframe::egui;
 use glam::{Mat3, Quat, Vec2, Vec3};
 use wte_core::{
-    BrushMode, BrushParams, BrushTip, Hit, PaintTarget, STROKE_PROBE_NAMES, StrokeCounters, StrokeStep, SurfaceReach,
+    BrushMode, BrushParams, BrushTip, Hit, PaintTarget, PressureDynamics, STROKE_PROBE_NAMES, StrokeCounters, StrokeStep, SurfaceReach,
     TextureSetId, TipAlign, TipField, TipVolume, tip_frame,
 };
 
@@ -182,11 +182,18 @@ impl StrokeClock {
     }
 }
 
-/// A walked step of the drag: a ray hit or a miss.
+/// A walked step of the drag: a ray hit with the pen pressure of the step (1.0 for a mouse), or a miss.
 #[derive(Copy, Clone, Debug)]
 enum QueuedSample {
-    Hit(Hit),
+    Hit(Hit, f32),
     Miss,
+}
+
+/// The pen pressure at the end of a walk step of length `step` towards a target `len` away (branch `pen-input`,
+/// ARCHITECTURE 8.6): the target's pressure when the step reaches it, else linear from `last_p`. Exactly `target_p`
+/// for a mouse (`1 + 0 * f`).
+pub(crate) fn walk_pressure(last_p: f32, target_p: f32, step: f32, len: f32) -> f32 {
+    if len <= step { target_p } else { last_p + (target_p - last_p) * (step / len) }
 }
 
 /// The numbers of one stroke for the log line of FEATURE_BRUSH 8.4 (P8).
@@ -225,6 +232,10 @@ struct ActiveStroke {
     radius_world: f32,
     /// 3D: brush radius on screen at the last resolved hit (points).
     ring_px: f32,
+    /// 3D: the pen pressure at `last` (1.0 for a mouse).
+    last_pressure: f32,
+    /// The stroke's pressure dynamics (from the settings at the press).
+    dynamics: PressureDynamics,
 }
 
 /// Where the ring sits on the model.
@@ -275,8 +286,9 @@ pub struct BrushTool {
     cursor_uv: Option<(TextureSetId, Vec2)>,
     /// Raycasts left in this frame.
     budget: u32,
-    /// Every pointer position of the drag that is not walked yet, with the transform of the frame it arrived in.
-    unresolved: VecDeque<(egui::Pos2, ViewXform)>,
+    /// Every pointer position of the drag that is not walked yet, with the transform of the frame it arrived in and
+    /// its pen pressure (1.0 for a mouse).
+    unresolved: VecDeque<(egui::Pos2, ViewXform, f32)>,
     /// Walked steps that are not painted yet.
     pending: VecDeque<QueuedSample>,
     /// The button of the open stroke went up.
@@ -469,6 +481,7 @@ impl BrushTool {
             mode: if state.tool == ToolKind::Eraser { BrushMode::Erase } else { BrushMode::Paint },
             // Read by the 2D stroke (`stroke_begin`) only; a 3D stroke's tip decides (`stroke_begin_with`).
             same_side_only: s.kind == BrushType::Circular,
+            dynamics: s.dynamics(),
         }
     }
 
@@ -558,23 +571,27 @@ impl BrushTool {
         self.stats.longest_sample = self.stats.longest_sample.max(dt);
     }
 
-    /// Appends a pointer position of the drag with the transform of its frame; a position within 0.001 points of
-    /// the last queued (or resolved) one is dropped.
-    fn queue_position(&mut self, pos: egui::Pos2, xf: &ViewXform) {
-        let last = self.unresolved.back().map(|(p, _)| *p).or(self.stroke.map(|st| st.last));
+    /// Appends a pointer position of the drag with the transform of its frame and its pen pressure; a position within
+    /// 0.001 points of the last queued (or resolved) one is dropped.
+    fn queue_position(&mut self, pos: egui::Pos2, xf: &ViewXform, pressure: f32) {
+        let last = self.unresolved.back().map(|(p, _, _)| *p).or(self.stroke.map(|st| st.last));
         if last.is_some_and(|l| l.distance(pos) < 1e-3) || !pos.is_finite() {
             return;
         }
-        self.unresolved.push_back((pos, *xf));
+        self.unresolved.push_back((pos, *xf, pressure));
     }
 
     /// Walks the queued screen positions from the last resolved one in steps of `max(1 pt, ring / 4)`, one raycast per
     /// step with the transform stored with the position the step leads to, at most `budget` raycasts. Each step
     /// appends a hit or a miss to `pending`.
+    ///
+    /// Branch `pen-input`: the pressure is interpolated along the walk (`walk_pressure`), and with size dynamics the
+    /// step shrinks with the thinner end of the walk (`size_factor(min(last, target))`), so a thin pen stroke gets
+    /// surface samples as dense relative to its width as a full-size one. For a mouse both are exactly as before.
     fn resolve(&mut self, state: &mut AppState, budget: &mut u32) {
         let Some(mut st) = self.stroke else { return };
         let Some(session) = state.session.as_ref() else { return };
-        while let Some(&(target, xf)) = self.unresolved.front() {
+        while let Some(&(target, xf, target_p)) = self.unresolved.front() {
             let remaining = target - st.last;
             let len = remaining.length();
             if len < 1e-3 {
@@ -584,16 +601,19 @@ impl BrushTool {
             if *budget == 0 {
                 break;
             }
-            let step = (0.25 * st.ring_px).max(1.0);
+            let factor = st.dynamics.size_factor(st.last_pressure.min(target_p));
+            let step = (0.25 * st.ring_px * factor).max(1.0);
             let next = if len <= step { target } else { st.last + remaining / len * step };
+            let pressure = walk_pressure(st.last_pressure, target_p, step, len);
             *budget -= 1;
             st.last = next;
+            st.last_pressure = pressure;
             match xf.surface_at(&session.doc, session.active_set, next) {
                 Surface::Model(hit) => {
                     if let Some(px) = xf.world_len_on_screen(hit.position, st.radius_world) {
                         st.ring_px = px;
                     }
-                    self.pending.push_back(QueuedSample::Hit(hit));
+                    self.pending.push_back(QueuedSample::Hit(hit, pressure));
                 }
                 _ => self.pending.push_back(QueuedSample::Miss),
             }
@@ -622,7 +642,7 @@ impl BrushTool {
             }
             let t0 = self.clock.now();
             let step = match sample {
-                QueuedSample::Hit(hit) => {
+                QueuedSample::Hit(hit, pressure) => {
                     let pace_dabs = !unlimited && self.clock.paces_dabs();
                     let (pace, released, frame_spent) = (self.pace, self.released, self.frame_spent);
                     let (clock, stats, frame_dabs) = (&mut self.clock, &mut self.stats, &mut self.frame_dabs);
@@ -636,7 +656,7 @@ impl BrushTool {
                         !pace_dabs || !over_limit(&pace, released, frame_spent + (clock.now() - t0), backlog)
                     };
                     let step =
-                        if self.partial { doc.stroke_resume(&mut more) } else { doc.stroke_to_3d_paced(&hit, 1.0, &mut more) };
+                        if self.partial { doc.stroke_resume(&mut more) } else { doc.stroke_to_3d_paced(&hit, pressure, &mut more) };
                     let set = hit.texture_set.unwrap_or(st.set);
                     self.ring = Some(RingAt { position: hit.position, set, facing: hit.normal, side: Some(hit.surface_normal()) });
                     self.cursor_uv = hit.texture_set.zip(hit.uv).map(|(s, uv)| (s, wrap_uv(uv)));
@@ -825,11 +845,19 @@ impl BrushTool {
         self.recent.clear();
         let ring_px = xf.world_len_on_screen(hit.position, radius).unwrap_or(8.0);
         self.stats = StrokeStats { size_px: settings(state).size_px, ring_pt: ring_px, ..StrokeStats::default() };
-        self.stroke = Some(ActiveStroke { view_3d: true, set, last: p.pos, radius_world: radius, ring_px });
+        self.stroke = Some(ActiveStroke {
+            view_3d: true,
+            set,
+            last: p.pos,
+            radius_world: radius,
+            ring_px,
+            last_pressure: p.pressure,
+            dynamics: params.dynamics,
+        });
         self.stroke_tip = Some(tip);
         self.last_xf = Some(*xf);
-        // The first sample is painted at once (as in round 3).
-        self.pending.push_back(QueuedSample::Hit(hit));
+        // The first sample is painted at once (as in round 3), with the press's pressure.
+        self.pending.push_back(QueuedSample::Hit(hit, p.pressure));
         self.paint(state, true);
         true
     }
@@ -848,7 +876,15 @@ impl BrushTool {
             doc.stroke_to_2d(set, px, p.pressure);
         }
         self.reset_stroke();
-        self.stroke = Some(ActiveStroke { view_3d: false, set, last: p.pos, radius_world: 0.0, ring_px: 0.0 });
+        self.stroke = Some(ActiveStroke {
+            view_3d: false,
+            set,
+            last: p.pos,
+            radius_world: 0.0,
+            ring_px: 0.0,
+            last_pressure: p.pressure,
+            dynamics: params.dynamics,
+        });
         self.cursor_uv = Some((set, uv));
         self.ring = state
             .doc()
@@ -1046,7 +1082,7 @@ impl Tool for BrushTool {
         }
         if st.view_3d {
             self.last_xf = Some(*xf);
-            self.queue_position(p.pos, xf);
+            self.queue_position(p.pos, xf, p.pressure);
             self.advance(state, false);
         } else {
             self.drag_2d(state, p);
@@ -1059,7 +1095,7 @@ impl Tool for BrushTool {
             return;
         }
         if st.view_3d {
-            self.queue_position(p.pos, xf);
+            self.queue_position(p.pos, xf, p.pressure);
             self.released = true;
             self.stats.released_at = Some(self.clock.now());
             self.budget = self.budget.max(self.pace.finish_raycasts);
@@ -1523,6 +1559,17 @@ mod tests {
         pace: StrokePace,
         clock: StrokeClock,
     ) -> (u64, AppState, ToolController) {
+        stroke_with_p(settings, path, &vec![1.0; path.len()], pace, clock)
+    }
+
+    /// `stroke_with` with a pen pressure per path point (branch `pen-input`).
+    fn stroke_with_p(
+        settings: BrushSettings,
+        path: &[[f32; 2]],
+        pressures: &[f32],
+        pace: StrokePace,
+        clock: StrokeClock,
+    ) -> (u64, AppState, ToolController) {
         let mut state = state_with(SampleKind::Sphere);
         state.tools.brush = settings;
         let xf = xf_3d(&mut state);
@@ -1531,17 +1578,17 @@ mod tests {
         tools.brush.clock = clock;
         let points: Vec<egui::Pos2> = path.iter().map(|p| at(&xf, p[0], p[1])).collect();
         tools.begin_frame();
-        let p = pointer(&state, &xf, points[0], egui::Modifiers::NONE);
+        let p = pointer_p(&state, &xf, points[0], egui::Modifiers::NONE, pressures[0]);
         tools.press(&mut state, &xf, &p, egui::PointerButton::Primary);
         tools.end_frame(&mut state, 0.0);
-        for pos in &points[1..] {
+        for (pos, &pressure) in points[1..].iter().zip(&pressures[1..]) {
             tools.begin_frame();
-            let p = pointer(&state, &xf, *pos, egui::Modifiers::NONE);
+            let p = pointer_p(&state, &xf, *pos, egui::Modifiers::NONE, pressure);
             tools.drag(&mut state, &xf, &p);
             tools.end_frame(&mut state, 0.0);
         }
         tools.begin_frame();
-        let p = pointer(&state, &xf, *points.last().unwrap(), egui::Modifiers::NONE);
+        let p = pointer_p(&state, &xf, *points.last().unwrap(), egui::Modifiers::NONE, *pressures.last().unwrap());
         tools.release(&mut state, &xf, &p);
         tools.end_frame(&mut state, 0.0);
         settle(&mut tools, &mut state);
@@ -2207,5 +2254,137 @@ mod tests {
             catching_up |= paced.state.status_hint == HINT_CATCHING_UP;
         }
         assert!(catching_up, "the trail over 250 ms is named in the status bar");
+    }
+
+    // ----- Branch `pen-input`, part B (PEN_INPUT_PLAN 3.4) -----
+
+    /// Every combination of the four pressure settings (minimums 0.1 / 0.6).
+    fn pressure_combinations() -> Vec<BrushSettings> {
+        let mut out = Vec::new();
+        for size in [false, true] {
+            for flow in [false, true] {
+                for (size_min, flow_min) in [(0.1, 0.0), (0.6, 0.6), (0.0, 0.3)] {
+                    out.push(BrushSettings {
+                        pressure_size: size,
+                        pressure_size_min: size_min,
+                        pressure_flow: flow,
+                        pressure_flow_min: flow_min,
+                        ..BrushSettings::default()
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// A 2D drag along `points` with a pressure per point.
+    fn drag_path_p(tools: &mut ToolController, state: &mut AppState, xf: &ViewXform, points: &[(egui::Pos2, f32)]) {
+        let p = pointer_p(state, xf, points[0].0, egui::Modifiers::NONE, points[0].1);
+        tools.begin_frame();
+        tools.press(state, xf, &p, egui::PointerButton::Primary);
+        for &(pos, pressure) in &points[1..] {
+            tools.begin_frame();
+            let p = pointer_p(state, xf, pos, egui::Modifiers::NONE, pressure);
+            tools.drag(state, xf, &p);
+        }
+        let &(pos, pressure) = points.last().unwrap();
+        let p = pointer_p(state, xf, pos, egui::Modifiers::NONE, pressure);
+        tools.release(state, xf, &p);
+        settle(tools, state);
+    }
+
+    /// Painted texels (alpha > 0) of every layer above Base, and the tallest painted column of set 0's paint layer.
+    fn painted_texels(state: &AppState) -> (usize, usize) {
+        let doc = state.doc().unwrap();
+        let count = doc
+            .sets
+            .iter()
+            .flat_map(|s| s.layers.iter().skip(1))
+            .map(|l| match &l.kind {
+                LayerKind::Raster(buf) => buf.data.chunks(4).filter(|p| p[3] > 0).count(),
+                _ => 0,
+            })
+            .sum();
+        let LayerKind::Raster(paint) = &doc.sets[0].layers[1].kind else { return (count, 0) };
+        let (w, h) = (paint.width as usize, paint.height as usize);
+        let tallest = (0..w).map(|x| (0..h).filter(|&y| paint.data[(y * w + x) * 4 + 3] > 0).count()).max().unwrap_or(0);
+        (count, tallest)
+    }
+
+    /// PEN B1: a mouse stroke (pressure 1.0) gives the same pixels whatever the four pressure settings, in 3D and in 2D.
+    #[test]
+    fn a_mouse_stroke_is_unchanged_by_the_pressure_settings() {
+        let (want3, ..) = stroke_with(small_brush(), &CORNER, unlimited(), StrokeClock::default());
+        let two_d = |settings: BrushSettings| {
+            let mut state = state_with(SampleKind::Sphere);
+            state.tools.brush = settings;
+            let xf = xf_2d(&mut state);
+            let mut tools = ToolController::new();
+            drag_path(&mut tools, &mut state, &xf, &[at(&xf, 0.3, 0.45), at(&xf, 0.5, 0.5), at(&xf, 0.7, 0.52)]);
+            paint_hash(&state)
+        };
+        let want2 = two_d(BrushSettings::default());
+        for s in pressure_combinations() {
+            let (h3, ..) = stroke_with(BrushSettings { size_px: 6.0, ..s.clone() }, &CORNER, unlimited(), StrokeClock::default());
+            assert_eq!(h3, want3, "3D differs with {s:?}");
+            assert_eq!(two_d(s.clone()), want2, "2D differs with {s:?}");
+        }
+    }
+
+    /// PEN B2: the pointer's pressure reaches the 3D and the 2D stroke: at 0.25 with Size on the stroke is thinner.
+    #[test]
+    fn pen_pressure_reaches_the_3d_and_2d_stroke() {
+        let settings = BrushSettings { size_px: 24.0, pressure_size: true, pressure_size_min: 0.0, ..BrushSettings::default() };
+        let two_d = |pressure: f32| {
+            let mut state = state_with(SampleKind::Sphere);
+            state.tools.brush = settings.clone();
+            let xf = xf_2d(&mut state);
+            let mut tools = ToolController::new();
+            let points: Vec<_> = (0..=8).map(|i| (at(&xf, 0.3 + 0.05 * i as f32, 0.5), pressure)).collect();
+            drag_path_p(&mut tools, &mut state, &xf, &points);
+            painted_texels(&state)
+        };
+        let ((n_light, h_light), (n_full, h_full)) = (two_d(0.25), two_d(1.0));
+        assert!(n_light > 0 && n_light < n_full / 2, "2D: {n_light} vs {n_full} texels");
+        assert!(h_light < h_full, "2D: column {h_light} vs {h_full}");
+        let three_d = |pressure: f32| {
+            let path = [[0.40, 0.45], [0.50, 0.45], [0.60, 0.47]];
+            let (_, state, _) = stroke_with_p(settings.clone(), &path, &[pressure; 3], unlimited(), StrokeClock::default());
+            painted_texels(&state).0
+        };
+        let (light, full) = (three_d(0.25), three_d(1.0));
+        assert!(light > 0 && light < full / 2, "3D: {light} vs {full} texels");
+    }
+
+    /// PEN B3: the walk interpolates the pressure linearly and lands on the target's pressure.
+    #[test]
+    fn pressure_is_interpolated_along_the_walk() {
+        assert_eq!(walk_pressure(0.2, 0.8, 5.0, 4.0), 0.8, "the step reaches the target");
+        assert_eq!(walk_pressure(0.2, 0.8, 4.0, 4.0), 0.8);
+        assert!((walk_pressure(0.2, 0.8, 1.0, 4.0) - 0.35).abs() < 1e-6);
+        assert!((walk_pressure(1.0, 0.0, 3.0, 4.0) - 0.25).abs() < 1e-6);
+        for (step, len) in [(1.0f32, 4.0f32), (0.3, 7.7), (2.0, 2.5), (9.0, 1.0)] {
+            assert_eq!(walk_pressure(1.0, 1.0, step, len).to_bits(), 1.0f32.to_bits(), "a mouse stays at 1.0 exactly");
+        }
+    }
+
+    /// PEN B4 (A4-style): a pen stroke with varying pressure gives the same pixels with unlimited pace and with one dab
+    /// per frame.
+    #[test]
+    fn a_pen_stroke_does_not_depend_on_the_pacing() {
+        let settings = BrushSettings { size_px: 24.0, spacing: 0.03, pressure_flow: true, ..BrushSettings::default() };
+        let path = [[0.40, 0.40], [0.50, 0.42], [0.60, 0.40], [0.60, 0.50], [0.60, 0.60]];
+        let pressures = [0.15, 0.5, 1.0, 0.3, 0.7];
+        let (reference, ..) = stroke_with_p(settings.clone(), &path, &pressures, unlimited(), StrokeClock::default());
+        let (mouse, ..) = stroke_with(settings.clone(), &path, unlimited(), StrokeClock::default());
+        assert_ne!(reference, mouse, "the pressures changed the stroke");
+        let slow = StrokePace { soft: 0.0, frame_cap: 0.0, ..StrokePace::default() };
+        let (hash, _, tools) =
+            stroke_with_p(settings.clone(), &path, &pressures, slow, StrokeClock::PerDab { per_dab: 1.0, now: 0.0 });
+        assert_eq!(hash, reference, "one dab per frame");
+        assert_eq!(tools.brush.stats.most_dabs_in_frame, 1);
+        let one = StrokePace { raycasts_per_frame: 1, finish_raycasts: 1, ..unlimited() };
+        let (hash, ..) = stroke_with_p(settings, &path, &pressures, one, StrokeClock::default());
+        assert_eq!(hash, reference, "one raycast per frame");
     }
 }

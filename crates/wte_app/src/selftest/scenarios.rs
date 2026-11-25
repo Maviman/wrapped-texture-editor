@@ -30,6 +30,7 @@ use crate::tools::{Surface, ViewXform};
 use crate::view::gizmo::{self, GizmoShape};
 
 mod objects;
+mod pen;
 mod side_tabs;
 
 /// Every scenario `scenario` accepts, in the order of the 8.11 table.
@@ -85,6 +86,7 @@ const NAMES: &[&str] = &[
     "objects",
     "objects_path",
     "objects_flow_path",
+    "pen",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -161,6 +163,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "objects" => objects::objects(),
         "objects_path" => objects::objects_path(args.path.is_some()),
         "objects_flow_path" => objects::objects_flow_path(args.path.is_some()),
+        "pen" => pen::pen(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -3879,6 +3882,7 @@ fn dialog_name(dialog: &Dialog) -> &'static str {
         Dialog::Message { .. } => "Message",
         Dialog::About => "About",
         Dialog::Shortcuts => "Shortcuts",
+        Dialog::TabletHelp => "TabletHelp",
         Dialog::CloseOpenings(_) => "CloseOpenings",
     }
 }
@@ -9275,7 +9279,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 51);
+        assert_eq!(scenario_names().len(), 52);
     }
 
     #[test]

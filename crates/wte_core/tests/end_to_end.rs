@@ -890,6 +890,7 @@ fn random_brush(rng: &mut XorShift, radius: f32) -> BrushParams {
         color: [rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8, 128 + (rng.next_u32() % 128) as u8],
         mode: if rng.next_u32().is_multiple_of(5) { BrushMode::Erase } else { BrushMode::Paint },
         same_side_only: !rng.next_u32().is_multiple_of(4),
+        dynamics: wte_core::PressureDynamics::default(),
     }
 }
 

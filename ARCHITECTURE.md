@@ -264,6 +264,39 @@ pen module and the frame order (2.2, 8.3), the views and the brush queue (8.5, 8
 (8.11 `Step::Pen`, scenario `pen`), the pitfalls (8.13), the tests (9.1, 9.2). A mouse always reports pressure 1.0, where
 both pressure factors are exactly 1.0 and the constant-step spacing is used: mouse strokes are bit-identical to `main`.
 
+### 1.11 Tablet companion (branch `companion`, `docs/plans/COMPANION_PLAN.md`)
+
+Goal: draw into the app from an Android tablet (the user's Galaxy Tab S8 Ultra with S Pen). The tablet shows the app's own
+window live and sends pen, finger and keyboard input back; the tablet app is a thin client, so a desktop update needs no
+tablet update. The tablet app "Tablet Companion" lives in its own repository (https://github.com/Maviman/tablet-companion;
+user decision after the plan: nothing Android in this repo, the APK is released there). Wire protocol v1:
+`docs/protocol/COMPANION_PROTOCOL.md` + `docs/protocol/fixtures/v1/` (a byte-identical copy lives in the tablet repo's
+`protocol/`; any change is made in both repos in the same step and recorded in `docs/notes/companion/protocol-changes.md`
+and the tablet repo's `protocol/CHANGES.md`). Notes `docs/notes/companion/`.
+
+| # | Decision |
+|---|---|
+| C1 | The picture comes from `ctx.request_screenshot` (egui-wgpu capture), never an OS screen grab. |
+| C2 | Changed 64-px cells as JPEG rectangles (`wte_core::encode_jpeg`); no new crate. |
+| C3 | Pull model: at most `window` unacknowledged frames (USB / Wi-Fi 2, Bluetooth 1); diff against the last sent picture; nothing is sent while nothing changes. |
+| C4 | The remote pen is a synthetic `Event::Touch` + `PenRecord` (`REMOTE_PEN_ID`) fed to the existing `PenRouter`: pressure, eraser, barrel and hover behave as a local Windows Ink pen. |
+| C5 | Fingers are sent raw; the desktop maps gestures: one finger orbits / pans in a view and clicks elsewhere, two fingers pan, a pinch zooms. |
+| C6 | One tablet at a time (another one gets BUSY; the same tablet replaces its session). |
+| C7 | Pointer arbiter: whoever presses first (local or remote) holds the pointer until release. |
+| C8 | Mutual HMAC-SHA256 challenge on every connection with a per-tablet 32-byte token; SHA-256 / HMAC / PBKDF2 implemented locally (`companion/crypto.rs`). |
+| C9 | The stream is authenticated at connect but not encrypted (stated in the dialog, Help and README). |
+| C10 | Pairing: an 8-character code (PBKDF2 100,000) for Wi-Fi; an Allow click for USB / Bluetooth; unknown tablets only while the dialog is open. |
+| C11 | USB = `adb reverse` run by the app with an adb.exe it finds (platform-tools not bundled). |
+| C12 | Ports: TCP 47800, UDP 47801 (Wi-Fi discovery only); tests 47811 or ephemeral. |
+| C13 | Self-test runs bind 127.0.0.1 only, never UDP, Bluetooth or adb (except the serial in `WTE_COMPANION_ADB_SERIAL`), and ignore the prefs (`server::bind_plan`, unit-tested). |
+| C14 | Bluetooth RFCOMM (`companion/bt_win.rs`) is compiled and layout-tested but never executed by agents. |
+| C15 / C16 | Android toolchain and debug signing: see the tablet repo. |
+
+Traceability: modules (2.2), no new crate (3), `encode_jpeg` (5.22), prefs (8.9), the frame hooks (8.3), the menu and
+status chip (8.7), the dialog (8.8), `Step::Until` and the scenarios `companion` / `companion_host` (8.11), pitfalls
+20-22 (8.13), the design (8.14), tests (9.2). With every link off nothing is opened and `Companion::inject` / `logic`
+return at once: the app is unchanged (regression shots identical, `docs/notes/companion/d5-d11.md`).
+
 ---
 
 ## 2. Workspace layout
@@ -427,6 +460,17 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `pen/wintab.rs` | pen-input part G | opt-in WinTab: pure `wintab_state`, `spread`, `apply` (WinTab pressure over the frame's pointer notes, `WintabRamp`); Windows: run-time loaded `wintab32.dll` (`open`, `close`, `poll`, `status`, `on_message` for `WT_PACKET` / `WT_PROXIMITY` / `WM_ACTIVATE`), `LOGCONTEXTW` (212 bytes), `AXIS`, `Packet` (12 bytes) |
 | `pen/win.rs` | pen-input (Windows only) | the window-procedure subclass (`install`, `pen_wndproc`): pen history -> records (`Shared::push_history`, `leave`, `drain_into`), `WM_TABLET_QUERYSYSTEMGESTURESTATUS`, Ink pen feedback off, `MicrosoftTabletPenServiceProperty`; `POINTER_INFO` / `POINTER_PEN_INFO` (`raw-dylib` user32) |
 | `selftest/scenarios/pen.rs` | pen-input | the scenario `pen` (8.11) |
+| `companion/mod.rs` | companion | `Companion` (owned by `WteApp`): start / stop (`apply_prefs`, `start_test`), `inject` (raw input hook), `logic` (events, pairing window, undo / redo, fit, STATE, CURSOR, capture, `AppState::companion`), `command` (`CompanionAction`), `fit_size` |
+| `companion/{crypto,proto,auth,encode}.rs` | companion | pure: SHA-256 / HMAC / PBKDF2 / code / OS random; wire messages, `FrameReader`, key table; handshake, `PairingWindow`, `PairedTablet`; RGB, cell diff, rectangles, JPEG tiles, refine, link profiles, `RateController` |
+| `companion/server.rs` | companion | `bind_plan` (C13), `Link`, `Hub` (UI <-> session threads), `Server` (listeners), `run_session` (handshake, reader), `run_writer` (STATE, FRAME, REFINE, CURSOR) |
+| `companion/capture.rs` | companion | the capture scheduler (UI thread) and the poller thread (`device.poll`) |
+| `companion/input.rs` | companion | `InputStage`: remote PEN / TOUCH / KEY / TEXT / MODS -> egui events and `PenRecord`s; arbiter; gestures; session end |
+| `companion/{discovery,adb,client}.rs` | companion | UDP responder (Wi-Fi only); adb search / `devices -l` parser / watcher (`CREATE_NO_WINDOW`); `TestClient` (tests and the `companion` scenario) |
+| `companion/bt_win.rs` | companion (Windows only) | RFCOMM listener through `raw-dylib` `ws2_32` (never run by agents, C14) |
+| `dialogs/companion.rs` | companion | Help > Tablet companion (`Dialog::Companion`) |
+| `selftest/scenarios/companion.rs` | companion | the scenarios `companion` and `companion_host` (8.11) |
+| `docs/protocol/` (repo root) | companion | the wire spec v1 and its golden fixtures (also in the tablet repo's `protocol/`) |
+| `tools/companion/` (repo root) | companion | `check_handshake.py` (fixture crypto cross-check), `regress.sh` + `compare_regress.py` (companion off = unchanged), `host_probe.py` (a Python tablet for `companion_host`) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
 | `selftest/scenarios.rs` | A6 | canned scenarios (the scaffold stub already contains the action-only smoke scenarios of section 8.11) |
 
@@ -572,6 +616,10 @@ wte_app does not depend on `image`/`png` directly: all encoding and decoding goe
 Branch `pen-input`: no new dependency. The window handle comes through `eframe::CreationContext: HasWindowHandle` with the
 trait re-exported by wgpu (`eframe::wgpu::rwh`, raw-window-handle 0.6.2, the one version in `Cargo.lock`); the Windows
 calls of `pen/win.rs` are `#[link(name = "user32", kind = "raw-dylib")]` imports, as in `gpu_check.rs` / `main.rs`.
+
+Branch `companion`: no new dependency (`Cargo.lock` unchanged). JPEG goes through `wte_core::encode_jpeg` (the `image`
+crate's "jpeg" feature, already a `wte_core` dependency); crypto is local code; the OS random generator
+(`BCryptGenRandom`) and Winsock RFCOMM (`ws2_32`) are `raw-dylib` imports; adb is a separate program found at run time.
 
 `main.rs` starts with `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` (release = no console; debug keeps one).
 No `build.rs`, no resource file: the window icon is set at runtime (`ViewportBuilder::with_icon`).
@@ -2721,6 +2769,9 @@ pub fn decode_image(bytes: &[u8], name_hint: Option<&str>, max_dim: u32) -> Resu
 #[derive(Copy, Clone, PartialEq, Eq, Debug)] pub enum PngLevel { Fast, Balanced, High }
 /// RGBA8, non-interlaced, straight alpha. `rgba.len() == width*height*4`.
 pub fn encode_png(width: u32, height: u32, rgba: &[u8], level: PngLevel) -> Result<Vec<u8>, ImageIoError>;
+// Branch companion: baseline JPEG of an RGB buffer (quality 1..=100; the companion's picture tiles). Errors as encode_png
+// (wrong length, zero size).
+pub fn encode_jpeg(width: u32, height: u32, rgb: &[u8], quality: u8) -> Result<Vec<u8>, ImageIoError>;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum FlatFormat { Png(PngLevel), Jpeg { quality: u8, matte: [u8; 3] }, Tga, Bmp, Tiff, WebpLossless }
@@ -4967,12 +5018,15 @@ impl eframe::App for WteApp {
         pen::drain_window_records(&mut self.state.pen.feed);
         self.state.pen.route(&mut raw.events);
     }
+    // branch companion (8.14), between the records and the router: self.companion.inject(ctx, raw, &mut self.state)
+    // (the tablet's input; returns at once without a server, touches nothing without a session)
     fn logic(&mut self, ctx, frame) {
         // branch pen-input (D7): the eraser end, through the normal SetTool dispatch, before tools and panels see input
         if let Some(tool) = pen::eraser_override(&mut self.state.pen, self.state.tool, self.tools.is_busy()) {
             dispatch::dispatch(self, AppAction::SetTool(tool), frame) }
         for done in self.jobs.poll() { io_flows::on_job_output(self, done.output, done.cancel_requested) } // may replace the session
         self.state.busy = self.jobs.busy();
+        self.companion.logic(ctx, &mut self.state, &self.gpu.device, self.tools.is_busy()); // branch companion (8.14)
         if let Some(r) = &mut self.selftest { r.tick(ctx, &mut self.state, &self.gpu, self.tools.is_busy()) }
         io_flows::handle_close_request(self, ctx);                            // CancelClose + prompt / "please wait" (8.9)
         io_flows::update_title(self, ctx);                                    // sends Title only when the text changed (8.9)
@@ -6324,6 +6378,15 @@ change their own fields directly and push actions; they close only through actio
 `ImportCreate`, `RunExport`, `ConfirmPending`, `SaveThen`, `Cancel`). Dialogs never call `rfd` and never read keys: Esc reaches
 them as `AppAction::Cancel` (`ModalResponse::should_close()` may be used for the click-on-backdrop case of Message / About).
 
+- **Tablet companion** (branch `companion`, `dialogs/companion.rs`, `Dialog::Companion`, Help > Tablet companion...):
+  where the tablet app comes from (Tablet Companion, github.com/Maviman/tablet-companion/releases); while connected
+  "Connected: <name> (<link>)" with [Disconnect] and [Fit to tablet] / [Restore window size]; the switches "USB cable"
+  (adb line; "No adb found" adds the platform-tools text and [Browse for adb.exe...]), "Wi-Fi" (PC name, LAN address,
+  port), "Bluetooth" (adapter line); Pairing (the code while Wi-Fi is on, "<name> wants to connect" [Allow] [Deny]);
+  Paired tablets with [Forget]; Options ("Let the tablet resize this window to its shape", Fingers: navigate / mouse,
+  Port); the fixed security text (`SECURITY_TEXT`, C9); [Close]. Switches, Allow / Deny, Forget, Disconnect, Fit and
+  Port push `AppAction::Companion`; the switches are disabled in self-test runs. While it is open the pairing window is
+  open (C10). `TABLET_HELP` (Tablet setup) has a seventh paragraph pointing to it.
 - **Tablet setup** (branch `pen-input`, `dialogs/tablet.rs`, `Dialog::TabletHelp`, Help > Tablet setup): heading, the six
   paragraphs of `TABLET_HELP` (Windows Ink in the Wacom / Huion / XP-Pen drivers; per-application setting; where the
   Pen pressure options are and that the curve is the driver's; eraser end, barrel button held while the tip touches =
@@ -6679,6 +6742,12 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
   four pressure keys of `brush` / `eraser` (`pressure_size`, `pressure_size_min`, `pressure_flow`,
   `pressure_flow_min`; a file without them gives Size on from 10 %, Flow off; out-of-range minimums are clamped) and
   `tablet_input` (`"windows_ink"` | `"win_tab"`; anything else reads as Windows Ink).
+  Branch `companion`: `companion` (`CompanionPrefs`, read leniently: an entry that does not read is the default): `usb`,
+  `wifi`, `bluetooth` (all false), `port` (47800; 0 reads as 47800), `adb_path`, `desktop_id` (32 hex digits, made the
+  first time a link is turned on), `paired` (`{ id, name, token, added }`; the token is stored as hex in plain text in
+  this per-user file), `allow_resize` (true), `fingers` (`"navigate"` | `"mouse"`). Never read or written in self-test
+  runs. A pairing is saved at once; link switches and the port are saved when changed. The wire protocol is
+  `docs/protocol/COMPANION_PROTOCOL.md`.
 
 Round 4 (S2): `prefs.json` (round 4): `brush`, `eraser`, `brush_shape_path`, `brush_shape_close` (B5 reads `brush` and `eraser`
 leniently and sanitized). `brush_flows::sync_prefs` copies the tool settings in directly before every write.
@@ -7025,6 +7094,11 @@ counted down) instead of failing (`export_errors`).
 | `objects_path` PATH | objects-tabs WP6 (plan 8.2; `selftest/scenarios/objects.rs`). PATH = a model with several objects (gate: `ABeautifulGame.glb`); opened and accepted (`open_and_accept`); the Objects tab; a click on the first row; `object_reveal` of the last row, a Ctrl-click on it; the frame clock reset, Shift+H; Shift+F (`Shot("isolated")`); `object_reveal = Some(0)` (the list back at the top), Navigate, a click on the best-facing grid point (`best_spots`) whose ray hits the last object; Brush (green): a warm-up stroke and, with the frame clock reset, a second stroke (`hit_stroke` 0 and 1); Alt+H | at least two objects (a clear failure otherwise), unique non-empty names, counts add up (the count is logged); at most `list height / ROW_HEIGHT + 2` rows laid out, the footer drawn; the selection is the first and the last object; after Shift+H exactly those two are visible and no frame of UI work took 250 ms or more (`VISIBILITY_FRAME_MS`); Shift+F puts the camera target on the selection's centre; before the pick the last row is out of the list; the pick selects only the last object and its row lies inside the list (revealed); each stroke makes one undo entry, no frame of the second took more than 140 ms (`BRUSH_FRAME_MS`, ROUND5 B4); Alt+H shows everything |
 | `objects_flow_path` PATH | objects-tabs completeness critic (`selftest/scenarios/objects.rs`). PATH = a model with several objects whose largest-footprint object (the board) has a texture set of its own (gate: `ABeautifulGame.glb`). The user's workflow: the board (largest x/z footprint) hidden from its row (revealed) with H; the piece (first object named "pawn", else the largest other one) selected from its row, Shift+F; a Navigate click where only the hidden board is, then on the piece; Brush (green, +2 size steps): a stroke from the piece's centre out to a point whose ray hits the board when shown and nothing now (`Shot("piece_selected")`); a projected image stamp (size 0.4) on the piece; a wrapped stamp with "jump small gaps" low on the piece; a text on the piece; Navigate (`Shot("designed")`), Preview (`Shot("preview")`); Save As, reopen (`Shot("reopened")`); export the piece's paint layer (per-layer PNG) and every set's flattened PNG; Show all; then the piece hidden and a 6 px stroke on its screen centre | the board-only sets exist; rays straight down over the board hit it when shown, none while hidden (also after the reopen); hiding is view state; the miss deselects, the pick selects the piece; the stroke changes the piece's sets and one undo entry; every stamp / text inks the piece's sets and no layer of a board-only set; the wrapped stamp is a new Wrap placement with jump gaps; the board-only sets' composites never change while it is hidden; the tint is shown with Navigate; after the reopen: the board hidden, one toast names it, not modified, nothing selected, structure and composites as saved; the layer PNG equals the layer and has ink; 15 flattened PNGs verified (`verify_export`, the hidden board's set included); Show all brings the board's ray hits back; with the piece hidden the stroke paints the object behind it (sets disjoint from the piece's), leaves the piece's sets unchanged and ends with "Brush Stroke" |
 | `pen` | Branch pen-input (`selftest/scenarios/pen.rs`; recorded pen samples through `Step::Pen`, never OS input). The Sphere sample; the brush at 40 texels, hardness 1, flow 1, pressure Size on (min 0), Flow off; in 2D a pen stroke along the row v = 0.5 from u 0.15 to 0.85 with pressure 0.1 -> 1.0 (`Shot("pen_ramp")`); undo; the same path as a mouse `Pointer` and as a pen at pressure 1.0; Size off, Flow on (min 0), flow 0.5: pen strokes at constant 0.2 (v 0.3) and 1.0 (v 0.7); in 3D pen strokes at 0.25 and 1.0, the mouse stroke of the same path, a light stroke beside it (`Shot("pen_3d")`); in 2D a mouse patch, then the inverted pen (two hover samples, a stroke across the patch); a barrel drag in 3D; a pen tap on the name of the Base row; a 3D pen ramp 0.05 -> 1.0 for the final shot; Help > Tablet setup opened (`Shot("tablet_help")`) and closed | no readout before the pen; the 2D column near 20 % of the ramp is less than half as tall as near 90 % and the end column is 40 +- 3 texels; "Pen N %" was the readout in a contact frame; after the Leave no readout, the pen seen; 2D and 3D: pen at 1.0 == mouse (paint hash); the 0.2 row is fainter than the 1.0 row and not empty; 3D: 0 < texels(0.25) < texels(1.0) / 2; the eraser end: the patch centre has alpha 0, the tool was the Eraser in every contact frame, the history label is "Erase", one frame after the step the Brush is back; the barrel drag turned the camera and painted nothing; the tap selected Base; the dialog opens and closes |
+| `companion` | Branch companion (`selftest/scenarios/companion.rs`; loopback only, no Android). Sphere, 2D, brush as `pen`. `CompanionAction::StartTest` (127.0.0.1:0, auto-allow); a `TestClient` thread ("Galaxy Tab S8 Ultra (test)", USB, confirm mode) gets the KEY frame (= the window's surface size); shot `companion_dialog`; a 2D pen ramp 0.1 -> 1.0 (`assert_ramp`, contact frames); an eraser-flag stroke (centre erased, Eraser in every contact frame, Brush back); ACTION Undo (ramp whole); 3D barrel drag (camera turned, no paint); two-finger pinch (camera distance smaller); KEY H + TEXT "h", TEXT "i", Backspace into the Text tool's content field after TEXT_WANTED (content "h"); half a stroke and the cable pulled (no button down, no contact, one undo step, chip "Tablet: waiting"). Each input step waits with `Step::Until` until a FRAME's `last_input_seq` confirms it. Final screenshot: the ramp and the cut-off stroke. |
+| `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
+
+Branch `companion`: `Step::Until(label, fn(&AppState, &Scratch) -> Result<bool, String>)` waits, one check per frame
+and at most the step timeout, for a condition set from outside the frame loop (the test tablet's thread); `Err` fails.
 
 Gate 3 added named mid-run captures (`Step::Shot`) for the report:
 `brush_shape` `_dialog` (the closing dialog), `text_tab` `_page_character` / `_page_warp` / `_page_path`, `text_fonts`
@@ -7092,6 +7166,70 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
     per-monitor DPI awareness (winit sets it) or lost samples (winit reads the whole pointer frame history).
 19. Branch `pen-input` part G: `wintab32.dll` is never imported at load time (the exe would not start without a tablet
     driver); WinTab never creates pointer events (pressure and the eraser flag only).
+20. Branch `companion`: a capture is always of the frame after the request (pitfall 5 again); the capture's input
+    sequence is the one injected in the captured pass, not the requesting one. Nothing in eframe polls the device: the
+    companion's poller thread does (`device.poll(Poll)` every 1 ms while a capture is pending).
+21. Branch `companion`: never bind a LAN address, UDP, Bluetooth or adb in a self-test run (a LAN bind pops the Windows
+    Firewall dialog, which takes the focus); `bind_plan(selftest = true, ..)` gives 127.0.0.1 only. Never inject remote
+    input through the OS (`SendInput` etc.): it goes through `raw_input_hook`.
+22. Branch `companion`: fingers right after the pen are a palm (300 ms hold, `input::PALM_HOLD`); a test that pinches
+    right after a pen stroke must wait that long (the `companion` scenario's test tablet does).
+
+### 8.14 Tablet companion (`companion/*`, branch `companion`)
+
+**Threads.** UI thread: `inject` (raw input hook) and `logic`. Listener threads (TCP 127.0.0.1, or 0.0.0.0 with Wi-Fi;
+UDP discovery with Wi-Fi; RFCOMM with Bluetooth; the adb watcher with USB): non-blocking accept with a 50 ms poll and
+the stop flag. Per session a reader (handshake, then C2S messages -> `HubEvent` channel -> `ctx.request_repaint()`) and a
+writer (STATE on change, FRAME when a captured picture waits and the ack window is open, REFINE after 400 ms idle, CURSOR
+at most 30/s; encoding on scoped worker threads). The capture poller. Only the UI thread touches `AppState`.
+
+**Robustness (fix pass, `docs/notes/companion/fix.md`).** The reader never writes: a PING's answer is handed to the
+writer (`Feedback::pong`), so the reader's idle check (4.6) always runs; only its last ERROR uses `try_lock`. Every link
+has a write timeout of the idle time (RFCOMM doubled): a tablet that stops reading makes the writer's send fail, the
+writer shuts the link down and the session ends ("stopped reading"). At most `MAX_HANDSHAKES` (8) connections are in
+their handshake at once (`Hub::admit`, an `Admission` held until AUTH_OK); more are closed in the accept loop without a
+thread, and a thread that cannot be started drops its connection instead of panicking. Magic + HELLO must arrive within
+`hello_timeout` (4 s), the whole handshake within 10 s. A code attempt reserves its place among the 5 allowed failures
+(`PairingWindow::begin_attempt` / `end_attempt`) and runs the PBKDF2 without `hub.auth` held. `Server::stop` joins the
+adb watcher quickly: every adb call gives up (`run_until`, error `Interrupted`, adb left running) when the stop flag is
+set.
+
+**Capture rule** (`capture.rs`, every `logic` pass while a session streams and the window is not minimized): a pass that
+is not the captured one marks the picture dirty; a dirty picture is captured when no capture is pending, the writer
+wants a frame and the frame-rate cap allows it (else `request_repaint_after`). The callback puts the picture into the
+mailbox (replacing an older one); the writer wakes the UI when its ack window opens again. Idle app + idle tablet = no
+frames. Minimized: no capture, STATE `NO_PICTURE`, a KEY frame on restore. Measured on this machine: request -> pixels
+about 17-21 ms (one frame); `docs/notes/companion/d5-d11.md`. Each capture carries the session id the UI knew when it
+asked (`Captured::session`); the writer drops a capture of another session, and the mailbox is emptied when a session
+starts and ends (a picture never carries an older session's input seq). The writer counts unchanged captures in a row
+(`Hub::empty_captures`); after about a second of them and with no input for `INPUT_RECENT` (1 s) the interval becomes
+`IDLE_CAPTURE_INTERVAL` (500 ms) instead of `1 / fps` (`capture_interval`, pure). `logic` keeps repainting every
+100 ms only while the remote holds something down (`InputStage::needs_ticks`: pen contact, fingers, the pointer,
+keys), not for a hovering pen or a latched modifier.
+
+**Inject order** (`Companion::inject`): drain the hub events (input only of the current session; an `Ended` stops the
+drain so a new session's input waits a frame); without a session and without input: return (frame untouched); else
+`InputStage::process` (local events first: modifier merge and the arbiter; then the remote messages in order: PEN ->
+`Touch` + `PenRecord` into `state.pen.feed`, TOUCH -> gesture mouse / wheel events, KEY / TEXT / MODS). ACTION Undo /
+Redo is queued for `logic` (dispatched when the tools are idle), FIT_REQUEST too. On a session end
+`InputStage::end_session` (Leave record, gesture button released, remote modifiers 0); `logic` restores a fitted window.
+While the window is minimized the remote input is dropped (but its seq counts as processed); the first `inject` after
+the window became minimized runs `InputStage::end_session` once, since the releases the tablet sends meanwhile are
+dropped too (else the local mouse stays locked out and a latched modifier sticks after the restore).
+While the remote is active (or input came in the last 5 s) `raw.focused = true` and `WindowFocused(false)` is dropped.
+Coordinates: surface pixels / `pixels_per_point`.
+
+**Fit to tablet.** `ViewportCommand::InnerSize` with the tablet's aspect at the current height, within 96 % x 90 % of the
+monitor (`fit_size`); only when the pref allows it and the window is neither maximized nor fullscreen (else STATE
+`FIT_UNAVAILABLE`); the old size is restored on Restore, disconnect and when the pref is turned off. Never a focus command.
+
+**Self-test guard (C13).** `Companion::new(selftest)`: an interactive companion opens what `bind_plan(false, prefs)` says
+(nothing with every link off); a self-test companion starts only through `CompanionAction::StartTest` (scenarios), with
+`bind_plan(true, ..)` = 127.0.0.1 only (+ adb for `WTE_COMPANION_ADB_SERIAL`), and never touches the prefs file.
+
+**Status.** `AppState::companion: CompanionStatus` (chip text, session, confirm request, code, bound addresses, dialog
+lines, scenario counters) is written by `logic`. The status chip ("Tablet: waiting" / "Tablet: <name> (USB)" /
+"Tablet: pairing"; only while a server runs; planned right after the texture size) opens the dialog.
 
 ---
 
@@ -7822,6 +7960,15 @@ Khronos samples, `brush_tab` / `text_tab` / `layers` / `side_tabs` also at 900x6
 ABeautifulGame and Lantern, `objects_flow_path` on ABeautifulGame); `tools/objtabs/compare_views.py` (view-rect identity at 1280x800) and `compare.py` (file by
 file) against the baseline exe's sweep.
 
+- Branch `companion`: `companion::crypto` (FIPS / RFC 4231 / PBKDF2 vectors cross-checked with Python), `proto` (every
+  message round trip, split framing, unknown types, longer payloads, limits, all fixtures byte for byte), `auth`, `encode`,
+  `input` (a remote stroke routes like a local pen; ppp 1 / 1.25 / 2; eraser, barrel, hover, cancel; arbiter; modifier
+  merge; keys; one- and two-finger gestures, pinch notches, palm rejection; session end in mid-stroke), `server`
+  (`bind_plan` for every pref combination; loopback handshake / frames / ack window / input order / keep-alive /
+  replace), `discovery`, `adb` (devices parser, search order, command lines), `bt_win` (struct layouts, GUID bytes),
+  `companion` (no server or no session = frame untouched; a pulled connection in mid-stroke releases the pen), prefs (an
+  old file without `companion`), the status bar plan with the chip.
+
 ## 10. Work packages
 
 Wave 0 creates a compiling workspace; wave 1 implements `wte_core`; wave 2 implements `wte_app`. Inside a wave the packages are
@@ -8004,3 +8151,16 @@ One builder, parts in order, each with its own commit; notes in `docs/notes/pen/
 | E | Status item, Tablet setup dialog, README, HOW_TO_TEST (8.7, 8.8) | `panels/status_bar.rs`, `dialogs/tablet.rs`, `panels/menu_bar.rs` | tests, clippy, scenario `pen` |
 | F | Final doc pass and verification | `ARCHITECTURE.md`, `HANDOFF.md`, `docs/plans/FEATURE_BRUSH.md`, `docs/notes/pen/build.md` | full test run, clippy, release build, the scenario list, pixel / byte identity with the 1b589a1 exe |
 | G | WinTab opt-in (own commit) | `pen/wintab.rs`, `dialogs/tablet.rs` | as F |
+
+### companion (branch `companion`, `docs/plans/COMPANION_PLAN.md` section 10)
+
+Desktop builder D0-D11 (notes `docs/notes/companion/`), then the Android builder in the tablet repo
+(https://github.com/Maviman/tablet-companion), then the gate (`docs/reports/COMPANION_GATE_REPORT.md`).
+
+| Step | Content | Main files |
+|---|---|---|
+| D0-D4 | plan, spec, fixtures, crypto, protocol, auth, prefs, `encode_jpeg`, encoder, server, test client, discovery, bind plan | `companion/{crypto,proto,auth,encode,server,client,discovery}.rs`, `wte_core/src/image_io.rs`, `docs/protocol/` |
+| D5-D6 | capture and its hooks; remote input, arbiter, gestures, keys, focus, session end | `companion/{capture,input,mod}.rs`, `app.rs` |
+| D7 | dialog, menu item, status chip, actions, Fit to tablet | `dialogs/companion.rs`, `panels/{menu_bar,status_bar}.rs`, `action.rs`, `dispatch.rs`, `state.rs` |
+| D8-D9 | adb watcher (checked against the emulator only); RFCOMM (compiled, never run) | `companion/{adb,bt_win}.rs` |
+| D10-D11 | `Step::Until`, scenarios `companion` / `companion_host`, docs | `selftest/*`, `ARCHITECTURE.md`, `HANDOFF.md`, `README.md`, `dist/HOW_TO_TEST.txt` |

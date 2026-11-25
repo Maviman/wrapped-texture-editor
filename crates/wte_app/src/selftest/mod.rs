@@ -82,6 +82,9 @@ pub enum Step {
     /// on camera framing and layout (dragging a gizmo handle: `ViewXform::for_view` + `view::gizmo::gizmo_shape`,
     /// converted to normalized view coordinates).
     Dyn(&'static str, fn(&AppState, &Scratch) -> Result<Vec<Step>, String>),
+    /// Branch `companion`: waits (one check per frame, at most the step timeout) until the condition is `Ok(true)`;
+    /// `Err` fails the scenario. For events from outside the frame loop (a test client on another thread).
+    Until(&'static str, fn(&AppState, &Scratch) -> Result<bool, String>),
     Screenshot,
     /// Round 4 (gate): a named capture in the middle of a run, written to `<out_stem>_<name>.png` (the run's own
     /// `OUT.png` is still the final `Screenshot`). Lets a scenario keep the picture of an intermediate frame (the
@@ -120,6 +123,7 @@ impl Step {
             Step::Setup(name, _) => format!("Setup({name})"),
             Step::Assert(name, _) => format!("Assert({name})"),
             Step::Dyn(name, _) => format!("Dyn({name})"),
+            Step::Until(name, _) => format!("Until({name})"),
             Step::Screenshot => "Screenshot".to_owned(),
             Step::Shot(name) => format!("Shot({name})"),
             Step::BakeWait(on) => format!("BakeWait({on})"),
@@ -154,6 +158,8 @@ enum Active {
     Capture(mpsc::Receiver<Arc<egui::ColorImage>>, Option<&'static str>),
     /// Round 5: after a `Do` step, until no Final stamp bake is pending (`AppState::final_bakes_pending`).
     Bakes,
+    /// Branch `companion`: `Step::Until`.
+    Until(&'static str, fn(&AppState, &Scratch) -> Result<bool, String>),
 }
 
 /// Drives a scenario: injects input, waits, asserts, captures the screenshot and writes the report.
@@ -418,6 +424,14 @@ impl Runner {
                 (!processed || tools_busy || self.waits_for_bakes(state)).then_some(Active::Input)
             }
             Active::Bakes => self.waits_for_bakes(state).then_some(Active::Bakes),
+            Active::Until(label, f) => match f(state, &self.scratch) {
+                Ok(true) => None,
+                Ok(false) => Some(Active::Until(label, f)),
+                Err(e) => {
+                    self.fail(EXIT_FAILED, format!("Until \"{label}\" failed: {e}"));
+                    None
+                }
+            },
             Active::Frames(n) => (n > 1).then_some(Active::Frames(n - 1)),
             Active::Idle { count } => {
                 let idle = is_idle(state, tools_busy) && state.view_rects == self.last_rects;
@@ -530,6 +544,7 @@ impl Runner {
                 }
                 Err(e) => self.fail(EXIT_FAILED, format!("Dyn \"{label}\" failed: {e}")),
             },
+            Step::Until(label, f) => self.active = Some((Active::Until(label, f), name)),
             Step::Screenshot => self.capture(ctx, None, name),
             Step::Shot(shot) => self.capture(ctx, Some(shot), name),
             Step::BakeWait(on) => self.bake_wait = on,

@@ -341,6 +341,98 @@ pub enum TabletInput {
     WinTab,
 }
 
+/// Branch `companion` (COMPANION_PLAN 3): what one finger on the tablet does over an editing view.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerMode {
+    /// "Navigate in the view, click elsewhere" (orbit / pan / zoom in the views, a mouse over the panels).
+    #[default]
+    Navigate,
+    /// "Act like the mouse everywhere".
+    Mouse,
+}
+
+/// Branch `companion` (COMPANION_PLAN 3 "Prefs", ARCHITECTURE 7): the Tablet companion settings in `Prefs::companion`.
+/// Every field falls back to its default when missing; the whole entry falls back to the default when it does not
+/// read. Ignored in self-test runs (decision C13).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompanionPrefs {
+    /// The links the user turned on (all off by default; they stay on across restarts).
+    pub usb: bool,
+    pub wifi: bool,
+    pub bluetooth: bool,
+    /// The TCP port of the session listener (`crate::companion::DEFAULT_PORT`).
+    pub port: u16,
+    /// The adb.exe the user browsed to (first in the search order, COMPANION_PLAN 6.1).
+    pub adb_path: Option<PathBuf>,
+    /// This desktop's id: 16 random bytes as hex, made the first time a link is turned on.
+    pub desktop_id: String,
+    /// The paired tablets; each token is stored as hex in plain text in this per-user file.
+    pub paired: Vec<crate::companion::auth::PairedTablet>,
+    /// "Let the tablet resize this window to its shape".
+    pub allow_resize: bool,
+    pub fingers: FingerMode,
+}
+
+impl Default for CompanionPrefs {
+    fn default() -> CompanionPrefs {
+        CompanionPrefs {
+            usb: false,
+            wifi: false,
+            bluetooth: false,
+            port: crate::companion::DEFAULT_PORT,
+            adb_path: None,
+            desktop_id: String::new(),
+            paired: Vec::new(),
+            allow_resize: true,
+            fingers: FingerMode::Navigate,
+        }
+    }
+}
+
+/// Branch `companion` (COMPANION_PLAN 3, ARCHITECTURE 8.14): what the Tablet companion shows in the status chip and its
+/// dialog, written by `Companion::logic` every frame while it runs; read by the panels and the self-test.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CompanionStatus {
+    /// A server runs (a link is on, or a self-test scenario started one).
+    pub running: bool,
+    /// The status chip ("Tablet: waiting", "Tablet: <name> (USB)", "Tablet: pairing"); `None` = no chip.
+    pub chip: Option<String>,
+    /// The connected tablet: name and link (`proto::link`).
+    pub session: Option<(String, u8)>,
+    /// An unknown tablet asks to connect (confirm mode): request id, name, link.
+    pub confirm: Option<(u64, String, u8)>,
+    /// The pairing code on display (the dialog is open and Wi-Fi is on, or a self-test code).
+    pub code: Option<String>,
+    /// The bound TCP addresses (the port of a self-test server on port 0 is resolved here).
+    pub tcp: Vec<std::net::SocketAddr>,
+    /// The adb line of the dialog (USB).
+    pub adb_line: String,
+    /// The Bluetooth line of the dialog.
+    pub bt_line: String,
+    /// LAN addresses for the Wi-Fi line (only while Wi-Fi is on, never in a self-test run).
+    pub lan: Vec<std::net::IpAddr>,
+    /// Bind errors and the last refused connection.
+    pub errors: Vec<String>,
+    pub last_refused: Option<String>,
+    /// The window is resized for the tablet ("Fit to tablet").
+    pub fitted: bool,
+    /// The window's surface (physical pixels) as the UI sees it, and its pixels per point.
+    pub surface: [u32; 2],
+    pub ppp: f32,
+    /// For the scenarios: sessions started, sessions that ended, the ids of sessions that delivered a pen stroke with
+    /// varying pressure, pen frames in contact, the last remote input sequence injected, a pointer button is down.
+    pub sessions_started: u32,
+    pub sessions_ended: u32,
+    pub stroke_sessions: Vec<u64>,
+    pub last_input_seq: u32,
+    pub pointer_down: bool,
+    /// Frames sent to the tablet and captures made (log and scenario).
+    pub frames_sent: u64,
+    pub captures: u64,
+}
+
 /// The tab of the lower area of the side panel (FEATURE_BRUSH 6.2, FEATURE_TEXT 6.1, ROUND4_PLAN 2.2 item 10). Starts
 /// on Layers; objects-tabs: the chosen tab is kept in the preferences (`Prefs::side_lower_tab`, written at exit). A tab
 /// whose condition is not met is greyed out and the area shows Layers, whatever this says; a tool change never writes
@@ -1042,6 +1134,9 @@ pub enum Dialog {
     Shortcuts,
     /// Branch `pen-input`: Help > Tablet setup (`dialogs/tablet.rs`).
     TabletHelp,
+    /// Branch `companion`: Help > Tablet companion (`dialogs/companion.rs`). While it is open the pairing window is open
+    /// (a code for Wi-Fi, Allow / Deny for USB and Bluetooth).
+    Companion,
     /// "How should the openings of this brush shape be closed?" (plan section 7 item 5; drawn by `brush_flows.rs`).
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
     CloseOpenings(Box<OpeningsDialogState>),
@@ -1093,6 +1188,9 @@ pub struct Prefs {
     /// Windows Ink.
     #[serde(deserialize_with = "lenient_prefs_serde::tablet_input")]
     pub tablet_input: TabletInput,
+    /// Branch `companion`: the Tablet companion settings. Read leniently: an entry that does not read is the default.
+    #[serde(deserialize_with = "lenient_prefs_serde::companion")]
+    pub companion: CompanionPrefs,
 }
 
 impl Default for Prefs {
@@ -1115,6 +1213,7 @@ impl Default for Prefs {
             side_lower_tab: SideTab::Layers.pref_name().to_owned(),
             side_split: None,
             tablet_input: TabletInput::WindowsInk,
+            companion: CompanionPrefs::default(),
         }
     }
 }
@@ -1178,6 +1277,8 @@ pub struct AppState {
     pub typing_prev: bool,
     /// True while the scenario runner drives the app (no native dialogs, no prefs writes).
     pub selftest: bool,
+    /// Branch `companion`: the Tablet companion's status (chip, dialog, scenarios).
+    pub companion: CompanionStatus,
     /// Throttle of the deferred stamp Preview bakes (`view::bake_stale_previews`, 8.4).
     pub preview_bakes: PreviewBakeClock,
     /// The chosen tab of the lower side-panel area (see `SideTab` for when it is shown); from `Prefs::side_lower_tab`
@@ -1298,6 +1399,7 @@ impl AppState {
             focus_text_content: false,
             typing_prev: false,
             selftest,
+            companion: CompanionStatus::default(),
             preview_bakes: PreviewBakeClock::default(),
             side_tab,
             upper_tab,
@@ -1367,7 +1469,7 @@ mod lenient_prefs_serde {
     use serde_json::Value;
     use wte_core::CloseMode;
 
-    use super::{BrushSettings, SideTab, TabletInput, UpperTab};
+    use super::{BrushSettings, CompanionPrefs, SideTab, TabletInput, UpperTab};
 
     /// Brush or eraser settings: every key is taken on its own; a key whose value does not read keeps its default.
     /// Sanitized (`BrushSettings::sanitized`).
@@ -1399,6 +1501,11 @@ mod lenient_prefs_serde {
 
     /// The pressure source: a value that does not read is Windows Ink.
     pub fn tablet_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<TabletInput, D::Error> {
+        Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
+    }
+
+    /// Branch `companion`: the Tablet companion settings; an entry that does not read is the default (all links off).
+    pub fn companion<'de, D: Deserializer<'de>>(deserializer: D) -> Result<CompanionPrefs, D::Error> {
         Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
     }
 

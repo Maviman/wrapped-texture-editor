@@ -35,6 +35,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             if item(ui, "Tablet setup", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::TabletHelp));
             }
+            // Branch `companion`: the Android tablet companion.
+            if item(ui, "Tablet companion...", "", true, false) {
+                actions.push(AppAction::ShowDialog(Dialog::Companion));
+            }
             if item(ui, "About", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::About));
             }

@@ -72,6 +72,8 @@ pub(crate) struct StatusWidths {
     pub undo: Option<f32>,
     /// Branch `pen-input`: the pen read-out (`PenFrame::readout`), only while a pen is in range.
     pub pen: Option<f32>,
+    /// Branch `companion`: the Tablet chip, only while a companion link is on.
+    pub companion: Option<f32>,
 }
 
 /// Which items the status bar draws.
@@ -85,6 +87,7 @@ pub(crate) struct StatusPlan {
     pub zoom: bool,
     pub undo: bool,
     pub pen: bool,
+    pub companion: bool,
 }
 
 /// Fits the items into `w.avail`. The job progress is always shown and the hint keeps `HINT_MIN_WIDTH`; then, while
@@ -106,6 +109,8 @@ pub(crate) fn plan(w: &StatusWidths) -> StatusPlan {
         }
     };
     p.size = take(&mut used, w.size);
+    // Branch `companion`: the Tablet chip right after the texture size (it only exists while a link is on).
+    p.companion = take(&mut used, w.companion);
     let mut hover_cost = 0.0;
     if let Some(&shortest) = w.hover.last()
         && take(&mut used, Some(shortest))
@@ -185,6 +190,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             zoom: zoom.as_deref().map(|t| measure(t, &body)),
             undo: undo.as_deref().map(|t| measure(t, &body)),
             pen: pen.as_deref().map(|t| measure(t, &body)),
+            companion: state.companion.chip.as_deref().map(|t| measure(t, &body) + 8.0),
         };
         let plan = plan(&widths);
 
@@ -213,6 +219,14 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if plan.size && let Some(text) = &size {
             separate(&mut right);
             rects.push(right.label(text.as_str()).on_hover_text("Texture size of the active texture set").rect);
+        }
+        if plan.companion && let Some(text) = &state.companion.chip {
+            separate(&mut right);
+            let resp = right.add(egui::Button::new(text.as_str()).small().frame(false)).on_hover_text("Help > Tablet companion");
+            if resp.clicked() {
+                state.actions.push(crate::action::AppAction::ShowDialog(crate::state::Dialog::Companion));
+            }
+            rects.push(resp.rect);
         }
         if plan.pen && let Some(text) = &pen {
             separate(&mut right);
@@ -315,6 +329,7 @@ mod tests {
             zoom: Some(80.0),
             undo: Some(130.0),
             pen: Some(60.0),
+            companion: None,
         }
     }
 
@@ -328,16 +343,31 @@ mod tests {
             + if p.zoom { item(w.zoom.unwrap()) } else { 0.0 }
             + if p.undo { item(w.undo.unwrap()) } else { 0.0 }
             + if p.pen { item(w.pen.unwrap()) } else { 0.0 }
+            + if p.companion { item(w.companion.unwrap()) } else { 0.0 }
+    }
+
+    /// Branch `companion`: the Tablet chip is planned right after the texture size; without a link nothing changes.
+    #[test]
+    fn the_tablet_chip_comes_after_the_size() {
+        let w = StatusWidths { companion: Some(150.0), ..widths(1400.0) };
+        let p = plan(&w);
+        assert!(p.companion && p.size && p.pen, "{p:?}");
+        assert!(plan_width(&w, &p) <= w.avail);
+        // Narrow: the chip stays when the zoom and the undo label have to go.
+        let w = StatusWidths { companion: Some(150.0), ..widths(700.0) };
+        let p = plan(&w);
+        assert!(p.companion && p.size && !p.undo, "{p:?}");
+        assert!(plan_width(&w, &p) <= w.avail + 0.5);
     }
 
     #[test]
     fn a_wide_bar_shows_everything_and_a_narrow_one_drops_the_least_important_first() {
         let w = widths(1400.0);
         let p = plan(&w);
-        assert_eq!(p, StatusPlan { hint: Some(220.0), hover: Some(0), size: true, zoom: true, undo: true, pen: true });
+        assert_eq!(p, StatusPlan { hint: Some(220.0), hover: Some(0), size: true, zoom: true, undo: true, pen: true, companion: false });
         // Without a pen in range the plan is the one of a mouse user.
         let p = plan(&StatusWidths { pen: None, ..w });
-        assert_eq!(p, StatusPlan { hint: Some(220.0), hover: Some(0), size: true, zoom: true, undo: true, pen: false });
+        assert_eq!(p, StatusPlan { hint: Some(220.0), hover: Some(0), size: true, zoom: true, undo: true, pen: false, companion: false });
 
         // 900 pt: the pen read-out and the undo label go before the hover read-out loses anything.
         let w = widths(900.0);
@@ -358,7 +388,7 @@ mod tests {
         // Very narrow: only the hint (elided) is left.
         let w = widths(200.0);
         let p = plan(&w);
-        assert_eq!(p, StatusPlan { hint: Some(186.0), hover: None, size: false, zoom: false, undo: false, pen: false });
+        assert_eq!(p, StatusPlan { hint: Some(186.0), hover: None, size: false, zoom: false, undo: false, pen: false, companion: false });
 
         for avail in [120.0, 200.0, 400.0, 596.0, 640.0, 800.0, 1000.0, 1236.0, 1600.0] {
             let w = widths(avail);

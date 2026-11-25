@@ -107,6 +107,7 @@ flattened, 50 % Multiply within 2/255. `tools/round3_audit/sweep.ps1` runs a job
 | `WTE_STROKE_LOG=1` | brush phase probe: one line per slow sample and a `brush stroke probe:` line per stroke |
 | `WTE_SYNC_FINAL_BAKES=1` | old behaviour: Final stamp bakes on the UI thread (round 5 moved them to a worker) |
 | `WTE_STAMP_MODE=wrap` | new stamps start in Wrap (for like-for-like timing runs) |
+| `WTE_COMPANION_PORT`, `WTE_COMPANION_TEST_CODE`, `WTE_COMPANION_AUTO_ALLOW=1`, `WTE_COMPANION_EXPECT_SESSIONS`, `WTE_COMPANION_ADB_SERIAL`, `WTE_COMPANION_LINGER_MS` | branch `companion`, scenario `companion_host` only (`--screenshot` runs): test port (47811), fixed pairing code, allow confirm requests at once, sessions to wait for, the one adb serial the watcher may address, ms to keep serving after the asserts (`docs/notes/companion/desktop.md`) |
 | `WTE_PEN_SUBCLASS=1` | branch `pen-input`: installs the pen window-procedure subclass in a self-test run too (it is always installed in a normal run); proves it does no harm; what it queues is dropped |
 | `RAYON_NUM_THREADS=n` | pool size; brush and wrap results must be identical for any n |
 | `WGPU_BACKEND=dx12` / Vulkan | renderer choice (see `dist/*.cmd`) |
@@ -146,6 +147,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
+| companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
 ### 5.2 Pen input (branch `pen-input`)
@@ -170,6 +172,22 @@ Gate + completeness critic (2026-11-24, `docs/reports/PEN_INPUT_GATE_REPORT.md`,
 **PASS**; one fix (a pen held still above the tablet no longer sends hover moves within 1 pt, so tooltips can show),
 Help > Tablet setup / README made precise (barrel button counts while the tip touches; touch on pen displays), hand
 tests extended to 11 (ring offset on every monitor, tooltips, pen display touch, the WinTab specifics).
+
+### 5.3 Tablet companion (branch `companion`)
+
+Plan `docs/plans/COMPANION_PLAN.md` (section 10 = work order; the user later moved the Android app to its own repo
+https://github.com/Maviman/tablet-companion, app name "Tablet Companion", package io.github.maviman.tabletcompanion),
+wire spec `docs/protocol/COMPANION_PROTOCOL.md` + fixtures (copied byte for byte into the tablet repo's `protocol/`;
+change both together, `docs/notes/companion/protocol-changes.md`), ARCHITECTURE 1.11 and 8.14, notes
+`docs/notes/companion/` (`desktop.md` = the hand-over to the Android side: how to run the desktop server headless).
+Desktop part done (D0-D11): server, handshake / pairing, JPEG tile encoder, capture, remote input through the pen
+router, dialog, status chip, adb watcher (checked against the emulator only), RFCOMM (compiled, never run). Scenarios
+`companion` (loopback test tablet) and `companion_host` (the Android end-to-end run's desktop side); with every link off
+the app is unchanged (regression shots identical to the e9c6567 exe). No new crate.
+
+**Owed:** the Android app and the end-to-end run (tablet repo), the gate, and the user's hand tests with the real
+tablet (`dist/HOW_TO_TEST.txt` "Tablet companion" + the tablet repo's `docs/HOW_TO_TEST.md`), incl. Bluetooth (never
+run by agents), the Windows Firewall prompt for Wi-Fi, the Samsung USB driver and Air command on the S Pen button.
 
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 

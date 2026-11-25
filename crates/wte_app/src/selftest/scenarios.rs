@@ -29,6 +29,7 @@ use crate::state::{
 use crate::tools::{Surface, ViewXform};
 use crate::view::gizmo::{self, GizmoShape};
 
+mod companion;
 mod objects;
 mod pen;
 mod side_tabs;
@@ -87,6 +88,8 @@ const NAMES: &[&str] = &[
     "objects_path",
     "objects_flow_path",
     "pen",
+    "companion",
+    "companion_host",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -164,6 +167,8 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "objects_path" => objects::objects_path(args.path.is_some()),
         "objects_flow_path" => objects::objects_flow_path(args.path.is_some()),
         "pen" => pen::pen(),
+        "companion" => companion::companion(),
+        "companion_host" => companion::companion_host(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -3883,6 +3888,7 @@ fn dialog_name(dialog: &Dialog) -> &'static str {
         Dialog::About => "About",
         Dialog::Shortcuts => "Shortcuts",
         Dialog::TabletHelp => "TabletHelp",
+        Dialog::Companion => "Companion",
         Dialog::CloseOpenings(_) => "CloseOpenings",
     }
 }
@@ -4262,6 +4268,8 @@ pub fn timeouts(name: &str) -> Option<(Duration, Duration)> {
         | "export_flow" | "export_unsettled" | "save_unsettled" | "objects_path" | "objects_flow_path" => {
             Some((Duration::from_secs(300), Duration::from_secs(3600)))
         }
+        // Branch `companion`: the Android end-to-end run waits up to 300 s for the tablet.
+        "companion_host" => Some((Duration::from_secs(300), Duration::from_secs(330))),
         _ => None,
     }
 }
@@ -9279,7 +9287,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 52);
+        assert_eq!(scenario_names().len(), 54);
     }
 
     #[test]

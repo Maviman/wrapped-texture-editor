@@ -107,6 +107,51 @@ With a drawing tablet or pen display (Windows Ink on in its driver):
 Please note the tablet model and driver version with anything that does
 not work, and send the log (see below).
 
+Tablet companion (Android tablet, desktop side)
+-----------------------------------------------
+The tablet-side steps and what to expect on the tablet are in the tablet
+app's own instructions:
+  https://github.com/Maviman/tablet-companion  (docs/HOW_TO_TEST.md)
+Install the app on the tablet from
+  https://github.com/Maviman/tablet-companion/releases
+On the PC (Help > Tablet companion...):
+  1. USB: turn "USB cable" on. Without adb the line says "No adb found":
+     download Google's platform-tools, unpack, Browse for adb.exe. With
+     the tablet plugged in and USB debugging allowed the line says
+     "Ready". No console window may flash. A fullscreen game you play
+     meanwhile must keep the focus.
+  2. Connect from the tablet (USB): the dialog asks "<tablet> wants to
+     connect" -> Allow. The status bar chip says "Tablet: <name> (USB)".
+     The tablet shows the editor within about 2 s.
+  3. Draw with the S Pen in 2D and 3D with light and hard pressure: the
+     stroke width follows the pressure as with a desktop tablet.
+  4. Hold the S Pen side button and drag: orbit in 3D, pan in 2D, nothing
+     painted. Fingers: one-finger drag orbits / pans, two fingers pan,
+     pinch zooms; taps on buttons and sliders work.
+  5. Draw with the PC mouse while the pen hovers on the tablet, and the
+     other way round: whoever pressed first draws, nothing gets stuck.
+  6. Cover the editor with another window: the tablet stays live.
+     Minimize it: the tablet says so, and is live again on restore.
+     Press Fit on the tablet: the window takes the tablet's shape without
+     coming to the front; Restore (tablet or dialog) brings the size back.
+  7. Pull the cable in the middle of a stroke: the stroke ends cleanly on
+     the PC (no stuck button), the chip says "Tablet: waiting"; plug in
+     again and the tablet continues by itself.
+  8. Wi-Fi: turn "Wi-Fi" on (allow the firewall prompt once, private
+     networks), type the code from the dialog on the tablet. Close and
+     reopen the tablet app: it connects again without a code.
+  9. Bluetooth: pair in Windows Settings once, turn "Bluetooth" on, choose
+     the PC on the tablet, Allow. The picture is coarser and slower; the
+     strokes are complete.
+ 10. Forget the tablet in the dialog: the next connection asks again.
+ 11. Turn every link off: the chip disappears; the editor behaves as
+     before (nothing listens).
+ 12. Windows display scaling at 125 % or 150 %, editor maximized: the
+     brush outline and hovered buttons sit exactly under the S Pen tip,
+     also near the window corners.
+Please note the tablet model, the link and the app versions with anything
+that does not work, and send the log (see below).
+
 If it crashes
 -------------
 You should see a box "Wrapped Texture Editor crashed. A crash report was

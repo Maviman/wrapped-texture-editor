@@ -26,6 +26,8 @@ pub struct WteApp {
     pub dialogs: dialogs::DialogsState,
     pub jobs: Jobs,
     pub selftest: Option<selftest::Runner>,
+    /// Branch `companion`: the Tablet companion server (off unless a link is on; ARCHITECTURE 8.14).
+    pub companion: crate::companion::Companion,
     pub exit_code: Arc<AtomicI32>,
     /// The egui context (jobs repaint through it; dispatch sends viewport commands with it).
     pub(crate) ctx: egui::Context,
@@ -179,6 +181,7 @@ impl WteApp {
             dialogs: dialogs::DialogsState::new(),
             jobs: Jobs::new(),
             selftest: runner,
+            companion: crate::companion::Companion::new(selftest_mode),
             exit_code,
             ctx,
             export_stash: None,
@@ -190,6 +193,11 @@ impl WteApp {
         };
         io_flows::start_fonts(&mut app);
         crate::brush_flows::startup(&mut app);
+        // Branch `companion`: links the user left on start again (never in a self-test run, C13).
+        if !selftest_mode {
+            let ctx = app.ctx.clone();
+            app.companion.apply_prefs(&ctx, &mut app.state.prefs.companion);
+        }
         Ok(app)
     }
 }
@@ -297,6 +305,8 @@ impl eframe::App for WteApp {
         } else {
             crate::pen::drain_window_records(&mut self.state.pen.feed);
         }
+        // Branch `companion` (ARCHITECTURE 8.14): the tablet's input, in-process; nothing without a connected tablet.
+        self.companion.inject(ctx, raw_input, &mut self.state);
         self.state.pen.route(&mut raw_input.events);
         // Part G: the opt-in WinTab pressure (interactive runs only; nothing unless its context gives packets).
         if self.selftest.is_none() {
@@ -334,6 +344,8 @@ impl eframe::App for WteApp {
         io_flows::feed_waiting_snapshot(self);
         self.state.busy = self.jobs.busy();
         drop(jobs);
+        // Branch `companion`: events, STATE, the capture of this frame, undo / redo from the tablet.
+        self.companion.logic(ctx, &mut self.state, &self.gpu.device, self.tools.is_busy());
         if let Some(runner) = &mut self.selftest {
             let _p = frame_profile::scope("selftest");
             runner.tick(ctx, &mut self.state, &self.gpu, self.tools.is_busy());
@@ -423,6 +435,7 @@ impl WteApp {
             dialogs: dialogs::DialogsState::new(),
             jobs: Jobs::new(),
             selftest: None,
+            companion: crate::companion::Companion::new(true),
             exit_code: Arc::new(AtomicI32::new(0)),
             ctx,
             export_stash: None,

@@ -248,21 +248,73 @@ fn picture_of<'a>(input: &'a StickerRenderInput, picture: &'a PicturePixels) -> 
     }
 }
 
-/// Steps (a) to (c) of 4.1 for one layer, in output pixels (artboard origin at 0, scale `s`).
-fn layer_raster(input: &StickerRenderInput, layer: &StickerLayer, s: f32, quality: RasterQuality, out_rect: IRect) -> LayerRaster {
+/// Steps (a) and (b) of 4.1 for one layer **without its mask and without its styles**, in output pixels (artboard
+/// origin at 0, scale `s`), clipped to `clip`: the pixels a linked PSD gets for the layer (STICKER_PLAN 5.4 "WTE ->
+/// PSD"; the mask is written separately, `mask_raster`). `None` when the layer draws nothing.
+pub fn layer_content(input: &StickerRenderInput, layer: &StickerLayer, s: f32, quality: RasterQuality, clip: IRect) -> Option<CroppedBuf> {
+    content_raster(input, layer, s, quality, clip, false).filter(|c| !c.is_empty())
+}
+
+/// The mask of a picture layer placed like its picture (`layer_content`): an output-pixel buffer whose red channel is
+/// the mask value wherever the picture lands (alpha > 0 there); `None` without a mask (or when the mask does not have
+/// the picture's size).
+pub fn mask_raster(input: &StickerRenderInput, layer: &StickerLayer, s: f32, clip: IRect) -> Option<CroppedBuf> {
+    let mask = layer.mask.as_ref()?;
+    let StickerContent::Picture(picture) = &layer.content else { return None };
+    let pixels = picture_of(input, picture)?;
+    if (mask.pixels.width, mask.pixels.height) != (pixels.width, pixels.height) {
+        return None;
+    }
+    let mut grey = PixelBuf::new(mask.pixels.width, mask.pixels.height);
+    for (p, &v) in grey.data.as_chunks_mut::<4>().0.iter_mut().zip(&mask.pixels.data) {
+        *p = [v, v, v, 255];
+    }
     let doc = &*input.doc;
     let origin = Vec2::new(doc.artboard.x0 as f32, doc.artboard.y0 as f32);
+    let t = layer.transform;
+    let moved = LayerTransform { translate: t.translate - origin, ..t };
+    Some(transform_picture(&grey, &moved, s, Some(clip))).filter(|c| !c.is_empty())
+}
+
+/// Steps (a) to (c) of 4.1 for one layer, in output pixels (artboard origin at 0, scale `s`).
+fn layer_raster(input: &StickerRenderInput, layer: &StickerLayer, s: f32, quality: RasterQuality, out_rect: IRect) -> LayerRaster {
     // Styles can reach in from outside the output: keep that much of the content.
     let m = layer.styles.margin(s) as i32;
     let clip = IRect::new(out_rect.x0 - m, out_rect.y0 - m, out_rect.x1 + m, out_rect.y1 + m);
+    let content = content_raster(input, layer, s, quality, clip, true);
+    let Some(content) = content.filter(|c| !c.is_empty()) else { return LayerRaster::default() };
+    let content = Arc::new(content);
+    if !layer.styles.any_on() {
+        return LayerRaster { content: Some(Arc::clone(&content)), styled: Some(content) };
+    }
+    let r = content.rect;
+    let base = PixelBuf { width: r.width(), height: r.height(), data: content.data.clone() };
+    let styled = apply_styles(&base, &layer.styles, s);
+    let m = ((styled.width - base.width) / 2) as i32;
+    let rect = IRect::new(r.x0 - m, r.y0 - m, r.x0 - m + styled.width as i32, r.y0 - m + styled.height as i32);
+    LayerRaster { content: Some(content), styled: Some(Arc::new(CroppedBuf { rect, data: styled.data })) }
+}
+
+/// Steps (a) and (b) of 4.1 for one layer (its mask applied when `with_mask`), clipped to `clip`.
+fn content_raster(
+    input: &StickerRenderInput,
+    layer: &StickerLayer,
+    s: f32,
+    quality: RasterQuality,
+    clip: IRect,
+    with_mask: bool,
+) -> Option<CroppedBuf> {
+    let doc = &*input.doc;
+    let origin = Vec2::new(doc.artboard.x0 as f32, doc.artboard.y0 as f32);
     let t = layer.transform;
-    let content: Option<CroppedBuf> = match &layer.content {
+    match &layer.content {
         StickerContent::Picture(picture) => picture_of(input, picture).map(|pixels| {
             let mut src: std::borrow::Cow<'_, PixelBuf> = std::borrow::Cow::Borrowed(&**pixels);
             if !layer.adjustments.is_empty() {
                 apply_adjustments(src.to_mut(), &layer.adjustments);
             }
-            if let Some(mask) = &layer.mask
+            if with_mask
+                && let Some(mask) = &layer.mask
                 && (mask.pixels.width, mask.pixels.height) == (src.width, src.height)
             {
                 let buf = src.to_mut();
@@ -288,18 +340,7 @@ fn layer_raster(input: &StickerRenderInput, layer: &StickerLayer, s: f32, qualit
                 place(&pic, pivot_in, pivot_out, t.scale, t.rotation, clip)
             })
         }
-    };
-    let Some(content) = content.filter(|c| !c.is_empty()) else { return LayerRaster::default() };
-    let content = Arc::new(content);
-    if !layer.styles.any_on() {
-        return LayerRaster { content: Some(Arc::clone(&content)), styled: Some(content) };
     }
-    let r = content.rect;
-    let base = PixelBuf { width: r.width(), height: r.height(), data: content.data.clone() };
-    let styled = apply_styles(&base, &layer.styles, s);
-    let m = ((styled.width - base.width) / 2) as i32;
-    let rect = IRect::new(r.x0 - m, r.y0 - m, r.x0 - m + styled.width as i32, r.y0 - m + styled.height as i32);
-    LayerRaster { content: Some(content), styled: Some(Arc::new(CroppedBuf { rect, data: styled.data })) }
 }
 
 /// A text layer's content (4.1 a, b): drawn at `size_px * s` (within the text engine's 8..=512 px per em; a larger em

@@ -22,14 +22,14 @@ use crate::layer::{Layer, LayerKind};
 use crate::math::IRect;
 use crate::pixel::{AlphaBuf, CroppedBuf, PixelBuf, SparseBuf};
 use crate::progress::Progress;
-use crate::project::{LoadReport, PngReuse, composite_key};
+use crate::project::{LinkAtLoad, LinkFileState, LoadReport, PngReuse, composite_key};
 use crate::project::manifest::{
     BlobEntry, GapEntry, ImportEntry, LayerEntry, LayerKindEntry, Manifest, SetEntry, SourceEntry, SourceFileEntry,
     StampSourceEntry, TextFxEntry,
 };
 use crate::project::migrate::{ParsedManifest, parse_manifest};
 use crate::project::save::{MANIFEST_ENTRY, parallel_budget};
-use crate::project::sticker_entries::{StickerContentEntry, StickerEntry, artboard_of, transform_of};
+use crate::project::sticker_entries::{LinkEntry, StickerContentEntry, StickerEntry, artboard_of, transform_of};
 use crate::stamp::{BakeQuality, StampObject, StampSource};
 use crate::sticker::{LayerMask, MAX_PICTURE_SIDE, PicturePixels, StickerContent, StickerDoc, StickerLayer};
 use crate::text::{DEFAULT_FONT_FAMILY, DEFAULT_FONT_STYLE, FontRef, default_font_bytes};
@@ -866,6 +866,9 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
         )?;
         sets.push(SetParts { name: set.name.clone(), width: set.width, height: set.height, layers, active: None });
     }
+    // P5c: which link copies the archive holds (read later by the app with `read_link_archive`, never here).
+    let link_archives: BTreeSet<String> =
+        manifest.links.iter().filter_map(|l| l.archive.clone()).filter(|a| zip.by_name(a).is_ok()).collect();
     drop(zip);
 
     // Step 7: every stamp needs a linked layer in its home set before the document is assembled.
@@ -960,13 +963,69 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
     }
     document.history.clear();
     document.mark_saved(document.history_state());
+    // Step 8 (P5c): the editor links, with what is on disk for each. Nothing is written.
+    let (links, link_report) = load_links(path, &manifest.links, &link_archives, &document);
+    document.set_loaded_links(links);
+    document.mark_links_saved(document.links_revision());
     progress.report(1.0, "Project opened");
     // A newer format, or a text or stamp feature this build cannot keep: a plain Save would overwrite the newer file
     // with less.
     let unknown_text = warnings
         .iter()
         .any(|w| matches!(w, LoadWarning::TextFeatureUnknown { .. } | LoadWarning::StampFeatureUnknown { .. }));
-    Ok(LoadReport { document, warnings, force_save_as: newer || unknown_text })
+    Ok(LoadReport { document, warnings, force_save_as: newer || unknown_text, links: link_report })
+}
+
+/// Step 8 of the load procedure (P5c, STICKER_PLAN 5.3 "At load"): the links of `entries` whose sticker was loaded,
+/// and per link what is at its path: the synced content (`Present`; a copy with another time counts), nothing
+/// (`Missing`), or other content (`Changed`). An entry that cannot be a link (a damaged or hand-edited file) or whose
+/// sticker is gone is left out with a log line. Only reads files.
+fn load_links(
+    project: &Path,
+    entries: &[LinkEntry],
+    archives: &BTreeSet<String>,
+    document: &Document,
+) -> (BTreeMap<StickerId, crate::link::StickerLink>, Vec<LinkAtLoad>) {
+    let mut links = BTreeMap::new();
+    let mut report = Vec::new();
+    for entry in entries {
+        if document.sticker(entry.sticker).is_none() || links.contains_key(&entry.sticker) {
+            log::warn!("the link of sticker {} is left out: no such sticker, or a second link", entry.sticker.0);
+            continue;
+        }
+        let link = match entry.to_link() {
+            Ok(link) => link,
+            Err(why) => {
+                log::warn!("the link of sticker {} is left out: {why}", entry.sticker.0);
+                continue;
+            }
+        };
+        let path = link.file.path(Some(project));
+        let state = match path.as_deref().map(std::fs::metadata) {
+            Some(Ok(meta)) if meta.is_file() => {
+                let modified = meta.modified().ok().and_then(crate::link::unix_ns);
+                let same_stamp = meta.len() == link.synced.size && modified.is_some() && modified == link.synced.modified_ns;
+                let same_content = same_stamp
+                    || path
+                        .as_deref()
+                        .and_then(|p| std::fs::read(p).ok())
+                        .is_some_and(|b| b.len() as u64 == link.synced.size && crc32fast::hash(&b) == link.synced.crc32);
+                if same_content { LinkFileState::Present } else { LinkFileState::Changed }
+            }
+            _ => LinkFileState::Missing,
+        };
+        let archive = entry.archive.clone().filter(|a| archives.contains(a));
+        report.push(LinkAtLoad { sticker: entry.sticker, state, path, archive });
+        links.insert(entry.sticker, link);
+    }
+    (links, report)
+}
+
+/// The stored copy of a linked file (`LinkAtLoad::archive`) from the project at `project` (P5c: the app restores a
+/// missing link file with it). Reads only.
+pub fn read_link_archive(project: &Path, entry: &str) -> Result<Vec<u8>, ProjectError> {
+    let mut zip = open_archive(project)?;
+    read_entry(&mut zip, entry, FILE_LIMIT).map_err(|e| ProjectError::ManifestInvalid(format!("{entry}: {}", e.reason())))
 }
 
 /// Reads only `manifest.json` of a .wtep (after version handling and migration).

@@ -607,13 +607,22 @@ pub fn artboard_of(v: [i32; 4]) -> Option<IRect> {
     Some(IRect::new(x, y, x1, y1))
 }
 
-// ----- PhotoCraft links (written as plain data; their meaning is STICKER_PLAN 5.3, package P5) -----
+// ----- editor links (STICKER_PLAN 5.3; written by P5c) -----
 
-/// One link of `Manifest::links` (STICKER_PLAN 5.3 `StickerLink` plus the archive entry of the linked file).
+fn default_editor() -> String {
+    crate::link::EDITOR_PHOTOCRAFT.to_owned()
+}
+
+/// One link of `Manifest::links` (STICKER_PLAN 5.3 `StickerLink` plus the archive entry of the linked file). P4 wrote
+/// none; `editor` (13.1) is optional with the default `"photocraft"`, and `editor_native` is also read under its
+/// revision-2 name `pc_native`, so a format-4 file of any earlier build loads.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LinkEntry {
     pub sticker: StickerId,
     pub file: LinkFileEntry,
+    /// The editor's key: `"photocraft"`, `"photoshop"` or `"other"`.
+    #[serde(default = "default_editor")]
+    pub editor: String,
     pub mode: LinkModeEntry,
     /// PSD pixels per layer-space pixel.
     pub scale: f32,
@@ -622,8 +631,8 @@ pub struct LinkEntry {
     #[serde(default)]
     pub layer_map: Vec<LinkLayerEntry>,
     pub next_lyid: u32,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub pc_native: bool,
+    #[serde(default, alias = "pc_native", skip_serializing_if = "is_false")]
+    pub editor_native: bool,
     /// `links/k<id:05>.psd` inside the project, when stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<String>,
@@ -657,13 +666,109 @@ pub struct FileStampEntry {
 }
 
 /// One PSD layer id <-> sticker layer pair of a link.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LinkLayerEntry {
     pub lyid: u32,
+    /// `0` for the placeholder layer of a sticker without layers.
     pub layer: StickerLayerId,
+    /// The layer name written or read (P5c; empty in files without it).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     pub origin: [i32; 2],
     pub size: [u32; 2],
     pub pixels_crc: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_crc: Option<u32>,
+}
+
+impl LinkEntry {
+    /// The entry of `link` (sticker `sticker`); `archive` = the stored copy of the file, if any.
+    pub fn of(sticker: StickerId, link: &crate::link::StickerLink, archive: Option<String>) -> LinkEntry {
+        use crate::link::{LinkFile, LinkMode};
+        LinkEntry {
+            sticker,
+            file: match &link.file {
+                LinkFile::InFolder(name) => LinkFileEntry::InFolder { name: name.clone() },
+                LinkFile::External(path) => LinkFileEntry::External { path: path.to_string_lossy().into_owned() },
+            },
+            editor: link.editor.clone(),
+            mode: match link.mode {
+                LinkMode::Layers => LinkModeEntry::Layers,
+                LinkMode::Merged => LinkModeEntry::Merged,
+            },
+            scale: link.scale,
+            synced: FileStampEntry { size: link.synced.size, modified_unix_ns: link.synced.modified_ns, crc32: link.synced.crc32 },
+            synced_sticker: link.synced_sticker,
+            layer_map: link
+                .layer_map
+                .iter()
+                .map(|e| LinkLayerEntry {
+                    lyid: e.lyid,
+                    layer: e.layer,
+                    name: e.name.clone(),
+                    origin: e.origin,
+                    size: e.size,
+                    pixels_crc: e.pixels_crc,
+                    mask_crc: e.mask_crc,
+                })
+                .collect(),
+            next_lyid: link.next_lyid,
+            editor_native: link.editor_native,
+            archive,
+        }
+    }
+
+    /// The link this entry describes; `None` (with the reason) when it cannot be one: an `InFolder` name that is not
+    /// a plain file name, a scale that is not a finite number >= 1, or two map entries with one `lyid`.
+    pub fn to_link(&self) -> Result<crate::link::StickerLink, &'static str> {
+        use crate::link::{FileStamp, LinkFile, LinkLayer, LinkMode, StickerLink};
+        let file = match &self.file {
+            LinkFileEntry::InFolder { name } => {
+                let plain = !name.is_empty()
+                    && std::path::Path::new(name).file_name().is_some_and(|n| n == std::ffi::OsStr::new(name))
+                    && !name.contains(['/', '\\', ':']);
+                if !plain {
+                    return Err("the linked file name is not a plain file name");
+                }
+                LinkFile::InFolder(name.clone())
+            }
+            LinkFileEntry::External { path } => LinkFile::External(path.into()),
+        };
+        if !(self.scale.is_finite() && self.scale >= 1.0) {
+            return Err("the link scale is not a number of at least 1");
+        }
+        let mut ids: Vec<u32> = self.layer_map.iter().map(|e| e.lyid).collect();
+        ids.sort_unstable();
+        if ids.windows(2).any(|p| p[0] == p[1]) {
+            return Err("two layers of the link have the same id");
+        }
+        let top = ids.last().copied().unwrap_or(0);
+        Ok(StickerLink {
+            file,
+            editor: self.editor.clone(),
+            mode: match self.mode {
+                LinkModeEntry::Layers => LinkMode::Layers,
+                LinkModeEntry::Merged => LinkMode::Merged,
+            },
+            scale: self.scale,
+            synced: FileStamp { size: self.synced.size, modified_ns: self.synced.modified_unix_ns, crc32: self.synced.crc32 },
+            synced_sticker: self.synced_sticker,
+            layer_map: self
+                .layer_map
+                .iter()
+                .map(|e| LinkLayer {
+                    lyid: e.lyid,
+                    layer: e.layer,
+                    name: e.name.clone(),
+                    origin: e.origin,
+                    size: e.size,
+                    pixels_crc: e.pixels_crc,
+                    mask_crc: e.mask_crc,
+                })
+                .collect(),
+            next_lyid: self.next_lyid.max(top.saturating_add(1)).max(1),
+            editor_native: self.editor_native,
+            problem: None,
+        })
+    }
 }

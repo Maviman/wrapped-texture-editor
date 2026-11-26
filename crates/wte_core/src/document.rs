@@ -99,6 +99,13 @@ pub(crate) struct StickerState {
     /// Stickers whose pixels an undo or redo just swapped (`Edit::StickerPixels`): their users are re-baked once the
     /// whole entry is applied (`settle_sticker_pixel_edits`).
     pub(crate) swapped: BTreeSet<StickerId>,
+    /// P5c: the editor links of stickers (STICKER_PLAN 5.3). View-like state: not in history snapshots (R6), saved
+    /// in the manifest; a change bumps `links_revision`, which `is_modified` compares with `links_saved`.
+    pub(crate) links: BTreeMap<StickerId, crate::link::StickerLink>,
+    pub(crate) links_revision: u64,
+    pub(crate) links_saved: u64,
+    /// CRC-32 of sticker pictures and masks by picture version, for `sticker_link_hash` (derived, not persisted).
+    pub(crate) link_crcs: HashMap<u64, u32>,
 }
 
 /// Most parameterizations a document keeps (least recently used dropped first).
@@ -351,12 +358,13 @@ impl Document {
         self.history.state
     }
 
-    /// True when the content differs from the last `mark_saved` state: `history_state() != saved`. Undo and redo back
+    /// True when the content differs from the last `mark_saved` state (`history_state() != saved`) or the editor links
+    /// changed since the last `mark_links_saved` (P5c; links are outside the history). Undo and redo back
     /// to the saved state clear it; a saved state evicted from the history, or left behind by a new edit after undoing
     /// below it, can never be reached again. A pending `Commit::Preview` edit is not counted here (see
     /// `has_pending_edit`).
     pub fn is_modified(&self) -> bool {
-        self.history.state != self.saved_revision
+        self.history.state != self.saved_revision || self.sticker_state.links_revision != self.sticker_state.links_saved
     }
 
     /// Records that the history state `state` (`history_state()`, or `DocumentSnapshot::history_state` of the snapshot
@@ -405,6 +413,8 @@ impl Document {
             history_state: self.history.state,
             png_reuse: self.png_reuse.clone(),
             stickers: self.sticker_state.map.clone(),
+            links: self.sticker_state.links.clone(),
+            links_revision: self.sticker_state.links_revision,
         }
     }
 
@@ -606,6 +616,10 @@ pub struct DocumentSnapshot {
     /// Every sticker of the document (`Arc` clones, no pixel copy); `project::save` writes those a stamp shows and the
     /// kept ones (STICKER_PLAN 2.11).
     pub stickers: std::collections::BTreeMap<crate::ids::StickerId, Arc<crate::sticker::StickerDoc>>,
+    /// The editor links (STICKER_PLAN 5.3); `project::save` writes those of saved stickers and archives their files.
+    pub links: std::collections::BTreeMap<crate::ids::StickerId, crate::link::StickerLink>,
+    /// `Document::links_revision` when the snapshot was taken (for `mark_links_saved` after a background save).
+    pub links_revision: u64,
 }
 
 /// One texture set inside a `DocumentSnapshot`.

@@ -14,7 +14,7 @@ pub mod sticker_entries;
 #[cfg(test)]
 mod sticker_tests;
 
-pub use load::{extract_bundle, extract_sources, load, read_manifest};
+pub use load::{extract_bundle, extract_sources, load, read_link_archive, read_manifest};
 pub use manifest::*;
 pub use sticker_entries::*;
 pub use save::{required_reader, save};
@@ -52,6 +52,24 @@ pub struct SaveStats {
     pub entries: u32,
     /// The images of the written file that a later save may copy (see `PngReuse`).
     pub reuse: Option<PngReuse>,
+    /// Things the user is told after a successful save (P5c: a linked file that was being written).
+    pub warnings: Vec<SaveWarning>,
+}
+
+/// A note about a save that succeeded (STICKER_PLAN 5.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SaveWarning {
+    /// The linked file of sticker `sticker` changed and does not read completely (its editor is writing it): the
+    /// project keeps the earlier copy of it (none on a first save).
+    LinkBeingWritten { sticker: crate::ids::StickerId, name: String },
+}
+
+impl std::fmt::Display for SaveWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SaveWarning::LinkBeingWritten { name, .. } => f.write_str(&crate::link::texts::being_written(name)),
+        }
+    }
 }
 
 /// The layer and composite images of an existing project file that `save` copies instead of encoding them again,
@@ -96,6 +114,32 @@ pub struct LoadReport {
     pub warnings: Vec<LoadWarning>,
     /// The file was written by a newer format version: plain Save must be refused so it is never overwritten.
     pub force_save_as: bool,
+    /// P5c (STICKER_PLAN 5.3 "At load"): what was found on disk for every editor link. `load` only reports; it writes
+    /// nothing. The app restores a missing `InFolder` file from its archive entry (`read_link_archive`) and asks
+    /// about a changed one.
+    pub links: Vec<LinkAtLoad>,
+}
+
+/// One editor link as `load` found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkAtLoad {
+    pub sticker: crate::ids::StickerId,
+    pub state: LinkFileState,
+    /// Where the file is expected (`None` only for an `InFolder` link of a project path without a folder).
+    pub path: Option<std::path::PathBuf>,
+    /// The copy of the file inside the project (`links/k<id:05>.psd`), when the archive has it.
+    pub archive: Option<String>,
+}
+
+/// What `load` found at a link's path.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LinkFileState {
+    /// The file has the content the link last synced (size and CRC-32; the time is not compared).
+    Present,
+    /// No file (an `InFolder` one can be restored from the archive; an `External` one is "link broken").
+    Missing,
+    /// The file changed while the project was closed ("Update" / "Ignore").
+    Changed,
 }
 
 /// Counters of `project::save` (tests): sticker picture and mask PNGs encoded by saves started on this thread (one

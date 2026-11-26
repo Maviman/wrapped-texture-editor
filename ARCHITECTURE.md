@@ -325,7 +325,14 @@ the `.wtes` sticker file (7.8), tests (9.1). (P5a; plan revision 3 adds Photosho
 fixtures of P0 as its tests (9.1). (P5b): the sticker PSD writer `psd::write_sticker`, one writer for every editor,
 laid out the way Photoshop lays out a file (5.28, 7.7, 7.9 "Writer"), judged by the reader, by the test-only strict
 structure walker `psd/strict.rs` (calibrated on the Photoshop-saved fixtures) and by `tools/sticker/psd_check.py`
-(Pillow); fixture f1 rebuilt with it and re-saved by PhotoCraft (`f1w_*`, 9.1).
+(Pillow); fixture f1 rebuilt with it and re-saved by PhotoCraft (`f1w_*`, 9.1). (P5c): the link logic of the editor
+link, pure and headless: `StickerLink` with its editor key, the round trip of 5.4 with the ids rules of 13.2
+(`link::map`), the states and decisions of 5.5, the atomic write with `.bak.psd` and the "could not be replaced"
+result, every sentence with the editor's name (`link::texts`); the `Document` side (`doc_links.rs`: the link map
+outside the history, `sticker_link_hash`, `prepare_link_file` / `finish_link_write`, `apply_link_update`); the project
+side (`links/k<id>.psd` archive entries by the save rule, `LoadReport::links`, the optional `editor` of `LinkEntry`)
+(2.1, 5.23, 5.28 "link", 6.13, 7.1, 7.2, 9.1); fixture f15 (a link export with a text, a shape and a mask, re-saved by
+PhotoCraft).
 
 ---
 
@@ -393,7 +400,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `sticker/filter.rs` | stickers P2 | Gaussian `blur` / `blur_mask` (three boxes), `sharpen`, `draw_gradient` / `draw_gradient_mask` (5.27, 6.12) |
 | `sticker/bench.rs` | stickers P1, P2 | the ignored `perf_k1_*` and `perf_k2_*` timings (test-only) |
 | `sticker/model.rs` | stickers P3a | `StickerDoc`, `StickerLayer`, `StickerContent`, `PicturePixels`, `LayerMask`, `ArtboardShape`; limits check, the trivial-path test (5.27 part 3) |
-| `sticker/render.rs` | stickers P3a | `render` / `render_with` (6.10), `StickerRenderInput`, `LayerKey`, `LayerRaster`, `LayerCache`, `render_size` |
+| `sticker/render.rs` | stickers P3a | `render` / `render_with` (6.10), `StickerRenderInput`, `LayerKey`, `LayerRaster`, `LayerCache`, `render_size`; P5c: `layer_content` / `mask_raster` (a layer's pixels and its mask for a linked PSD, 6.13) |
 | `sticker/pipeline.rs` | stickers P3a | `SourceFrame`, `bake_placement_of`, `Styling`, `work_level`, `styled_mips`, `styled_straight`, `sticker_scale` (6.5 "Stickers") |
 | `doc_stickers.rs` | stickers P3a | the sticker commands of `Document` (queries, add / remove / promote / detach, `set_sticker`, stamp styles, the two placements, finished pictures) and `StickerCaches` (5.20 "Stickers") |
 | `doc_stickers_tests.rs` | stickers P3a | the `k3a_*` tests of the sticker document (test-only child of the crate root) |
@@ -406,6 +413,12 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `psd/testkit.rs`, `psd/read_tests.rs`, `psd/fixture_tests.rs` | stickers P5a | test-only: the PSD byte builder and the test compositor; the `k5_synth_*` / `k5_desc_*` and `k5_ps_*` / `k5_pc_*` tests (9.1) |
 | `psd/write.rs` | stickers P5b | `psd::write_sticker` (7.9 "Writer"): `StickerPsd`, `StickerPsdLayer`, `normalise`, `composite`; resources 1005 / 1044 / 1057, records with masks, clipping, `luni` / `lyid`, PackBits channels, the merged picture matted on white |
 | `psd/strict.rs`, `psd/write_tests.rs` | stickers P5b | test-only: the strict structure walker (7.9 "Strict walker") and the `k5_write_*` / `k5_strict_*` tests (9.1) |
+| `link/mod.rs` | stickers P5c | the editor link's data and decisions (5.28 "link"): `StickerLink`, `LinkFile`, `LinkMode`, `FileStamp`, `LinkLayer`, `LinkProblem`, `LinkState` (badges), `link_state`, `sync_action`, `next_stale`, `send_first_question`, `rewrite_warning`, `links_folder`, `link_file_name`, `archive_entry`, the editor keys, `SMART_FORCES_OUTSIDE_PHOTOCRAFT` |
+| `link/map.rs` | stickers P5c | the round trip of 6.13: `export`, `import`, `import_fitted`, `link_scale`, `mask_crc`, the ids rules and the two matching passes |
+| `link/file.rs` | stickers P5c | `write_link_file` (temp file, `.bak.psd`, own-write registration before the rename, retries, "could not be replaced"), `LinkFileIo`, `LinkWriteError` |
+| `link/texts.rs` | stickers P5c | every sentence about a link, each taking the editor's name |
+| `link/tests.rs`, `link/fixture_tests.rs` | stickers P5c | test-only: the `k5_link_*` tests (9.1) |
+| `doc_links.rs` | stickers P5c | the links of `Document` (5.28 "link"): `link`, `links`, `links_revision`, `mark_links_saved`, `sticker_link_hash`, `link_state`, `prepare_link_file`, `finish_link_write`, `unlink`, `set_link_file_and_editor`, `apply_link_update`, `apply_link_fit`, `link_file_refused`; `PreparedLink`, `LinkApplied` |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -437,7 +450,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `image_io.rs` | C5 | `decode_image`, `encode_png`, `encode_flat`, `FlatFormat`, `PngLevel` |
 | `project/mod.rs` | S | re-exports, `FORMAT_VERSION`, `SaveOptions`, `SaveStats`, `LoadReport`, `PngReuse`, `counters` (stickers P4) |
 | `project/manifest.rs` | S | serde manifest schema (types only); round 4: `TextFxEntry`, `GapEntry`, `WarpEntry`, `PathEntry`, `TextEntry::unknown_features` |
-| `project/sticker_entries.rs` | stickers P4 | the format-4 entries (7.2 "Format 4"): `StickerEntry`, `StickerLayerEntry`, `StickerContentEntry`, `ShapeEntry`, `AdjustmentEntry`, `StyleStackEntry` and its members, `LinkEntry` (plain data until P5); conversions and the float visitors of the save check |
+| `project/sticker_entries.rs` | stickers P4 | the format-4 entries (7.2 "Format 4"): `StickerEntry`, `StickerLayerEntry`, `StickerContentEntry`, `ShapeEntry`, `AdjustmentEntry`, `StyleStackEntry` and its members, `LinkEntry` (P5c: `of` / `to_link`, the optional `editor`); conversions and the float visitors of the save check |
 | `project/sticker_tests.rs` | stickers P4 | the `k4_*` unit tests (test-only child of `project`) |
 | `project/save.rs` | C6 | `project::save` |
 | `project/load.rs` | C6 | `project::load`, `read_manifest`, `extract_bundle`, `extract_sources` |
@@ -3052,7 +3065,11 @@ pub const PROJECT_MIMETYPE: &str = "application/x-wtep";
 pub struct SaveOptions { pub png: PngLevel /* Fast */, pub write_flattened: bool /* true */, pub keep_backup: bool /* false */,
                          pub now_unix: u64, pub app_version: String }
 #[derive(Clone, Debug, Default)]
-pub struct SaveStats { pub bytes_written: u64, pub entries: u32, pub reuse: Option<PngReuse> /* record of the written file */ }
+pub struct SaveStats { pub bytes_written: u64, pub entries: u32, pub reuse: Option<PngReuse> /* record of the written file */,
+                       pub warnings: Vec<SaveWarning> /* P5c */ }
+/// P5c: a note about a save that succeeded; Display = "<name>: the linked file is being written; the project keeps
+/// the earlier copy."
+pub enum SaveWarning { LinkBeingWritten { sticker: StickerId, name: String } }
 /// Images of an existing project file that `save` copies instead of encoding (7.1, "Copying unchanged images").
 #[derive(Clone, Debug, Default)]
 pub struct PngReuse { pub path: PathBuf, pub len: u64, pub modified: Option<SystemTime>,
@@ -3062,8 +3079,12 @@ pub struct PngReuse { pub path: PathBuf, pub len: u64, pub modified: Option<Syst
                       pub stickers: HashMap<u64, String> }
 /// Test counters (thread-local): `counters::sticker_encodes()` = sticker PNGs encoded by saves on this thread.
 pub mod counters { pub fn sticker_encodes() -> u64; }
-pub struct LoadReport { pub document: Document, pub warnings: Vec<LoadWarning>, pub force_save_as: bool }
-pub use save::save;  pub use load::{load, read_manifest, extract_bundle, extract_sources};
+pub struct LoadReport { pub document: Document, pub warnings: Vec<LoadWarning>, pub force_save_as: bool,
+                        pub links: Vec<LinkAtLoad> /* P5c: what is on disk per editor link; load writes nothing */ }
+pub struct LinkAtLoad { pub sticker: StickerId, pub state: LinkFileState, pub path: Option<PathBuf>,
+                        pub archive: Option<String> /* links/k<id:05>.psd when the archive holds it */ }
+pub enum LinkFileState { Present /* the synced content (size + CRC; the time is not compared) */, Missing, Changed }
+pub use save::save;  pub use load::{load, read_manifest, read_link_archive, extract_bundle, extract_sources};
 
 // project/save.rs  [C6]
 /// Writes a complete .wtep atomically (temp file in the same directory, fsync, verify, rename).
@@ -3071,6 +3092,8 @@ pub fn save(snapshot: &DocumentSnapshot, path: &Path, opts: &SaveOptions, progre
 // project/load.rs  [C6]
 pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectError>;
 pub fn read_manifest(path: &Path) -> Result<Manifest, ProjectError>;
+/// P5c: the stored copy of a linked file (`LinkAtLoad::archive`); the app restores a missing link file with it.
+pub fn read_link_archive(project: &Path, entry: &str) -> Result<Vec<u8>, ProjectError>;
 /// R7 "Extract Original Files", working on in-memory data (so it also works for a document that was never saved): writes
 /// the model file, every sidecar and every extra at their relative paths, every blob under `stamps\` (images) or
 /// `fonts\` (fonts) using its sanitized original name, and (stickers P4) every `(name, finished picture)` of `stickers`
@@ -3570,7 +3593,7 @@ Part 4 (P3b; 5.20 "Sticker pixel edits", 5.18, 6.7). The pixel edits are `Docume
 (`PixelTarget`, `PixelData`, `StickerPatch`, `StickerBrush`, `StickerCheckpoint` re-exported at the crate root); the
 generic tile patches are `history::TilePatchOf<BPP>` over `pixel::TileBuf` (5.5, 5.18).
 
-### 5.28 `psd/` (stickers; P5a = the reader; P5b = the writer; P5c adds `link.rs`)
+### 5.28 `psd/` and `link/` (stickers; P5a = the reader; P5b = the writer; P5c = `link/`, `doc_links.rs`)
 
 The PSD / PSB reader and writer of the editor link (STICKER_PLAN 5.2, 13.2, 13.3). One reader for every writer: it
 never branches on who wrote a file; one writer for every editor. Pure, headless, deterministic; never panics on any input. `export/psd.rs` (the texture exporter, 7.7)
@@ -3645,6 +3668,90 @@ pub fn effects_enabled(data: &[u8]) -> bool;    // master switch on and some eff
 The link logic of P5c asks `forcing(SMART_FORCES_OUTSIDE_PHOTOCRAFT && editor != "photocraft")`: empty = the file
 comes back layer by layer; otherwise as one merged picture when `merged` is `Some`, else the state "needs a merged
 picture". The test helper `psd::testkit::mode` states exactly this rule (and "a flat file is one merged picture").
+
+**`link/` (P5c; STICKER_PLAN 5.3-5.5, 13.1, 13.2).** Pure and headless: no program is started, no file watched, no
+clipboard. The core has no editor enum: the link stores the editor's key and every text takes the editor's name.
+
+```rust
+// link/mod.rs
+pub const SMART_FORCES_OUTSIDE_PHOTOCRAFT: bool = true;            // decision D3 (13.8); smart_forces(editor_key)
+pub const EDITOR_PHOTOCRAFT: &str = "photocraft"; pub const EDITOR_PHOTOSHOP: &str = "photoshop"; pub const EDITOR_OTHER: &str = "other";
+pub const UPDATE_LABEL: &str = "Update Linked Sticker";
+pub const PLACEHOLDER_LAYER: StickerLayerId = StickerLayerId(0);   // map entry of the empty layer written for an empty sticker
+pub enum LinkFile { InFolder(String) /* name in X_links\ */, External(PathBuf) }   // path(project), display_name()
+pub enum LinkMode { Layers, Merged }
+pub struct FileStamp { pub size: u64, pub modified_ns: Option<u64>, pub crc32: u32 }  // of_bytes, read, same_content (size + CRC)
+pub struct LinkLayer { pub lyid: u32, pub layer: StickerLayerId, pub name: String, pub origin: [i32; 2], pub size: [u32; 2],
+                       pub pixels_crc: u32, pub mask_crc: Option<u32> }                // normalised, canvas pixels
+pub enum LinkProblem { Refused { crc32, sentence }, NeedsMerged { crc32 }, CanvasTooLarge { crc32, width, height },
+                       TooLarge { crc32, width, height }, Unreadable { crc32, reason } }   // shown while the file has crc32
+pub struct StickerLink { pub file: LinkFile, pub editor: String /* key */, pub mode: LinkMode, pub scale: f32 /* >= 1 */,
+    pub synced: FileStamp, pub synced_sticker: u64 /* Document::sticker_link_hash */, pub layer_map: Vec<LinkLayer>,
+    pub next_lyid: u32, pub editor_native: bool, pub problem: Option<LinkProblem> /* not saved */ }
+pub enum LinkState { Linked, ChangedInWte, ChangedInEditor, Conflict, Missing, NeedsMerged, Refused(String),
+                     CanvasTooLarge { width, height }, TooLarge { width, height }, Unreadable(String) }
+impl LinkState { pub fn badge(&self, editor: &str, sticker: &str, file: &str) -> String; }   // "linked", "changed in <editor>", ...
+pub fn link_state(link: &StickerLink, observed: Option<&FileStamp> /* None = missing */, sticker_hash: u64) -> LinkState;
+pub enum SyncAction { Nothing, Apply, Conflict { saved_over: bool } }
+pub fn sync_action(file_changed: bool, wte_changed: bool, stale_in_editor: bool) -> SyncAction;
+pub enum StaleEvent { Rewrote { opened: bool }, Answered, EditAgain { child_exited: bool } }
+pub fn next_stale(stale: bool, event: StaleEvent) -> bool;                      // the session flag of 5.5 (the app keeps it)
+pub fn send_first_question(link: &StickerLink, wte_changed: bool, editor: &str) -> Option<String>;
+pub enum OpenedState { NotOpened, ChildRunning, Unknown }
+pub fn rewrite_warning(opened: OpenedState, editor: &str) -> Option<String>;
+pub fn links_folder(project: &Path) -> PathBuf;                                // X.wtep -> X_links
+pub fn link_file_name(sticker_name: &str, id: StickerId) -> String;            // "<sanitised name>_k<id>.psd"
+pub fn archive_entry(id: StickerId) -> String;                                 // "links/k<id:05>.psd"
+
+// link/map.rs (6.13)
+pub fn link_scale(doc: &StickerDoc, final_scale: f32) -> u32;                  // 1 | 2 | 4
+pub fn export(input: &StickerRenderInput, scale: u32, previous: Option<&StickerLink>) -> Result<LinkExport, PsdError>;
+pub struct LinkExport { pub psd: StickerPsd, pub layer_map: Vec<LinkLayer>, pub next_lyid: u32, pub scale: u32 }
+pub struct ImportContext<'a> { pub editor_key: &'a str, pub editor_name: &'a str, pub file_name: &'a str,
+                               pub blob_sizes: &'a [(BlobId, [u32; 2])] }
+pub fn import(psd: &PsdDoc, sticker: &StickerDoc, link: &StickerLink, cx: &ImportContext) -> Result<LinkImport, ImportProblem>;
+pub fn import_fitted(..same..) -> Result<LinkImport, ImportProblem>;           // "Fit it into the sticker"
+pub enum ImportProblem { NeedsMerged, CanvasTooLarge { width, height }, TooLarge { width, height } }
+pub struct LinkImport { pub sticker: StickerDoc, pub mode: LinkMode, pub scale: f32, pub layer_map: Vec<LinkLayer>,
+    pub next_lyid: u32, pub editor_native: bool, pub ids_lost: Option<&'static str>, pub outcomes: Vec<LayerOutcome>,
+    pub toast: Option<String>, pub profile_note: Option<String>, pub log: Vec<String> }
+pub enum LayerOutcome { Untouched(id), Moved(id), MaskChanged { layer, kept }, PixelsChanged(id), New(id), Placeholder, Deleted(id) }
+pub fn mask_crc(mask: Option<&PsdMask>, rect: IRect) -> Option<u32>;          // disabled flag + values over the layer rect
+
+// link/file.rs
+pub trait LinkFileIo { fn rename(..); fn pause(&mut self, ms: u64); fn before_rename(&mut self, crc32: u32);
+                       fn rename_failed(&mut self, crc32: u32); }   // defaults: std::fs::rename, sleep, nothing
+pub struct RealFileIo;
+pub fn write_link_file(target: &Path, bytes: &[u8], io: &mut dyn LinkFileIo) -> Result<FileStamp, LinkWriteError>;
+pub enum LinkWriteError { Locked { file }, Io { file, message } }   // sentence(editor): "<file> could not be replaced ..."
+pub fn backup_path(target: &Path) -> PathBuf;                       // <stem>.bak.psd
+
+// link/texts.rs: updated, merged_layer_name, merged_reason, needs_merged(editor_key, editor), offers_cli_convert,
+// canvas_too_large, too_large, unreadable, conflict, saved_over, take_editors_version, could_not_replace,
+// being_written, changed_while_closed, SAVE_FIRST, profile_note, ids_not_kept, send_to, edit_in, unsaved_links,
+// other_editor_open
+
+// doc_links.rs (impl Document)
+pub fn link(&self, id: StickerId) -> Option<&StickerLink>;
+pub fn links(&self) -> impl Iterator<Item = (StickerId, &StickerLink)>;
+pub fn links_revision(&self) -> u64;  pub fn mark_links_saved(&mut self, revision: u64);   // is_modified counts links
+pub fn sticker_link_hash(&mut self, id: StickerId) -> Result<u64, EditError>;
+pub fn link_state(&mut self, id: StickerId, observed: Option<&FileStamp>) -> Result<LinkState, EditError>;
+pub fn prepare_link_file(&mut self, id: StickerId, file: LinkFile, editor: &str) -> Result<PreparedLink, EditError>;
+pub fn finish_link_write(&mut self, prepared: PreparedLink, written: FileStamp) -> Result<(), EditError>;
+pub fn unlink(&mut self, id: StickerId);
+pub fn set_link_file_and_editor(&mut self, id: StickerId, file: Option<LinkFile>, editor: Option<&str>) -> Result<(), EditError>;
+pub fn apply_link_update(&mut self, id, psd: &PsdDoc, stamp: FileStamp, editor_name: &str, file_name: &str) -> Result<LinkApplied, EditError>;
+pub fn apply_link_fit(..same..) -> Result<LinkApplied, EditError>;
+pub fn link_file_refused(&mut self, id, err: &PsdError, stamp: FileStamp, file_name: &str) -> Result<LinkState, EditError>;
+pub struct PreparedLink { pub sticker: StickerId, pub bytes: Vec<u8>, pub crc32: u32, pub link: StickerLink }
+pub enum LinkApplied { Updated { mode, toast, profile_note, log }, Problem(LinkState) }
+```
+
+`DocumentSnapshot` carries `links` and `links_revision`; `Document::is_modified` is true while the history state differs
+from the saved one **or** `links_revision` differs from the last `mark_links_saved` (links are outside the history, R6).
+`mark_saved` does not touch the links: after a background save the app calls `mark_links_saved(snapshot.links_revision)`
+(P9a); `load` marks both.
 
 ---
 
@@ -5015,6 +5122,81 @@ Measured (release, this machine, plan 8.4 budgets in brackets; build note `docs/
 10.8 ms (60), magic eraser 15.5 ms (60), remove background 46.5 ms (150), Gaussian blur radius 16 at 2048^2 51 ms (150),
 flood 4096^2 one colour 38 ms (400).
 
+### 6.13 The editor link: sticker <-> PSD, states, who writes when (`link/`, `doc_links.rs`) [stickers P5c]
+
+STICKER_PLAN 5.3-5.5 and 13.1 / 13.2 are the source; this section records what is built and where it differs.
+
+**Scale.** `link_scale(doc, final)`: the larger of the sticker's Final render scale over its stamps (2.6) and
+`ceil(1 / smallest |scale| of a picture layer)`, rounded up to 1, 2 or 4 (at most 4), halved until `artboard * s`
+fits 4096 a side. The PSD canvas is `artboard * s`; `StickerLink::scale` keeps `s`.
+
+**WTE -> PSD** (`export`). Per sticker layer, bottom to top: `render::layer_content` = steps (a) and (b) of 6.10 (content,
+adjustments, transform at scale `s`) **without the mask and without styles**, clipped to the canvas, normalised
+(`psd::write::normalise`: RGB under alpha 0 cleared, trimmed). A picture's mask is `render::mask_raster` (the mask as an
+opaque grey picture placed with the same transform; mask value = red where the picture lands, 255 elsewhere, default
+255). Name, `lyid`, `clip`, visibility, `opacity_u8(opacity)`, blend. Ids: a layer already in the map keeps its `lyid`,
+a new one takes `next_lyid` (ids are never reused); the map entry stores `lyid`, layer id, name, origin, size, the CRC
+of the normalised bytes and `mask_crc` (the disabled flag and the mask's values over the layer's rect, so a trimmed or
+re-rectangled mask compares equal). The fonts of hidden text layers are loaded too (hidden layers are written). A
+sticker without layers is written with one empty layer "Layer 1" whose map entry names `PLACEHOLDER_LAYER` (a PSD
+without layers would open in Photoshop as an opaque picture); while it stays empty it never comes back as a layer.
+`id_seed` (resource 1044) = `next_lyid - 1`.
+
+**PSD -> WTE** (`import`). `too_large` -> `TooLarge`. The artboard becomes `ceil(canvas / s)` at the old top-left;
+over 4096 -> `CanvasTooLarge` (nothing applied; `import_fitted` = one merged picture at `s = max(W, H) / 4096`). A
+flat file, or `forcing(smart_forces(editor))` not empty -> **merged**: the layers are replaced by one picture layer
+"<editor> picture" (the un-matted merged picture, scale `1 / s` at the artboard origin), no merged picture ->
+`NeedsMerged`; the toast names the features (`PsdFeatures::words`, "a, b and c"; none for a flat file). Otherwise
+**layers**: each PSD layer is clipped to the canvas and normalised; duplicate ids after the first (from the bottom)
+count as no id. Matching (13.2), in order:
+
+1. *Ids lost* when the file has layers and the map is not empty and either no layer carries a known id (rule 1), or a
+   layer with a known id `i` differs from entry `i` in pixels **and** name while its pixels **or its name** equal another
+   entry (rule 2; the name part is a P5c addition, so a renumbered layer that was also repainted still triggers it).
+   Then pass 1 matches by (CRC, size), ties by name, then by map order; pass 2 matches a left-over layer to the one
+   left-over entry with its name, as "pixels changed". The log line "layer ids of <file> were not kept (<rule>)".
+2. Ids trusted: a known id is that entry, unless pixels **and** name both differ ("`lyid` reuse": deleted + new). Rule
+   3: a layer with an unknown id (or none) whose pixels and name equal an entry whose own id is not in the file is that
+   entry (it takes the new id).
+
+Rows (5.4): pixels, mask and origin equal -> **untouched** (the WTE layer as it is; name, visibility, opacity - kept when
+it rounds to the file's byte -, blend if one of the seven, clip - not on the bottom layer, which the writer writes
+unclipped - and order from the file); another origin -> **moved** (`translate += delta / s`); the mask differs -> a picture
+at a whole-pixel translate, scale 1, rotation 0 and `s == 1` keeps its pixels and gets the PSD mask mapped into picture
+space (an unedited blob picture needs its decoded size, `ImportContext::blob_sizes`), any other layer becomes a picture
+as in the next row; pixels differ -> a picture with the PSD pixels (owned, the normalised rect; 1 x 1 transparent when
+empty), transform scale `1 / s` with the top-left at `artboard origin + rect origin / s`, adjustments removed, the PSD
+mask (a disabled mask = none), id, styles and `locked` kept; unknown -> a **new** picture layer (fresh layer id); map
+entries and sticker layers not in the file -> deleted. The new map is built from the file's ids (fresh ids from
+`next_lyid` for layers without one), `next_lyid` above every id seen. More than 32 layers or more picture bytes than a
+sticker holds -> merged instead, with that reason. `editor_native` = some layer is TEXT / SMART / FILL. A non-sRGB
+RGB profile adds `profile_note`.
+
+**Document** (`doc_links.rs`). `apply_link_update` = `import` + `set_sticker(.., "Update Linked Sticker", Final)` (no entry
+when nothing changed; new buffers get fresh picture versions there), then the link (outside the history) takes the
+stamp, the sticker hash after the edit, map, mode, scale, `editor_native`, and loses its problem. A problem
+(`ImportProblem`, a refused or damaged file through `link_file_refused`; a truncated one is not a problem) is stored
+with the CRC of the content it is about and is the badge while the file has that content. `sticker_link_hash` covers
+exactly what goes into the PSD: the artboard rectangle and per layer the project-format entry (serde JSON) with styles
+and `locked` left out and pictures / masks as `{w}x{h}`, size and CRC-32 (CRCs cached by picture version), so styles,
+the stamp, the sticker's name and shape are not "changed in WTE", and the hash is the same after save and load.
+
+**States** (5.5): `link_state` - missing; a problem for the current content; else from `file_changed` (size or CRC
+differ; the time is not compared) and `wte_changed` (hash): linked / changed in <editor> / changed in WTE / conflict.
+`sync_action`: no file change -> nothing (also after an undo of an update: R6); stale -> "saved over" conflict; both ->
+conflict; else apply. `next_stale`: set by a rewrite of a file opened this session, cleared by an answer or by "Edit
+in" after the child exited.
+
+**Who writes** (5.3, 13.1 A8). `prepare_link_file` makes the bytes and the link-to-be and changes nothing;
+`write_link_file` writes `<name>.wte-tmp`, copies the old file aside, registers the CRC (`before_rename`), renames over
+the PSD (sharing / lock / access errors: three more tries 200 ms apart), then keeps the old copy as `<stem>.bak.psd`;
+on failure both temp files are deleted, the registration is taken back (`rename_failed`) and nothing else changed;
+`finish_link_write` then takes the written stamp. A project save only reads link files (7.1).
+
+Known limits: the reader bounds each layer, not the sum of all layers (P5a check note A; a document of many full-size
+8192 layers is as large in WTE); a hidden layer with a non-WTE blend key comes back with the WTE layer's blend (or
+Normal).
+
 ---
 
 ## 7. File formats
@@ -5046,6 +5228,7 @@ let deflated = zip::write::SimpleFileOptions::DEFAULT.compression_method(zip::Co
 | `blobs/b<id:05>.<ext>` | STORED for images, deflate 6 for fonts | stamp source images and font files (original encoded bytes), only those referenced by a stamp or (format 4) by a layer of a saved sticker (unedited pictures, text fonts) |
 | `stickers/k<id:05>/p<layer:03>.png` | STORED | format 4: the owned (edited) picture of a sticker picture layer, straight RGBA8, the whole picture (never cropped) |
 | `stickers/k<id:05>/m<layer:03>.png` | STORED | format 4: the mask of a sticker picture layer, 8-bit greyscale PNG, the size of its picture |
+| `links/k<id:05>.psd` | STORED | format 4 (P5c): the stored copy of an `InFolder` link file of a saved sticker, by the save rule below; never for an `External` link |
 | `sets/s<set:02>/l<layer id>.png` | STORED | layer pixels: RGBA8 PNG cropped to `nonzero_bounds` (raster: bbox of pixels != `[0,0,0,0]`, so RGB under alpha 0 is kept) or to the bounds of the cache parts (stamp/text) |
 | `sets/s<set:02>/flattened.png` | STORED | full-size composite of the set (if `write_flattened`) — lets other tools grab the result without our app |
 | `thumbnail.png` | STORED | at most 256 px, from the composite of set 0 |
@@ -5053,7 +5236,7 @@ let deflated = zip::write::SimpleFileOptions::DEFAULT.compression_method(zip::Co
 
 Entry names are built only from numeric ids and sanitized extensions; no user string reaches a ZIP path. Original names live in the
 manifest. Readers take entry names from the manifest only. The sticker entries come after the blobs and before the layers.
-`links/k<id:05>.psd` (the stored copy of a PhotoCraft link file) is package P5's (STICKER_PLAN 5.3); P4 writes none.
+The link copies (`links/k<id:05>.psd`) follow the sticker entries.
 
 **Which stickers are saved (format 4).** Those a stamp shows and those with `keep` (the tray), ascending id
 (`save::saved_stickers`, `Document::saved_sticker_ids`); any other sticker in the document is a leftover of undo and is
@@ -5093,6 +5276,15 @@ dropped at save.
    `FileRef { entry, size, crc32 }` with `crc32fast::hash`; write `manifest.json` last; `finish()`.
 4. `verify`: reopen with `ZipArchive::new`, parse `manifest.json`, check that every `FileRef` entry exists with the recorded size.
 5. Report progress per layer; honour `progress.cancelled()` between entries (`ProjectError::Cancelled`, temp file removed).
+
+**Links (P5c, STICKER_PLAN 5.3).** The links of saved stickers are written as `LinkEntry`s (7.2). For an `InFolder` link
+the file `link::links_folder(path)/<name>` is **read** (never written: `write_links` has no writer for link files)
+and stored as `links/k<id:05>.psd` by `save::archive_choice`: CRC equal to `synced.crc32` -> stored; different and
+`psd::read` accepts it (also a complete file the reader refuses as a whole) -> stored; different and truncated or
+damaged (the editor is writing it) -> the previous entry is copied from the old project file (the `PngReuse` file;
+none on a first save) and `SaveStats::warnings` gets `SaveWarning::LinkBeingWritten` ("<name>: the linked file is
+being written; the project keeps the earlier copy."); a missing file keeps the previous entry silently. `verify` also
+checks that every `archive` entry exists. At Save As the app copies the link files into the new folder first (P9a).
 
 `write_atomic`: temp name `<file name>.tmp-<pid>` in the same directory; `File::sync_all()`; if `keep_backup` and the target exists,
 rename it to `<path>.bak` (replacing an older one); `std::fs::rename(tmp, path)` (replaces on Windows); delete the temp file on any error.
@@ -5155,6 +5347,12 @@ rename it to `<path>.bak` (replacing an older one); `std::fs::rename(tmp, path)`
    (`SparseBuf::empty()`, name = stamp name, on top of that set) and is flagged for re-bake, so the structure invariants of 6.5
    hold when `from_parts` runs `debug_check_structure`. Then `Document::from_parts`; then `rebake_stamp(id, Full)` for the flagged
    stamps; clear history; `mark_saved(revision)` (equals `history_state()` here, 6.7).
+8. P5c: the links (`load::load_links`): each `LinkEntry` whose sticker was loaded becomes a `StickerLink`
+   (`LinkEntry::to_link`; an `InFolder` name that is not a plain file name, a scale below 1 or not finite, or two map
+   entries with one id leave the link out with a log line, as does a second link of one sticker); `next_lyid` is raised
+   above every map id. `LoadReport::links` says per link what is at its path: `Present` (size and modification time
+   equal, or the bytes' CRC equal), `Missing`, `Changed`; and the archive entry when the archive has it. **Nothing is
+   written**: the app restores a missing `InFolder` file with `read_link_archive` and asks about a changed one.
 
 Fatal: not a ZIP, no/invalid manifest, too new, unrecoverable model, manifest or model file beyond its size limit. Everything else
 degrades with a warning. Corruption is detected by
@@ -5197,7 +5395,7 @@ pub struct Manifest {
     #[serde(default)] pub ui_state: serde_json::Value,
     // format 4 (stickers P4), not written when empty:
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub stickers: Vec<StickerEntry>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub links: Vec<LinkEntry>,   // plain data until P5
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub links: Vec<LinkEntry>,   // written since P5c
 }
 pub struct FileRef { pub entry: String, pub size: u64, pub crc32: u32 }
 pub struct SourceEntry { pub format: ModelFormat, pub main: SourceFileEntry, pub sidecars: Vec<SourceFileEntry>,
@@ -5279,9 +5477,12 @@ pub struct ShapeEntry { pub form: ShapeFormEntry /* {"type": "rect" | "rounded_r
 pub enum AdjustmentEntry { BrightnessContrast { .. }, HueSaturation { .. }, Levels { .. }, Invert, BlackWhite, Posterize { .. }, Threshold { .. } }
 pub struct StyleStackEntry { contour, stroke, drop_shadow, inner_shadow, outer_glow, inner_glow, color_overlay,
                              gradient_overlay, bevel /* each Option<..Entry>, absent = None; an entry with "on": false is kept */ }
-pub struct LinkEntry { sticker, file: LinkFileEntry /* in_folder { name } | external { path } */, mode: LinkModeEntry,
+pub struct LinkEntry { sticker, file: LinkFileEntry /* in_folder { name } | external { path } */,
+                       editor: String /* default "photocraft" (P4 files) */, mode: LinkModeEntry /* layers | merged */,
                        scale, synced: FileStampEntry /* { size, modified_unix_ns, crc32 } */, synced_sticker,
-                       layer_map: Vec<LinkLayerEntry>, next_lyid, pc_native, archive: Option<String> }   // written by P5 (STICKER_PLAN 5.3)
+                       layer_map: Vec<LinkLayerEntry /* { lyid, layer (0 = placeholder), name (default ""), origin, size,
+                       pixels_crc, mask_crc } */>, next_lyid,
+                       editor_native /* also read as "pc_native" */, archive: Option<String> }   // written by P5c (STICKER_PLAN 5.3)
 ```
 The content tag is `kind`, so the shape's geometry is named `form`, and the inner tags of shapes and paints are `type`.
 A picture entry names its PNG as a `FileRef` (entry, size, CRC-32), like the layer images, not as a bare file name.
@@ -8769,6 +8970,38 @@ and text layers (exactly those two files, each = `dense(layer)`).
   re-saved by the real PhotoCraft v0.2.0 CLI keeps names, ids, order, hidden, opacity, the seven blends, clipping, a soft
   mask and every layer's pixels on the canvas) and `k5_check_random_stickers_round_trip` (300 random stickers, fixed
   seed: strict walker, read back as written, composite of the read layers = the writer's composite).
+- Branch `stickers`, P5c (STICKER_PLAN 7 "P5", 13.9; `link::tests`, `link::fixture_tests`; names `k5_link_*`):
+  `export_and_untouched_import_give_the_same_sticker` (ids 1..n, no styles in the file, the read-back sticker equal,
+  no undo step, the same bytes twice, a deleted layer's id never reused, a new one takes `next_lyid`),
+  `an_empty_sticker_is_written_with_one_empty_layer_that_never_comes_back`; the mapping table row by row:
+  `rows_moved_mask_pixels_new_deleted_clip_props` (moved shape stays a shape, a mask on a whole-pixel picture kept and
+  mapped, a mask on a text -> picture, pixels changed -> picture without adjustments and with its styles, new, deleted,
+  clip / hidden / opacity / Multiply / renamed), `a_disabled_mask_is_no_mask_and_not_a_change_every_time`,
+  `each_forcing_feature_comes_back_merged_with_its_sentence_per_editor` (ten features, Photoshop and PhotoCraft
+  links, SMART differs, the toast word for word, needs-merged without a merged picture),
+  `merged_replaces_the_layers_and_undo_restores_them` (undo -> "changed in WTE", nothing re-applied); the ids rules:
+  `ids_rewritten_to_unknown_values_or_missing_are_matched_by_content`,
+  `ids_renumbered_by_position_after_a_delete_and_an_add` (map 1, 2, 4, 5 -> file 1..4: all untouched; with one layer
+  repainted, either of the two moved ones: pass 2), `one_layer_renumbered_and_duplicate_ids`,
+  `lyid_reuse_is_deleted_plus_new`, `a_photoshop_like_resave_keeps_every_layer` (extra resources and blocks, rects
+  one pixel larger with white RGB under alpha 0, names padded to 2); scale: `scale_two_text_untouched_and_a_changed_layer_keeps_its_size`
+  (and the canvas -> artboard rule), `a_canvas_over_the_artboard_limit_applies_nothing_then_fits` (and "too large"),
+  `scale_rules`, `fitted_import_of_a_small_canvas_and_no_merged`; states: `state_table_and_the_stale_rule`,
+  `badges_and_refusal_sentences` (every `PsdRefusal` sentence on the badge, truncated vs damaged, the needs-merged
+  sentences per editor); `folder_file_names_and_the_modified_flag`;
+  `write_keeps_one_backup_and_a_locked_file_changes_nothing` (injected rename: retries, the sentence, no temp file,
+  the registration taken back); project: `save_never_writes_the_file_and_archives_it_by_the_rule` (file bytes and time
+  unchanged; CRC equal / different and readable / half written + warning), `a_first_save_with_a_half_written_file_stores_nothing_and_warns`,
+  `load_reports_present_changed_missing_and_writes_nothing` (also a missing external file, the manifest round trip,
+  the sticker hash after save and load), `entries_that_cannot_be_links_are_left_out` (and `pc_native`, `mask_crc`).
+  Fixtures: `f15_photocraft_resave_comes_back_as_the_same_sticker` (new fixture f15: this build's export of the test
+  sticker with a text, a shape and a mask, re-saved by the real PhotoCraft v0.2.0 CLI; every layer untouched),
+  `f1_and_f1w_untouched_layers_survive_photocrafts_resave`, `photocraft_fixtures_text_reuse_clip_merged_props` (f5,
+  f12, f10, f11, f4, f4b, f6, f8, f8b, f7, f3, f9, f13), `photoshop_files_decide_the_path_per_editor` (smart object per
+  editor with MaxCompat on and off, type layers, effects / adjustment / group, MaxCompat-off shape -> needs a merged
+  picture, MaxCompat-on shape, masks, 16 bit, a flat file, the profile note, Lab refused); ignored
+  `k5_link_make_f15_input`. The P4 test `k4_unknown_extra_fields_in_the_new_entries_still_load` now asserts the
+  `editor` default.
 
 ### 9.2 `wte_app` tests
 
@@ -9312,3 +9545,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | P4 | project format 4: sticker and style entries, sticker PNGs, `required_reader` 4, load degradation (`StickerLost`, `StickerPixelsLost`, `StickerFontFallback`), save reuse by picture version, `v3_to_v4`, Extract writes sticker pictures; the `.wtes` file | `crates/wte_core/src/project/{mod,manifest,save,load,migrate,sticker_entries,sticker_tests}.rs`, `sticker/file.rs`, `doc_build.rs`, `error.rs`, `tests/project_roundtrip.rs`, `tests/fixtures/project/` | a v4 manifest with a sticker through a copy of the P0 version check ("made by a newer version"); the layer PNG entries of a re-saved v3 fixture byte for byte |
 | P5a | the PSD / PSB reader of the editor link (5.2, 13.2), the effects descriptor walker, the 55 Photoshop fixtures with their licence, the test byte builder | `crates/wte_core/src/psd/{mod,read,descriptor,testkit,read_tests,fixture_tests}.rs`, `lib.rs`, `tests/fixtures/psd/photoshop/` | arithmetic on lengths, the sweep and `k5_ps_sweep_large` under `--release`, one more CLI fixture, the 8 outside samples, no `Cargo.toml` / `Cargo.lock` change |
 | P5b | the sticker PSD writer (5.2, 13.3), the strict structure walker, the Pillow check, fixture f1 rebuilt with the writer (`f1w_*`) | `crates/wte_core/src/psd/{write,strict,write_tests,mod}.rs`, `tests/fixtures/psd/{f1w_*,make_f1w.sh,README.md}`, `tools/sticker/psd_check.py` | `psd_check.py` on the round-trip outputs and the fixtures, two writes of one sticker diffed, `export/psd.rs` and its golden test untouched |
+| P5c | the link logic (5.3-5.5, 13.1, 13.2): `StickerLink` with the editor key, the round trip and the ids rules, states, the atomic write with `.bak.psd`, the texts; `Document` links; project archive entries, the save rule, `LoadReport::links`; fixture f15 | `crates/wte_core/src/link/{mod,map,file,texts,tests,fixture_tests}.rs`, `doc_links.rs`, `document.rs`, `sticker/render.rs`, `project/{mod,save,load,sticker_entries,sticker_tests}.rs`, `lib.rs`, `tests/fixtures/psd/{f15_*,make_f15.sh,README.md}` | three rows of the mapping table re-derived by hand from fixture bytes, one more renumbering pattern, nothing in `psd/` changed |

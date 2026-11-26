@@ -25,10 +25,12 @@ use crate::project::manifest::{
 };
 use crate::project::migrate::parse_manifest;
 use crate::project::sticker_entries::{
-    AdjustmentEntry, ShapeEntry, StickerContentEntry, StickerEntry, StickerLayerEntry, StyleStackEntry, adjustment_floats,
-    artboard_entry, shape_floats, style_floats, transform_entry,
+    AdjustmentEntry, LinkEntry, ShapeEntry, StickerContentEntry, StickerEntry, StickerLayerEntry, StyleStackEntry,
+    adjustment_floats, artboard_entry, shape_floats, style_floats, transform_entry,
 };
-use crate::project::{FORMAT_VERSION, PROJECT_MIMETYPE, PngReuse, SaveOptions, SaveStats, composite_key, counters};
+use crate::project::{
+    FORMAT_VERSION, PROJECT_MIMETYPE, PngReuse, SaveOptions, SaveStats, SaveWarning, composite_key, counters,
+};
 use crate::stamp::{Placement, StampObject, StampSource, SurfaceMode, WrapOptions};
 use crate::sticker::{ArtboardShape, PicturePixels, StickerContent, StickerDoc};
 
@@ -129,7 +131,8 @@ fn check_entry_sizes(snapshot: &DocumentSnapshot, limit: u64) -> Result<(), Proj
 
 /// The lowest format version whose reader shows everything in this file correctly (FEATURE_TEXT 4.3 item 2): 4 when
 /// any stamp shows a sticker or has non-default styles (an entry that is off counts: an older build would drop it on
-/// its next save), or the file lists a sticker (STICKER_PLAN 2.11; links: P5); else 3 when any projected stamp is
+/// its next save), or the file lists a sticker (STICKER_PLAN 2.11; a link always belongs to a saved sticker, so links
+/// need nothing more, P5c); else 3 when any projected stamp is
 /// wrapped or has a Wrap option set (round 6; also a projected stamp that only keeps options for switching back: an
 /// older build would drop them silently on its next save), else 2 when any text stamp uses a
 /// round-4 feature (a gap value counts, also one on the last character of a line), else 1. `save` writes it as
@@ -478,8 +481,9 @@ fn write_archive<W: Write + Seek>(
     out: W,
     snapshot: &DocumentSnapshot,
     opts: &SaveOptions,
+    links_dir: Option<&Path>,
     progress: &dyn Progress,
-) -> Result<(W, u32, PngReuse), ProjectError> {
+) -> Result<(W, u32, PngReuse, Vec<SaveWarning>), ProjectError> {
     let invalid = |e: serde_json::Error| ProjectError::ManifestInvalid(e.to_string());
     let mut archive = Archive { zip: ZipWriter::new(out), entries: 0, progress };
     // Unchanged images are copied from the file this document was loaded from or last saved to (finding SP-6).
@@ -518,6 +522,9 @@ fn write_archive<W: Write + Seek>(
 
     // Stickers (format 4).
     let stickers = write_stickers(&mut archive, snapshot, opts, &mut reuse, &mut written)?;
+    // Their editor links and the copies of the linked files (P5c).
+    let mut warnings = Vec::new();
+    let links = write_links(&mut archive, snapshot, links_dir, &mut reuse, &mut warnings)?;
 
     // Layers and composites, set by set.
     let total_layers = snapshot.sets.iter().map(|s| s.layers.len() + 1).sum::<usize>().max(1) as f32;
@@ -603,8 +610,7 @@ fn write_archive<W: Write + Seek>(
         blobs,
         ui_state: snapshot.ui_state.clone(),
         stickers,
-        // PhotoCraft links are package P5's.
-        links: Vec::new(),
+        links,
     };
     let json = serde_json::to_vec_pretty(&manifest).map_err(invalid)?;
     archive.add(MANIFEST_ENTRY.to_owned(), zip_deflated(), &json)?;
@@ -612,7 +618,77 @@ fn write_archive<W: Write + Seek>(
     let entries = archive.entries;
     let out = archive.zip.finish().map_err(zip_error)?;
     progress.report(0.97, "Saving project");
-    Ok((out, entries, written))
+    Ok((out, entries, written, warnings))
+}
+
+/// What the save stores for a linked file (STICKER_PLAN 5.3, review A26).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ArchiveChoice {
+    /// Store the file as it is now.
+    Store,
+    /// Keep the previous archive entry (copied from the old project file; none on a first save); `warn` = tell the
+    /// user that the file is being written.
+    KeepEarlier { warn: bool },
+}
+
+/// The save rule of 5.3 for one `InFolder` link: `current` = the file's bytes (`None` when it is missing). Its CRC
+/// equals `synced_crc` -> stored; it differs and `psd::read` accepts it (also a file the reader refuses as a whole,
+/// which is complete) -> stored; it differs and is truncated or damaged (the editor is writing it right now) -> the
+/// earlier copy, with a warning. A missing file keeps the earlier copy silently (the badge says "file missing").
+pub(crate) fn archive_choice(current: Option<&[u8]>, synced_crc: u32) -> ArchiveChoice {
+    let Some(bytes) = current else { return ArchiveChoice::KeepEarlier { warn: false } };
+    if crc32fast::hash(bytes) == synced_crc {
+        return ArchiveChoice::Store;
+    }
+    match crate::psd::read(bytes, &crate::psd::PsdLimits::default()) {
+        Ok(_) | Err(crate::psd::PsdError::Unsupported(_) | crate::psd::PsdError::TooLarge { .. }) => ArchiveChoice::Store,
+        Err(_) => ArchiveChoice::KeepEarlier { warn: true },
+    }
+}
+
+/// The links of the saved stickers (P5c, STICKER_PLAN 5.3) and a copy of every `InFolder` link file as
+/// `links/k<id:05>.psd` by `archive_choice`. Link files are only **read** here: a project save never writes a link
+/// file (the function has no writer for one). `External` links are never copied. `links_dir` is the project's links
+/// folder (`link::links_folder` of the path being written).
+fn write_links<W: Write + Seek>(
+    archive: &mut Archive<'_, W>,
+    snapshot: &DocumentSnapshot,
+    links_dir: Option<&Path>,
+    reuse: &mut Option<Reuse<'_>>,
+    warnings: &mut Vec<SaveWarning>,
+) -> Result<Vec<LinkEntry>, ProjectError> {
+    let saved: BTreeSet<StickerId> = saved_stickers(snapshot).iter().map(|(id, _)| *id).collect();
+    let mut out = Vec::new();
+    for (id, link) in &snapshot.links {
+        if !saved.contains(id) {
+            continue;
+        }
+        let crate::link::LinkFile::InFolder(name) = &link.file else {
+            out.push(LinkEntry::of(*id, link, None));
+            continue;
+        };
+        let current = links_dir.and_then(|dir| std::fs::read(dir.join(name)).ok());
+        let entry = crate::link::archive_entry(*id);
+        let bytes = match archive_choice(current.as_deref(), link.synced.crc32) {
+            ArchiveChoice::Store => current,
+            ArchiveChoice::KeepEarlier { warn } => {
+                if warn {
+                    let name = snapshot.stickers.get(id).map_or_else(String::new, |s| s.name.clone());
+                    warnings.push(SaveWarning::LinkBeingWritten { sticker: *id, name });
+                }
+                reuse.as_mut().and_then(|r| r.read(&entry))
+            }
+        };
+        let stored = match bytes {
+            Some(bytes) => {
+                archive.add(entry.clone(), zip_stored(), &bytes)?;
+                Some(entry)
+            }
+            None => None,
+        };
+        out.push(LinkEntry::of(*id, link, stored));
+    }
+    Ok(out)
 }
 
 /// Flattens one set, writes `flattened.png` when requested and keeps the (encoded) thumbnail of the first set. When
@@ -705,6 +781,9 @@ fn verify(tmp: &Path) -> Result<(), ProjectError> {
         entry.read_to_end(&mut json).map_err(|e| failed(format!("{MANIFEST_ENTRY}: {e}")))?;
     }
     let manifest = parse_manifest(&json).map_err(|e| failed(e.to_string()))?.manifest;
+    for entry in manifest.links.iter().filter_map(|l| l.archive.as_ref()) {
+        zip.by_name(entry).map_err(|e| failed(format!("{entry}: {e}")))?;
+    }
     for file_ref in file_refs(&manifest) {
         let entry = zip.by_name(&file_ref.entry).map_err(|e| failed(format!("{}: {e}", file_ref.entry)))?;
         if entry.size() != file_ref.size {
@@ -729,14 +808,15 @@ pub fn save(snapshot: &DocumentSnapshot, path: &Path, opts: &SaveOptions, progre
     validate(snapshot)?;
     let mut stats = SaveStats::default();
     let mut written = None;
+    let links_dir = crate::link::links_folder(path);
     write_atomic(
         path,
         opts.keep_backup,
         |file: &mut std::fs::File| -> Result<(), ProjectError> {
             let buffered = BufWriter::with_capacity(1 << 20, &mut *file);
-            let (buffered, entries, reuse) = write_archive(buffered, snapshot, opts, progress)?;
+            let (buffered, entries, reuse, warnings) = write_archive(buffered, snapshot, opts, Some(&links_dir), progress)?;
             buffered.into_inner().map_err(|e| ProjectError::Io(e.into_error()))?;
-            stats = SaveStats { bytes_written: file.metadata()?.len(), entries, reuse: None };
+            stats = SaveStats { bytes_written: file.metadata()?.len(), entries, reuse: None, warnings };
             written = Some(reuse);
             Ok(())
         },

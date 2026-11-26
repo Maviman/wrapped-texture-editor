@@ -483,9 +483,11 @@ fn k4_unknown_extra_fields_in_the_new_entries_still_load() {
         "archive": "links/k00001.psd",
         "from_a_later_build": "x"
     });
-    // A link entry is plain data in P4 (its meaning is package P5's): it parses, with unknown keys ignored.
+    // A link entry written without the P5c fields parses, with unknown keys ignored: the editor defaults to
+    // PhotoCraft, the native flag to false.
     let parsed: LinkEntry = serde_json::from_value(link.clone()).unwrap();
-    assert_eq!((parsed.next_lyid, parsed.layer_map.len(), parsed.pc_native), (4, 1, false));
+    assert_eq!((parsed.next_lyid, parsed.layer_map.len(), parsed.editor_native), (4, 1, false));
+    assert_eq!(parsed.editor, "photocraft");
     edit_manifest(&path, |m| {
         m["links"] = json!([link]);
         let s = &mut m["stickers"][0];

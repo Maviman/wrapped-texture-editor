@@ -8765,6 +8765,10 @@ and text layers (exactly those two files, each = `dense(layer)`).
   the written normalised ones, merged picture and PhotoCraft's PNGs within the un-matting bound); ignored:
   `k5_write_make_f1w_input`, `k5_write_dump_for_psd_check` (inputs of `tools/sticker/psd_check.py`) and
   `perf_psd_write_and_read_2048_five_layers` (8.4, `--release`).
+  P5b checker: `k5_check_rich_sticker_survives_a_photocraft_resave` (fixture f14w: the writer's rich test sticker
+  re-saved by the real PhotoCraft v0.2.0 CLI keeps names, ids, order, hidden, opacity, the seven blends, clipping, a soft
+  mask and every layer's pixels on the canvas) and `k5_check_random_stickers_round_trip` (300 random stickers, fixed
+  seed: strict walker, read back as written, composite of the read layers = the writer's composite).
 
 ### 9.2 `wte_app` tests
 

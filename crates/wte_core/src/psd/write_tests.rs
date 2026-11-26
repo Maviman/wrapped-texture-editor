@@ -711,6 +711,124 @@ fn k5_write_f1w_photocraft_resave_keeps_ids_and_normalised_pixels() {
     assert_unmatted_close(&merged_png, &want, 1, "f1w_pc_merged.png");
 }
 
+#[test]
+fn k5_check_rich_sticker_survives_a_photocraft_resave() {
+    // P5b checker: `f14w_rich_pc.psd` is `rich_sticker()` as this writer wrote it (SHA-256 dba2d8ae...17d5, the
+    // `rich.psd` of `k5_write_dump_for_psd_check`), re-saved headless by the real PhotoCraft v0.2.0 CLI
+    // (`convert rich.psd f14w_rich_pc.psd`, `make_f14w.sh`). A second editor reads every feature the writer writes
+    // the way WTE means it: names (luni over a lossy Pascal name, an emoji), `lyid`s, order, hidden, opacity, the
+    // seven blend keys, the clipping byte, a soft mask with default 0, the layer partly outside the canvas and the
+    // empty layer; every layer's pixels and mask on the canvas are the written (normalised) ones.
+    let written = rich_sticker();
+    let doc = read(&std::fs::read(fixture_dir().join("f14w_rich_pc.psd")).unwrap(), &PsdLimits::default()).unwrap();
+    assert_eq!(doc.layers.len(), written.layers.len());
+    assert_eq!(testkit::mode(&doc, false), testkit::Mode::Layers);
+    let canvas = IRect::from_size(64, 48);
+    for (i, (w, r)) in written.layers.iter().zip(&doc.layers).enumerate() {
+        assert_eq!((r.name.as_str(), r.lyid), (w.name.as_str(), Some(w.lyid)), "layer {i}");
+        assert_eq!((r.visible, r.opacity, r.blend), (w.visible, w.opacity, PsdBlend::Known(w.blend)), "layer {i}");
+        assert_eq!(r.clipped, w.clipped && i > 0, "layer {i}");
+        assert_eq!(r.features, PsdFeatures::empty(), "layer {i}");
+        let want = normalise(&w.pixels);
+        let got = r.pixels.as_ref().unwrap();
+        for y in canvas.y0..canvas.y1 {
+            for x in canvas.x0..canvas.x1 {
+                assert_eq!(got.get(x, y), want.get(x, y), "layer {i} ({}) pixel {x}, {y}", w.name);
+            }
+        }
+        match (&w.mask, &r.mask) {
+            (None, None) => {}
+            (Some(m), Some(rm)) => {
+                assert!(!rm.disabled, "layer {i}");
+                for y in canvas.y0..canvas.y1 {
+                    for x in canvas.x0..canvas.x1 {
+                        assert_eq!(rm.value(x, y), m.value(x, y), "layer {i}: mask at {x}, {y}");
+                    }
+                }
+            }
+            other => panic!("layer {i}: mask {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn k5_check_random_stickers_round_trip() {
+    // P5b checker: 300 random stickers (fixed seed): canvases 1..40 a side, layers anywhere (also wholly outside the
+    // canvas, 1 x 1, empty), random alpha with holes and RGB under alpha 0, masks of either default (also wholly
+    // outside, all default, disabled), clipping anywhere (also on the bottom layer and on chains), hidden bases,
+    // every blend and opacity. Each file passes the strict walker and reads back with no re-sync; layers and masks
+    // come back as written (normalised; masks as functions on the plane), and the reader's composite of what was
+    // read is the writer's composite exactly; the stored merged picture is within the un-matting bound of it.
+    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut rnd = move |n: u32| -> u32 {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s % n.max(1) as u64) as u32
+    };
+    for case in 0..300 {
+        let (cw, ch) = (1 + rnd(40), 1 + rnd(40));
+        let n = rnd(6) as usize;
+        let mut layers = Vec::new();
+        for k in 0..n {
+            let x0 = rnd(cw + 20) as i32 - 10;
+            let y0 = rnd(ch + 20) as i32 - 10;
+            let rect = if rnd(8) == 0 { IRect::EMPTY } else { IRect::new(x0, y0, x0 + 1 + rnd(30) as i32, y0 + 1 + rnd(30) as i32) };
+            let seed = rnd(1 << 30);
+            let holes = rnd(3);
+            let mut l = layer_from(&format!("l{case}.{k}"), 1 + k as u32 * 3, rect, |x, y| {
+                let h = (x as u32).wrapping_mul(2_654_435_761) ^ (y as u32).wrapping_mul(40_503) ^ seed;
+                let a = match holes {
+                    0 => 255,
+                    1 => (h >> 8) as u8,
+                    _ => if h & 3 == 0 { 0 } else { (h >> 16) as u8 },
+                };
+                [h as u8, (h >> 4) as u8, (h >> 12) as u8, a]
+            });
+            if rnd(3) == 0 {
+                let mx = rnd(cw + 20) as i32 - 10;
+                let my = rnd(ch + 20) as i32 - 10;
+                let mrect = IRect::new(mx, my, mx + 1 + rnd(30) as i32, my + 1 + rnd(30) as i32);
+                let default = if rnd(2) == 0 { 0 } else { 255 };
+                let flat = rnd(4) == 0;
+                let mut m = mask_from(mrect, default, |x, y| {
+                    if flat { default } else { ((x * 37 + y * 11) as u32 ^ seed) as u8 }
+                });
+                m.disabled = rnd(5) == 0;
+                l.mask = Some(m);
+            }
+            l.clipped = rnd(3) == 0;
+            l.visible = rnd(5) != 0;
+            l.opacity = if rnd(2) == 0 { 255 } else { rnd(256) as u8 };
+            l.blend = BLENDS[rnd(7) as usize];
+            layers.push(l);
+        }
+        let psd = StickerPsd { size: [cw, ch], layers, id_seed: rnd(40) };
+        let (_, _, doc) = roundtrip(&psd);
+        assert_eq!(doc.layers.len(), psd.layers.len(), "case {case}");
+        for (i, (w, r)) in psd.layers.iter().zip(&doc.layers).enumerate() {
+            assert_eq!(r.pixels.as_ref(), Some(&normalise(&w.pixels)), "case {case} layer {i}");
+            assert_eq!((r.visible, r.opacity, r.clipped), (w.visible, w.opacity, w.clipped && i > 0), "case {case} layer {i}");
+            assert_eq!(r.features, PsdFeatures::empty(), "case {case} layer {i}");
+            match (&w.mask, &r.mask) {
+                (None, None) => {}
+                (Some(m), Some(rm)) => {
+                    assert_eq!((rm.default, rm.disabled), (m.default, m.disabled), "case {case} layer {i}");
+                    for y in -12..ch as i32 + 42 {
+                        for x in -12..cw as i32 + 42 {
+                            assert_eq!(rm.value(x, y), m.value(x, y), "case {case} layer {i}: mask at {x}, {y}");
+                        }
+                    }
+                }
+                other => panic!("case {case} layer {i}: mask {other:?}"),
+            }
+        }
+        let want = composite(&psd).unwrap();
+        assert_eq!(read_composite(&doc), want, "case {case}");
+        assert_unmatted_close(doc.merged.as_ref().unwrap(), &want, 0, &format!("case {case}"));
+    }
+}
+
 // ---- psd_check.py input and performance -------------------------------------------------------------------------
 
 #[test]

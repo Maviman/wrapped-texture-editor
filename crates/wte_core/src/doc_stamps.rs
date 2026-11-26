@@ -1166,7 +1166,7 @@ impl Document {
     /// Round 5, rule 1 (one code path): a `Full` bake makes the stamp's bake job, runs it on the calling thread and
     /// applies its output without the staleness check (`apply_bake_output`): the same code the worker of a deferred
     /// Final bake runs. The `Preview` bake keeps its direct code.
-    fn bake_and_apply(&mut self, id: StampId, quality: BakeQuality) -> Result<(), EditError> {
+    pub(crate) fn bake_and_apply(&mut self, id: StampId, quality: BakeQuality) -> Result<(), EditError> {
         if quality == BakeQuality::Full {
             let job = self.make_bake_job(id)?;
             return self.apply_bake_output(job.run());
@@ -1257,7 +1257,7 @@ impl Document {
     }
 
     /// Removes the linked layers of `id` whose cache is empty, except the one in its home set.
-    fn remove_empty_linked(&mut self, id: StampId) {
+    pub(crate) fn remove_empty_linked(&mut self, id: StampId) {
         let Some(home) = self.stamp(id).map(|s| s.home_set) else { return };
         for (s, set) in self.sets.iter_mut().enumerate() {
             if s == home.index() {
@@ -1310,7 +1310,7 @@ impl Document {
     /// A stamp whose inputs cannot be prepared (a missing image, a font that does not parse) is logged, taken out of
     /// `unbaked` and skipped: its caches stay as they are.
     pub fn next_final_bake(&mut self) -> Option<StampBakeJob> {
-        if self.stroke.is_some() {
+        if self.any_stroke() {
             return None;
         }
         loop {
@@ -1333,7 +1333,7 @@ impl Document {
     /// (`history_state()` and `is_modified()` do not change). An output that carries an error: warning in the log, the
     /// stamp is no longer unbaked and keeps its caches (`Failed`). A locked layer does not stop it (not a user edit).
     pub fn apply_final_bake(&mut self, out: StampBakeOutput) -> FinalBake {
-        if self.stroke.is_some() {
+        if self.any_stroke() {
             return FinalBake::Busy(Box::new(out));
         }
         let id = out.id;
@@ -1928,7 +1928,7 @@ impl Document {
             }
             return WrapPreview::Stale;
         }
-        if self.stroke.is_some() {
+        if self.any_stroke() {
             self.bakes.preview_stale.insert(id);
             return WrapPreview::Stale;
         }

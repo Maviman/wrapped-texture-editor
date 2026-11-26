@@ -389,6 +389,8 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `sticker/pipeline.rs` | stickers P3a | `SourceFrame`, `bake_placement_of`, `Styling`, `work_level`, `styled_mips`, `styled_straight`, `sticker_scale` (6.5 "Stickers") |
 | `doc_stickers.rs` | stickers P3a | the sticker commands of `Document` (queries, add / remove / promote / detach, `set_sticker`, stamp styles, the two placements, finished pictures) and `StickerCaches` (5.20 "Stickers") |
 | `doc_stickers_tests.rs` | stickers P3a | the `k3a_*` tests of the sticker document (test-only child of the crate root) |
+| `doc_sticker_edits.rs` | stickers P3b | sticker pixel edits: strokes on pictures and masks, `replace_sticker_pixels`, promotion inside an edit, `convert_text_stamp`, Revert, the re-bake of users and the undo of `Edit::StickerPixels` (5.20 "Sticker pixel edits") |
+| `doc_sticker_edits_tests.rs` | stickers P3b | the `k3b_*` tests (test-only child of the crate root) |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -1027,6 +1029,11 @@ impl CroppedBuf {
     pub fn to_dense(&self, width: u32, height: u32) -> PixelBuf;
     pub fn blit_into(&self, out: &mut PixelBuf);                     // copy at rect (clipped), rest of `out` kept
 }
+
+/// Stickers P3b (review A4): a dense image that undo tile patches and backups work on (5.18). Implemented for `PixelBuf`
+/// (BPP 4), `AlphaBuf` (BPP 1) and `Arc<T>` (reads as `T`; `bytes_mut` is `Arc::make_mut`, copy-on-write), so the
+/// read-only calls (`touch_rect`, `into_patch`, `diff`) take a layer's `Arc` as they took `&PixelBuf` before.
+pub trait TileBuf { const BPP: usize; fn size(&self) -> [u32; 2]; fn bytes(&self) -> &[u8]; fn bytes_mut(&mut self) -> &mut [u8]; }
 
 /// RGBA8 pixels made of disjoint cropped parts; transparent everywhere else: the storage of stamp / text caches (6.5).
 /// Parts are pairwise disjoint, never empty, cropped to their non-zero pixels, ordered by (y0, x0). (Review round 2,
@@ -2176,29 +2183,47 @@ layer; `merge_down` — the lower layer and, if raster, the upper one; every oth
 ### 5.18 `history.rs` [C2]
 
 ```rust
-pub enum TileData { Solid([u8; 4]), Raw(Box<[u8]>) }                 // Raw: tile_w * tile_h * 4 bytes (edge tiles are smaller)
+pub enum TileData { Solid([u8; 4]), Raw(Box<[u8]>) }                 // Raw: tile_w * tile_h * BPP bytes (edge tiles are smaller);
+                                                                     // Solid of a 1-byte buffer: the value in [0], the rest 0
 pub struct Tile { pub tx: u16, pub ty: u16, pub data: TileData }
-/// Sparse set of 64x64 tiles of one raster layer. Applying it swaps its contents with the layer (it becomes its own inverse).
-pub struct TilePatch { pub tiles: Vec<Tile> }
-impl TilePatch {
+/// Sparse set of 64x64 tiles of one buffer with BPP bytes per pixel (stickers P3b: generic over `TileBuf`, 5.5; review
+/// A4). Applying it swaps its contents with the buffer (it becomes its own inverse). The kind is the type: a patch refuses
+/// a buffer of another BPP (`swap_with` changes nothing and returns EMPTY).
+pub struct TilePatchOf<const BPP: usize> { pub tiles: Vec<Tile> }
+pub type TilePatch = TilePatchOf<4>;                                 // paint layers (`Edit::Pixels`), sticker pictures
+pub type MaskPatch = TilePatchOf<1>;                                 // sticker layer masks (`AlphaBuf`)
+impl<const BPP: usize> TilePatchOf<BPP> {
     pub const TILE: u32 = 64;
+    pub fn empty() -> Self;  pub fn bpp(&self) -> usize;  pub fn fits<B: TileBuf>(&self) -> bool;   // B::BPP == BPP
     pub fn is_empty(&self) -> bool;  pub fn byte_len(&self) -> usize;  pub fn bounds(&self, width: u32, height: u32) -> IRect;
-    pub fn swap_with(&mut self, buf: &mut PixelBuf) -> IRect;        // returns the dirty bounds
+    /// The patch that turns `new` back into `old` (same size and kind; else empty): the tiles of `old` where they differ,
+    /// in (row, column) order (`replace_sticker_pixels`).
+    pub fn diff<B: TileBuf>(old: &B, new: &B) -> Self;
+    pub fn swap_with<B: TileBuf>(&mut self, buf: &mut B) -> IRect;   // returns the dirty bounds; EMPTY for another kind
 }
 
-/// Copy-on-first-touch backup of a raster layer during a stroke or fill.
-pub struct TileBackup { /* width, height, tiles: HashMap<(u16,u16), Box<[u8]>> */ }
-impl TileBackup {
-    pub fn new(width: u32, height: u32) -> TileBackup;
-    pub fn touch_rect(&mut self, buf: &PixelBuf, r: IRect);          // saves every not-yet-saved tile intersecting r; call BEFORE writing
+/// Copy-on-first-touch backup of a buffer during a stroke or fill (generic like the patch; a buffer of another kind is
+/// ignored by `touch_rect` / `restore` and gives an empty patch).
+pub struct TileBackupOf<const BPP: usize> { /* width, height, tiles: HashMap<(u16,u16), Box<[u8]>> */ }
+pub type TileBackup = TileBackupOf<4>;
+pub type MaskBackup = TileBackupOf<1>;
+impl<const BPP: usize> TileBackupOf<BPP> {
+    pub fn new(width: u32, height: u32) -> Self;
+    pub fn touch_rect<B: TileBuf>(&mut self, buf: &B, r: IRect);     // saves every not-yet-saved tile intersecting r; call BEFORE writing
+    /// Pre-edit bytes of the span x0..x1 of row y (BPP * (x1 - x0) bytes, appended to `out` after clearing it).
+    pub fn original_span<B: TileBuf>(&self, buf: &B, y: u32, x0: u32, x1: u32, out: &mut Vec<u8>);
+    pub fn restore<B: TileBuf>(&self, buf: &mut B) -> IRect;         // undo everything; returns the dirty bounds
+    pub fn into_patch<B: TileBuf>(self, current: &B) -> TilePatchOf<BPP>;   // drops tiles identical to `current`, collapses uniform tiles
+    pub fn is_empty(&self) -> bool;
+}
+impl TileBackupOf<4> {
     pub fn original(&self, buf: &PixelBuf, x: u32, y: u32) -> [u8; 4];   // pre-edit pixel (from the backup if saved, else from buf); tests
     /// Pre-edit RGBA of the span x0..x1 of row y, appended to `out` after clearing it (4 * (x1 - x0) bytes): one tile
     /// lookup per 64 texels. This is what the stroke re-apply loop uses; never call `original` per texel there.
     pub fn original_row(&self, buf: &PixelBuf, y: u32, x0: u32, x1: u32, out: &mut Vec<u8>);
-    pub fn restore(&self, buf: &mut PixelBuf) -> IRect;              // undo everything; returns the dirty bounds
-    pub fn into_patch(self, current: &PixelBuf) -> TilePatch;        // drops tiles identical to `current`, collapses uniform tiles
-    pub fn is_empty(&self) -> bool;
 }
+// The texture path keeps its bytes: a recorded texture stroke patch hashes as on the P0 code (test
+// k3b_2_texture_stroke_patch_bytes_are_unchanged); every existing history, stroke and fill test runs unchanged.
 
 /// Pixel storage of one layer inside a structure snapshot.
 #[derive(Clone)]
@@ -2225,6 +2250,13 @@ pub struct LayerRecord { pub id: LayerId, pub name: String, pub visible: bool, p
 pub enum Edit {
     Pixels { set: TextureSetId, layer: LayerId, patch: TilePatch },
     Structure(Box<StructureSnapshot>),
+    /// Stickers P3b (2.10 of STICKER_PLAN): a tile patch on an owned picture (`StickerPatch::Pixels(TilePatch)`) or a mask
+    /// (`StickerPatch::Mask(MaskPatch)`) of one sticker layer. Applying it swaps the tiles through `Arc::make_mut` on the
+    /// sticker and on the buffer (copy-on-write when a snapshot shares them), gives the buffer a new picture version and
+    /// records the sticker; `undo` / `redo` re-bake its users once the whole entry is applied
+    /// (`settle_sticker_pixel_edits`: Final, or unbaked with deferred Final bakes; a sticker a structure part of the same
+    /// entry took away is skipped). History cost: the patch bytes.
+    StickerPixels { sticker: StickerId, layer: StickerLayerId, patch: StickerPatch },
     Multi(Vec<Edit>),                                                // applied in order for redo, reverse order for undo
 }
 pub struct Entry { pub label: String, pub edit: Edit,
@@ -2268,6 +2300,8 @@ impl Document {
     pub(crate) fn begin_pending(&mut self, label: &str);
     pub(crate) fn push_edit(&mut self, label: &str, edit: Edit);     // history.push + touch()
 }
+// Stickers P3b: `undo`, `redo`, `can_undo`, `can_redo` treat an open sticker stroke like an open texture stroke
+// (`Document::any_stroke`); every history-producing command refuses during either (`guard_no_stroke`).
 ```
 
 ### 5.19 `brush.rs`, `stroke.rs`, `fill.rs` [C3]
@@ -2696,7 +2730,7 @@ impl Document {
 **Stickers (P3a; `doc_stickers.rs`, STICKER_PLAN 2.6-2.9).**
 
 ```rust
-pub enum StickerRef { Id(StickerId), OfStamp(StampId, ShareScope) }   // OfStamp of an image stamp: P3b (InvalidParam here)
+pub enum StickerRef { Id(StickerId), OfStamp(StampId, ShareScope) }   // OfStamp of an image stamp: promoted inside the edit (P3b)
 pub enum ShareScope { ThisStamp, AllUsers }
 pub const STYLE_LABEL: &str = "Edit Sticker Style";
 impl Document {
@@ -2714,6 +2748,7 @@ impl Document {
     /// The one structural edit: `edit` on a copy, sanitized, new buffers versioned, limits checked before anything
     /// changes; an artboard change refits every user (sticker::refit_placement, 2.9) and an automatic depth; users are
     /// re-baked through the pending edit (`label`; Preview calls fold, Final flushes). LayerLocked when a user is locked.
+    /// P3b: `OfStamp` of an image stamp promotes it first without an entry (below, "Promotion inside an edit").
     pub fn set_sticker(&mut self, on: StickerRef, edit: impl FnOnce(&mut StickerDoc), label: &str, commit: Commit)
         -> Result<StickerId, EditError>;
     pub fn set_stamp_styles(&mut self, stamp: StampId, styles: StyleStack, commit: Commit) -> Result<(), EditError>;
@@ -2756,6 +2791,82 @@ impl Document {
   Without a margin it is `refit_auto_depth` (unchanged).
 - **Save.** Until format 4 (P4) `project::save` refuses a document with a sticker stamp or non-default stamp styles
   (`ProjectError::ManifestInvalid`, nothing is written).
+
+**Sticker pixel edits, conversion, Revert (P3b; `doc_sticker_edits.rs`, STICKER_PLAN 2.7, 2.8, 2.10).**
+
+```rust
+pub enum PixelTarget { Pixels, Mask }
+pub enum PixelData { Rgba(PixelBuf), Alpha(AlphaBuf) }     // the plan's `TileData` (that name is history's tile payload)
+pub enum StickerPatch { Pixels(TilePatch), Mask(MaskPatch) }  // the patch of `Edit::StickerPixels`
+pub struct StickerBrush { pub radius: f32 /* layer-space px */, pub hardness: f32, pub opacity: f32, pub flow: f32,
+                          pub spacing: f32, pub color: [u8; 4], pub mode: BrushMode, pub dynamics: PressureDynamics,
+                          pub selection: Option<Arc<AlphaBuf>> /* the size of the painted buffer */ }
+pub struct StickerCheckpoint { /* stamps: Vec<StampObject>, stickers: Vec<(StickerId, Arc<StickerDoc>)> */ }
+pub const STICKER_BRUSH_LABEL: &str = "Sticker Brush";  pub const STICKER_ERASER_LABEL: &str = "Sticker Eraser";
+pub const CONVERT_LABEL: &str = "Convert to Sticker";   pub const REVERT_LABEL: &str = "Revert Sticker";
+impl Document {
+    /// Opens a stroke on a picture layer or its mask; promotes an image stamp first; a Picture(Blob) becomes Owned; the one
+    /// copy of a buffer a snapshot shares happens here. Errors before anything changes (StrokeInProgress, Unknown*,
+    /// LayerLocked for the layer or a user, InvalidParam: not a picture / no mask / a text stamp / a selection of another
+    /// size, StickerLimit).
+    pub fn sticker_stroke_begin(&mut self, on: StickerRef, layer: StickerLayerId, target: PixelTarget, params: StickerBrush)
+        -> Result<StickerId, EditError>;
+    pub fn sticker_stroke_dab(&mut self, at: Vec2 /* layer space */, pressure: f32) -> Result<IRect /* buffer px */, EditError>;
+    pub fn sticker_stroke_break(&mut self);                 // next sample starts a new segment (as stroke_break)
+    pub fn sticker_stroke_end(&mut self) -> Result<(), EditError>;   // one entry; nothing painted: no entry, begin undone
+    pub fn sticker_stroke_cancel(&mut self);
+    pub fn sticker_stroke_active(&self) -> bool;  pub fn sticker_stroke_target(&self) -> Option<(StickerId, StickerLayerId)>;
+    /// A tool's whole-buffer result: same size on an owned picture or a mask -> `Edit::StickerPixels` of the changed tiles
+    /// (`TilePatchOf::diff`); another size, or a blob picture -> a `Structure` entry; unchanged -> no entry.
+    pub fn replace_sticker_pixels(&mut self, on: StickerRef, layer: StickerLayerId, target: PixelTarget, new: PixelData,
+                                  label: &str) -> Result<StickerId, EditError>;
+    pub fn convert_text_stamp(&mut self, stamp: StampId) -> Result<StickerId, EditError>;   // "Convert to Sticker"
+    pub fn sticker_checkpoint(&self, stamps: &[StampId], stickers: &[StickerId]) -> StickerCheckpoint;
+    pub fn restore_sticker_state(&mut self, to: &StickerCheckpoint, label: &str) -> Result<(), EditError>;
+    pub fn rebake_sticker_users(&mut self, id: StickerId, quality: BakeQuality);
+}
+```
+
+- **Strokes** follow the texture stroke's model (6.4, 6.7): dabs raise a 16-bit coverage per buffer pixel (`falloff`,
+  `mask_increment`, flow builds, one-pixel AA ramp, **no wrapping** at the picture's borders), and after the dabs of a
+  sample every changed rect is recomputed from its pre-stroke pixels in a `TileBackup` / `MaskBackup` (opacity caps):
+  a picture by `apply_brush` (Paint / Erase, never alpha-locked); a mask towards the colour's Rec. 601 grey (Paint) or
+  towards 0 (Erase). A selection multiplies each pixel's strength by `selection / 255`. Samples are in layer space; the
+  inverse layer transform (`LayerTransform::invert`) gives content pixels and the radius is divided by the layer's mean
+  scale; dabs every `max(spacing * 2 * radius, 0.5)` along a segment, pressure interpolated, `PressureDynamics` as 2D
+  texture strokes (constant step, no pressure-sized walk). Every dab that changes pixels gives the buffer a new picture
+  version (a Preview render during the stroke must never reuse a layer raster of an earlier state).
+- **Copy-on-write and the one copy (review A25).** Writes use `Arc::make_mut` on the sticker and on the buffer. Before every
+  write `forget_sticker_pictures(id)` drops the cached renders and styled stamp pictures made from the sticker's current
+  `Arc` (they are stale after it); the snapshot that `begin` keeps for a promotion or a blob conversion is taken before
+  the sticker exists or is changed, and no other "before" snapshot is taken. So only a history snapshot (or a job still
+  running) can make a write copy a buffer, and that copy happens in `sticker_stroke_begin`
+  (`sticker::counters::buffer_copies`; budget 40 ms at 4096 x 4096, measured 15 ms). While a sticker stroke is open no
+  Final bake job is handed out (`next_final_bake` is `None`) and `apply_final_bake` / `apply_wrap_preview` answer as during
+  a texture stroke, so no job takes the live sticker's `Arc`.
+- **Promotion inside an edit (2.10, review A3).** `promotion_of(on)` says whether `OfStamp` names an image stamp. A
+  structural edit (`set_sticker`) flushes a pending edit of another label, takes `before = snapshot_structure(&[])`,
+  promotes with `promote_no_history` and then runs as usual; `begin_pending_with(label, before)` makes `before` the
+  pending entry's "before" (an entry with the same label already pending keeps its own). A pixel edit pushes
+  `Edit::Multi([Structure(before), StickerPixels])` as one entry (a blob picture made owned is in `before` too). Every
+  error after the promotion restores `before` (nothing is recorded). A stroke that paints nothing takes its promotion
+  back; `set_sticker` / `replace_sticker_pixels` that change nothing still record the promotion.
+- **Users are re-baked** after every pixel entry (`rebake_users_final`: `bake_and_apply(Full)` + `remove_empty_linked`, or
+  the stamp joins `unbaked` with deferred Final bakes). `rebake_sticker_users(id, Preview)` during a stroke on `id` is the
+  live preview (synchronous Preview bakes, no history); the stroke's end bakes at Final, its cancel puts the earlier
+  pictures back. Undo / redo of `Edit::StickerPixels`: 5.18.
+- **`convert_text_stamp`** (review A24): the layer's em = `text_raster_px` (the frame's `em_px` when the too-large
+  fallback draws smaller), artboard = the text frame's size at the origin, the anchor at the layer's `translate`; the
+  stored placement does not change; styles scaled by `em / 128`; linked `LayerKind::Text` layers become `Stamp` (caches
+  kept); one pending entry flushed at Final (re-bake). Test k3b-7: same frame within 1 px, mean difference <= 2/255 at
+  32, 128 and 512 px per em; undo gives the text stamp back byte for byte.
+- **Revert.** `sticker_checkpoint` = `Arc` clones of the named stamps and stickers (plus the stickers of named sticker
+  stamps). `restore_sticker_state` puts back the stamps that still exist and differ and the stickers that differ (a stamp
+  whose source changes between text and picture gets its linked layers' kind back), then marks every affected stamp
+  edited (Final): one entry, or none when nothing differs.
+- **Limits (2.7)** are checked before anything changes, each with its `StickerLimit` message: 32 layers, 4096-px
+  artboard, 512 MiB of owned pictures (also when a stroke makes a blob picture owned), 4096 px a side for a picture an
+  editor operation gives a new size (`MAX_CREATED_SIDE`); 8192 for imported pictures painted in place.
 
 ### 5.21 `import/` [C5]
 
@@ -3404,13 +3515,23 @@ pub const STYLE_REFERENCE_EM: f32 = 128.0;
 // sticker/mod.rs
 pub fn refit_placement(placement: &mut Placement, old: &IRect, new: &IRect);   // 2.9 (shares text::frame::HostFrame)
 pub mod counters { pub fn renders() -> u64; pub fn styled_calls() -> u64; pub fn max_styled_side() -> u32;
-                   pub fn max_styled_pixels() -> u64; pub fn reset_max(); }        // thread-local, every build
+                   pub fn max_styled_pixels() -> u64; pub fn reset_max();
+                   pub fn buffer_copies() -> u64 /* P3b: shared picture / mask buffers copied by a write */ }   // thread-local, every build
+impl LayerTransform {                                                         // P3b
+    pub fn invert(&self, size: [u32; 2], q: Vec2) -> Vec2;    // content point at layer-space point q (inverse of `apply`)
+    pub fn mean_scale(&self) -> f32;                          // (|scale.x| + |scale.y|) / 2, 1 when not usable
+}
 ```
 
 Picture versions: `Document::next_pixel_version()` gives every owned picture and mask buffer a number at every change of
 its bytes; `add_sticker` / `set_sticker` give a fresh number to every buffer that is not one of the old value's buffers
 (same `Arc` and version; two layers sharing one buffer share its number). Caches key pixels by version (blob pictures by
-`BlobId`), never by address or content.
+`BlobId`), never by address or content. P3b: a stroke gives a new number at `begin` and at every dab that changes pixels;
+`replace_sticker_pixels`, the undo and the redo of `Edit::StickerPixels` and a cancelled stroke give one each.
+
+Part 4 (P3b; 5.20 "Sticker pixel edits", 5.18, 6.7). The pixel edits are `Document` commands in `doc_sticker_edits.rs`
+(`PixelTarget`, `PixelData`, `StickerPatch`, `StickerBrush`, `StickerCheckpoint` re-exported at the crate root); the
+generic tile patches are `history::TilePatchOf<BPP>` over `pixel::TileBuf` (5.5, 5.18).
 
 ---
 
@@ -4446,6 +4567,16 @@ composite); gpu_dirty.add(r) }`.
   by `stroke_begin` and by every other history-producing command — first finalizes all Preview-baked stamps
   (`finalize_stamp_bake` for each id in `preview_baked`), then pushes `Edit::Structure(before)`. `cancel_pending_edit()` restores
   `before` and clears `preview_baked`.
+- **Sticker pixels** (stickers P3b, STICKER_PLAN 2.10). `StickerPixels`: `Arc::make_mut` on the sticker (in the
+  document's map) and on the picture or mask, `patch.swap_with`, a new picture version, the sticker id noted in
+  `StickerState::swapped`; after the whole entry `settle_sticker_pixel_edits` re-bakes the users of each noted sticker
+  that still exists (Final, or `unbaked` with deferred Final bakes: undo never waits for a bake). Why it is sound: as for
+  `Keep`, history is linear, so when a `StickerPixels` entry is applied the sticker layer it names exists with exactly
+  the pixels its patch expects; snapshots taken earlier share the old buffer and stay immutable because every write is
+  copy-on-write. Masks use `MaskPatch` (one byte per pixel; a 4096 x 4096 mask patch is at most 16 MB). The sticker
+  map in `Structure` snapshots is shared by `Arc` (no pixel copy); `Document::links` (P5) is not in snapshots.
+  Promotion inside an edit: a pixel edit on an image stamp is `Multi([Structure(before promotion), StickerPixels])`;
+  undo runs the patch first (the sticker still exists), then the structure (the image stamp comes back with its caches).
 - **Unbaked stamps in snapshots** (round 5, 5.20 rule 7): `StructureSnapshot::unbaked` is `Document::unbaked` at the time of
   the snapshot. `snapshot_structure` stores it; `restore_structure` swaps it with the document's (ids of stamps that no longer
   exist are dropped) and returns the old set in the inverse snapshot. So a cache of a stamp whose Full bake was still due
@@ -4453,7 +4584,7 @@ composite); gpu_dirty.add(r) }`.
   the UI thread; the app bakes a restored unbaked stamp in the background. A bake that lands later changes the current state
   only (no entry): an entry pushed after it records the baked caches. With deferred Final bakes off, a restored unbaked
   stamp (a snapshot taken while the mode was on) is baked at once by `restore_structure`.
-- **Budget**: entry cost = `patch.byte_len()` for `Pixels`; for `Structure` the summed `byte_len` of the pinned raster buffers and
+- **Budget**: entry cost = `patch.byte_len()` for `Pixels` and `StickerPixels`; for `Structure` the summed `byte_len` of the pinned raster buffers and
   stamp/text caches in the stored snapshot that are not `ptr_eq` to a buffer currently in the document (recomputed lazily when
   checking the budget). Evict oldest entries while `total > budget_bytes` or `len > max_entries`; the newest entry is always kept.
 - `Pixels` application calls `mark_layer_dirty` (fresh layer version). `undo`/`redo` call `touch()`: the revision only grows (it
@@ -8283,6 +8414,26 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `k3a_work_level_bounds_the_picture`, `k3a_sticker_scale_rules`). Ignored, release, serial:
   `sticker::bench::perf_k3a_render_three_layers_1024` (cold / one layer changed / Preview quality; `cargo test -p
   wte_core --release --lib perf_k3a -- --ignored --test-threads=1 --nocapture`; numbers in `docs/notes/sticker/build-P3a.md`).
+- Branch `stickers`, P3b (STICKER_PLAN 7 "P3b", names `k3b_*`): `doc_sticker_edits_tests`
+  (`k3b_1_a_stroke_is_one_entry_and_undo_redo_restore_the_bytes_with_new_versions` (one entry, new versions at undo and
+  redo, the user re-baked, pen pressure against the 2D kernel), `k3b_1_cancel_restores_and_a_selection_limits_the_dabs`
+  (live preview, cancel, selection, a selection of another size refused),
+  `k3b_1_a_stroke_on_a_blob_picture_makes_it_owned_and_leaves_the_blob_alone`;
+  `k3b_2_a_mask_stroke_is_a_one_byte_patch_and_a_mask_patch_does_not_fit_a_picture`,
+  `k3b_2_texture_stroke_patch_bytes_are_unchanged` (hash recorded on the P0 code);
+  `k3b_3_replace_same_size_is_a_patch_of_changed_tiles_another_size_a_structure_entry`;
+  `k3b_4a_a_preview_drag_on_an_image_stamp_is_one_entry_with_its_promotion`,
+  `k3b_4b_cancel_after_the_first_preview_brings_the_image_stamp_back` (also: a refused edit takes the promotion back, a
+  text stamp is not promoted), `k3b_4c_a_stroke_on_an_image_stamp_is_one_entry_and_4d_this_stamp_only` (Multi of
+  structure and pixels, undo / redo, a stroke that paints nothing, AllUsers);
+  `k3b_5_the_first_dab_after_a_snapshot_copies_the_buffer_once_in_begin` (`counters::buffer_copies`);
+  `k3b_6_limits_are_refused_with_their_messages_and_change_nothing`;
+  `k3b_7_convert_text_stamp_keeps_the_frame_and_the_picture_at_32_128_512`;
+  `k3b_8_revert_after_five_mixed_edits_is_one_entry_and_undo_brings_them_back`;
+  `k3b_history_counts_sticker_patches_and_commands_wait_for_the_stroke` (StrokeInProgress, no job during a stroke,
+  history cost, deferred Final bakes at the end and at undo)). Every existing `history`, `stroke` and `fill` test runs
+  unchanged on the generic patches. Ignored, release, serial: `doc_sticker_edits_tests::perf_k3b_stroke_begin_and_one_dab`
+  (`cargo test -p wte_core --release --lib perf_k3b -- --ignored --test-threads=1 --nocapture`).
 
 ### 9.2 `wte_app` tests
 
@@ -8822,3 +8973,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | P1 | styles and picture maths: `StyleStack` (margin, sanitize, presets), `apply_styles`, tent blur, `dist_out` / `dist_in`, `nearest_ink`, adjustments, shapes and polygon coverage, the affine resampler, `AlphaBuf`, the limits; no `Document` change | `crates/wte_core/src/sticker/{mod,style,fx,fx_tests,adjust,shape,resample,bench}.rs`, `pixel.rs`, `text/edt.rs` | every formula against plan 4; `apply_styles` fuzzed with empty, 1x1, opaque and transparent inputs; licence headers; `distance_to_ink` unchanged |
 | P2 | selection, cut-out and filter maths: `Selection` (marquee, lasso, combine, grow / shrink / feather), colour-tolerance regions (wand, colour range, flood fill), magic eraser, fill, colour to alpha, mattes, defringe, remove background, Gaussian blur, sharpen, gradient; no `Document` change | `crates/wte_core/src/sticker/{select,cutout,filter,bench}.rs` | the checker's own pictures (a noisy white background), a 4096 x 4096 single-colour flood (perf), determinism |
 | P3a | the sticker document in `Document`: `StickerDoc` and picture versions, `StampSource::Sticker`, `StampObject::styles`, the render (6.10), the stamp picture pipeline (margin, working size, two placements), promote / detach / `set_sticker` / stamp styles, job freshness and `DrawnPicture`, caches; save refuses stickers until P4; the app shows a sticker stamp like an image stamp | `crates/wte_core/src/{doc_stickers,doc_stickers_tests,doc_stamps,stamp_job,history,document,stamp}.rs`, `sticker/{model,render,pipeline}.rs` | every read of the placement and `wrapped_projector` in bake / wrap code listed as bake or stored; the stamp / wrap tests; scenarios against the P0 baseline |
+| P3b | pixel edits: generic `TilePatchOf` / `TileBackupOf` over `TileBuf`, `Edit::StickerPixels`, sticker strokes (picture and mask, selection, pressure), `replace_sticker_pixels`, promotion inside an edit, the one copy per stroke, limits, `convert_text_stamp`, Revert (`sticker_checkpoint`, `restore_sticker_state`), `rebake_sticker_users` | `crates/wte_core/src/{doc_sticker_edits,doc_sticker_edits_tests,history,pixel,doc_stickers,document}.rs`, `sticker/mod.rs` | the history test module unchanged; `TilePatch` read for any place that still assumes 4 bytes; scenarios `undo`, `paint2d`, `paint3d` against the P0 baseline |

@@ -94,6 +94,11 @@ pub(crate) struct StickerState {
     /// Derived sticker data (renders, layer rasters, decoded blob pictures, styled stamp pictures); not persisted, not
     /// in the history.
     pub(crate) cache: crate::doc_stickers::StickerCaches,
+    /// The open sticker stroke (P3b, `sticker_stroke_begin`); excludes a texture stroke and every other command.
+    pub(crate) stroke: Option<Box<crate::doc_sticker_edits::StickerStroke>>,
+    /// Stickers whose pixels an undo or redo just swapped (`Edit::StickerPixels`): their users are re-baked once the
+    /// whole entry is applied (`settle_sticker_pixel_edits`).
+    pub(crate) swapped: BTreeSet<StickerId>,
 }
 
 /// Most parameterizations a document keeps (least recently used dropped first).
@@ -412,9 +417,15 @@ impl Document {
         self.layer(id).map(Layer::version)
     }
 
-    /// `Err(EditError::StrokeInProgress)` while a stroke is open. First statement of every history-producing command.
+    /// `Err(EditError::StrokeInProgress)` while a stroke is open (a texture stroke or a sticker stroke: they exclude
+    /// each other, STICKER_PLAN 2.8). First statement of every history-producing command.
     pub(crate) fn guard_no_stroke(&self) -> Result<(), EditError> {
-        if self.stroke.is_some() { Err(EditError::StrokeInProgress) } else { Ok(()) }
+        if self.any_stroke() { Err(EditError::StrokeInProgress) } else { Ok(()) }
+    }
+
+    /// True while a texture stroke or a sticker stroke (`sticker_stroke_begin`) is open.
+    pub(crate) fn any_stroke(&self) -> bool {
+        self.stroke.is_some() || self.sticker_state.stroke.is_some()
     }
 
     /// THE way to report changed pixels of one layer: clips `r` to the set, adds it to the set's `pending` region and

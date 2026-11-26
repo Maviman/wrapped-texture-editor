@@ -7,7 +7,8 @@
 // - The pipeline takes the styled path when a stamp's styles have an entry that is on (`StyleStack::any_on`); a stack
 //   whose entries are all off draws exactly what no stack draws, so it keeps the bit-identical path too.
 // - Caches compare stickers by `Arc::ptr_eq` while holding the `Arc` (never a bare address) and pictures by version.
-// - `StickerRef::OfStamp` of an image stamp (promotion inside an edit) is package P3b; here it is `InvalidParam`.
+// - `StickerRef::OfStamp` of an image stamp promotes it inside the edit (P3b, 2.10): `set_sticker` here, the pixel
+//   edits in `doc_sticker_edits.rs`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,8 +42,8 @@ const RENDER_CACHE_BYTES: usize = 512 << 20;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StickerRef {
     Id(StickerId),
-    /// The sticker of this stamp. (For an image stamp that is not a sticker yet, the command promotes inside itself:
-    /// package P3b.)
+    /// The sticker of this stamp. For an image stamp that is not a sticker yet, a content command promotes it inside
+    /// itself (2.10: promotion and edit are one history entry); a text stamp is `InvalidParam`.
     OfStamp(StampId, ShareScope),
 }
 
@@ -266,7 +267,8 @@ impl Document {
         Ok(id)
     }
 
-    /// `promote_stamp` without a history entry (the caller records it; P3b promotes inside an edit).
+    /// `promote_stamp` without a history entry (the caller records it: promotion inside an edit, 2.10). Every error
+    /// comes before anything changes.
     pub(crate) fn promote_no_history(&mut self, stamp: StampId, scope: ShareScope) -> Result<StickerId, EditError> {
         let object = self.stamp(stamp).ok_or(EditError::UnknownStamp)?;
         let StampSource::Image { blob } = object.source else {
@@ -318,8 +320,12 @@ impl Document {
     /// owned buffers get fresh versions; the limits of 2.7 checked before anything changes). When the artboard changed,
     /// every user's placement is refitted (2.9, an automatic depth with it). Users are re-baked: `Commit::Preview` calls
     /// with the same `label` fold into one pending entry (Preview bakes), `Commit::Final` ends it (Final bakes, deferred
-    /// when that mode is on). Nothing changes and no entry is made when the value is unchanged. Errors:
-    /// `UnknownSticker`, `UnknownStamp`, `LayerLocked` (a user is locked), the limits, `StrokeInProgress`.
+    /// when that mode is on). Nothing changes and no entry is made when the value is unchanged. `OfStamp` of an image
+    /// stamp promotes it first without an entry of its own (2.10, review A3): the pending entry's "before" still shows
+    /// the image stamp, so a Preview, Preview, Final drag is one undo step and `cancel_pending_edit` brings the image
+    /// stamp back (the promotion is recorded even when the edit itself changes nothing). Errors, each before anything
+    /// changes: `UnknownSticker`, `UnknownStamp`, `InvalidParam` (a text stamp), `LayerLocked` (a user is locked),
+    /// the limits, `StrokeInProgress`.
     pub fn set_sticker(
         &mut self,
         on: StickerRef,
@@ -328,23 +334,47 @@ impl Document {
         commit: Commit,
     ) -> Result<StickerId, EditError> {
         self.guard_no_stroke()?;
-        let id = self.resolve_sticker(on)?;
+        let mut promoted = None;
+        let id = match self.promotion_of(on)? {
+            Some((stamp, scope)) => {
+                // A pending edit of another label ends first, so it never contains the promotion.
+                if self.pending_edit.as_ref().is_none_or(|p| p.label != label) {
+                    self.flush_pending_edit();
+                }
+                let before = self.snapshot_structure(&[]);
+                let id = self.promote_no_history(stamp, scope)?;
+                promoted = Some(before);
+                id
+            }
+            None => self.resolve_sticker(on)?,
+        };
         let old = Arc::clone(self.sticker_state.map.get(&id).ok_or(EditError::UnknownSticker)?);
         let mut new = (*old).clone();
         edit(&mut new);
         new.sanitize();
         self.version_new_buffers(&mut new, Some(&old));
-        self.check_sticker(&new)?;
+        if let Err(e) = self.check_sticker(&new) {
+            if let Some(before) = promoted {
+                self.restore_structure(before);
+            }
+            return Err(e);
+        }
         let changed = new != *old;
         let continues = self.pending_edit.as_ref().is_some_and(|p| p.label == label);
-        if !changed && !continues {
+        if !changed && !continues && promoted.is_none() {
             return Ok(id);
         }
         let users = self.sticker_users(id);
         if changed && users.iter().any(|u| self.stamp_locked(*u)) {
+            if let Some(before) = promoted {
+                self.restore_structure(before);
+            }
             return Err(EditError::LayerLocked);
         }
-        self.begin_pending(label);
+        match promoted {
+            Some(before) => self.begin_pending_with(label, before),
+            None => self.begin_pending(label),
+        }
         if changed {
             let refit = old.artboard != new.artboard;
             let new = Arc::new(new);
@@ -833,9 +863,9 @@ impl Document {
 
     // ----- internals -----
 
-    /// The sticker `on` names. `OfStamp` of a sticker stamp is its sticker; of another stamp `InvalidParam` (P3b
-    /// promotes an image stamp inside the edit).
-    fn resolve_sticker(&self, on: StickerRef) -> Result<StickerId, EditError> {
+    /// The sticker `on` names. `OfStamp` of a sticker stamp is its sticker; of another stamp `InvalidParam` (an image
+    /// stamp is promoted by the content commands before this is asked: `promotion_of`).
+    pub(crate) fn resolve_sticker(&self, on: StickerRef) -> Result<StickerId, EditError> {
         match on {
             StickerRef::Id(id) => self.sticker_state.map.contains_key(&id).then_some(id).ok_or(EditError::UnknownSticker),
             StickerRef::OfStamp(stamp, _) => match self.stamp(stamp).ok_or(EditError::UnknownStamp)?.source {

@@ -580,7 +580,7 @@ impl StrokeScratch {
 /// How much a dab of strength `amount` (flow x pressure x coverage, 0..=1) adds to a mask value that is `remaining`
 /// below full. `ceil` guarantees progress for low-flow soft brushes (pitfall 8 of section 6.9).
 #[inline]
-fn mask_increment(remaining: u16, amount: f32) -> u16 {
+pub(crate) fn mask_increment(remaining: u16, amount: f32) -> u16 {
     ((remaining as f32 * amount).ceil() as u32).min(remaining as u32) as u16
 }
 

@@ -6,18 +6,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::document::Document;
-use crate::ids::{LayerId, StampId, StickerId, TextureSetId};
+use crate::doc_sticker_edits::StickerPatch;
+use crate::ids::{LayerId, StampId, StickerId, StickerLayerId, TextureSetId};
 use crate::layer::{BlendMode, Layer, LayerKind};
 use crate::math::IRect;
-use crate::pixel::{PixelBuf, SparseBuf};
+use crate::pixel::{PixelBuf, SparseBuf, TileBuf};
 use crate::stamp::{StampObject, StampSource};
 use crate::sticker::StickerDoc;
 
-/// Pixels of one tile of a `TilePatch`.
+/// Pixels of one tile of a `TilePatch` / `MaskPatch`.
 pub enum TileData {
-    /// Every pixel of the tile has this colour.
+    /// Every pixel of the tile has this value: the colour of an RGBA tile; for a one-byte buffer (`MaskPatch`) the
+    /// value is `[0]` and the other three bytes are 0.
     Solid([u8; 4]),
-    /// `tile_w * tile_h * 4` bytes (edge tiles are smaller).
+    /// `tile_w * tile_h * BPP` bytes (edge tiles are smaller).
     Raw(Box<[u8]>),
 }
 
@@ -28,75 +30,131 @@ pub struct Tile {
     pub data: TileData,
 }
 
-/// Sparse set of 64x64 tiles of one raster layer. Applying it swaps its contents with the layer (it becomes its own inverse).
-pub struct TilePatch {
+/// Sparse set of 64x64 tiles of one buffer with `BPP` bytes per pixel (STICKER_PLAN 2.10: generic over the bytes per
+/// pixel, review A4). Applying it swaps its contents with the buffer (it becomes its own inverse). The patch knows
+/// its kind from its type and refuses a buffer of another kind (`swap_with` changes nothing then).
+pub struct TilePatchOf<const BPP: usize> {
     pub tiles: Vec<Tile>,
 }
 
+/// A patch of a 4-byte buffer (`PixelBuf`): paint layers (`Edit::Pixels`) and sticker pictures.
+pub type TilePatch = TilePatchOf<4>;
+/// A patch of a 1-byte buffer (`AlphaBuf`): sticker layer masks.
+pub type MaskPatch = TilePatchOf<1>;
+
+/// Tile side in pixels.
+const TILE: u32 = 64;
+
 /// Pixel rect of tile `(tx, ty)` in a `width x height` image; edge tiles are clipped, tiles outside are `EMPTY`.
 fn tile_rect(tx: u16, ty: u16, width: u32, height: u32) -> IRect {
-    let (x0, y0) = (tx as u32 * TilePatch::TILE, ty as u32 * TilePatch::TILE);
+    let (x0, y0) = (tx as u32 * TILE, ty as u32 * TILE);
     if x0 >= width || y0 >= height {
         return IRect::EMPTY;
     }
-    let (x1, y1) = ((x0 + TilePatch::TILE).min(width), (y0 + TilePatch::TILE).min(height));
+    let (x1, y1) = ((x0 + TILE).min(width), (y0 + TILE).min(height));
     IRect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32)
 }
 
-/// Byte range of the part of row `y` that lies inside `r` (which must lie inside `buf`).
-fn row_span(buf: &PixelBuf, r: IRect, y: i32) -> std::ops::Range<usize> {
-    let start = (y as usize * buf.width as usize + r.x0 as usize) * 4;
-    start..start + r.width() as usize * 4
+/// The rectangle of a whole buffer.
+fn buf_rect<B: TileBuf>(buf: &B) -> IRect {
+    let [w, h] = buf.size();
+    IRect::from_size(w, h)
 }
 
-fn read_tile(buf: &PixelBuf, r: IRect) -> Box<[u8]> {
-    let mut out = Vec::with_capacity(r.area() as usize * 4);
+/// Byte range of the part of row `y` that lies inside `r` (which must lie inside `buf`).
+fn row_span<B: TileBuf>(buf: &B, r: IRect, y: i32) -> std::ops::Range<usize> {
+    let start = (y as usize * buf.size()[0] as usize + r.x0 as usize) * B::BPP;
+    start..start + r.width() as usize * B::BPP
+}
+
+fn read_tile<B: TileBuf>(buf: &B, r: IRect) -> Box<[u8]> {
+    let mut out = Vec::with_capacity(r.area() as usize * B::BPP);
     for y in r.y0..r.y1 {
-        out.extend_from_slice(&buf.data[row_span(buf, r, y)]);
+        out.extend_from_slice(&buf.bytes()[row_span(buf, r, y)]);
     }
     out.into_boxed_slice()
 }
 
-/// Writes `data` (`r.area() * 4` bytes) into `buf` at `r`.
-fn write_tile(buf: &mut PixelBuf, r: IRect, data: &[u8]) {
-    let n = r.width() as usize * 4;
+/// Writes `data` (`r.area() * BPP` bytes) into `buf` at `r`.
+fn write_tile<B: TileBuf>(buf: &mut B, r: IRect, data: &[u8]) {
+    let n = r.width() as usize * B::BPP;
     for (i, y) in (r.y0..r.y1).enumerate() {
         let span = row_span(buf, r, y);
-        buf.data[span].copy_from_slice(&data[i * n..(i + 1) * n]);
+        buf.bytes_mut()[span].copy_from_slice(&data[i * n..(i + 1) * n]);
     }
 }
 
-fn fill_tile(buf: &mut PixelBuf, r: IRect, rgba: [u8; 4]) {
+fn fill_tile<B: TileBuf>(buf: &mut B, r: IRect, value: [u8; 4]) {
+    let value = &value[..B::BPP];
     for y in r.y0..r.y1 {
         let span = row_span(buf, r, y);
-        for px in buf.data[span].as_chunks_mut::<4>().0 {
-            *px = rgba;
+        for px in buf.bytes_mut()[span].chunks_exact_mut(B::BPP) {
+            px.copy_from_slice(value);
         }
     }
 }
 
-fn tile_equals(buf: &PixelBuf, r: IRect, data: &[u8]) -> bool {
-    let n = r.width() as usize * 4;
-    data.len() == r.area() as usize * 4
-        && (r.y0..r.y1).enumerate().all(|(i, y)| buf.data[row_span(buf, r, y)] == data[i * n..(i + 1) * n])
+fn tile_equals<B: TileBuf>(buf: &B, r: IRect, data: &[u8]) -> bool {
+    let n = r.width() as usize * B::BPP;
+    data.len() == r.area() as usize * B::BPP
+        && (r.y0..r.y1).enumerate().all(|(i, y)| buf.bytes()[row_span(buf, r, y)] == data[i * n..(i + 1) * n])
 }
 
 /// `Solid` when every pixel is the same, else `Raw`.
-fn pack_tile(data: Box<[u8]>) -> TileData {
-    let (pixels, _) = data.as_chunks::<4>();
-    match pixels.first() {
-        Some(first) if pixels.iter().all(|p| p == first) => TileData::Solid(*first),
+fn pack_tile(data: Box<[u8]>, bpp: usize) -> TileData {
+    let mut pixels = data.chunks_exact(bpp);
+    match pixels.next() {
+        Some(first) if pixels.all(|p| p == first) => {
+            let mut solid = [0u8; 4];
+            solid[..bpp].copy_from_slice(first);
+            TileData::Solid(solid)
+        }
         _ => TileData::Raw(data),
     }
 }
 
-impl TilePatch {
+impl<const BPP: usize> TilePatchOf<BPP> {
     /// Tile side in pixels.
-    pub const TILE: u32 = 64;
+    pub const TILE: u32 = TILE;
+
+    /// An empty patch.
+    pub fn empty() -> TilePatchOf<BPP> {
+        TilePatchOf { tiles: Vec::new() }
+    }
+
+    /// Bytes per pixel of the buffers this patch is made for.
+    pub fn bpp(&self) -> usize {
+        BPP
+    }
+
+    /// True when the patch can be applied to a buffer of type `B` (same bytes per pixel).
+    pub fn fits<B: TileBuf>(&self) -> bool {
+        B::BPP == BPP
+    }
 
     /// True when the patch holds no tile.
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
+    }
+
+    /// The patch that turns `new` back into `old` (STICKER_PLAN 2.8 `replace_sticker_pixels`): the tiles of `old`
+    /// where the two differ, in (row, column) order. Empty for buffers of another kind or of different sizes.
+    pub fn diff<B: TileBuf>(old: &B, new: &B) -> TilePatchOf<BPP> {
+        let [w, h] = old.size();
+        if !(B::BPP == BPP && new.size() == [w, h]) {
+            return TilePatchOf::empty();
+        }
+        let mut tiles = Vec::new();
+        for ty in 0..h.div_ceil(TILE) {
+            for tx in 0..w.div_ceil(TILE) {
+                let r = tile_rect(tx as u16, ty as u16, w, h);
+                if r.is_empty() || (r.y0..r.y1).all(|y| old.bytes()[row_span(old, r, y)] == new.bytes()[row_span(new, r, y)]) {
+                    continue;
+                }
+                tiles.push(Tile { tx: tx as u16, ty: ty as u16, data: pack_tile(read_tile(old, r), BPP) });
+            }
+        }
+        TilePatchOf { tiles }
     }
 
     /// Memory held by the patch, in bytes.
@@ -113,23 +171,28 @@ impl TilePatch {
             .sum()
     }
 
-    /// Pixel bounds of all tiles, clipped to a `width x height` layer.
+    /// Pixel bounds of all tiles, clipped to a `width x height` buffer.
     pub fn bounds(&self, width: u32, height: u32) -> IRect {
         self.tiles.iter().fold(IRect::EMPTY, |acc, t| acc.union(&tile_rect(t.tx, t.ty, width, height)))
     }
 
     /// Swaps the patch's tiles with the same tiles of `buf`; returns the dirty bounds.
     ///
-    /// Tiles that lie outside `buf` or whose size does not fit it are left alone (and not reported as dirty).
-    pub fn swap_with(&mut self, buf: &mut PixelBuf) -> IRect {
+    /// A buffer of another kind (`B::BPP != BPP`) is refused: nothing changes and the result is `EMPTY`. Tiles that
+    /// lie outside `buf` or whose size does not fit it are left alone (and not reported as dirty).
+    pub fn swap_with<B: TileBuf>(&mut self, buf: &mut B) -> IRect {
+        if !self.fits::<B>() {
+            return IRect::EMPTY;
+        }
+        let [width, height] = buf.size();
         let mut dirty = IRect::EMPTY;
         for tile in &mut self.tiles {
-            let r = tile_rect(tile.tx, tile.ty, buf.width, buf.height);
+            let r = tile_rect(tile.tx, tile.ty, width, height);
             if r.is_empty() {
                 continue;
             }
             if let TileData::Raw(d) = &tile.data
-                && d.len() != r.area() as usize * 4
+                && d.len() != r.area() as usize * BPP
             {
                 continue;
             }
@@ -138,50 +201,110 @@ impl TilePatch {
                 TileData::Solid(c) => fill_tile(buf, r, *c),
                 TileData::Raw(d) => write_tile(buf, r, d),
             }
-            tile.data = pack_tile(previous);
+            tile.data = pack_tile(previous, BPP);
             dirty = dirty.union(&r);
         }
         dirty
     }
 }
 
-/// Copy-on-first-touch backup of a raster layer during a stroke or fill.
-pub struct TileBackup {
+/// Copy-on-first-touch backup of a buffer with `BPP` bytes per pixel during a stroke or fill.
+pub struct TileBackupOf<const BPP: usize> {
     width: u32,
     height: u32,
     tiles: HashMap<(u16, u16), Box<[u8]>>,
 }
 
-impl TileBackup {
-    /// Empty backup for a `width x height` layer.
-    pub fn new(width: u32, height: u32) -> TileBackup {
-        TileBackup { width, height, tiles: HashMap::new() }
+/// The backup of a 4-byte buffer (paint layers, sticker pictures).
+pub type TileBackup = TileBackupOf<4>;
+/// The backup of a 1-byte buffer (sticker layer masks).
+pub type MaskBackup = TileBackupOf<1>;
+
+impl<const BPP: usize> TileBackupOf<BPP> {
+    /// Empty backup for a `width x height` buffer.
+    pub fn new(width: u32, height: u32) -> TileBackupOf<BPP> {
+        TileBackupOf { width, height, tiles: HashMap::new() }
     }
 
-    /// The backup's canvas clipped to `buf` (they are the same size unless the caller mixes layers up).
-    fn canvas(&self, buf: &PixelBuf) -> IRect {
-        IRect::from_size(self.width.min(buf.width), self.height.min(buf.height))
+    /// The backup's canvas clipped to `buf` (they are the same size unless the caller mixes buffers up).
+    fn canvas<B: TileBuf>(&self, buf: &B) -> IRect {
+        let [w, h] = buf.size();
+        IRect::from_size(self.width.min(w), self.height.min(h))
     }
 
-    /// Saves every not-yet-saved tile intersecting `r`; call BEFORE writing.
-    pub fn touch_rect(&mut self, buf: &PixelBuf, r: IRect) {
+    /// Saves every not-yet-saved tile intersecting `r`; call BEFORE writing. A buffer of another kind
+    /// (`B::BPP != BPP`) is ignored.
+    pub fn touch_rect<B: TileBuf>(&mut self, buf: &B, r: IRect) {
+        if B::BPP != BPP {
+            debug_assert!(false, "tile backup of {BPP} bytes per pixel used on a buffer of {}", B::BPP);
+            return;
+        }
         let c = r.intersect(&self.canvas(buf));
         if c.is_empty() {
             return;
         }
-        let tile = TilePatch::TILE as i32;
+        let tile = TILE as i32;
+        let whole = buf_rect(buf);
         for ty in c.y0 / tile..=(c.y1 - 1) / tile {
             for tx in c.x0 / tile..=(c.x1 - 1) / tile {
                 let key = (tx as u16, ty as u16);
                 let (w, h) = (self.width, self.height);
-                self.tiles.entry(key).or_insert_with(|| read_tile(buf, tile_rect(key.0, key.1, w, h).intersect(&buf.rect())));
+                self.tiles.entry(key).or_insert_with(|| read_tile(buf, tile_rect(key.0, key.1, w, h).intersect(&whole)));
             }
         }
     }
 
+    /// Undoes everything: writes the saved tiles back into `buf`; returns the dirty bounds (`EMPTY` for a buffer of
+    /// another kind, which is left alone).
+    pub fn restore<B: TileBuf>(&self, buf: &mut B) -> IRect {
+        if B::BPP != BPP {
+            return IRect::EMPTY;
+        }
+        let whole = buf_rect(buf);
+        let mut dirty = IRect::EMPTY;
+        for (&(tx, ty), data) in &self.tiles {
+            let r = tile_rect(tx, ty, self.width, self.height).intersect(&whole);
+            if r.is_empty() || data.len() != r.area() as usize * BPP {
+                continue;
+            }
+            write_tile(buf, r, data);
+            dirty = dirty.union(&r);
+        }
+        dirty
+    }
+
+    /// Converts the backup into an undo patch: drops tiles identical to `current`, collapses uniform tiles. A buffer
+    /// of another kind gives an empty patch.
+    pub fn into_patch<B: TileBuf>(self, current: &B) -> TilePatchOf<BPP> {
+        if B::BPP != BPP {
+            return TilePatchOf::empty();
+        }
+        let (width, height) = (self.width, self.height);
+        let whole = buf_rect(current);
+        // Sorted by (row, column): HashMap order must not leak into the patch (4.7).
+        let mut saved: Vec<_> = self.tiles.into_iter().collect();
+        saved.sort_unstable_by_key(|&((tx, ty), _)| (ty, tx));
+        let mut tiles = Vec::new();
+        for ((tx, ty), data) in saved {
+            let r = tile_rect(tx, ty, width, height).intersect(&whole);
+            if r.is_empty() || tile_equals(current, r, &data) {
+                continue;
+            }
+            tiles.push(Tile { tx, ty, data: pack_tile(data, BPP) });
+        }
+        TilePatchOf { tiles }
+    }
+
+    /// True when no tile has been saved.
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+}
+
+impl TileBackupOf<4> {
     /// Pre-edit pixel (from the backup if saved, else from `buf`); for tests.
     pub fn original(&self, buf: &PixelBuf, x: u32, y: u32) -> [u8; 4] {
-        let (tx, ty) = (x / TilePatch::TILE, y / TilePatch::TILE);
+        let (tx, ty) = (x / TILE, y / TILE);
         if let Some(data) = self.tiles.get(&(tx as u16, ty as u16)) {
             let r = tile_rect(tx as u16, ty as u16, self.width, self.height);
             if r.contains(x as i32, y as i32) {
@@ -199,70 +322,43 @@ impl TileBackup {
     ///
     /// Texels outside the layer (a caller bug) read as zero, so the length contract always holds.
     pub fn original_row(&self, buf: &PixelBuf, y: u32, x0: u32, x1: u32, out: &mut Vec<u8>) {
+        self.original_span(buf, y, x0, x1, out);
+    }
+}
+
+impl<const BPP: usize> TileBackupOf<BPP> {
+    /// Pre-edit bytes of the span x0..x1 of row y (`BPP * (x1 - x0)` bytes, appended to `out` after clearing it), one
+    /// tile lookup per 64 pixels; pixels outside the buffer read as zero. `original_row` for any kind of buffer.
+    pub fn original_span<B: TileBuf>(&self, buf: &B, y: u32, x0: u32, x1: u32, out: &mut Vec<u8>) {
         out.clear();
         if x1 <= x0 {
             return;
         }
-        out.reserve((x1 - x0) as usize * 4);
+        out.reserve((x1 - x0) as usize * BPP);
         let canvas = self.canvas(buf);
-        let ty = y / TilePatch::TILE;
+        let row = y as usize * buf.size()[0] as usize * BPP;
+        let ty = y / TILE;
         let mut x = x0;
         while x < x1 {
-            let tx = x / TilePatch::TILE;
-            let end = ((tx + 1) * TilePatch::TILE).min(x1);
-            // The part of x..end that exists in the layer.
-            let valid_end = if (y as i32) < canvas.y1 { end.min(canvas.x1 as u32).max(x) } else { x };
+            let tx = x / TILE;
+            let end = ((tx + 1) * TILE).min(x1);
+            // The part of x..end that exists in the buffer.
+            let valid_end = if (y as i32) < canvas.y1 && B::BPP == BPP { end.min(canvas.x1 as u32).max(x) } else { x };
             if valid_end > x {
-                let n = (valid_end - x) as usize * 4;
+                let n = (valid_end - x) as usize * BPP;
                 let saved = self.tiles.get(&(tx as u16, ty as u16)).and_then(|data| {
                     let r = tile_rect(tx as u16, ty as u16, self.width, self.height);
-                    let i = ((y - r.y0 as u32) as usize * r.width() as usize + (x - r.x0 as u32) as usize) * 4;
+                    let i = ((y - r.y0 as u32) as usize * r.width() as usize + (x - r.x0 as u32) as usize) * BPP;
                     data.get(i..i + n)
                 });
                 match saved {
                     Some(span) => out.extend_from_slice(span),
-                    None => out.extend_from_slice(&buf.row(y)[x as usize * 4..x as usize * 4 + n]),
+                    None => out.extend_from_slice(&buf.bytes()[row + x as usize * BPP..row + x as usize * BPP + n]),
                 }
             }
-            out.resize(out.len() + (end - valid_end) as usize * 4, 0);
+            out.resize(out.len() + (end - valid_end) as usize * BPP, 0);
             x = end;
         }
-    }
-
-    /// Undoes everything: writes the saved tiles back into `buf`; returns the dirty bounds.
-    pub fn restore(&self, buf: &mut PixelBuf) -> IRect {
-        let mut dirty = IRect::EMPTY;
-        for (&(tx, ty), data) in &self.tiles {
-            let r = tile_rect(tx, ty, self.width, self.height).intersect(&buf.rect());
-            if r.is_empty() || data.len() != r.area() as usize * 4 {
-                continue;
-            }
-            write_tile(buf, r, data);
-            dirty = dirty.union(&r);
-        }
-        dirty
-    }
-
-    /// Converts the backup into an undo patch: drops tiles identical to `current`, collapses uniform tiles.
-    pub fn into_patch(self, current: &PixelBuf) -> TilePatch {
-        let (width, height) = (self.width, self.height);
-        // Sorted by (row, column): HashMap order must not leak into the patch (4.7).
-        let mut saved: Vec<_> = self.tiles.into_iter().collect();
-        saved.sort_unstable_by_key(|&((tx, ty), _)| (ty, tx));
-        let mut tiles = Vec::new();
-        for ((tx, ty), data) in saved {
-            let r = tile_rect(tx, ty, width, height).intersect(&current.rect());
-            if r.is_empty() || tile_equals(current, r, &data) {
-                continue;
-            }
-            tiles.push(Tile { tx, ty, data: pack_tile(data) });
-        }
-        TilePatch { tiles }
-    }
-
-    /// True when no tile has been saved.
-    pub fn is_empty(&self) -> bool {
-        self.tiles.is_empty()
     }
 }
 
@@ -319,6 +415,10 @@ pub struct StructureSnapshot {
 pub enum Edit {
     Pixels { set: TextureSetId, layer: LayerId, patch: TilePatch },
     Structure(Box<StructureSnapshot>),
+    /// Stickers (STICKER_PLAN 2.10): a tile patch on an owned picture or a mask of one sticker layer. Applying it
+    /// swaps the tiles through `Arc::make_mut` on the sticker and on the buffer (copy-on-write when a snapshot shares
+    /// them), gives the buffer a new picture version and re-bakes the sticker's users once the whole entry is applied.
+    StickerPixels { sticker: StickerId, layer: StickerLayerId, patch: StickerPatch },
     /// Applied in order for redo, reverse order for undo.
     Multi(Vec<Edit>),
 }
@@ -378,6 +478,7 @@ fn sticker_buffers(stickers: &BTreeMap<StickerId, Arc<StickerDoc>>) -> impl Iter
 fn edit_cost(edit: &Edit, live: &HashSet<usize>, seen: &mut HashSet<usize>) -> usize {
     match edit {
         Edit::Pixels { patch, .. } => patch.byte_len(),
+        Edit::StickerPixels { patch, .. } => patch.byte_len(),
         Edit::Structure(snapshot) => {
             let mut total = 0usize;
             for (key, bytes) in sticker_buffers(&snapshot.stickers) {
@@ -538,12 +639,13 @@ impl Document {
     ///
     /// A pending Preview edit is flushed first, so it is the entry that gets undone.
     pub fn undo(&mut self) -> Option<String> {
-        if self.stroke.is_some() {
+        if self.any_stroke() {
             return None;
         }
         self.flush_pending_edit();
         let mut entry = self.history.undo.pop()?;
         self.apply_edit(&mut entry.edit, true);
+        self.settle_sticker_pixel_edits();
         std::mem::swap(&mut entry.state, &mut self.history.state);
         let label = entry.label.clone();
         self.history.redo.push(entry);
@@ -555,12 +657,13 @@ impl Document {
     ///
     /// A pending Preview edit is flushed first; like every new entry it clears the redo stack.
     pub fn redo(&mut self) -> Option<String> {
-        if self.stroke.is_some() {
+        if self.any_stroke() {
             return None;
         }
         self.flush_pending_edit();
         let mut entry = self.history.redo.pop()?;
         self.apply_edit(&mut entry.edit, false);
+        self.settle_sticker_pixel_edits();
         std::mem::swap(&mut entry.state, &mut self.history.state);
         let label = entry.label.clone();
         self.history.undo.push(entry);
@@ -580,6 +683,7 @@ impl Document {
                 let dirty = patch.swap_with(Arc::make_mut(buf));
                 self.mark_layer_dirty(id, dirty);
             }
+            Edit::StickerPixels { sticker, layer, patch } => self.swap_sticker_patch(*sticker, *layer, patch),
             Edit::Structure(snapshot) => {
                 let empty =
                     StructureSnapshot { sets: Vec::new(), stamps: Vec::new(), unbaked: BTreeSet::new(), stickers: BTreeMap::new() };
@@ -598,12 +702,12 @@ impl Document {
 
     /// True when `undo` would do something.
     pub fn can_undo(&self) -> bool {
-        self.stroke.is_none() && (self.pending_edit.is_some() || !self.history.undo.is_empty())
+        !self.any_stroke() && (self.pending_edit.is_some() || !self.history.undo.is_empty())
     }
 
     /// True when `redo` would do something.
     pub fn can_redo(&self) -> bool {
-        self.stroke.is_none() && self.pending_edit.is_none() && !self.history.redo.is_empty()
+        !self.any_stroke() && self.pending_edit.is_none() && !self.history.redo.is_empty()
     }
 
     /// Label of the entry `undo` would undo.

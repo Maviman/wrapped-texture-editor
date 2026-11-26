@@ -7,7 +7,8 @@
 //! selections and colour-tolerance regions ([`select`]), the cut-out helpers ([`cutout`]) and blur, sharpen and the
 //! gradient tool ([`filter`]). Package P3a: the sticker document ([`model`]), its rendering ([`render`]), the
 //! pipeline from a stamp's source to the picture its bake places ([`pipeline`]), `refit_placement` (2.9) and the
-//! work counters ([`counters`]); the document commands are `doc_stickers.rs`.
+//! work counters ([`counters`]); the document commands are `doc_stickers.rs`. Package P3b: the pixel edits, the
+//! sticker strokes, promotion inside an edit, text conversion and Revert (`doc_sticker_edits.rs`).
 //!
 //! Determinism (ARCHITECTURE 4.7): integer or fixed-order `f32` arithmetic; rayon only over independent rows,
 //! columns or bands; results identical for any thread count (tested with local pools of 1 and 8 threads).
@@ -105,6 +106,21 @@ impl LayerTransform {
         let q = (p - c) * self.scale;
         self.translate + c + Vec2::new(q.x * cos - q.y * sin, q.x * sin + q.y * cos)
     }
+
+    /// The content point (content pixels, continuous) at layer-space point `q` of a picture of `size`: the inverse of
+    /// `apply` (scales are never 0 after `sanitize`).
+    pub fn invert(&self, size: [u32; 2], q: Vec2) -> Vec2 {
+        let c = Vec2::new(size[0] as f32, size[1] as f32) * 0.5;
+        let (sin, cos) = self.rotation.sin_cos();
+        let d = q - self.translate - c;
+        c + Vec2::new(d.x * cos + d.y * sin, -d.x * sin + d.y * cos) / self.scale
+    }
+
+    /// The mean of the two scales' magnitudes (content pixels per layer-space pixel is its inverse); 1 when not usable.
+    pub fn mean_scale(&self) -> f32 {
+        let m = (self.scale.x.abs() + self.scale.y.abs()) * 0.5;
+        if m.is_finite() && m > 0.0 { m } else { 1.0 }
+    }
 }
 
 /// The placement refit of 2.9 when a sticker's artboard changes from `old` to `new` (crop, trim, padding, canvas
@@ -152,6 +168,19 @@ pub mod counters {
         static STYLED: Cell<u64> = const { Cell::new(0) };
         static MAX_SIDE: Cell<u32> = const { Cell::new(0) };
         static MAX_PIXELS: Cell<u64> = const { Cell::new(0) };
+        static BUFFER_COPIES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Records one copy of a sticker picture or mask buffer that a snapshot, a cache or a job still shared
+    /// (`Arc::make_mut` on a shared buffer, P3b).
+    pub(crate) fn buffer_copied() {
+        BUFFER_COPIES.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Sticker picture and mask buffers copied because they were shared (copy-on-write), on this thread so far
+    /// (STICKER_PLAN 2.10 "The first dab after a snapshot": one per stroke at most, in `sticker_stroke_begin`).
+    pub fn buffer_copies() -> u64 {
+        BUFFER_COPIES.with(Cell::get)
     }
 
     pub(crate) fn rendered() {

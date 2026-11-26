@@ -24,6 +24,7 @@ pub mod composite;
 pub mod doc_build;
 pub mod doc_layers;
 pub mod doc_stamps;
+pub mod doc_sticker_edits;
 pub mod doc_stickers;
 pub mod document;
 pub mod error;
@@ -57,6 +58,8 @@ pub mod wrap_param;
 #[cfg(test)]
 mod doc_stickers_tests;
 #[cfg(test)]
+mod doc_sticker_edits_tests;
+#[cfg(test)]
 mod wrap_tests;
 
 #[doc(hidden)]
@@ -70,6 +73,10 @@ pub use bvh::*;
 pub use composite::*;
 pub use doc_build::*;
 pub use doc_layers::*;
+pub use doc_sticker_edits::{
+    CONVERT_LABEL, PixelData, PixelTarget, REVERT_LABEL, STICKER_BRUSH_LABEL, STICKER_ERASER_LABEL, StickerBrush,
+    StickerCheckpoint, StickerPatch,
+};
 pub use doc_stickers::{STYLE_LABEL, ShareScope, StickerCaches, StickerRef};
 pub use document::*;
 pub use error::*;

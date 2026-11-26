@@ -1,5 +1,5 @@
 //! Pixel containers (ARCHITECTURE.md 4.2, 5.5): dense `PixelBuf`, cropped `CroppedBuf`, the borrowed `PixelView` and
-//! the one-channel `AlphaBuf` (stickers).
+//! the one-channel `AlphaBuf` (stickers) and the `TileBuf` trait of undo tile patches (sticker masks, P3b).
 //! All pixel data is RGBA8, straight alpha, sRGB-encoded, tightly packed, row 0 = top.
 
 use crate::math::IRect;
@@ -487,6 +487,70 @@ impl AlphaBuf {
     /// Size of the data in bytes.
     pub fn byte_len(&self) -> usize {
         self.data.len()
+    }
+}
+
+/// A dense image that undo tile patches and tile backups work on (STICKER_PLAN 2.10, review A4): `BPP` bytes per
+/// pixel, rows of `width * BPP` bytes, row 0 = top. `PixelBuf` (4: RGBA paint layers and sticker pictures) and
+/// `AlphaBuf` (1: sticker layer masks).
+pub trait TileBuf {
+    /// Bytes per pixel.
+    const BPP: usize;
+    /// `[width, height]`.
+    fn size(&self) -> [u32; 2];
+    /// All bytes, `width * height * BPP`.
+    fn bytes(&self) -> &[u8];
+    /// All bytes, mutable.
+    fn bytes_mut(&mut self) -> &mut [u8];
+}
+
+impl TileBuf for PixelBuf {
+    const BPP: usize = 4;
+    #[inline]
+    fn size(&self) -> [u32; 2] {
+        [self.width, self.height]
+    }
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        &self.data
+    }
+    #[inline]
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+impl TileBuf for AlphaBuf {
+    const BPP: usize = 1;
+    #[inline]
+    fn size(&self) -> [u32; 2] {
+        [self.width, self.height]
+    }
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        &self.data
+    }
+    #[inline]
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+/// A shared buffer reads as the buffer; writing goes through `Arc::make_mut` (copy-on-write when shared), so the
+/// read-only uses (`touch_rect`, `into_patch`, `diff`) take a layer's `Arc` as they took `&PixelBuf` by deref before.
+impl<T: TileBuf + Clone> TileBuf for std::sync::Arc<T> {
+    const BPP: usize = T::BPP;
+    #[inline]
+    fn size(&self) -> [u32; 2] {
+        (**self).size()
+    }
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        (**self).bytes()
+    }
+    #[inline]
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        std::sync::Arc::make_mut(self).bytes_mut()
     }
 }
 

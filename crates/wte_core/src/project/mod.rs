@@ -10,16 +10,22 @@ pub mod load;
 pub mod manifest;
 pub mod migrate;
 pub mod save;
+pub mod sticker_entries;
+#[cfg(test)]
+mod sticker_tests;
 
 pub use load::{extract_bundle, extract_sources, load, read_manifest};
 pub use manifest::*;
+pub use sticker_entries::*;
 pub use save::{required_reader, save};
 
 /// Version of the manifest schema written by this build. 2 (round 4): text entries may carry `fx`; a file whose
 /// texts use none of it is written with `min_reader_version` 1 (`save::required_reader`). 3 (round 6): a projected
 /// placement may carry `mode` ("wrap") and the Wrap options `wrap_gaps` / `wrap_overlap`; a file that uses none of
-/// them is written with the `min_reader_version` it had before.
-pub const FORMAT_VERSION: u32 = 3;
+/// them is written with the `min_reader_version` it had before. 4 (stickers, STICKER_PLAN 2.11): stamps may show a
+/// sticker and carry layer styles, the manifest may list stickers and PhotoCraft links; a file that uses none of them
+/// is written with the `min_reader_version` it had before.
+pub const FORMAT_VERSION: u32 = 4;
 /// File extension of a project file (without the dot).
 pub const PROJECT_EXTENSION: &str = "wtep";
 /// Content of the `mimetype` entry, the first entry of every project archive.
@@ -52,7 +58,8 @@ pub struct SaveStats {
 /// for every layer whose pixels did not change since (same id and `Layer::version`) and every set whose composite
 /// inputs did not change (same `composite_key`). Recorded by `load` and by every successful `save` for the file it
 /// read or wrote, kept by the document (`Document::set_png_reuse`, not persisted) and handed to the next save in its
-/// snapshot. Used only while that file still has the recorded size and modification time.
+/// snapshot. Used only while that file still has the recorded size and modification time. Format 4: the owned
+/// sticker pictures and masks too, by picture version (`stickers`; STICKER_PLAN 2.11 "Save reuse").
 #[derive(Clone, Debug, Default)]
 pub struct PngReuse {
     pub path: std::path::PathBuf,
@@ -64,6 +71,9 @@ pub struct PngReuse {
     pub flattened: std::collections::HashMap<crate::ids::TextureSetId, (u64, String)>,
     /// (composite key of the first set, `thumbnail.png` entry).
     pub thumbnail: Option<(u64, String)>,
+    /// Sticker picture or mask version (STICKER_PLAN 2.2) -> the `stickers/...` PNG entry that holds exactly those
+    /// bytes. Versions are never reused within a document, so a matching version can never copy another picture.
+    pub stickers: std::collections::HashMap<u64, String>,
 }
 
 impl PngReuse {
@@ -86,6 +96,25 @@ pub struct LoadReport {
     pub warnings: Vec<LoadWarning>,
     /// The file was written by a newer format version: plain Save must be refused so it is never overwritten.
     pub force_save_as: bool,
+}
+
+/// Counters of `project::save` (tests): sticker picture and mask PNGs encoded by saves started on this thread (one
+/// add per encoded entry, counted on the calling thread before the parallel encode).
+pub mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static STICKER_ENCODES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn sticker_encoded(n: u64) {
+        STICKER_ENCODES.with(|c| c.set(c.get() + n));
+    }
+
+    /// Sticker PNGs encoded by saves on this thread so far (copied entries are not counted).
+    pub fn sticker_encodes() -> u64 {
+        STICKER_ENCODES.with(Cell::get)
+    }
 }
 
 /// The key of everything the composite of a set depends on: its size and, per layer bottom to top, the id, pixel

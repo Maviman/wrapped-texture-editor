@@ -1141,7 +1141,7 @@ fn plain_text_entry_has_the_v1_keys() {
 
 #[test]
 fn required_reader_follows_fx() {
-    assert_eq!(FORMAT_VERSION, 3);
+    assert_eq!(FORMAT_VERSION, 4);
     // The migration steps (`STEPS.len() == FORMAT_VERSION - 1` is asserted in `project::migrate`) change nothing
     // but the version of a version-1 manifest.
     let v1: Value = serde_json::from_str(FROZEN_V1_TEXT_MANIFEST).unwrap();
@@ -1717,5 +1717,108 @@ fn reopened_wrapped_stamps_rebuild_their_parameterization_exactly() {
         d.set_stamp_placement(id, Placement::Projected(moved), Commit::Final).unwrap();
     }
     assert_eq!(doc_state(&mut loaded), doc_state(&mut doc), "a move after reopening bakes differently");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ------------------------------------------------------------------------------------------------------------------
+// Stickers P4 (STICKER_PLAN 7 "P4"): project format 4. The frozen v3 project below was saved by the P0 release exe
+// (scenario `roundtrip`, an image and a text stamp on the sample sphere, min_reader_version 2); the hashes were
+// recorded by this test on the code before P4 (whose project reader is the P0 one).
+// ------------------------------------------------------------------------------------------------------------------
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("project").join(name)
+}
+
+/// One hash over the loaded state: per set its layers (id, name, flags, kind, linked stamp, content rect, pixels) and
+/// composite; and one over the stamps as their manifest entries (the same JSON on the P0 code and since).
+fn v3_state_hash(doc: &mut Document) -> (u64, u64) {
+    doc.recomposite_all();
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for id in doc.set_ids() {
+        let set = doc.set(id).unwrap();
+        for l in &set.layers {
+            let dense = l.to_dense(set.width, set.height);
+            let rect = if l.is_raster() { IRect::EMPTY } else { l.content_rect() };
+            let s = format!(
+                "{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{}",
+                l.id,
+                l.name,
+                l.visible,
+                l.opacity.to_bits(),
+                l.blend as u8,
+                l.locked,
+                l.alpha_lock,
+                l.kind_name(),
+                l.stamp_id(),
+                rect,
+                fnv(&dense.data)
+            );
+            h = fnv1a64(h, s.as_bytes());
+        }
+        h = fnv1a64(h, &testutil::hash_pixels(set.composite()).to_le_bytes());
+    }
+    let stamps: Vec<StampEntry> = doc.stamps.iter().map(StampEntry::from).collect();
+    (h, fnv(serde_json::to_string(&stamps).unwrap().as_bytes()))
+}
+
+/// The state hashes of the fixture, recorded by this test on the code before P4 (HEAD bdec1ec, whose project reader
+/// and bake are the P0 ones: the P3a / P3b identity sweeps matched the P0 baseline byte for byte): (layers and
+/// composites, stamps as manifest entries) as loaded, and again after every stamp was baked again.
+const V3_LOADED: (u64, u64) = (0xa53c_e7bb_f4a5_9917, 0x428a_e025_ace1_c186);
+const V3_REBAKED: (u64, u64) = (0xa53c_e7bb_f4a5_9917, 0x428a_e025_ace1_c186);
+
+#[test]
+fn k4_a_v3_project_of_the_p0_exe_loads_as_before() {
+    let path = fixture("v3_roundtrip.wtep");
+    let raw: Value = serde_json::from_slice(&read_zip_entry(&path, "manifest.json")).unwrap();
+    assert_eq!((&raw["format_version"], &raw["min_reader_version"]), (&json!(3), &json!(2)), "the fixture is a P0 save");
+    // `read_manifest` migrates: the version-3 manifest becomes a version-4 one with nothing else changed.
+    let stored = project::read_manifest(&path).unwrap();
+    assert_eq!((stored.format_version, stored.min_reader_version), (FORMAT_VERSION, 2));
+    let report = project::load(&path, &NoProgress).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(!report.force_save_as);
+    let mut doc = report.document;
+    assert!(doc.stickers().next().is_none() && doc.stamps.iter().all(|s| s.styles.is_default()));
+    let loaded = v3_state_hash(&mut doc);
+    // Every stamp baked again from its definition (through the editing path: two Final tint edits that end at the
+    // stored tint).
+    let stamps: Vec<(StampId, [u8; 4])> = doc.stamps.iter().map(|s| (s.id, s.tint)).collect();
+    for (id, tint) in stamps {
+        doc.set_stamp_tint(id, [tint[0], tint[1], tint[2], tint[3] ^ 1], Commit::Final).unwrap();
+        doc.set_stamp_tint(id, tint, Commit::Final).unwrap();
+    }
+    doc.settle_final_bakes();
+    let rebaked = v3_state_hash(&mut doc);
+    assert_eq!(loaded, V3_LOADED, "the loaded document");
+    assert_eq!(rebaked, V3_REBAKED, "the document after baking every stamp again");
+
+    // Saved again (unchanged, and with every image encoded again): the same layers and stamps, the same layer PNGs as
+    // the P0 exe wrote, and min_reader_version 2 as before (only format_version and app_version differ).
+    let report = project::load(&path, &NoProgress).unwrap();
+    let mut doc = report.document;
+    let dir = temp_dir("k4_v3_resave");
+    for (name, reuse) in [("copied.wtep", true), ("encoded.wtep", false)] {
+        if !reuse {
+            doc.set_png_reuse(None);
+        }
+        let out = dir.join(name);
+        project::save(&doc.snapshot(), &out, &save_options(), &NoProgress).unwrap();
+        let manifest = project::read_manifest(&out).unwrap();
+        assert_eq!((manifest.format_version, manifest.min_reader_version), (FORMAT_VERSION, 2), "{name}");
+        assert_eq!(manifest.stamps, stored.stamps, "{name}");
+        assert!(manifest.stickers.is_empty() && manifest.links.is_empty());
+        assert_eq!(serde_json::to_value(&manifest.sets).unwrap(), serde_json::to_value(&stored.sets).unwrap(), "{name}");
+        let raw: Value = serde_json::from_slice(&read_zip_entry(&out, "manifest.json")).unwrap();
+        for key in ["stickers", "links"] {
+            assert!(raw.get(key).is_none(), "{name}: no {key} key in a file without stickers");
+        }
+        for (_, layer) in layer_entries(&path) {
+            if let Some(pixels) = &layer.pixels {
+                assert!(read_zip_entry(&out, &pixels.file.entry) == read_zip_entry(&path, &pixels.file.entry), "{name}: {}", pixels.file.entry);
+            }
+        }
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

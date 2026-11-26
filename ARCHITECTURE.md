@@ -317,7 +317,9 @@ Traceability (P1): styles, adjustments, shapes, the resampler and the limits (2.
 blur, sharpen and the gradient tool (2.1, 5.27, 6.12, 9.1); 1.3's non-goal now names texture layers only. (P3a): the
 sticker document (`StickerDoc`, picture versions), `StampSource::Sticker`, `StampObject::styles`, the sticker render
 (6.10), the picture pipeline of a stamp (margin, working size, two placements: 6.5 "Stickers"), the `Document` sticker
-API and job freshness (2.1, 4.4, 5.1, 5.2, 5.12, 5.14, 5.18, 5.20 "Stickers", 5.27 part 3, 9.1).
+API and job freshness (2.1, 4.4, 5.1, 5.2, 5.12, 5.14, 5.18, 5.20 "Stickers", 5.27 part 3, 9.1). (P4): project format 4
+(stickers, stamp styles, sticker PNG entries, save reuse by picture version, load degradation; 5.23, 7.1, 7.2, 7.3) and
+the `.wtes` sticker file (7.8), tests (9.1).
 
 ---
 
@@ -391,6 +393,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `doc_stickers_tests.rs` | stickers P3a | the `k3a_*` tests of the sticker document (test-only child of the crate root) |
 | `doc_sticker_edits.rs` | stickers P3b | sticker pixel edits: strokes on pictures and masks, `replace_sticker_pixels`, promotion inside an edit, `convert_text_stamp`, Revert, the re-bake of users and the undo of `Edit::StickerPixels` (5.20 "Sticker pixel edits") |
 | `doc_sticker_edits_tests.rs` | stickers P3b | the `k3b_*` tests (test-only child of the crate root) |
+| `sticker/file.rs` | stickers P4 | the `.wtes` sticker file (7.8): `write_wtes`, `read_wtes`, `WtesManifest`, `WtesFile`; `Document::{saved_sticker_ids, sticker_extract_pictures, sticker_wtes, import_wtes}` |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -420,8 +423,10 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `import/mtl_ref.rs` | C5 | `parse_texture_ref` (strip `map_Kd` options) |
 | `import/uri.rs` | C5 | base64 decode, percent decode, data-URI parsing |
 | `image_io.rs` | C5 | `decode_image`, `encode_png`, `encode_flat`, `FlatFormat`, `PngLevel` |
-| `project/mod.rs` | S | re-exports, `FORMAT_VERSION`, `SaveOptions`, `SaveStats`, `LoadReport` |
+| `project/mod.rs` | S | re-exports, `FORMAT_VERSION`, `SaveOptions`, `SaveStats`, `LoadReport`, `PngReuse`, `counters` (stickers P4) |
 | `project/manifest.rs` | S | serde manifest schema (types only); round 4: `TextFxEntry`, `GapEntry`, `WarpEntry`, `PathEntry`, `TextEntry::unknown_features` |
+| `project/sticker_entries.rs` | stickers P4 | the format-4 entries (7.2 "Format 4"): `StickerEntry`, `StickerLayerEntry`, `StickerContentEntry`, `ShapeEntry`, `AdjustmentEntry`, `StyleStackEntry` and its members, `LinkEntry` (plain data until P5); conversions and the float visitors of the save check |
+| `project/sticker_tests.rs` | stickers P4 | the `k4_*` unit tests (test-only child of `project`) |
 | `project/save.rs` | C6 | `project::save` |
 | `project/load.rs` | C6 | `project::load`, `read_manifest`, `extract_bundle`, `extract_sources` |
 | `project/migrate.rs` | C6 | manifest version migration chain |
@@ -2789,8 +2794,8 @@ impl Document {
   automatic" test and the fit run on the bake placements and the fitted depth is written into the stored placement;
   `set_stamp_source`, `retune_text`, `set_sticker` (artboard refit), `set_stamp_styles` and `set_stamps_styles` call it.
   Without a margin it is `refit_auto_depth` (unchanged).
-- **Save.** Until format 4 (P4) `project::save` refuses a document with a sticker stamp or non-default stamp styles
-  (`ProjectError::ManifestInvalid`, nothing is written).
+- **Save.** Format 4 (P4, 7.1 / 7.2): sticker stamps, stamp styles and the stickers a stamp shows or the tray keeps are
+  saved (P3a refused them with `ManifestInvalid` until then).
 
 **Sticker pixel edits, conversion, Revert (P3b; `doc_sticker_edits.rs`, STICKER_PLAN 2.7, 2.8, 2.10).**
 
@@ -3028,7 +3033,7 @@ pub fn encode_flat(buf: &PixelBuf, format: &FlatFormat) -> Result<Vec<u8>, Image
 
 ```rust
 // project/mod.rs  [S]
-pub const FORMAT_VERSION: u32 = 3;   // 2: round 4 (text effects); 3: round 6 (surface mode, Wrap options)
+pub const FORMAT_VERSION: u32 = 4;   // 2: round 4 (text effects); 3: round 6 (surface mode, Wrap options); 4: stickers
 pub const PROJECT_EXTENSION: &str = "wtep";
 pub const PROJECT_MIMETYPE: &str = "application/x-wtep";
 #[derive(Clone, Debug)]
@@ -3040,7 +3045,11 @@ pub struct SaveStats { pub bytes_written: u64, pub entries: u32, pub reuse: Opti
 #[derive(Clone, Debug, Default)]
 pub struct PngReuse { pub path: PathBuf, pub len: u64, pub modified: Option<SystemTime>,
                       pub layers: HashMap<LayerId, (u64 /* version */, String /* entry */, [i32; 4] /* rect */)>,
-                      pub flattened: HashMap<TextureSetId, (u64 /* composite_key */, String)>, pub thumbnail: Option<(u64, String)> }
+                      pub flattened: HashMap<TextureSetId, (u64 /* composite_key */, String)>, pub thumbnail: Option<(u64, String)>,
+                      // stickers P4: picture or mask version (STICKER_PLAN 2.2) -> the `stickers/...` PNG entry holding those bytes
+                      pub stickers: HashMap<u64, String> }
+/// Test counters (thread-local): `counters::sticker_encodes()` = sticker PNGs encoded by saves on this thread.
+pub mod counters { pub fn sticker_encodes() -> u64; }
 pub struct LoadReport { pub document: Document, pub warnings: Vec<LoadWarning>, pub force_save_as: bool }
 pub use save::save;  pub use load::{load, read_manifest, extract_bundle, extract_sources};
 
@@ -3051,12 +3060,15 @@ pub fn save(snapshot: &DocumentSnapshot, path: &Path, opts: &SaveOptions, progre
 pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectError>;
 pub fn read_manifest(path: &Path) -> Result<Manifest, ProjectError>;
 /// R7 "Extract Original Files", working on in-memory data (so it also works for a document that was never saved): writes
-/// the model file, every sidecar and every extra at their relative paths, and every blob under `stamps\` (images) or
-/// `fonts\` (fonts) using its sanitized original name, into `dest_dir` (created if missing). With `overwrite == false`
-/// an existing file is never replaced: the new file gets a `_2`, `_3`, ... suffix. Returns the written paths (7.1).
-pub fn extract_bundle(bundle: &SourceBundle, blobs: &BlobStore, dest_dir: &Path, overwrite: bool)
-    -> Result<Vec<PathBuf>, ProjectError>;
-/// Thin wrapper: reads `source/*`, the extras and the blobs of a saved .wtep (no import, no layers) and calls extract_bundle.
+/// the model file, every sidecar and every extra at their relative paths, every blob under `stamps\` (images) or
+/// `fonts\` (fonts) using its sanitized original name, and (stickers P4) every `(name, finished picture)` of `stickers`
+/// (`Document::sticker_extract_pictures`) as `stickers\<name>.png`, into `dest_dir` (created if missing). With
+/// `overwrite == false` an existing file is never replaced: the new file gets a `_2`, `_3`, ... suffix. Returns the
+/// written paths (7.1).
+pub fn extract_bundle(bundle: &SourceBundle, blobs: &BlobStore, stickers: &[(String, PixelBuf)], dest_dir: &Path,
+    overwrite: bool) -> Result<Vec<PathBuf>, ProjectError>;
+/// Thin wrapper: reads `source/*`, the extras and the blobs of a saved .wtep (no import, no layers, so no sticker
+/// pictures) and calls extract_bundle.
 pub fn extract_sources(path: &Path, dest_dir: &Path, overwrite: bool) -> Result<Vec<PathBuf>, ProjectError>;
 // project/migrate.rs  [C6]
 pub fn upgrade(manifest: serde_json::Value, from_version: u32) -> Result<serde_json::Value, ProjectError>;
@@ -3067,6 +3079,19 @@ pub fn write_atomic<E: From<std::io::Error>>(path: &Path, keep_backup: bool,
     write: impl FnOnce(&mut std::fs::File) -> Result<(), E>,
     verify: impl FnOnce(&Path) -> Result<(), E>) -> Result<(), E>;
 // project/manifest.rs  [S]  — see section 7.2
+// project/sticker_entries.rs  (stickers P4) — see section 7.2 "Format 4"
+// sticker/file.rs  (stickers P4) — see section 7.8
+pub fn write_wtes(sticker: &StickerDoc, styles: Option<&StyleStack>, blobs: &BlobStore, preview: Option<&PixelBuf>)
+    -> Result<Vec<u8>, ProjectError>;
+pub fn read_wtes(bytes: &[u8]) -> Result<WtesFile, ProjectError>;
+pub struct WtesFile { pub sticker: StickerDoc, pub styles: Option<StyleStack>, pub blobs: BlobStore,
+                      pub preview: Option<PixelBuf>, pub warnings: Vec<LoadWarning> }
+impl Document {
+    pub fn saved_sticker_ids(&self) -> Vec<StickerId>;                       // stamp-shown or kept, ascending
+    pub fn sticker_extract_pictures(&mut self) -> Vec<(String, PixelBuf)>;   // scale 1, no stamp styles
+    pub fn sticker_wtes(&mut self, id: StickerId, styles: Option<&StyleStack>) -> Result<Vec<u8>, ProjectError>;
+    pub fn import_wtes(&mut self, file: &WtesFile) -> Result<StickerId, EditError>;   // a kept tray sticker, "Add Sticker"
+}
 ```
 
 ### 5.24 `export/` [C6]
@@ -4930,20 +4955,30 @@ let deflated = zip::write::SimpleFileOptions::DEFAULT.compression_method(zip::Co
 | `source/main.<ext>` | deflate 6 | original model file bytes, `<ext>` = `obj` / `gltf` / `glb` |
 | `source/f<nnn>.<ext>` | deflate 6 (STORED for png/jpg/jpeg/webp) | sidecars in capture order (`nnn` = 000, 001, ...); `<ext>` = lower-case ASCII-alphanumeric extension of the original name (max 8 chars), else `bin` |
 | `source/x<nnn>.<ext>` | deflate 6 (STORED for png/jpg/jpeg/webp) | `SourceBundle::extras` in order: original files of manually chosen textures (same `<ext>` rule) |
-| `blobs/b<id:05>.<ext>` | STORED for images, deflate 6 for fonts | stamp source images and font files (original encoded bytes), only those referenced by a stamp |
+| `blobs/b<id:05>.<ext>` | STORED for images, deflate 6 for fonts | stamp source images and font files (original encoded bytes), only those referenced by a stamp or (format 4) by a layer of a saved sticker (unedited pictures, text fonts) |
+| `stickers/k<id:05>/p<layer:03>.png` | STORED | format 4: the owned (edited) picture of a sticker picture layer, straight RGBA8, the whole picture (never cropped) |
+| `stickers/k<id:05>/m<layer:03>.png` | STORED | format 4: the mask of a sticker picture layer, 8-bit greyscale PNG, the size of its picture |
 | `sets/s<set:02>/l<layer id>.png` | STORED | layer pixels: RGBA8 PNG cropped to `nonzero_bounds` (raster: bbox of pixels != `[0,0,0,0]`, so RGB under alpha 0 is kept) or to the bounds of the cache parts (stamp/text) |
 | `sets/s<set:02>/flattened.png` | STORED | full-size composite of the set (if `write_flattened`) — lets other tools grab the result without our app |
 | `thumbnail.png` | STORED | at most 256 px, from the composite of set 0 |
 | `manifest.json` | deflate 6, **last** entry | pretty-printed JSON, schema 7.2 |
 
 Entry names are built only from numeric ids and sanitized extensions; no user string reaches a ZIP path. Original names live in the
-manifest. Readers take entry names from the manifest only.
+manifest. Readers take entry names from the manifest only. The sticker entries come after the blobs and before the layers.
+`links/k<id:05>.psd` (the stored copy of a PhotoCraft link file) is package P5's (STICKER_PLAN 5.3); P4 writes none.
+
+**Which stickers are saved (format 4).** Those a stamp shows and those with `keep` (the tray), ascending id
+(`save::saved_stickers`, `Document::saved_sticker_ids`); any other sticker in the document is a leftover of undo and is
+dropped at save.
 
 **Save procedure** (`project::save`):
 1. Validate: every float in stamps is finite (else `ManifestInvalid`, naming the float and the stamp). The floats of a text
    come from `TextSpec::floats`, the read-only visitor (size, line and letter spacing, outline width, and every round-4 effect
    value: each gap, thickening, slant, the warp's bend / horizontal / vertical, the path's bend / diameter / centre / points /
-   start), so a new effect value cannot be forgotten and nothing is cloned. `min_reader_version` is `required_reader(snapshot)` (7.3).
+   start), so a new effect value cannot be forgotten and nothing is cloned. Format 4: also the stamp styles
+   (`sticker_entries::style_floats`) and every float of a saved sticker (`save::sticker_floats`: corner radius, per layer
+   opacity, transform, text, shape, adjustments, styles; the message names the field, the layer and the sticker); a
+   sticker stamp whose sticker is not in the document is refused. `min_reader_version` is `required_reader(snapshot)` (7.3).
 2. Encode layer PNGs in parallel with rayon (`encode_png`, level from `SaveOptions`), at most `max(1, 1 GiB / (w*h*4))` at a time.
    Raster layers are cropped to `pixel_ops::nonzero_bounds` — **not** `content_bounds`: a texel with alpha 0 but non-zero RGB is
    content (section 4.2) and must round-trip; only a raster layer whose every byte is zero has `pixels: null` and no entry.
@@ -4959,6 +4994,13 @@ manifest. Readers take entry names from the manifest only.
    `SaveStats::reuse` returns the record of the written file; the app stores it with `Document::set_png_reuse`. `load` records
    every layer image it read as stored (with the version the layer has after `from_parts`; re-baked caches get newer versions)
    and, when nothing was lost or re-baked, the composites.
+   **Sticker pictures and masks (format 4, STICKER_PLAN 2.11, review A8)** are keyed by their **picture version** (plan
+   2.2: monotonic per document, never reused, a new one at every change of the bytes, also when an undo brings earlier
+   bytes back): `PngReuse::stickers` maps a version to the entry that holds exactly those bytes. A buffer whose version is
+   recorded is copied; otherwise it is encoded (in parallel, once per version: two layers sharing one buffer write the
+   same PNG under both names). Never by address or by hashing pixels, so a stale copy is impossible. `load` records every
+   sticker PNG it read as stored, with the fresh version `from_parts` gave it. `project::counters::sticker_encodes`
+   counts the encodes (tests).
 3. Inside `write_atomic(path, keep_backup, write, verify)`: write entries in table order through a `BufWriter<File>`; compute each
    `FileRef { entry, size, crc32 }` with `crc32fast::hash`; write `manifest.json` last; `finish()`.
 4. `verify`: reopen with `ZipArchive::new`, parse `manifest.json`, check that every `FileRef` entry exists with the recorded size.
@@ -4989,6 +5031,15 @@ rename it to `<path>.bak` (replacing an older one); `std::fs::rename(tmp, path)`
    entry (a damaged project); a library that was already missing at import was never stored and is not repeated. The reopened file
    therefore usually has no warnings, which also lets the next save reuse its stored composites (`PngReuse`).
 4. Blobs: read into `BlobStore::insert_with_id`; unreadable => `BlobMissing { used_by }`.
+   4b (format 4, `load::load_stickers`): the stickers of the manifest. Owned pictures and masks are read from their
+   entries (one by one, decoded in parallel; a picture at most `MAX_PICTURE_SIDE` = 8192 a side, never resized). A
+   picture that cannot be read leaves its layer an empty (1 x 1 transparent) picture, a mask that cannot be read or has
+   another size than its picture becomes an empty mask (the layer is hidden), each with `StickerPixelsLost { sticker,
+   layer, name, mask, reason }`; a blob picture whose blob is missing is an empty picture too. A text layer whose font
+   is missing gets a font blob of the file with the bundled font's bytes, else the bundled font under an id above every
+   id the manifest mentions (`blob_floor`), with `StickerFontFallback`. A sticker whose entry is invalid as a whole
+   (artboard outside 1..=4096, two layers with one id, `StickerDoc::check_limits`) is lost. Values are repaired by
+   `StickerDoc::sanitize`; `next_layer` is raised above every layer id. A mask on a text or shape layer is ignored (logged).
 5. Stamps: build `StampObject`s. Image stamp whose blob is missing: its linked layers are loaded as plain raster layers and the stamp
    is dropped (still visible, no longer re-editable). Text stamp whose font blob is missing: font replaced by the bundled default,
    `FontFallback`, stamp flagged for re-bake. Text stamp with a round-4 feature this build does not know (an unknown or missing
@@ -5002,6 +5053,11 @@ rename it to `<path>.bak` (replacing an older one); `std::fs::rename(tmp, path)`
    picture (gaps sorted, the later of two entries for one character kept, zero gaps dropped, path keys of other kinds
    cleared), so valid but hand-written effects keep their stored pictures too. Files the app wrote hold sanitized
    effects, read back equal, and keep their stored pictures.
+   Format 4: a sticker stamp whose sticker is missing or was lost in 4b is dropped like an image stamp without its blob:
+   its linked layers load as plain raster layers with the pictures they showed, one `StickerLost { sticker, used_by,
+   reason }` per sticker (a lost tray sticker has an empty `used_by`). A stamp whose sticker lost a picture, a mask or a
+   font in 4b is flagged for re-bake (the stored picture no longer matches the sticker). Stamp styles are read with
+   `StyleStackEntry::to_styles` (sanitized). The ids of the loaded stickers count for `next_id`.
 6. Layers per set, bottom to top: each `serde_json::Value` is parsed as `LayerEntry`; failure => `UnknownLayer`, skipped. Pixels are
    decoded with `decode_image`; the declared `rect` must match the PNG size and lie inside the set. Raster: blit into a dense buffer
    (no stored pixels => unallocated layer); decode failure => transparent (unallocated) layer + `LayerPixelsLost`. Stamp/text:
@@ -5022,7 +5078,9 @@ was never saved): writes `main`, every sidecar and every extra under its origina
 `sanitize_file_stem(stem) + sanitized extension` — so the `mtllib` / `map_Kd` / glTF `uri` references between them stay valid,
 into `dest_dir` (`create_dir_all`), preserving the relative sub-directories of sidecar/extra keys when they are plain relative
 paths without `..` (else flat; extras therefore land in `textures\set<NN>\`); then every blob: images into `stamps\`, fonts into
-`fonts\` (a font name without a font extension gets the one of its container: `ttf`, `otf`, `ttc`, `woff`, `woff2`). Name
+`fonts\` (a font name without a font extension gets the one of its container: `ttf`, `otf`, `ttc`, `woff`, `woff2`); format 4:
+then every saved sticker's finished picture (scale 1, no stamp styles; `Document::sticker_extract_pictures`, which the app
+passes in) as `stickers\<sanitized sticker name>.png`. Name
 collisions inside one call get `_2`, `_3`, ... before the extension. With `overwrite == false`, when any planned file already
 exists in the destination, the files are not renamed one by one (that would break their references): the whole set is written
 into a fresh sub-folder `<model stem>_original` (`_2`, `_3`, ... when that exists too). With `overwrite == true` existing files
@@ -5049,6 +5107,9 @@ pub struct Manifest {
     #[serde(default)] pub stamps: Vec<StampEntry>,
     #[serde(default)] pub blobs: Vec<BlobEntry>,
     #[serde(default)] pub ui_state: serde_json::Value,
+    // format 4 (stickers P4), not written when empty:
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub stickers: Vec<StickerEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub links: Vec<LinkEntry>,   // plain data until P5
 }
 pub struct FileRef { pub entry: String, pub size: u64, pub crc32: u32 }
 pub struct SourceEntry { pub format: ModelFormat, pub main: SourceFileEntry, pub sidecars: Vec<SourceFileEntry>,
@@ -5069,9 +5130,10 @@ pub enum LayerKindEntry { Raster, Stamp { stamp: StampId }, Text { stamp: StampI
 pub struct PixelsEntry { pub file: FileRef, pub rect: [i32; 4] /* x, y, w, h */ }
 
 pub struct StampEntry { pub id: StampId, pub name: String, pub home_set: TextureSetId, pub tint: [u8; 4],
-                        pub source: StampSourceEntry, pub placement: PlacementEntry }
+                        pub source: StampSourceEntry, pub placement: PlacementEntry,
+                        #[serde(default, skip_serializing_if = "Option::is_none")] pub styles: Option<StyleStackEntry> }  // format 4; None = default
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StampSourceEntry { Image { blob: BlobId }, Text(TextEntry) }
+pub enum StampSourceEntry { Image { blob: BlobId }, Text(TextEntry), Sticker { sticker: StickerId } /* format 4 */ }
 pub struct TextEntry { pub content: String, pub font: FontRefEntry, pub size_px: f32 /* raster resolution */, pub color: [u8; 4],
                        pub align: TextAlign, pub line_spacing: f32, pub letter_spacing: f32 /* em fraction */,
                        pub outline: Option<OutlineEntry>,
@@ -5106,6 +5168,36 @@ impl From<&StampObject> for StampEntry {}      impl StampEntry { pub fn to_stamp
 impl From<&TextSpec> for TextEntry {}          impl TextEntry { pub fn to_spec(&self) -> TextSpec; }
 impl From<&Placement> for PlacementEntry {}    impl PlacementEntry { pub fn to_placement(&self) -> Placement; }
 ```
+**Format 4 (stickers P4, `project/sticker_entries.rs`).** Entry types mirror the model types (STICKER_PLAN 2.2-2.5) field by
+field with snake_case names; floats are stored exactly as the core holds them; every optional field is
+`#[serde(default)]`, unknown fields are ignored (a later build may add some); values are repaired by `sanitize` after
+conversion:
+```rust
+pub struct StickerEntry { pub id: StickerId, pub name: String, pub artboard: [i32; 4] /* x, y, w, h */,
+                          #[serde(default)] pub shape: ArtboardShapeEntry /* {"kind": "rect" | "rounded_rect" (radius) | "ellipse"} */,
+                          #[serde(default, skip_serializing_if = "is_false")] pub keep: bool,
+                          pub next_layer: u32, pub layers: Vec<StickerLayerEntry> /* bottom -> top */ }
+pub struct StickerLayerEntry { pub id: StickerLayerId, pub name: String, pub visible: bool, pub locked: bool, pub opacity: f32,
+                               pub blend: BlendMode, pub transform: [f32; 5] /* tx, ty, sx, sy, rotation rad */,
+                               pub content: StickerContentEntry, #[serde(default, skip_serializing_if = "is_false")] pub clip: bool,
+                               pub mask: Option<FileRef> /* m<layer>.png */, pub adjustments: Vec<AdjustmentEntry> /* not written when empty */,
+                               pub styles: Option<StyleStackEntry> /* not written for the default */ }
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StickerContentEntry { Picture { blob: Option<BlobId>, file: Option<FileRef> } /* exactly one */, Text(TextEntry), Shape(ShapeEntry) }
+pub struct ShapeEntry { pub form: ShapeFormEntry /* {"type": "rect" | "rounded_rect" | "ellipse" | "polygon" | "star" | "line", ...} */,
+                        pub size: [f32; 2], pub fill: PaintEntry /* {"type": "none" | "solid" | "linear"} */,
+                        pub outline: Option<ShapeOutlineEntry /* { color, width } */> }
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AdjustmentEntry { BrightnessContrast { .. }, HueSaturation { .. }, Levels { .. }, Invert, BlackWhite, Posterize { .. }, Threshold { .. } }
+pub struct StyleStackEntry { contour, stroke, drop_shadow, inner_shadow, outer_glow, inner_glow, color_overlay,
+                             gradient_overlay, bevel /* each Option<..Entry>, absent = None; an entry with "on": false is kept */ }
+pub struct LinkEntry { sticker, file: LinkFileEntry /* in_folder { name } | external { path } */, mode: LinkModeEntry,
+                       scale, synced: FileStampEntry /* { size, modified_unix_ns, crc32 } */, synced_sticker,
+                       layer_map: Vec<LinkLayerEntry>, next_lyid, pc_native, archive: Option<String> }   // written by P5 (STICKER_PLAN 5.3)
+```
+The content tag is `kind`, so the shape's geometry is named `form`, and the inner tags of shapes and paints are `type`.
+A picture entry names its PNG as a `FileRef` (entry, size, CRC-32), like the layer images, not as a bare file name.
+
 Plain arrays instead of glam serde keep the JSON stable. A manually chosen texture is linked to its set by the key of its
 `extras` entry (`textures/set<NN>/<name>`, 5.15); `SetEntry` therefore needs no separate reference field. `ui_state` is written by the app (camera, UV view, view mode, active set,
 colours, swatches; objects-tabs: `hidden_objects`, the names of the hidden objects, written only when one is hidden) and
@@ -5123,10 +5215,14 @@ manifest like any malformed field.
 - `format_version > FORMAT_VERSION` but `min_reader_version` acceptable => open with `LoadWarning::NewerFormat` and
   `LoadReport.force_save_as = true` (the app then refuses plain Save so the newer file is never overwritten with lost fields).
 - Older => `migrate::upgrade(value, from)`: a chain of pure `fn vN_to_vN1(Value) -> Value`, then `from_value`. `FORMAT_VERSION`
-  is 3 (round 6): `v1_to_v2` returns the manifest unchanged (a version-1 text entry has no `fx`; serde fills in the default);
-  `v2_to_v3` likewise (a version-2 projected placement has no `mode` / `wrap_*`: Project, options off).
+  is 4 (stickers P4): `v1_to_v2` returns the manifest unchanged (a version-1 text entry has no `fx`; serde fills in the default);
+  `v2_to_v3` likewise (a version-2 projected placement has no `mode` / `wrap_*`: Project, options off); `v3_to_v4` likewise
+  (no `stickers`, no `links`, no stamp `styles`, no `sticker` source kind: an old project loads into exactly the
+  document it gave before).
 - `min_reader_version` is the lowest version whose reader shows everything in the file correctly: `project::required_reader`
-  gives 3 when any projected stamp is wrapped or has a Wrap option set (also a projected stamp keeping options for
+  gives 4 when any stamp shows a sticker or has non-default styles (an entry that is off counts: an older build would drop
+  it on its next save) or a sticker is saved (a kept tray sticker; P5: or a link), so a round-6 build refuses such a file
+  (`TooNew`); otherwise exactly what it gave before: 3 when any projected stamp is wrapped or has a Wrap option set (also a projected stamp keeping options for
   switching back: an older build would drop them on its next save), else 2 when a text stamp has `!fx.is_default()` (a
   gap value counts, also one on the last character of a line), else 1. So a round-4 project without new text features
   opens in the round-3 build, and a round-6 project without wrapped stamps or options in the round-5 build (with the
@@ -5139,6 +5235,11 @@ manifest like any malformed field.
   warning, and a re-save writes the same `source` object with `min_reader_version` 2. Never edit either fixture string.
 - Unknown names never fail a file (`TextFeatureUnknown`, 7.1 step 5); out-of-range or non-finite values are repaired by
   `sanitize_fx`; a wrong JSON type inside `fx` fails the manifest (`ManifestInvalid`) like any malformed field.
+- A third frozen fixture, `tests/fixtures/project/v3_roundtrip.wtep` (`k4_a_v3_project_of_the_p0_exe_loads_as_before`):
+  the `.wtep` the P0 exe of branch `stickers` saved in scenario `roundtrip` (format 3, `min_reader_version` 2, an image and
+  a text stamp). It loads without a warning into the state hashes recorded on the code before P4, bakes again to the same
+  pictures, and a re-save (images copied, and every image encoded again) writes the same layer PNGs, stamps and sets with
+  `min_reader_version` 2. Never replace the file.
 - objects-tabs (1.9): the names of the hidden objects live in `ui_state` (`UiState::hidden_objects`, written only when
   one is hidden). No version change: `FORMAT_VERSION` stays 3, `required_reader` and `IMPORTER_VERSION` (2) are unchanged;
   older builds ignore the key and show every object; a project without it opens with nothing hidden.
@@ -5348,6 +5449,29 @@ trailing bytes remain) returning header, layers (rect, blend key, opacity, hidde
 section 9. Opening the files in GIMP / Krita / Photopea remains a manual release check.
 
 ---
+
+### 7.8 Sticker file `.wtes` (`sticker/file.rs`, stickers P4; STICKER_PLAN 2.12, E7)
+
+One sticker for reuse in another project (the tray's library, P6b / P8). A ZIP written in memory with fixed entry time
+stamps (`zip::DateTime::default()`, 1980-01-01) and the two option values of 7.1, so the same sticker always gives the
+same bytes:
+
+| Entry | Compression | Content |
+|---|---|---|
+| `mimetype` | STORED, **first** | exactly `application/x-wtes` (`WTES_MIMETYPE`) |
+| `blobs/b<id:05>.<ext>` | STORED for images, deflate 6 for fonts | the images of unedited picture layers and the fonts of text layers (`StickerDoc::blobs`), original bytes |
+| `p<layer:03>.png` / `m<layer:03>.png` | STORED | owned pictures (straight RGBA8) and masks (8-bit grey), `PngLevel::Fast` |
+| `preview.png` | STORED | the finished picture (with the stored styles) scaled to at most 512 px a side (`WTES_PREVIEW_SIDE`) |
+| `sticker.json` | deflate 6, **last** | `WtesManifest { format: 1, sticker: StickerEntry /* id 0 */, styles: Option<StyleStackEntry>, blobs: Vec<BlobEntry> }` |
+
+`write_wtes` runs the save check of 7.1 step 1 on the sticker and the styles (`ManifestInvalid` naming the field) and
+refuses a blob the sticker needs that the store lacks. `read_wtes`: not a ZIP => `NotAZip`; no or another `mimetype`,
+no `sticker.json`, a `format` that is missing or not a number, or a sticker invalid as a whole => `ManifestInvalid`;
+`format > WTES_FORMAT` (1) => `TooNew`; lost pictures, masks and fonts degrade as in a project (`WtesFile::warnings`, the
+same `load_stickers`). Blob ids inside the read sticker are the file's; `Document::import_wtes` adds the blobs to the
+document's store (identical bytes are shared), maps the ids and adds the sticker as a kept tray sticker with
+`add_sticker` (a new id, fresh picture versions, one entry "Add Sticker"); the file's styles stay with the caller.
+`Document::sticker_wtes(id, styles)` writes the file of a sticker of the document with its finished picture as preview.
 
 ## 8. `wte_app` architecture
 
@@ -8409,7 +8533,8 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `k3a_10_caches_never_hand_out_another_stickers_picture` (1,000 add / drop cycles; `LayerKey` by version);
   `k3a_11_render_matches_the_layer_compositor_...` (seven blend modes vs `flatten_layers`, fast path, pools of 1 and 8,
   mask, ellipse crop, scale 2 doubles a shape) and `k3a_11_a_clipped_pattern_shows_only_inside_its_text`;
-  `k3a_finished_pictures_paste_style_and_save_refusal`); `sticker::model::tests` (`k3a_versions_decide_equality_before_bytes`,
+  `k3a_finished_pictures_paste_style_and_save` (until P4: `..._save_refusal`; since P4 the save succeeds with
+  `min_reader_version` 4)); `sticker::model::tests` (`k3a_versions_decide_equality_before_bytes`,
   `k3a_limits_are_checked`); `sticker::pipeline::tests` (`k3a_bake_placement_grows_by_the_margin_...`,
   `k3a_work_level_bounds_the_picture`, `k3a_sticker_scale_rules`). Ignored, release, serial:
   `sticker::bench::perf_k3a_render_three_layers_1024` (cold / one layer changed / Preview quality; `cargo test -p
@@ -8434,6 +8559,23 @@ and text layers (exactly those two files, each = `dense(layer)`).
   history cost, deferred Final bakes at the end and at undo)). Every existing `history`, `stroke` and `fill` test runs
   unchanged on the generic patches. Ignored, release, serial: `doc_sticker_edits_tests::perf_k3b_stroke_begin_and_one_dab`
   (`cargo test -p wte_core --release --lib perf_k3b -- --ignored --test-threads=1 --nocapture`).
+- Branch `stickers`, P4 (STICKER_PLAN 7 "P4", names `k4_*`): `project::sticker_tests`
+  (`k4_required_reader_is_4_for_each_new_feature_alone_and_unchanged_otherwise` (stamp styles, an off style entry, a
+  sticker stamp, a kept tray sticker, each alone and undone; a leftover sticker and the older features keep their
+  numbers); `k4_a_sticker_with_every_layer_kind_shared_by_two_stamps_round_trips` (blob picture with mask, owned
+  picture with clip / every adjustment / a style / rotation and flip, text, shapes, a rounded artboard off the origin,
+  stamp styles, a kept tray sticker, a leftover not written; entry names, grey masks, no `styles` key for a default
+  stack; reloaded stickers and stamps equal, the same bakes, a re-save copies every sticker PNG);
+  `k4_lost_pictures_masks_fonts_and_stickers_degrade_with_warnings`; `k4_unknown_extra_fields_in_the_new_entries_still_load`
+  (also a `links` entry, parsed as plain data); `k4_non_finite_numbers_are_refused_at_save_with_a_named_message`
+  (stamp styles and every kind of sticker float; `.wtes` too); `k4_save_reuse_copies_unchanged_pictures_and_encodes_new_versions`
+  (copy without an encode; a stroke and its undo encode again; a stale record is not used);
+  `k4_two_different_pictures_never_share_a_reuse_record` (200 random edit / save steps with strokes, replaced pictures
+  and masks, undo / redo, detached copies sharing a buffer and reloads; every saved PNG compared with the document);
+  `k4_wtes_round_trip_with_deterministic_bytes`; `k4_a_wtes_with_a_lost_picture_degrades_like_a_project`;
+  `k4_extract_writes_the_finished_picture_of_every_saved_sticker`); `tests/project_roundtrip.rs`
+  `k4_a_v3_project_of_the_p0_exe_loads_as_before` (7.3, the frozen v3 fixture: hashes recorded on the pre-P4 code, the
+  layer PNGs of a re-save equal the P0 exe's).
 
 ### 9.2 `wte_app` tests
 
@@ -8974,3 +9116,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | P2 | selection, cut-out and filter maths: `Selection` (marquee, lasso, combine, grow / shrink / feather), colour-tolerance regions (wand, colour range, flood fill), magic eraser, fill, colour to alpha, mattes, defringe, remove background, Gaussian blur, sharpen, gradient; no `Document` change | `crates/wte_core/src/sticker/{select,cutout,filter,bench}.rs` | the checker's own pictures (a noisy white background), a 4096 x 4096 single-colour flood (perf), determinism |
 | P3a | the sticker document in `Document`: `StickerDoc` and picture versions, `StampSource::Sticker`, `StampObject::styles`, the render (6.10), the stamp picture pipeline (margin, working size, two placements), promote / detach / `set_sticker` / stamp styles, job freshness and `DrawnPicture`, caches; save refuses stickers until P4; the app shows a sticker stamp like an image stamp | `crates/wte_core/src/{doc_stickers,doc_stickers_tests,doc_stamps,stamp_job,history,document,stamp}.rs`, `sticker/{model,render,pipeline}.rs` | every read of the placement and `wrapped_projector` in bake / wrap code listed as bake or stored; the stamp / wrap tests; scenarios against the P0 baseline |
 | P3b | pixel edits: generic `TilePatchOf` / `TileBackupOf` over `TileBuf`, `Edit::StickerPixels`, sticker strokes (picture and mask, selection, pressure), `replace_sticker_pixels`, promotion inside an edit, the one copy per stroke, limits, `convert_text_stamp`, Revert (`sticker_checkpoint`, `restore_sticker_state`), `rebake_sticker_users` | `crates/wte_core/src/{doc_sticker_edits,doc_sticker_edits_tests,history,pixel,doc_stickers,document}.rs`, `sticker/mod.rs` | the history test module unchanged; `TilePatch` read for any place that still assumes 4 bytes; scenarios `undo`, `paint2d`, `paint3d` against the P0 baseline |
+| P4 | project format 4: sticker and style entries, sticker PNGs, `required_reader` 4, load degradation (`StickerLost`, `StickerPixelsLost`, `StickerFontFallback`), save reuse by picture version, `v3_to_v4`, Extract writes sticker pictures; the `.wtes` file | `crates/wte_core/src/project/{mod,manifest,save,load,migrate,sticker_entries,sticker_tests}.rs`, `sticker/file.rs`, `doc_build.rs`, `error.rs`, `tests/project_roundtrip.rs`, `tests/fixtures/project/` | a v4 manifest with a sticker through a copy of the P0 version check ("made by a newer version"); the layer PNG entries of a re-saved v3 fixture byte for byte |

@@ -159,6 +159,35 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8], level: PngLevel) -> Resu
     Ok(out)
 }
 
+/// 8-bit greyscale (`gray.len() == width*height`), non-interlaced (STICKER_PLAN 2.11: sticker layer masks). `Err(Empty)`
+/// for a zero-size image, `Err(Encode)` for a wrong buffer length or an encoder failure (as `encode_png`).
+pub fn encode_png_gray(width: u32, height: u32, gray: &[u8], level: PngLevel) -> Result<Vec<u8>, ImageIoError> {
+    if width == 0 || height == 0 {
+        return Err(ImageIoError::Empty);
+    }
+    let expected = width as u64 * height as u64;
+    if gray.len() as u64 != expected {
+        return Err(ImageIoError::Encode(format!(
+            "pixel data has {} bytes, expected {expected} for {width}x{height} grey",
+            gray.len()
+        )));
+    }
+    let encode_error = |e: png::EncodingError| ImageIoError::Encode(e.to_string());
+    let mut out = Vec::with_capacity(gray.len() / 4 + 1024);
+    let mut encoder = png::Encoder::new(&mut out, width, height);
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(match level {
+        PngLevel::Fast => png::Compression::Fast,
+        PngLevel::Balanced => png::Compression::Balanced,
+        PngLevel::High => png::Compression::High,
+    });
+    let mut writer = encoder.write_header().map_err(encode_error)?;
+    writer.write_image_data(gray).map_err(encode_error)?;
+    writer.finish().map_err(encode_error)?;
+    Ok(out)
+}
+
 /// RGB8 (tightly packed, `rgb.len() == width*height*3`) as baseline JPEG with `quality` clamped to 1..=100 (branch
 /// `companion`: the picture tiles of the tablet companion, COMPANION_PLAN 2.4). `Err(Empty)` for a zero-size image,
 /// `Err(Encode)` for a wrong buffer length or an encoder failure (as `encode_png`).

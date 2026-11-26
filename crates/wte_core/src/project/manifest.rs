@@ -9,9 +9,10 @@ use glam::{Quat, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::blob::BlobKind;
-use crate::ids::{BlobId, LayerId, StampId, TextureSetId};
+use crate::ids::{BlobId, LayerId, StampId, StickerId, TextureSetId};
 use crate::import::ModelFormat;
 use crate::layer::BlendMode;
+use crate::project::sticker_entries::{LinkEntry, StickerEntry, StyleStackEntry};
 use crate::stamp::{Placement, Projector, StampObject, StampSource, SurfaceMode, UvPlacement, WrapOptions};
 use crate::text::{FontRef, Gap, Outline, PathShape, TextAlign, TextFx, TextPath, TextSpec, Warp, WarpStyle};
 
@@ -37,6 +38,12 @@ pub struct Manifest {
     pub blobs: Vec<BlobEntry>,
     #[serde(default)]
     pub ui_state: serde_json::Value,
+    /// Format 4 (STICKER_PLAN 2.11): the stickers a stamp shows and the kept tray stickers. Not written when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stickers: Vec<StickerEntry>,
+    /// Format 4: PhotoCraft links (STICKER_PLAN 5.3). Not written when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<LinkEntry>,
 }
 
 /// Reference to one ZIP entry with its uncompressed size and CRC-32.
@@ -133,15 +140,19 @@ pub struct StampEntry {
     pub tint: [u8; 4],
     pub source: StampSourceEntry,
     pub placement: PlacementEntry,
+    /// Format 4: the stamp's layer styles (STICKER_PLAN 2.5); not written for the default (empty) stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub styles: Option<StyleStackEntry>,
 }
 
-/// Source of a stamp (`"kind": "image" | "text"`).
+/// Source of a stamp (`"kind": "image" | "text" | "sticker"`; `sticker` since format 4).
 #[allow(clippy::large_enum_variant)] // the text entry grew with `fx` (round 4); entries are few
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StampSourceEntry {
     Image { blob: BlobId },
     Text(TextEntry),
+    Sticker { sticker: StickerId },
 }
 
 /// A `TextSpec`.
@@ -378,16 +389,16 @@ impl From<&StampObject> for StampEntry {
             source: match &s.source {
                 StampSource::Image { blob } => StampSourceEntry::Image { blob: *blob },
                 StampSource::Text(spec) => StampSourceEntry::Text(TextEntry::from(spec)),
-                // Not reached: `save` refuses sticker stamps until format 4 (package P4) can store them.
-                StampSource::Sticker { .. } => StampSourceEntry::Image { blob: BlobId(u32::MAX) },
+                StampSource::Sticker { sticker } => StampSourceEntry::Sticker { sticker: *sticker },
             },
             placement: PlacementEntry::from(&s.placement),
+            styles: StyleStackEntry::of(&s.styles),
         }
     }
 }
 
 impl StampEntry {
-    /// The stamp object this entry describes.
+    /// The stamp object this entry describes (styles sanitized).
     pub fn to_stamp(&self) -> StampObject {
         StampObject {
             id: self.id,
@@ -395,11 +406,12 @@ impl StampEntry {
             source: match &self.source {
                 StampSourceEntry::Image { blob } => StampSource::Image { blob: *blob },
                 StampSourceEntry::Text(text) => StampSource::Text(text.to_spec()),
+                StampSourceEntry::Sticker { sticker } => StampSource::Sticker { sticker: *sticker },
             },
             placement: self.placement.to_placement(),
             tint: self.tint,
             home_set: self.home_set,
-            styles: crate::sticker::style::StyleStack::default(),
+            styles: self.styles.as_ref().map(StyleStackEntry::to_styles).unwrap_or_default(),
         }
     }
 }

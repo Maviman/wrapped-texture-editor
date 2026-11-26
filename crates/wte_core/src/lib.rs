@@ -96,6 +96,7 @@ pub use stamp_bake::*;
 pub use stamp_job::{FinalBake, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview};
 pub use sticker::adjust::Adjustment;
 pub use sticker::cutout::{BackgroundCut, Matte, RemoveBgOptions, RemoveBgRefusal};
+pub use sticker::file::{WTES_EXTENSION, WTES_FORMAT, WTES_MIMETYPE, WtesFile, WtesManifest, read_wtes, write_wtes};
 pub use sticker::select::{RegionOptions, SelectMode, Selection};
 pub use sticker::shape::{Paint, ShapeKind, ShapeSpec};
 pub use sticker::style::{

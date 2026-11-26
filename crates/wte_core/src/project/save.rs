@@ -1,8 +1,9 @@
 // Owner: core-persist (C6). Writing a `.wtep` project archive (ARCHITECTURE.md 5.23, container and procedure: 7.1).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufReader, BufWriter, Seek, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use rayon::prelude::*;
 use zip::write::SimpleFileOptions;
@@ -11,8 +12,8 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::composite::flatten_layers;
 use crate::document::{DocumentSnapshot, SetSnapshot};
 use crate::error::{ImageIoError, ProjectError};
-use crate::ids::BlobId;
-use crate::image_io::{PngLevel, encode_png};
+use crate::ids::{BlobId, StickerId, StickerLayerId};
+use crate::image_io::{PngLevel, encode_png, encode_png_gray};
 use crate::import::{IMPORTER_VERSION, MAX_SOURCE_FILE, SourceFile};
 use crate::layer::{Layer, LayerKind};
 use crate::pixel_ops::{crop, nonzero_bounds, thumbnail};
@@ -20,11 +21,16 @@ use crate::progress::Progress;
 use crate::project::atomic::write_atomic;
 use crate::project::manifest::{
     BlobEntry, FileRef, ImportEntry, LayerEntry, LayerKindEntry, Manifest, PixelsEntry, SetEntry, SourceEntry,
-    SourceFileEntry, StampEntry,
+    SourceFileEntry, StampEntry, TextEntry,
 };
 use crate::project::migrate::parse_manifest;
-use crate::project::{FORMAT_VERSION, PROJECT_MIMETYPE, PngReuse, SaveOptions, SaveStats, composite_key};
+use crate::project::sticker_entries::{
+    AdjustmentEntry, ShapeEntry, StickerContentEntry, StickerEntry, StickerLayerEntry, StyleStackEntry, adjustment_floats,
+    artboard_entry, shape_floats, style_floats, transform_entry,
+};
+use crate::project::{FORMAT_VERSION, PROJECT_MIMETYPE, PngReuse, SaveOptions, SaveStats, composite_key, counters};
 use crate::stamp::{Placement, StampObject, StampSource, SurfaceMode, WrapOptions};
+use crate::sticker::{ArtboardShape, PicturePixels, StickerContent, StickerDoc};
 
 /// Name of the manifest entry, the last entry of the archive.
 pub(crate) const MANIFEST_ENTRY: &str = "manifest.json";
@@ -76,23 +82,28 @@ fn zip_error(e: zip::result::ZipError) -> ProjectError {
     }
 }
 
-fn check_finite(value: f32, what: impl Fn() -> String) -> Result<(), ProjectError> {
+pub(crate) fn check_finite(value: f32, what: impl Fn() -> String) -> Result<(), ProjectError> {
     if value.is_finite() { Ok(()) } else { Err(ProjectError::ManifestInvalid(format!("{} is not a finite number", what()))) }
 }
 
 /// Step 1 of the save procedure: every float that goes into the manifest is finite (serde_json would write `null`).
 fn validate(snapshot: &DocumentSnapshot) -> Result<(), ProjectError> {
-    // Stickers (STICKER_PLAN P3a): sticker stamps and stamp styles are stored by project format 4 (package P4). Until
-    // then a project that uses them is refused rather than written without them.
-    if let Some(stamp) = snapshot.stamps.iter().find(|s| matches!(s.source, StampSource::Sticker { .. }) || !s.styles.is_default()) {
-        return Err(ProjectError::ManifestInvalid(format!(
-            "stamp \"{}\" uses a sticker or stamp styles, which this build cannot save yet",
-            stamp.name
-        )));
-    }
     for stamp in &snapshot.stamps {
         for (field, value) in stamp_floats(stamp) {
             check_finite(value, || format!("{field} of stamp \"{}\"", stamp.name))?;
+        }
+        if let StampSource::Sticker { sticker } = &stamp.source
+            && !snapshot.stickers.contains_key(sticker)
+        {
+            return Err(ProjectError::ManifestInvalid(format!("stamp \"{}\" shows a sticker that does not exist", stamp.name)));
+        }
+    }
+    for (_, sticker) in saved_stickers(snapshot) {
+        for (layer, field, value) in sticker_floats(sticker) {
+            check_finite(value, || match layer {
+                Some(layer) => format!("{field} of layer \"{layer}\" of sticker \"{}\"", sticker.name),
+                None => format!("{field} of sticker \"{}\"", sticker.name),
+            })?;
         }
     }
     for layer in snapshot.sets.iter().flat_map(|s| &s.layers) {
@@ -107,7 +118,7 @@ fn check_entry_sizes(snapshot: &DocumentSnapshot, limit: u64) -> Result<(), Proj
     let source = &snapshot.source;
     let files = std::iter::once(&source.main).chain(&source.sidecars).chain(&source.extras);
     let named = files.map(|f| (f.original_name.as_str(), f.bytes.len()));
-    let blobs = referenced_blobs(&snapshot.stamps).into_iter().filter_map(|id| snapshot.blobs.get(id));
+    let blobs = referenced_blobs(snapshot).into_iter().filter_map(|id| snapshot.blobs.get(id));
     for (name, len) in named.chain(blobs.map(|b| (b.name.as_str(), b.bytes.len()))) {
         if len as u64 > limit {
             return Err(ProjectError::EntryTooLarge { entry: name.to_owned() });
@@ -116,12 +127,22 @@ fn check_entry_sizes(snapshot: &DocumentSnapshot, limit: u64) -> Result<(), Proj
     Ok(())
 }
 
-/// The lowest format version whose reader shows everything in this file correctly (FEATURE_TEXT 4.3 item 2): 3 when
-/// any projected stamp is wrapped or has a Wrap option set (round 6; also a projected stamp that only keeps options for
-/// switching back: an older build would drop them silently on its next save), else 2 when any text stamp uses a
+/// The lowest format version whose reader shows everything in this file correctly (FEATURE_TEXT 4.3 item 2): 4 when
+/// any stamp shows a sticker or has non-default styles (an entry that is off counts: an older build would drop it on
+/// its next save), or the file lists a sticker (STICKER_PLAN 2.11; links: P5); else 3 when any projected stamp is
+/// wrapped or has a Wrap option set (round 6; also a projected stamp that only keeps options for switching back: an
+/// older build would drop them silently on its next save), else 2 when any text stamp uses a
 /// round-4 feature (a gap value counts, also one on the last character of a line), else 1. `save` writes it as
 /// `min_reader_version`, so a project without a newer feature stays readable by the older rounds.
 pub fn required_reader(snapshot: &DocumentSnapshot) -> u32 {
+    let uses_stickers = snapshot
+        .stamps
+        .iter()
+        .any(|s| matches!(s.source, StampSource::Sticker { .. }) || !s.styles.is_default())
+        || !saved_stickers(snapshot).is_empty();
+    if uses_stickers {
+        return 4;
+    }
     let uses_wrap = snapshot.stamps.iter().any(|s| {
         matches!(&s.placement, Placement::Projected(p) if p.mode != SurfaceMode::Project || p.wrap != WrapOptions::default())
     });
@@ -156,7 +177,46 @@ fn stamp_floats(stamp: &StampObject) -> Vec<(&'static str, f32)> {
         // read without cloning the spec.
         spec.floats(&mut |name, value| out.push((name, value)));
     }
+    style_floats(&stamp.styles, &mut out);
     out
+}
+
+/// Every float of a sticker that is written to the manifest: `(layer name or None for the sticker itself, field,
+/// value)`.
+pub(crate) fn sticker_floats(sticker: &StickerDoc) -> Vec<(Option<&str>, &'static str, f32)> {
+    let mut out = Vec::new();
+    if let ArtboardShape::RoundedRect { radius } = sticker.shape {
+        out.push((None, "the corner radius", radius));
+    }
+    for layer in &sticker.layers {
+        let mut fields = vec![("the opacity", layer.opacity)];
+        fields.extend(transform_entry(&layer.transform).map(|v| ("the transform", v)));
+        match &layer.content {
+            StickerContent::Text(spec) => spec.floats(&mut |name, value| fields.push((name, value))),
+            StickerContent::Shape(shape) => shape_floats(shape, &mut fields),
+            StickerContent::Picture(_) => {}
+        }
+        for a in &layer.adjustments {
+            adjustment_floats(a, &mut fields);
+        }
+        style_floats(&layer.styles, &mut fields);
+        out.extend(fields.into_iter().map(|(field, value)| (Some(layer.name.as_str()), field, value)));
+    }
+    out
+}
+
+/// The stickers a save writes (STICKER_PLAN 2.11): those a stamp shows and those kept for the tray, ascending id. The
+/// others are leftovers of undo and are dropped.
+pub(crate) fn saved_stickers(snapshot: &DocumentSnapshot) -> Vec<(StickerId, &StickerDoc)> {
+    let shown: BTreeSet<StickerId> = snapshot
+        .stamps
+        .iter()
+        .filter_map(|s| match s.source {
+            StampSource::Sticker { sticker } => Some(sticker),
+            _ => None,
+        })
+        .collect();
+    snapshot.stickers.iter().filter(|(id, doc)| doc.keep || shown.contains(id)).map(|(id, doc)| (*id, &**doc)).collect()
 }
 
 /// The archive being written: adds entries, counts them and honours cancellation between entries.
@@ -222,6 +282,12 @@ impl<'r> Reuse<'r> {
         Some((rect, self.read(&entry)?))
     }
 
+    /// The stored PNG of a sticker picture or mask of this version (STICKER_PLAN 2.11 "Save reuse").
+    fn sticker(&mut self, version: u64) -> Option<Vec<u8>> {
+        let entry = self.record.stickers.get(&version)?.clone();
+        self.read(&entry)
+    }
+
     /// The stored entry recorded as `(key, entry)` when its key is `key`.
     fn keyed(&mut self, stored: Option<&(u64, String)>, key: u64) -> Option<Vec<u8>> {
         let (k, entry) = stored?;
@@ -281,17 +347,130 @@ fn layer_entry(layer: &Layer, pixels: Option<PixelsEntry>) -> LayerEntry {
     }
 }
 
-/// Ids of the blobs a stamp needs: the image of an image stamp, the font of a text stamp. (Sticker stamps: format 4,
-/// package P4.)
-fn referenced_blobs(stamps: &[StampObject]) -> BTreeSet<BlobId> {
-    stamps
+/// Ids of the blobs the saved file needs: the image of an image stamp, the font of a text stamp, and the images and
+/// fonts of the saved stickers' layers.
+fn referenced_blobs(snapshot: &DocumentSnapshot) -> BTreeSet<BlobId> {
+    let mut out: BTreeSet<BlobId> = snapshot
+        .stamps
         .iter()
         .filter_map(|s| match &s.source {
             StampSource::Image { blob } => Some(*blob),
             StampSource::Text(spec) => Some(spec.font.blob),
             StampSource::Sticker { .. } => None,
         })
-        .collect()
+        .collect();
+    for (_, sticker) in saved_stickers(snapshot) {
+        out.extend(sticker.blobs());
+    }
+    out
+}
+
+/// The pixels of one sticker PNG entry.
+enum StickerPixels<'a> {
+    Rgba(&'a crate::pixel::PixelBuf),
+    Gray(&'a crate::pixel::AlphaBuf),
+}
+
+/// One sticker PNG entry of a save: sticker, layer, mask (true) or picture, entry name, picture version, pixels.
+type StickerItem<'a> = (StickerId, StickerLayerId, bool, String, u64, StickerPixels<'a>);
+
+/// Writes the owned pictures and masks of the saved stickers (`stickers/k<id:05>/p<layer:03>.png`, straight RGBA;
+/// `.../m<layer:03>.png`, 8-bit grey) and returns their manifest entries. A buffer whose picture version is recorded in
+/// the previous file (`PngReuse::stickers`) is copied from it; every version is encoded at most once.
+fn write_stickers<W: Write + Seek>(
+    archive: &mut Archive<'_, W>,
+    snapshot: &DocumentSnapshot,
+    opts: &SaveOptions,
+    reuse: &mut Option<Reuse<'_>>,
+    written: &mut PngReuse,
+) -> Result<Vec<StickerEntry>, ProjectError> {
+    let stickers = saved_stickers(snapshot);
+    let mut items: Vec<StickerItem<'_>> = Vec::new();
+    for (id, sticker) in &stickers {
+        for layer in &sticker.layers {
+            if let StickerContent::Picture(PicturePixels::Owned { pixels, version }) = &layer.content {
+                let entry = format!("stickers/k{:05}/p{:03}.png", id.0, layer.id.0);
+                items.push((*id, layer.id, false, entry, *version, StickerPixels::Rgba(pixels)));
+            }
+            if let Some(mask) = &layer.mask {
+                let entry = format!("stickers/k{:05}/m{:03}.png", id.0, layer.id.0);
+                items.push((*id, layer.id, true, entry, mask.version, StickerPixels::Gray(&mask.pixels)));
+            }
+        }
+    }
+    // One PNG per version: copied (sequentially, one archive reader) or encoded (in parallel).
+    let mut pngs: HashMap<u64, Arc<Vec<u8>>> = HashMap::new();
+    let mut to_encode: Vec<(u64, &StickerPixels<'_>)> = Vec::new();
+    for item in &items {
+        if pngs.contains_key(&item.4) || to_encode.iter().any(|e| e.0 == item.4) {
+            continue;
+        }
+        match reuse.as_mut().and_then(|r| r.sticker(item.4)) {
+            Some(png) => {
+                pngs.insert(item.4, Arc::new(png));
+            }
+            None => to_encode.push((item.4, &item.5)),
+        }
+    }
+    counters::sticker_encoded(to_encode.len() as u64);
+    let encoded: Vec<(u64, Result<Vec<u8>, ImageIoError>)> = to_encode
+        .par_iter()
+        .map(|(version, pixels)| {
+            let png = match pixels {
+                StickerPixels::Rgba(p) => encode_png(p.width, p.height, &p.data, opts.png),
+                StickerPixels::Gray(m) => encode_png_gray(m.width, m.height, &m.data, opts.png),
+            };
+            (*version, png)
+        })
+        .collect();
+    for (version, png) in encoded {
+        pngs.insert(version, Arc::new(png?));
+    }
+    let mut files: HashMap<(StickerId, StickerLayerId, bool), FileRef> = HashMap::new();
+    for (id, layer, mask, entry, version, _) in items {
+        let png = &pngs[&version];
+        let file = archive.add(entry.clone(), zip_stored(), png)?;
+        written.stickers.insert(version, entry);
+        files.insert((id, layer, mask), file);
+    }
+    Ok(stickers.iter().map(|(id, sticker)| sticker_entry(*id, sticker, &files)).collect())
+}
+
+/// The manifest entry of a saved sticker; `files` holds the PNG entries of its owned pictures and masks.
+pub(crate) fn sticker_entry(id: StickerId, sticker: &StickerDoc, files: &HashMap<(StickerId, StickerLayerId, bool), FileRef>) -> StickerEntry {
+    StickerEntry {
+        id,
+        name: sticker.name.clone(),
+        artboard: artboard_entry(&sticker.artboard),
+        shape: sticker.shape.into(),
+        keep: sticker.keep,
+        next_layer: sticker.next_layer,
+        layers: sticker
+            .layers
+            .iter()
+            .map(|l| StickerLayerEntry {
+                id: l.id,
+                name: l.name.clone(),
+                visible: l.visible,
+                locked: l.locked,
+                opacity: l.opacity,
+                blend: l.blend,
+                transform: transform_entry(&l.transform),
+                content: match &l.content {
+                    StickerContent::Picture(PicturePixels::Blob(blob)) => StickerContentEntry::Picture { blob: Some(*blob), file: None },
+                    StickerContent::Picture(PicturePixels::Owned { .. }) => {
+                        StickerContentEntry::Picture { blob: None, file: files.get(&(id, l.id, false)).cloned() }
+                    }
+                    StickerContent::Text(spec) => StickerContentEntry::Text(TextEntry::from(&**spec)),
+                    StickerContent::Shape(shape) => StickerContentEntry::Shape(ShapeEntry::from(shape)),
+                },
+                clip: l.clip,
+                mask: files.get(&(id, l.id, true)).cloned(),
+                adjustments: l.adjustments.iter().map(AdjustmentEntry::from).collect(),
+                styles: StyleStackEntry::of(&l.styles),
+            })
+            .collect(),
+    }
 }
 
 /// Writes every entry of the archive in the order of the table in section 7.1 and returns the entry count.
@@ -323,7 +502,7 @@ fn write_archive<W: Write + Seek>(
 
     // Stamp images and fonts that a stamp still uses.
     let mut blobs = Vec::new();
-    for id in referenced_blobs(&snapshot.stamps) {
+    for id in referenced_blobs(snapshot) {
         let Some(blob) = snapshot.blobs.get(id) else {
             log::warn!("blob {} is referenced by a stamp but is not in the document; it is not saved", id.0);
             continue;
@@ -336,6 +515,9 @@ fn write_archive<W: Write + Seek>(
         let file = archive.add(entry, options, &blob.bytes)?;
         blobs.push(BlobEntry { id, kind: blob.kind, original_name: blob.name.clone(), file });
     }
+
+    // Stickers (format 4).
+    let stickers = write_stickers(&mut archive, snapshot, opts, &mut reuse, &mut written)?;
 
     // Layers and composites, set by set.
     let total_layers = snapshot.sets.iter().map(|s| s.layers.len() + 1).sum::<usize>().max(1) as f32;
@@ -420,6 +602,9 @@ fn write_archive<W: Write + Seek>(
         stamps: snapshot.stamps.iter().map(StampEntry::from).collect(),
         blobs,
         ui_state: snapshot.ui_state.clone(),
+        stickers,
+        // PhotoCraft links are package P5's.
+        links: Vec::new(),
     };
     let json = serde_json::to_vec_pretty(&manifest).map_err(invalid)?;
     archive.add(MANIFEST_ENTRY.to_owned(), zip_deflated(), &json)?;
@@ -488,6 +673,12 @@ pub(crate) fn file_refs(manifest: &Manifest) -> Vec<FileRef> {
     let mut refs = vec![source.main.file.clone()];
     refs.extend(source.sidecars.iter().chain(&source.extras).map(|f| f.file.clone()));
     refs.extend(manifest.blobs.iter().map(|b| b.file.clone()));
+    for layer in manifest.stickers.iter().flat_map(|s| &s.layers) {
+        if let StickerContentEntry::Picture { file: Some(file), .. } = &layer.content {
+            refs.push(file.clone());
+        }
+        refs.extend(layer.mask.clone());
+    }
     for set in &manifest.sets {
         for value in &set.layers {
             if let Ok(layer) = serde_json::from_value::<LayerEntry>(value.clone())

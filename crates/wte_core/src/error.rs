@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::ids::{BlobId, LayerId, StampId, TextureSetId};
+use crate::ids::{BlobId, LayerId, StampId, StickerId, StickerLayerId, TextureSetId};
 
 /// Failure of an `AssetResolver` to deliver a referenced file.
 #[derive(Debug, thiserror::Error)]
@@ -293,6 +293,14 @@ pub enum LoadWarning {
     /// Round 6: a 3D stamp uses a surface mode this build does not know (named in `what`); it loads as a projected
     /// stamp and plain Save is refused (`LoadReport::force_save_as`).
     StampFeatureUnknown { stamp: StampId, what: String },
+    /// Format 4 (STICKER_PLAN 2.11): a sticker is missing from the file or could not be read (`reason`); the stamps
+    /// showing it keep their pictures as paint layers (the rule of a missing image blob).
+    StickerLost { sticker: StickerId, used_by: Vec<StampId>, reason: String },
+    /// Format 4: the picture of a sticker layer (or, with `mask`, its mask) could not be read; the layer is now empty
+    /// (a lost mask hides the whole layer).
+    StickerPixelsLost { sticker: StickerId, layer: StickerLayerId, name: String, mask: bool, reason: String },
+    /// Format 4: the font of a sticker's text layer is missing; the built-in font is used instead.
+    StickerFontFallback { sticker: StickerId, layer: StickerLayerId, family: String },
     Import(ImportWarning),
 }
 
@@ -344,6 +352,23 @@ impl fmt::Display for LoadWarning {
                 f,
                 "Stamp {} uses a {what} that this version does not know; it is shown projected instead. Use Save As to keep the original file intact.",
                 stamp.0
+            ),
+            LoadWarning::StickerLost { sticker, used_by, reason } => write!(
+                f,
+                "Sticker {} could not be loaded ({reason}); {} stamp(s) showing it keep their pictures as paint layers.",
+                sticker.0,
+                used_by.len()
+            ),
+            LoadWarning::StickerPixelsLost { name, mask: false, reason, .. } => {
+                write!(f, "The picture of sticker layer \"{name}\" could not be read ({reason}); the layer is now empty.")
+            }
+            LoadWarning::StickerPixelsLost { name, mask: true, reason, .. } => write!(
+                f,
+                "The mask of sticker layer \"{name}\" could not be read ({reason}); the layer is hidden by an empty mask."
+            ),
+            LoadWarning::StickerFontFallback { family, .. } => write!(
+                f,
+                "The font \"{family}\" of a sticker's text layer is missing; the built-in font is used instead."
             ),
             LoadWarning::Import(w) => write!(f, "{w}"),
         }

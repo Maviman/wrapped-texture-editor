@@ -69,6 +69,9 @@ pub struct DocumentParts {
     pub blobs: BlobStore,
     pub ui_state: serde_json::Value,
     pub next_id: u64,
+    /// The stickers sticker stamps show and the kept tray stickers (STICKER_PLAN 2.11). Owned pictures and masks get
+    /// fresh picture versions in `from_parts` (whatever versions they carry).
+    pub stickers: std::collections::BTreeMap<crate::ids::StickerId, crate::sticker::StickerDoc>,
 }
 
 /// Maps the 0..=1 progress of a sub-operation into `lo..=hi` of the caller's operation.
@@ -173,6 +176,14 @@ fn validate_parts(parts: &DocumentParts) -> Result<(), DocError> {
         if !links.contains(&(stamp.id, stamp.home_set.index())) {
             return Err(bad(format!("stamp \"{}\" has no layer in its home texture set", stamp.name)));
         }
+        if let StampSource::Sticker { sticker } = &stamp.source
+            && !parts.stickers.contains_key(sticker)
+        {
+            return Err(bad(format!("stamp \"{}\" shows a sticker that does not exist", stamp.name)));
+        }
+    }
+    for (id, sticker) in &parts.stickers {
+        sticker.check_limits().map_err(|e| bad(format!("sticker {} is invalid: {e}", id.0)))?;
     }
     Ok(())
 }
@@ -256,6 +267,7 @@ impl Document {
             blobs: BlobStore::default(),
             ui_state: serde_json::Value::Null,
             next_id,
+            stickers: Default::default(),
         };
         Document::from_parts(parts, &ScaledProgress { inner: progress, lo: 0.2, hi: 1.0 })
     }
@@ -274,7 +286,7 @@ impl Document {
         if progress.cancelled() {
             return Err(DocError::Cancelled);
         }
-        let DocumentParts { name, model, sets: set_parts, stamps, blobs, ui_state, next_id } = parts;
+        let DocumentParts { name, model, sets: set_parts, stamps, blobs, ui_state, next_id, stickers } = parts;
         let ImportedModel { mesh, warnings, bundle, options, .. } = model;
 
         progress.report(0.0, "Analysing the model");
@@ -302,7 +314,7 @@ impl Document {
 
         let set_count = set_parts.len();
         let mut version_counter = 0u64;
-        let mut max_id = stamps.iter().map(|s| s.id.0).max().unwrap_or(0);
+        let mut max_id = stamps.iter().map(|s| s.id.0).chain(stickers.keys().map(|k| k.0)).max().unwrap_or(0);
         let mut sets = Vec::with_capacity(set_count);
         for (i, (part, texel_map)) in set_parts.into_iter().zip(texel_maps).enumerate() {
             progress.report(0.6 + 0.4 * i as f32 / set_count as f32, "Compositing layers");
@@ -337,7 +349,7 @@ impl Document {
         }
 
         let object_count = mesh.objects.len();
-        let document = Document {
+        let mut document = Document {
             name,
             mesh: Arc::new(mesh),
             bvh: Arc::new(bvh),
@@ -368,6 +380,11 @@ impl Document {
             visibility_generation: 0,
             sticker_state: Box::default(),
         };
+        // Stickers (STICKER_PLAN 2.11): fresh picture versions, then into the map.
+        for (id, mut sticker) in stickers {
+            document.version_new_buffers(&mut sticker, None);
+            document.sticker_state.map.insert(id, Arc::new(sticker));
+        }
         document.debug_check_structure();
         progress.report(1.0, "Compositing layers");
         Ok(document)
@@ -621,6 +638,7 @@ mod tests {
             blobs: BlobStore::default(),
             ui_state: serde_json::json!({ "zoom": 2 }),
             next_id: 1,
+            stickers: Default::default(),
         }
     }
 

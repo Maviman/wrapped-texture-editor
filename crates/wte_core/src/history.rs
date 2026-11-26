@@ -1170,6 +1170,7 @@ pub(crate) mod testkit {
             blobs: BlobStore::default(),
             ui_state: serde_json::Value::Null,
             next_id: 200,
+            stickers: Default::default(),
         };
         Document::from_parts(parts, &NoProgress).expect("doc_with_stamp")
     }

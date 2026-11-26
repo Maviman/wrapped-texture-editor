@@ -8,13 +8,15 @@
 //! gradient tool ([`filter`]). Package P3a: the sticker document ([`model`]), its rendering ([`render`]), the
 //! pipeline from a stamp's source to the picture its bake places ([`pipeline`]), `refit_placement` (2.9) and the
 //! work counters ([`counters`]); the document commands are `doc_stickers.rs`. Package P3b: the pixel edits, the
-//! sticker strokes, promotion inside an edit, text conversion and Revert (`doc_sticker_edits.rs`).
+//! sticker strokes, promotion inside an edit, text conversion and Revert (`doc_sticker_edits.rs`). Package P4: the
+//! `.wtes` sticker file ([`file`]; the project entries are `project::sticker_entries`).
 //!
 //! Determinism (ARCHITECTURE 4.7): integer or fixed-order `f32` arithmetic; rayon only over independent rows,
 //! columns or bands; results identical for any thread count (tested with local pools of 1 and 8 threads).
 
 pub mod adjust;
 pub mod cutout;
+pub mod file;
 pub mod filter;
 pub mod fx;
 pub mod model;

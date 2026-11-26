@@ -12,7 +12,7 @@ type Step = fn(Value) -> Result<Value, ProjectError>;
 
 /// `STEPS[i]` upgrades a manifest of format version `i + 1` to version `i + 2`; a format change appends its
 /// `vN_to_vN1` here and bumps `FORMAT_VERSION`.
-const STEPS: &[Step] = &[v1_to_v2, v2_to_v3];
+const STEPS: &[Step] = &[v1_to_v2, v2_to_v3, v3_to_v4];
 
 /// Version 1 -> 2 (round 4, FEATURE_TEXT 4.3): a text entry gained the optional `fx` object. A version-1 text has
 /// none, and serde fills in the default, so the manifest is returned unchanged.
@@ -24,6 +24,13 @@ fn v1_to_v2(manifest: Value) -> Result<Value, ProjectError> {
 /// A version-2 placement has none (= Project, options off), and serde fills in the defaults, so the manifest is
 /// returned unchanged.
 fn v2_to_v3(manifest: Value) -> Result<Value, ProjectError> {
+    Ok(manifest)
+}
+
+/// Version 3 -> 4 (stickers, STICKER_PLAN 2.11): the optional `stickers` and `links` lists, a stamp's optional
+/// `styles` and the stamp source kind `sticker`. A version-3 manifest has none of them, and serde fills in the defaults
+/// (no stickers, no links, default styles), so the manifest is returned unchanged.
+fn v3_to_v4(manifest: Value) -> Result<Value, ProjectError> {
     Ok(manifest)
 }
 

@@ -404,6 +404,7 @@ impl Document {
             revision: self.revision,
             history_state: self.history.state,
             png_reuse: self.png_reuse.clone(),
+            stickers: self.sticker_state.map.clone(),
         }
     }
 
@@ -602,6 +603,9 @@ pub struct DocumentSnapshot {
     pub history_state: u64,
     /// Images of an existing project file that `project::save` may copy (`PngReuse`).
     pub png_reuse: Option<Arc<crate::project::PngReuse>>,
+    /// Every sticker of the document (`Arc` clones, no pixel copy); `project::save` writes those a stamp shows and the
+    /// kept ones (STICKER_PLAN 2.11).
+    pub stickers: std::collections::BTreeMap<crate::ids::StickerId, Arc<crate::sticker::StickerDoc>>,
 }
 
 /// One texture set inside a `DocumentSnapshot`.

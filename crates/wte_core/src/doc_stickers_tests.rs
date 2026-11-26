@@ -771,7 +771,7 @@ fn k3a_11_a_clipped_pattern_shows_only_inside_its_text() {
 // ----- the rest of 2.8 -----
 
 #[test]
-fn k3a_finished_pictures_paste_style_and_save_refusal() {
+fn k3a_finished_pictures_paste_style_and_save() {
     let (mut doc, blob, ids) = identity_doc();
     let img = crate::image_io::decode_image(&doc.blobs.get(blob).unwrap().bytes, None, 8192).unwrap().pixels;
     assert_eq!(doc.stamp_picture(ids[0], true).unwrap(), img, "without styles: the image itself");
@@ -795,7 +795,8 @@ fn k3a_finished_pictures_paste_style_and_save_refusal() {
     let decorated = doc.sticker_picture(sid, Some(&styles), 2.0).unwrap();
     assert_eq!(plain.width, 32);
     assert_eq!(decorated.width, 64 + 2 * styles.margin(2.0));
-    // Projects with stickers or styles are not written by this build (format 4 is package P4).
+    // Projects with stickers and styles are written as format 4 since package P4 (P3a refused them here; the round
+    // trip itself is tested in `project::sticker_tests`).
     let dir = crate::testutil::temp_dir("k3a_save");
     let opts = crate::project::SaveOptions {
         png: PngLevel::Fast,
@@ -805,7 +806,10 @@ fn k3a_finished_pictures_paste_style_and_save_refusal() {
         app_version: "test".into(),
     };
     let result = crate::project::save(&doc.snapshot(), &dir.join("s.wtep"), &opts, &crate::progress::NoProgress);
-    assert!(matches!(result, Err(crate::error::ProjectError::ManifestInvalid(_))), "{result:?}");
+    assert!(result.is_ok(), "{result:?}");
+    let manifest = crate::project::read_manifest(&dir.join("s.wtep")).unwrap();
+    assert_eq!(manifest.min_reader_version, 4, "stamp styles need format 4");
+    std::fs::remove_dir_all(&dir).unwrap();
     // Unknown ids.
     assert!(matches!(doc.remove_sticker(StickerId(999_999)), Err(EditError::UnknownSticker)));
     assert!(matches!(doc.promote_stamp(ids[3], ShareScope::ThisStamp), Err(EditError::InvalidParam(_))));

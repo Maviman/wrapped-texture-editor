@@ -185,6 +185,7 @@ pub fn doc_from_raw_objects(raw: RawMesh, objects: &RawObjects, size: u32) -> Do
         blobs: BlobStore::default(),
         ui_state: serde_json::Value::Null,
         next_id,
+        stickers: Default::default(),
     };
     Document::from_parts(parts, &NoProgress).expect("doc_from_raw: Document::from_parts failed")
 }

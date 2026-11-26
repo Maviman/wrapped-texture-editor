@@ -663,13 +663,15 @@ pub fn start_extract(app: &mut WteApp, dir: PathBuf) {
     if refuse_while_busy(app) {
         return;
     }
-    let Some(doc) = app.state.doc() else { return };
+    let Some(doc) = app.state.doc_mut() else { return };
     let source = std::sync::Arc::clone(&doc.source);
     let blobs = doc.blobs.clone();
+    // The finished pictures of the saved stickers (STICKER_PLAN 2.11); none for a document without stickers.
+    let stickers = doc.sticker_extract_pictures();
     log::info!("extract original files to {}", dir.display());
     app.jobs.spawn(&app.ctx, "Extracting original files", true, move |p| {
         p.report(0.0, "Writing files");
-        let result = wte_core::project::extract_bundle(&source, &blobs, &dir, false).map_err(|e| e.to_string());
+        let result = wte_core::project::extract_bundle(&source, &blobs, &stickers, &dir, false).map_err(|e| e.to_string());
         JobOutput::Extracted { result, dir }
     });
 }

@@ -2,7 +2,7 @@
 // and "Extract Original Files" (R7).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,12 +15,12 @@ use crate::doc_build::{DocumentParts, MAX_TEXTURE_SIDE, SetParts};
 use crate::document::Document;
 use crate::error::{DocError, ImportError, ImportWarning, LoadWarning, ProjectError};
 use crate::export::naming::{NameDeduper, is_plain_dir_name, sanitize_extension, sanitize_file_stem, split_extension};
-use crate::ids::{BlobId, LayerId, StampId};
+use crate::ids::{BlobId, LayerId, StampId, StickerId, StickerLayerId};
 use crate::image_io::decode_image;
 use crate::import::{IMPORTER_VERSION, ImportOptions, SourceBundle, SourceFile, import_from_bundle, normalize_ref};
 use crate::layer::{Layer, LayerKind};
 use crate::math::IRect;
-use crate::pixel::{CroppedBuf, PixelBuf, SparseBuf};
+use crate::pixel::{AlphaBuf, CroppedBuf, PixelBuf, SparseBuf};
 use crate::progress::Progress;
 use crate::project::{LoadReport, PngReuse, composite_key};
 use crate::project::manifest::{
@@ -29,7 +29,9 @@ use crate::project::manifest::{
 };
 use crate::project::migrate::{ParsedManifest, parse_manifest};
 use crate::project::save::{MANIFEST_ENTRY, parallel_budget};
+use crate::project::sticker_entries::{StickerContentEntry, StickerEntry, artboard_of, transform_of};
 use crate::stamp::{BakeQuality, StampObject, StampSource};
+use crate::sticker::{LayerMask, MAX_PICTURE_SIDE, PicturePixels, StickerContent, StickerDoc, StickerLayer};
 use crate::text::{DEFAULT_FONT_FAMILY, DEFAULT_FONT_STYLE, FontRef, default_font_bytes};
 
 /// Size limit of `manifest.json`.
@@ -74,7 +76,7 @@ fn open_archive(path: &Path) -> Result<Archive, ProjectError> {
 /// Reads one entry completely. The declared size is checked against `limit` before anything is read, and the read
 /// itself is capped as well (a lying header cannot make it allocate more). The ZIP CRC is verified at the end of the
 /// entry, so corrupt data surfaces as `Failed`.
-fn read_entry(zip: &mut Archive, name: &str, limit: u64) -> Result<Vec<u8>, EntryError> {
+fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, limit: u64) -> Result<Vec<u8>, EntryError> {
     let mut entry = match zip.by_name(name) {
         Ok(entry) => entry,
         Err(ZipError::FileNotFound) => return Err(EntryError::Missing),
@@ -140,7 +142,7 @@ fn read_bundle(zip: &mut Archive, source: &SourceEntry) -> Result<SourceBundle, 
 
 /// Step 4: the blobs of the manifest. Unreadable ones (also ones beyond the size limit) are left out: the stamps using
 /// them degrade in step 5.
-fn read_blobs(zip: &mut Archive, entries: &[BlobEntry]) -> BlobStore {
+pub(crate) fn read_blobs<R: Read + Seek>(zip: &mut ZipArchive<R>, entries: &[BlobEntry]) -> BlobStore {
     let mut blobs = BlobStore::default();
     for entry in entries {
         match read_entry(zip, &entry.file.entry, FILE_LIMIT) {
@@ -191,17 +193,30 @@ fn ordered_sets(manifest: &Manifest) -> Result<Vec<&SetEntry>, ProjectError> {
     Ok(sets)
 }
 
-/// The bundled default font as a `FontRef`, stored in `blobs` under an id that nothing else uses.
-fn fallback_font(blobs: &mut BlobStore, manifest: &Manifest) -> FontRef {
+/// One above every blob id the manifest mentions (blob entries, stamps, sticker layers): the lowest id the bundled
+/// font may take when it replaces a missing font.
+fn blob_floor(manifest: &Manifest) -> u32 {
+    let stamps = manifest.stamps.iter().filter_map(|s| match &s.source {
+        crate::project::manifest::StampSourceEntry::Image { blob } => Some(blob.0),
+        crate::project::manifest::StampSourceEntry::Text(text) => Some(text.font.blob.0),
+        crate::project::manifest::StampSourceEntry::Sticker { .. } => None,
+    });
+    let stickers = manifest.stickers.iter().flat_map(|k| &k.layers).filter_map(|l| match &l.content {
+        StickerContentEntry::Picture { blob, .. } => blob.map(|b| b.0),
+        StickerContentEntry::Text(text) => Some(text.font.blob.0),
+        StickerContentEntry::Shape(_) => None,
+    });
+    let mentioned = manifest.blobs.iter().map(|b| b.id.0).chain(stamps).chain(stickers);
+    mentioned.max().map_or(0, |m| m.saturating_add(1))
+}
+
+/// The bundled default font as a `FontRef`, stored in `blobs` under an id that nothing else uses: at least `floor`
+/// (`blob_floor`), so a dangling reference of the file can never start to point at this font.
+pub(crate) fn fallback_font(blobs: &mut BlobStore, floor: u32) -> FontRef {
     let bytes = default_font_bytes();
     let existing = blobs.iter().find(|b| b.kind == BlobKind::Font && b.bytes[..] == *bytes).map(|b| b.id);
     let blob = existing.unwrap_or_else(|| {
-        // Above every id the file mentions, so a dangling reference can never start to point at this font.
-        let mentioned = manifest.blobs.iter().map(|b| b.id.0).chain(manifest.stamps.iter().map(|s| match &s.source {
-            crate::project::manifest::StampSourceEntry::Image { blob } => blob.0,
-            crate::project::manifest::StampSourceEntry::Text(text) => text.font.blob.0,
-        }));
-        let id = BlobId(mentioned.chain(blobs.iter().map(|b| b.id.0)).max().map_or(0, |m| m.saturating_add(1)));
+        let id = BlobId(blobs.iter().map(|b| b.id.0.saturating_add(1)).max().unwrap_or(0).max(floor));
         blobs.insert_with_id(id, BlobKind::Font, DEFAULT_FONT_FILE, Arc::from(bytes));
         id
     });
@@ -251,8 +266,14 @@ fn canonical_fx(entry: &TextFxEntry) -> TextFxEntry {
     fx
 }
 
-/// Step 5: builds the stamp objects, degrading those whose image or font blob is missing.
-fn load_stamps(manifest: &Manifest, set_count: usize, blobs: &mut BlobStore, warnings: &mut Vec<LoadWarning>) -> LoadedStamps {
+/// Step 5: builds the stamp objects, degrading those whose image or font blob or whose sticker is missing.
+fn load_stamps(
+    manifest: &Manifest,
+    set_count: usize,
+    blobs: &mut BlobStore,
+    stickers: &mut LoadedStickers,
+    warnings: &mut Vec<LoadWarning>,
+) -> LoadedStamps {
     let mut out = LoadedStamps { stamps: Vec::new(), dropped: BTreeSet::new(), rebake: BTreeSet::new() };
     let mut seen = BTreeSet::new();
     let mut missing: BTreeMap<BlobId, Vec<StampId>> = BTreeMap::new();
@@ -307,12 +328,22 @@ fn load_stamps(manifest: &Manifest, set_count: usize, blobs: &mut BlobStore, war
             StampSource::Text(spec) => {
                 if blobs.get(spec.font.blob).is_none() {
                     fallbacks.push(LoadWarning::FontFallback { stamp: stamp.id, family: spec.font.family.clone() });
-                    spec.font = fallback_font(blobs, manifest);
+                    spec.font = fallback_font(blobs, blob_floor(manifest));
                     out.rebake.insert(stamp.id);
                 }
             }
-            // A format-3 manifest has no sticker stamps (format 4: package P4).
-            StampSource::Sticker { .. } => {}
+            // Format 4: a stamp whose sticker is missing or unreadable keeps its layers as paint layers.
+            StampSource::Sticker { sticker } => {
+                if !stickers.stickers.contains_key(sticker) {
+                    stickers.lost.entry(*sticker).or_insert_with(|| "it is not in the file".to_owned());
+                    stickers.users.entry(*sticker).or_default().push(stamp.id);
+                    out.dropped.insert(stamp.id);
+                    continue;
+                }
+                if stickers.degraded.contains(sticker) {
+                    out.rebake.insert(stamp.id);
+                }
+            }
         }
         out.stamps.push(stamp);
     }
@@ -322,8 +353,239 @@ fn load_stamps(manifest: &Manifest, set_count: usize, blobs: &mut BlobStore, war
     }));
     warnings.extend(fallbacks);
     warnings.extend(features);
+    warnings.extend(std::mem::take(&mut stickers.lost).into_iter().map(|(sticker, reason)| {
+        let mut used_by = stickers.users.remove(&sticker).unwrap_or_default();
+        used_by.sort();
+        LoadWarning::StickerLost { sticker, used_by, reason }
+    }));
     out.stamps.sort_by_key(|s| s.id);
     out
+}
+
+/// Result of step 4b (format 4).
+#[derive(Default)]
+pub(crate) struct LoadedStickers {
+    pub(crate) stickers: BTreeMap<StickerId, StickerDoc>,
+    /// Owned pictures and masks read as stored: `(sticker, layer, mask, archive entry)`, for `PngReuse::stickers`.
+    stored: Vec<(StickerId, StickerLayerId, bool, String)>,
+    /// Stickers that could not be loaded, with the reason (warned in step 5 together with their users).
+    pub(crate) lost: BTreeMap<StickerId, String>,
+    /// Stamps showing a lost sticker.
+    users: BTreeMap<StickerId, Vec<StampId>>,
+    /// Stickers that loaded with a lost picture, mask or font: the stamps showing them are re-baked.
+    degraded: BTreeSet<StickerId>,
+}
+
+/// One stored sticker PNG to decode: (sticker index, layer index, is mask, archive entry, bytes or the read error).
+type StickerPng = (usize, usize, bool, String, Result<Vec<u8>, String>);
+
+/// A transparent 1 x 1 picture: what a sticker picture layer holds when its pixels are lost (it draws nothing).
+fn empty_picture() -> PicturePixels {
+    PicturePixels::Owned { pixels: Arc::new(PixelBuf::new(1, 1)), version: 0 }
+}
+
+/// Decodes a stored sticker picture (straight RGBA, at most `MAX_PICTURE_SIDE` a side, never resized) or mask (8-bit
+/// grey; any colour PNG is read through its first channel).
+fn decode_sticker_png(bytes: &[u8]) -> Result<PixelBuf, String> {
+    let image = decode_image(bytes, Some("sticker.png"), MAX_PICTURE_SIDE).map_err(|e| e.to_string())?;
+    if image.resized {
+        let [w, h] = image.original_size;
+        return Err(format!("the stored image is {w}x{h}, larger than {MAX_PICTURE_SIDE} pixels on a side"));
+    }
+    Ok(image.pixels)
+}
+
+/// Step 4b (format 4): the stickers of the manifest. Owned pictures and masks are read from their PNG entries; a picture
+/// that cannot be read leaves its layer empty, a mask that cannot be read (or has another size than its picture) hides
+/// its layer, a text layer whose font is missing gets the bundled font, each with a warning. A sticker whose entry is
+/// invalid as a whole (artboard, layer ids, limits) is lost: the stamps showing it degrade in step 5.
+pub(crate) fn load_stickers<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    entries: &[StickerEntry],
+    font_floor: u32,
+    blobs: &mut BlobStore,
+    warnings: &mut Vec<LoadWarning>,
+) -> LoadedStickers {
+    let mut out = LoadedStickers::default();
+    let first_warning = warnings.len();
+    let png_limit = MAX_PICTURE_SIDE as u64 * MAX_PICTURE_SIDE as u64 * 4 + PNG_SLACK;
+    let mut docs: Vec<(StickerId, StickerDoc)> = Vec::new();
+    let mut pngs: Vec<StickerPng> = Vec::new();
+    for entry in entries {
+        if out.lost.contains_key(&entry.id) || docs.iter().any(|(id, _)| *id == entry.id) {
+            log::warn!("sticker id {} occurs twice in the project; the second one is ignored", entry.id.0);
+            continue;
+        }
+        match sticker_doc(entry, blobs, font_floor, docs.len(), &mut pngs, warnings) {
+            Ok(doc) => docs.push((entry.id, doc)),
+            Err(reason) => {
+                out.lost.insert(entry.id, reason);
+            }
+        }
+    }
+    // The stored PNGs: read sequentially (one archive reader), decoded in parallel.
+    for png in &mut pngs {
+        png.4 = read_entry(zip, &png.3, png_limit).map_err(|e| e.reason());
+    }
+    let decoded: Vec<Result<PixelBuf, String>> =
+        pngs.par_iter().map(|(_, _, _, _, bytes)| bytes.as_ref().map_err(Clone::clone).and_then(|b| decode_sticker_png(b))).collect();
+    // Pictures first, so that every mask can be checked against its picture's size.
+    let order = |png: &StickerPng| png.2;
+    let mut indices: Vec<usize> = (0..pngs.len()).collect();
+    indices.sort_by_key(|&i| order(&pngs[i]));
+    let mut decoded: Vec<Option<Result<PixelBuf, String>>> = decoded.into_iter().map(Some).collect();
+    for i in indices {
+        let (k, l, mask, entry, _) = &pngs[i];
+        let result = decoded[i].take().expect("decoded once");
+        let (id, doc) = &mut docs[*k];
+        let layer = &mut doc.layers[*l];
+        let lost = |reason: String| LoadWarning::StickerPixelsLost {
+            sticker: *id,
+            layer: layer.id,
+            name: layer.name.clone(),
+            mask: *mask,
+            reason,
+        };
+        if !*mask {
+            match result {
+                Ok(pixels) => {
+                    layer.content = StickerContent::Picture(PicturePixels::Owned { pixels: Arc::new(pixels), version: 0 });
+                    out.stored.push((*id, layer.id, false, entry.clone()));
+                }
+                Err(reason) => warnings.push(lost(reason)),
+            }
+            continue;
+        }
+        let size = match &layer.content {
+            StickerContent::Picture(PicturePixels::Owned { pixels, .. }) => [pixels.width, pixels.height],
+            StickerContent::Picture(PicturePixels::Blob(b)) => blob_picture_size(blobs, *b).unwrap_or([1, 1]),
+            _ => [1, 1],
+        };
+        let mask_of = |pixels: &PixelBuf| AlphaBuf { width: pixels.width, height: pixels.height, data: pixels.data.iter().step_by(4).copied().collect() };
+        let result = result.and_then(|pixels| {
+            if [pixels.width, pixels.height] == size {
+                Ok(mask_of(&pixels))
+            } else {
+                Err(format!("the mask is {}x{}, its picture {}x{}", pixels.width, pixels.height, size[0], size[1]))
+            }
+        });
+        match result {
+            Ok(alpha) => {
+                layer.mask = Some(LayerMask { pixels: Arc::new(alpha), version: 0 });
+                out.stored.push((*id, layer.id, true, entry.clone()));
+            }
+            Err(reason) => {
+                warnings.push(lost(reason));
+                layer.mask = Some(LayerMask { pixels: Arc::new(AlphaBuf::new(size[0], size[1])), version: 0 });
+            }
+        }
+    }
+    for (id, mut doc) in docs {
+        doc.sanitize();
+        match doc.check_limits() {
+            Ok(()) => {
+                out.stickers.insert(id, doc);
+            }
+            Err(e) => {
+                out.stored.retain(|s| s.0 != id);
+                out.lost.insert(id, e.to_string());
+            }
+        }
+    }
+    // A sticker that lost a picture, a mask or a font no longer looks like the stamps' stored pictures.
+    out.degraded = warnings[first_warning..]
+        .iter()
+        .filter_map(|w| match w {
+            LoadWarning::StickerPixelsLost { sticker, .. } | LoadWarning::StickerFontFallback { sticker, .. } => Some(*sticker),
+            _ => None,
+        })
+        .collect();
+    out
+}
+
+/// The decoded size of an image blob (only needed for a mask on an unedited picture).
+fn blob_picture_size(blobs: &BlobStore, blob: BlobId) -> Option<[u32; 2]> {
+    let blob = blobs.get(blob)?;
+    let image = decode_image(&blob.bytes, Some(&blob.name), MAX_PICTURE_SIDE).ok()?;
+    Some([image.pixels.width, image.pixels.height])
+}
+
+/// The sticker an entry describes, its owned pictures and masks still to be read (queued in `pngs`; until then such a
+/// layer holds `empty_picture`). `Err(reason)` when the entry is invalid as
+/// a whole.
+fn sticker_doc(
+    entry: &StickerEntry,
+    blobs: &mut BlobStore,
+    font_floor: u32,
+    index: usize,
+    pngs: &mut Vec<StickerPng>,
+    warnings: &mut Vec<LoadWarning>,
+) -> Result<StickerDoc, String> {
+    let artboard = artboard_of(entry.artboard).ok_or_else(|| "its artboard is invalid".to_owned())?;
+    let mut doc = StickerDoc::new(&entry.name, 1, 1);
+    doc.artboard = artboard;
+    doc.shape = entry.shape.to_shape();
+    doc.keep = entry.keep;
+    let mut ids = BTreeSet::new();
+    for (l, layer) in entry.layers.iter().enumerate() {
+        if !ids.insert(layer.id) {
+            return Err(format!("two of its layers have the id {}", layer.id.0));
+        }
+        let lost = |mask: bool, reason: &str| LoadWarning::StickerPixelsLost {
+            sticker: entry.id,
+            layer: layer.id,
+            name: layer.name.clone(),
+            mask,
+            reason: reason.to_owned(),
+        };
+        let content = match &layer.content {
+            StickerContentEntry::Picture { blob: Some(blob), file: None } => {
+                if blobs.get(*blob).is_some_and(|b| b.kind == BlobKind::Image) {
+                    StickerContent::Picture(PicturePixels::Blob(*blob))
+                } else {
+                    warnings.push(lost(false, "its image file is missing"));
+                    StickerContent::Picture(empty_picture())
+                }
+            }
+            StickerContentEntry::Picture { blob: None, file: Some(file) } => {
+                pngs.push((index, l, false, file.entry.clone(), Ok(Vec::new())));
+                StickerContent::Picture(empty_picture())
+            }
+            StickerContentEntry::Picture { .. } => {
+                warnings.push(lost(false, "the entry names no picture or two"));
+                StickerContent::Picture(empty_picture())
+            }
+            StickerContentEntry::Text(text) => {
+                let mut spec = text.to_spec();
+                if !blobs.get(spec.font.blob).is_some_and(|b| b.kind == BlobKind::Font) {
+                    warnings.push(LoadWarning::StickerFontFallback { sticker: entry.id, layer: layer.id, family: spec.font.family.clone() });
+                    spec.font = fallback_font(blobs, font_floor);
+                }
+                StickerContent::Text(Box::new(spec))
+            }
+            StickerContentEntry::Shape(shape) => StickerContent::Shape(shape.to_shape()),
+        };
+        let mut out = StickerLayer::new(layer.id, &layer.name, content);
+        out.visible = layer.visible;
+        out.locked = layer.locked;
+        out.opacity = layer.opacity;
+        out.blend = layer.blend;
+        out.transform = transform_of(layer.transform);
+        out.clip = layer.clip;
+        out.adjustments = layer.adjustments.iter().map(|a| a.to_adjustment()).collect();
+        out.styles = layer.styles.as_ref().map(|s| s.to_styles()).unwrap_or_default();
+        if let Some(mask) = &layer.mask {
+            if matches!(out.content, StickerContent::Picture(_)) {
+                pngs.push((index, l, true, mask.entry.clone(), Ok(Vec::new())));
+            } else {
+                log::warn!("sticker {} layer {}: a mask on a text or shape layer is ignored", entry.id.0, layer.id.0);
+            }
+        }
+        doc.layers.push(out);
+    }
+    let next = ids.last().map_or(1, |id| id.0.saturating_add(1));
+    doc.next_layer = entry.next_layer.max(next);
+    Ok(doc)
 }
 
 /// What a layer entry becomes.
@@ -570,7 +832,8 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
     // Steps 4 and 5: blobs and stamps.
     progress.report(0.3, "Reading stamps");
     let mut blobs = read_blobs(&mut zip, &manifest.blobs);
-    let mut stamps = load_stamps(&manifest, set_entries.len(), &mut blobs, &mut warnings);
+    let mut stickers = load_stickers(&mut zip, &manifest.stickers, blob_floor(&manifest), &mut blobs, &mut warnings);
+    let mut stamps = load_stamps(&manifest, set_entries.len(), &mut blobs, &mut stickers, &mut warnings);
     let mut rebake = std::mem::take(&mut stamps.rebake);
 
     // Step 6: layers.
@@ -597,7 +860,13 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
     drop(zip);
 
     // Step 7: every stamp needs a linked layer in its home set before the document is assembled.
-    let max_id = layer_ids.iter().map(|l| l.0).chain(stamps.stamps.iter().map(|s| s.id.0)).max().unwrap_or(0);
+    let max_id = layer_ids
+        .iter()
+        .map(|l| l.0)
+        .chain(stamps.stamps.iter().map(|s| s.id.0))
+        .chain(stickers.stickers.keys().map(|k| k.0))
+        .max()
+        .unwrap_or(0);
     let mut next_id = manifest.next_id.max(max_id.saturating_add(1));
     for stamp in &stamps.stamps {
         let home = stamp.home_set.index();
@@ -621,6 +890,7 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
         blobs,
         ui_state: manifest.ui_state.clone(),
         next_id,
+        stickers: std::mem::take(&mut stickers.stickers),
     };
     let mut document =
         Document::from_parts(parts, &Scaled { inner: progress, lo: 0.65, hi: 0.95 }).map_err(|e| match e {
@@ -635,6 +905,21 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
         for (id, entry, rect) in stored {
             if let Some(version) = document.layer_version(id) {
                 reuse.layers.insert(id, (version, entry, rect));
+            }
+        }
+        // Sticker pictures and masks read as stored, by the picture version `from_parts` gave them.
+        for (sticker, layer, mask, entry) in stickers.stored {
+            let Some(layer) = document.sticker(sticker).and_then(|d| d.layer(layer)) else { continue };
+            let version = if mask {
+                layer.mask.as_ref().map(|m| m.version)
+            } else {
+                match &layer.content {
+                    StickerContent::Picture(PicturePixels::Owned { version, .. }) => Some(*version),
+                    _ => None,
+                }
+            };
+            if let Some(version) = version {
+                reuse.stickers.insert(version, entry);
             }
         }
         if rebake.is_empty() && warnings.is_empty() {
@@ -722,17 +1007,31 @@ fn blob_file_name(blob: &crate::blob::Blob) -> String {
 }
 
 /// R7 "Extract Original Files", working on in-memory data (so it also works for a document that was never saved): writes
-/// the model file, every sidecar and every extra at their relative paths, and every blob under `stamps\` (images) or
-/// `fonts\` (fonts) under its original name (sanitized only when Windows would refuse it), into `dest_dir` (created if
-/// missing). Returns the written paths (7.1).
+/// the model file, every sidecar and every extra at their relative paths, every blob under `stamps\` (images) or
+/// `fonts\` (fonts) under its original name (sanitized only when Windows would refuse it), and every finished sticker
+/// picture of `stickers` (`(sticker name, picture)`, `Document::sticker_extract_pictures`) as `stickers\<name>.png`
+/// (STICKER_PLAN 2.11), into `dest_dir` (created if missing). Returns the written paths (7.1).
 ///
 /// The files refer to each other by name, so they are never renamed one by one: with `overwrite == false`, when any
 /// of them already exists in `dest_dir`, the whole set goes into a fresh sub-folder `<model stem>_original` (`_2`,
 /// `_3`, ... when that exists too) instead, and nothing existing is replaced. With `overwrite == true` existing files
 /// are replaced. Two files of one call that would get the same name are told apart by `_2`, `_3`, ... suffixes.
 ///
-/// Order of the returned paths: model file, sidecars, extras, blobs by id.
-pub fn extract_bundle(bundle: &SourceBundle, blobs: &BlobStore, dest_dir: &Path, overwrite: bool) -> Result<Vec<PathBuf>, ProjectError> {
+/// Order of the returned paths: model file, sidecars, extras, blobs by id, sticker pictures in the given order.
+pub fn extract_bundle(
+    bundle: &SourceBundle,
+    blobs: &BlobStore,
+    stickers: &[(String, PixelBuf)],
+    dest_dir: &Path,
+    overwrite: bool,
+) -> Result<Vec<PathBuf>, ProjectError> {
+    let sticker_pngs = stickers
+        .iter()
+        .map(|(name, picture)| {
+            let png = crate::image_io::encode_png(picture.width, picture.height, &picture.data, crate::image_io::PngLevel::Balanced)?;
+            Ok((format!("{}.png", sanitize_file_stem(name)), png))
+        })
+        .collect::<Result<Vec<(String, Vec<u8>)>, crate::error::ImageIoError>>()?;
     // The plan: (sub-folder, unique name, bytes).
     let main_name = extracted_name(&bundle.main.original_name, &bundle.main.key);
     let mut plan: Vec<(String, String, &[u8])> = vec![(String::new(), main_name.clone(), &bundle.main.bytes[..])];
@@ -745,6 +1044,9 @@ pub fn extract_bundle(bundle: &SourceBundle, blobs: &BlobStore, dest_dir: &Path,
             BlobKind::Font => "fonts",
         };
         plan.push((sub_dir.to_owned(), blob_file_name(blob), &blob.bytes[..]));
+    }
+    for (name, png) in &sticker_pngs {
+        plan.push(("stickers".to_owned(), name.clone(), &png[..]));
     }
     let mut names = NameDeduper::default();
     for (sub_dir, name, _) in &mut plan {
@@ -781,7 +1083,8 @@ pub fn extract_bundle(bundle: &SourceBundle, blobs: &BlobStore, dest_dir: &Path,
     Ok(written)
 }
 
-/// Thin wrapper: reads `source/*`, the extras and the blobs of a saved .wtep (no import, no layers) and calls extract_bundle.
+/// Thin wrapper: reads `source/*`, the extras and the blobs of a saved .wtep (no import, no layers, so no sticker
+/// pictures: those need the document) and calls extract_bundle.
 ///
 /// Entries are taken from the manifest. The model file must be readable (`ModelUnrecoverable` otherwise); other
 /// unreadable files are skipped with a logged warning.
@@ -791,7 +1094,7 @@ pub fn extract_sources(path: &Path, dest_dir: &Path, overwrite: bool) -> Result<
     let bundle = read_bundle(&mut zip, &manifest.source)?;
     let blobs = read_blobs(&mut zip, &manifest.blobs);
     drop(zip);
-    extract_bundle(&bundle, &blobs, dest_dir, overwrite)
+    extract_bundle(&bundle, &blobs, &[], dest_dir, overwrite)
 }
 
 #[cfg(test)]
@@ -1510,7 +1813,7 @@ f 1/1/1 3/3/1 4/4/1
         assert_eq!(loaded.sets[0].layers[0].raster().unwrap().data, &chosen.data[..]);
 
         let out = dir.join("extracted");
-        let written = extract_bundle(&loaded.source, &loaded.blobs, &out, false).unwrap();
+        let written = extract_bundle(&loaded.source, &loaded.blobs, &[], &out, false).unwrap();
         let relative: Vec<String> = written
             .iter()
             .map(|p| p.strip_prefix(&out).unwrap().to_string_lossy().replace('\\', "/"))
@@ -1548,7 +1851,7 @@ f 1/1/1 3/3/1 4/4/1
             paths.iter().map(|p| p.strip_prefix(&out).unwrap().to_string_lossy().replace('\\', "/")).collect()
         };
         // A file of the set exists: the whole set goes into a fresh folder, under its own names.
-        let first = extract_bundle(&bundle, &blobs, &out, false).unwrap();
+        let first = extract_bundle(&bundle, &blobs, &[], &out, false).unwrap();
         let expect = |folder: &str| -> Vec<String> {
             ["model.obj", "model.mtl", "stamps/Logo_ final_.png", "fonts/Brand.ttf", "stamps/blob2"]
                 .iter()
@@ -1560,17 +1863,17 @@ f 1/1/1 3/3/1 4/4/1
         assert_eq!(std::fs::read(&first[0]).unwrap(), &bundle.main.bytes[..]);
         assert_eq!(std::fs::read(out.join("model_original").join("fonts").join("Brand.ttf")).unwrap(), b"font bytes");
 
-        let second = extract_bundle(&bundle, &blobs, &out, false).unwrap();
+        let second = extract_bundle(&bundle, &blobs, &[], &out, false).unwrap();
         assert_eq!(rel(&second), expect("model_original_2"));
 
         // With overwrite the plain names are used and replaced.
-        let third = extract_bundle(&bundle, &blobs, &out, true).unwrap();
+        let third = extract_bundle(&bundle, &blobs, &[], &out, true).unwrap();
         assert_eq!(rel(&third), ["model.obj", "model.mtl", "stamps/Logo_ final_.png", "fonts/Brand.ttf", "stamps/blob2"]);
         assert_eq!(std::fs::read(out.join("model.obj")).unwrap(), &bundle.main.bytes[..]);
 
         // Into an empty folder: the plain names.
         let empty = dir.join("empty");
-        let fourth = extract_bundle(&bundle, &blobs, &empty, false).unwrap();
+        let fourth = extract_bundle(&bundle, &blobs, &[], &empty, false).unwrap();
         assert_eq!(fourth[0], empty.join("model.obj"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1591,7 +1894,7 @@ f 1/1/1 3/3/1 4/4/1
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join(texture), b"someone else's texture").unwrap();
-        let written = extract_bundle(&bundle, &BlobStore::default(), &out, false).unwrap();
+        let written = extract_bundle(&bundle, &BlobStore::default(), &[], &out, false).unwrap();
         let folder = out.join("crate_original");
         assert_eq!(written, [folder.join("crate.obj"), folder.join("crate.mtl"), folder.join(texture)]);
         assert_eq!(std::fs::read(out.join(texture)).unwrap(), b"someone else's texture");
@@ -1614,7 +1917,7 @@ f 1/1/1 3/3/1 4/4/1
         blobs.insert(BlobKind::Font, "Source Sans 3-Bold", Arc::from(&b"OTTO cff"[..]));
         blobs.insert(BlobKind::Font, "Noto.CJK-Regular", Arc::from(&b"ttcf collection"[..]));
         blobs.insert(BlobKind::Font, "Brand.woff2", Arc::from(&b"wOF2 web"[..]));
-        let written = extract_bundle(&bundle, &blobs, &dir, false).unwrap();
+        let written = extract_bundle(&bundle, &blobs, &[], &dir, false).unwrap();
         let names: Vec<String> = written[2..].iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["Ubuntu-Light.ttf", "Source Sans 3-Bold.otf", "Noto.CJK-Regular.ttc", "Brand.woff2"]);
         std::fs::remove_dir_all(&dir).unwrap();

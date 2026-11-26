@@ -56,7 +56,7 @@ pub(super) fn pen() -> Vec<Step> {
                 Err(format!("{:?}", s.pen.frame))
             }
         }),
-        Step::Shot("pen_ramp"),
+        Step::Shot { name: "pen_ramp", expect: "" },
         // (3) 2D identity: the mouse and the pen at full pressure paint the same pixels.
         Step::Do(AppAction::Undo),
         Step::WaitIdle,
@@ -118,7 +118,7 @@ pub(super) fn pen() -> Vec<Step> {
             model_pen(s, &[[-0.5, 0.35], [0.5, 0.45]], (0.25, 0.25), false, false)
         }),
         Step::WaitIdle,
-        Step::Shot("pen_3d"),
+        Step::Shot { name: "pen_3d", expect: "" },
         Step::Do(AppAction::Undo),
         Step::Do(AppAction::Undo),
         Step::WaitIdle,
@@ -143,7 +143,7 @@ pub(super) fn pen() -> Vec<Step> {
                 let t = k as f32 / 12.0;
                 PenPoint { at: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], pressure: 1.0 }
             }));
-            Ok(vec![Step::Pen { view: ViewId::Main2D, samples, inverted: true, barrel: false, points_per_frame: 2 }])
+            Ok(vec![Step::Pen { view: ViewId::Main2D.into(), samples, inverted: true, barrel: false, points_per_frame: 2 }])
         }),
         Step::Assert("the stroke erased the centre and the tool was the Eraser while touching", |s, sc| {
             let a = alpha_at(s, [0.5, RAMP_V])?;
@@ -192,7 +192,7 @@ pub(super) fn pen() -> Vec<Step> {
             let at = panel_rect(s, PanelHit::LayerName(base))?.center();
             let xf = view_xf(s, ViewId::Main3D)?;
             let samples = vec![PenPoint { at: norm(&xf, at), pressure: 0.0 }, PenPoint { at: norm(&xf, at), pressure: 0.6 }];
-            Ok(vec![Step::Pen { view: ViewId::Main3D, samples, inverted: false, barrel: false, points_per_frame: 1 }])
+            Ok(vec![Step::Pen { view: ViewId::Main3D.into(), samples, inverted: false, barrel: false, points_per_frame: 1 }])
         }),
         Step::WaitIdle,
         Step::Assert("the tap selected Base", |s, _| {
@@ -215,7 +215,7 @@ pub(super) fn pen() -> Vec<Step> {
         Step::Assert("Tablet setup is open", |s, _| {
             if matches!(s.dialog, Dialog::TabletHelp) { Ok(()) } else { Err(format!("dialog {}", dialog_name(&s.dialog))) }
         }),
-        Step::Shot("tablet_help"),
+        Step::Shot { name: "tablet_help", expect: "" },
         Step::Do(AppAction::CloseDialog),
         Step::WaitIdle,
         Step::Assert("Tablet setup closed", |s, _| {
@@ -251,7 +251,7 @@ fn uv_pen(state: &AppState, v: f32, u: [f32; 2], p: (f32, f32), inverted: bool, 
     let xf = view_xf(state, ViewId::Main2D)?;
     let screen = [uv_screen(&xf, [u[0], v]), uv_screen(&xf, [u[1], v])];
     let samples = pen_samples(&xf, &screen, p);
-    Ok(vec![Step::Pen { view: ViewId::Main2D, samples, inverted, barrel, points_per_frame: POINTS_PER_FRAME }])
+    Ok(vec![Step::Pen { view: ViewId::Main2D.into(), samples, inverted, barrel, points_per_frame: POINTS_PER_FRAME }])
 }
 
 /// The mouse stroke of `uv_pen` (same points, same points per frame).
@@ -264,7 +264,7 @@ fn model_pen(state: &AppState, disc: &[[f32; 2]], p: (f32, f32), inverted: bool,
     let (xf, c, r) = model_disc(state, ViewId::Main3D)?;
     let screen: Vec<egui::Pos2> = disc.iter().map(|q| disc_point(c, r, *q)).collect();
     let samples = pen_samples(&xf, &screen, p);
-    Ok(vec![Step::Pen { view: ViewId::Main3D, samples, inverted, barrel, points_per_frame: POINTS_PER_FRAME }])
+    Ok(vec![Step::Pen { view: ViewId::Main3D.into(), samples, inverted, barrel, points_per_frame: POINTS_PER_FRAME }])
 }
 
 /// FNV hash of every raster layer above Base of every set (the painted pixels).

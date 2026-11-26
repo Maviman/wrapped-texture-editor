@@ -31,6 +31,7 @@ mod selftest;
 mod shortcuts;
 mod stamp_bakes;
 mod state;
+mod sticker;
 mod text_ops;
 mod theme;
 mod toasts;

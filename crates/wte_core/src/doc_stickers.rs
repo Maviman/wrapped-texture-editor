@@ -16,17 +16,17 @@ use std::sync::Arc;
 use crate::blob::BlobKind;
 use crate::document::{Commit, Document};
 use crate::error::EditError;
-use crate::ids::{BlobId, StampId, StickerId};
+use crate::ids::{BlobId, StampId, StickerId, StickerLayerId};
 use crate::image_io::decode_image;
 use crate::pixel::PixelBuf;
 use crate::pixel_ops::PremulMips;
 use crate::stamp::{BakeQuality, Placement, Projector, StampObject, StampSource, SurfaceMode};
-use crate::sticker::model::{PicturePixels, StickerContent, StickerDoc};
+use crate::sticker::model::{PicturePixels, StickerContent, StickerDoc, StickerLayer};
 use crate::sticker::pipeline::{
     STYLE_REFERENCE_EM, SourceFrame, Styling, bake_placement_of, placement_texels, sticker_scale, styled_mips,
     styled_straight, work_level,
 };
-use crate::sticker::render::{LayerCache, StickerRenderInput, render_size, render_with};
+use crate::sticker::render::{LayerCache, StickerRenderInput, layer_alpha_at, render, render_size, render_with};
 use crate::sticker::style::StyleStack;
 use crate::sticker::{MAX_PICTURE_SIDE, refit_placement};
 use crate::text::RasterQuality;
@@ -645,6 +645,43 @@ impl Document {
             }
             None => Ok((*picture).clone()),
         }
+    }
+
+    // ----- the editor's read-outs (stickers P6a) -----
+
+    /// The top visible layer of sticker `id` that draws a pixel at the layer-space point `p` (its alpha there, mask
+    /// applied, is above 0; styles, opacity and clipping are not looked at): the click of the editor's Move tool
+    /// (STICKER_PLAN 3.3). `None` for an unknown sticker or when no layer is there. Read only.
+    pub fn sticker_layer_at(&mut self, id: StickerId, p: glam::Vec2) -> Option<StickerLayerId> {
+        let doc = Arc::clone(self.sticker_state.map.get(&id)?);
+        let input = self.sticker_render_input(&doc).ok()?;
+        doc.layers.iter().rev().filter(|l| l.visible).find(|l| layer_alpha_at(&input, l, p) > 0).map(|l| l.id)
+    }
+
+    /// The thumbnail of one layer of sticker `id` drawn on its own (shown, full opacity, Normal, not clipped; its mask,
+    /// adjustments and styles kept): the whole artboard scaled so that its longer side has `side` pixels (at most
+    /// scale 1). `None` for an unknown sticker or layer. Never a history command (the Layers tab of the editor).
+    pub fn sticker_layer_thumbnail(&mut self, id: StickerId, layer: StickerLayerId, side: u32) -> Option<PixelBuf> {
+        let doc = self.sticker_state.map.get(&id)?;
+        let one = StickerLayer {
+            visible: true,
+            opacity: 1.0,
+            blend: crate::layer::BlendMode::Normal,
+            clip: false,
+            ..doc.layer(layer)?.clone()
+        };
+        let alone = Arc::new(StickerDoc {
+            name: String::new(),
+            artboard: doc.artboard,
+            shape: doc.shape,
+            layers: vec![one],
+            next_layer: doc.next_layer,
+            keep: false,
+        });
+        let input = self.sticker_render_input(&alone).ok()?;
+        let [w, h] = alone.size();
+        let s = (side.max(1) as f32 / w.max(h).max(1) as f32).clamp(1.0 / 64.0, 1.0);
+        Some(render(&input, s, RasterQuality::Full))
     }
 
     // ----- the picture pipeline (2.6) -----

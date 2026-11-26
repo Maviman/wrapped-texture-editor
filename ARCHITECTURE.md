@@ -300,8 +300,10 @@ return at once: the app is unchanged (regression shots identical, `docs/notes/co
 
 ### 1.12 Stickers and outside editors (PhotoCraft, Photoshop) (branch `stickers`, `docs/plans/STICKER_PLAN.md`)
 
-Skeleton (P1); P6a completes it with the decisions of STICKER_PLAN 0 / 0.1 and the traceability of every later package.
-Goal: layered stickers (a small multi-layer picture document per sticker: picture, text and shape layers with opacity,
+Opened by P1; completed by P6a with the decisions of STICKER_PLAN 0 / 0.1 and the traceability of every package.
+The user's decisions (plan 0.1, binding): WTE gets its own sticker editor modelled on PhotoCraft's tools (a clean
+reimplementation) plus an "Edit in PhotoCraft" link; a sticker is a layered document; PhotoCraft v0.2.0 and the latest
+are both supported; revision 3 adds Photoshop as a second outside editor (plan 13). Goal: layered stickers (a small multi-layer picture document per sticker: picture, text and shape layers with opacity,
 blend mode, transform, mask, adjustments and layer styles), styles (die-cut contour, stroke, shadows, glows, overlays,
 bevel) on every stamp, a Sticker view in the main window with the live 3D result beside it, and working together with
 PhotoCraft (a linked PSD, drag and drop, clipboard). Notes `docs/notes/sticker/`.
@@ -311,6 +313,13 @@ PhotoCraft (a linked PSD, drag and drop, clipboard). Notes `docs/notes/sticker/`
 | S1 | All sticker maths is CPU only, deterministic, straight RGBA8, in `wte_core::sticker` (5.27, 6.11); no new crate. |
 | S2 | One style type, `StyleStack`, for sticker layers and stamps; lengths in pixels at the reference scale of what it is applied to; the margin is known from the numbers alone (6.11). |
 | S3 | Algorithms are clean reimplementations written with PhotoCraft's MIT source open; every such file starts with the notice line of STICKER_PLAN 4.0 (`licenses/photocraft-MIT.txt`). |
+| S4 | Stickers belong to the document (`Document::stickers`, `Arc<StickerDoc>` by `StickerId`); a stamp shows an image, a text or a sticker and several stamps may share one sticker (E6). Old stamps stay as they are until edited: an image stamp is promoted to a sticker at its first content edit, inside that edit's one history entry (5.20, 6.7). |
+| S5 | One history: sticker pixel edits are `Edit::StickerPixels` tile patches, everything else a `Structure` entry whose snapshot carries the sticker map; selections, the active sticker layer, the tool and the canvas camera are app state (8.15). The editor link's state is outside the history (5.28). |
+| S6 | Rendering is CPU only and deterministic; caches hold the `Arc` they were made from or a picture version, never an address (5.27, 6.10). The app's canvas texture is keyed by value (`LayerKey`), never by an `Arc` it would have to keep (8.15). |
+| S7 | The Sticker view is a fifth view mode in the main window, `[canvas | divider | 3D view]`; the canvas is not a `ViewId` (it has no offscreen target); the 3D half only navigates; `ViewMode::Sticker` is never written to `Document::ui_state` (8.5, 8.15). |
+| S8 | Keys in the Sticker view come from a second table, `STICKER_SHORTCUTS`, with one routing rule; X is the Text key of both modes; Delete never deletes the stamp or a texture layer; a paint tool cannot become active there (8.10). |
+| S9 | Input is ordinary egui input (mouse, pen, tablet companion); Secondary / Middle drags pan the canvas with every tool; no feature is reachable only by hover, right click, double click or a key (8.15). |
+| S10 | The link writes the PSD only on an explicit command, never at project save; a link needs a saved project; WTE never rewrites the linked file by itself; no test or agent starts an outside editor (stub launcher); no new crate; no AI; never take the user's focus (plan 0.4). |
 
 Traceability (P1): styles, adjustments, shapes, the resampler and the limits (2.1, 5.27, 6.11), `AlphaBuf` (5.5),
 `nearest_ink` (5.13 / 6.11), pitfalls (6.9), tests (9.1). (P2): selections, colour-tolerance regions, cut-out helpers,
@@ -332,7 +341,15 @@ result, every sentence with the editor's name (`link::texts`); the `Document` si
 outside the history, `sticker_link_hash`, `prepare_link_file` / `finish_link_write`, `apply_link_update`); the project
 side (`links/k<id>.psd` archive entries by the save rule, `LoadReport::links`, the optional `editor` of `LinkEntry`)
 (2.1, 5.23, 5.28 "link", 6.13, 7.1, 7.2, 9.1); fixture f15 (a link export with a text, a shape and a mask, re-saved by
-PhotoCraft).
+PhotoCraft). (P6a): the Sticker view: `ViewMode::Sticker`, `StickerEdit` and its commands (`sticker/`), the canvas
+(header, checkerboard, Move and Hand, pans and zoom), the sticker's layers in the Layers tab and the sticker tool's page
+in the Tool tab, `STICKER_SHORTCUTS` and the routing rule, the pen's eraser end in the view, the canvas's rect for the
+companion's finger gestures, the self-test's `Target`, `Step::WaitMs` and shots with their expected content, the
+scenario `sticker_view`; core read-outs `Document::sticker_layer_at` / `sticker_layer_thumbnail` (2.2, 5.20, 8.2, 8.3,
+8.5, 8.7, 8.10, 8.11, 8.13, 8.15, 9.1). Still to come, each documented by its package: the Sticker tab, styles UI and tray
+(P6b: 8.7-8.9, 8.15), painting, selections and the layout / text / shape tools (P7a, P7b, P8: 8.6, 8.7, 8.15, 9.2), the
+editor link in the app (P9a, P9b: 8.16), drop target, clipboard and drag out (P10a, P10b, P11: 8.17), linked paint layers
+(P12: 8.16), docs and the version (P13).
 
 ---
 
@@ -400,9 +417,9 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `sticker/filter.rs` | stickers P2 | Gaussian `blur` / `blur_mask` (three boxes), `sharpen`, `draw_gradient` / `draw_gradient_mask` (5.27, 6.12) |
 | `sticker/bench.rs` | stickers P1, P2 | the ignored `perf_k1_*` and `perf_k2_*` timings (test-only) |
 | `sticker/model.rs` | stickers P3a | `StickerDoc`, `StickerLayer`, `StickerContent`, `PicturePixels`, `LayerMask`, `ArtboardShape`; limits check, the trivial-path test (5.27 part 3) |
-| `sticker/render.rs` | stickers P3a | `render` / `render_with` (6.10), `StickerRenderInput`, `LayerKey`, `LayerRaster`, `LayerCache`, `render_size`; P5c: `layer_content` / `mask_raster` (a layer's pixels and its mask for a linked PSD, 6.13) |
+| `sticker/render.rs` | stickers P3a | `render` / `render_with` (6.10), `StickerRenderInput`, `LayerKey`, `LayerRaster`, `LayerCache`, `render_size`; P5c: `layer_content` / `mask_raster` (a layer's pixels and its mask for a linked PSD, 6.13); P6a: `layer_alpha_at` (the Move tool's hit test) |
 | `sticker/pipeline.rs` | stickers P3a | `SourceFrame`, `bake_placement_of`, `Styling`, `work_level`, `styled_mips`, `styled_straight`, `sticker_scale` (6.5 "Stickers") |
-| `doc_stickers.rs` | stickers P3a | the sticker commands of `Document` (queries, add / remove / promote / detach, `set_sticker`, stamp styles, the two placements, finished pictures) and `StickerCaches` (5.20 "Stickers") |
+| `doc_stickers.rs` | stickers P3a; P6a | the sticker commands of `Document` (queries, add / remove / promote / detach, `set_sticker`, stamp styles, the two placements, finished pictures) and `StickerCaches` (5.20 "Stickers"); P6a: the editor read-outs `sticker_layer_at`, `sticker_layer_thumbnail` |
 | `doc_stickers_tests.rs` | stickers P3a | the `k3a_*` tests of the sticker document (test-only child of the crate root) |
 | `doc_sticker_edits.rs` | stickers P3b | sticker pixel edits: strokes on pictures and masks, `replace_sticker_pixels`, promotion inside an edit, `convert_text_stamp`, Revert, the re-bake of users and the undo of `Edit::StickerPixels` (5.20 "Sticker pixel edits") |
 | `doc_sticker_edits_tests.rs` | stickers P3b | the `k3b_*` tests (test-only child of the crate root) |
@@ -541,6 +558,11 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `selftest/scenarios/companion.rs` | companion | the scenarios `companion` and `companion_host` (8.11) |
 | `docs/protocol/` (repo root) | companion | the wire spec v1 and its golden fixtures (also in the tablet repo's `protocol/`) |
 | `tools/companion/` (repo root) | companion | `check_handshake.py` (fixture crypto cross-check), `regress.sh` + `compare_regress.py` (companion off = unchanged), `host_probe.py` (a Python tablet for `companion_host`) |
+| `sticker/mod.rs` | stickers P6a | the Sticker view (8.15): `StickerAction` and `run` / `run_in`, `enter` / `leave` / `validate`, `StickerUi` (`AppState::sticker_ui`), `Shown` (what the canvas shows: a sticker, an image stamp's virtual sticker, a text stamp), `edit_ref`, `differs_from_entry` (Revert), `cancel_drag` |
+| `sticker/canvas.rs` | stickers P6a | the central area of the Sticker view: header, canvas (texture keyed by `CanvasKey`, checkerboard, artboard outline, pixel grid, active layer outline), `handle_input` (Move, pans, zoom), `Geom`, `Hit` |
+| `sticker/layers_ui.rs` | stickers P6a | the Layers tab in the Sticker view (rows, thumbnails, drag reorder, footer) and the Tool tab's sticker page (`tool_page`) |
+| `sticker/tests.rs` | stickers P6a | the Sticker view's unit tests and test helpers (`image_stamp_state`, `canvas_state`, `canvas_pass`) |
+| `selftest/scenarios/sticker.rs` | stickers P6a | the scenario `sticker_view` (8.11) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
 | `selftest/scenarios.rs` | A6 | canned scenarios (the scaffold stub already contains the action-only smoke scenarios of section 8.11) |
 
@@ -2821,6 +2843,11 @@ impl Document {
   Without a margin it is `refit_auto_depth` (unchanged).
 - **Save.** Format 4 (P4, 7.1 / 7.2): sticker stamps, stamp styles and the stickers a stamp shows or the tray keeps are
   saved (P3a refused them with `ManifestInvalid` until then).
+- **Editor read-outs (P6a, never history commands).** `sticker_layer_at(id, p)`: the top visible layer that draws a pixel
+  at the layer-space point `p` (its alpha there above 0, mask applied; styles, opacity and clipping not looked at;
+  `sticker::render::layer_alpha_at`), the Move tool's click. `sticker_layer_thumbnail(id, layer, side)`: one layer drawn
+  alone (shown, opacity 1, Normal, not clipped; mask, adjustments and styles kept) over the whole artboard, the longer
+  side `side` pixels (scale at most 1), for the Layers tab.
 
 **Sticker pixel edits, conversion, Revert (P3b; `doc_sticker_edits.rs`, STICKER_PLAN 2.7, 2.8, 2.10).**
 
@@ -6185,6 +6212,20 @@ Branch `pen-input`:
   must not end the eraser override). `on_message` takes the lock with `try_lock` and skips a message sent from inside
   `open` / `close` / `WTEnable` instead of deadlocking (checker fixes). Never in a self-test run.
 
+**Stickers P6a (STICKER_PLAN 3.1-3.3; 8.15).** Additive: `ViewMode::Sticker` (serde name "sticker"; never written,
+`AppState::remembered_view_mode`), `StickerTool` (14 tools, `ALL` in strip order, `label`, `built`: Move and Hand in P6a),
+`StickerTarget { Stamp(StampId), Tray(StickerId), ToolSource }`, `Canvas2D` (= `UvViewState`, the artboard as its
+texture), `StickerEdit { target, active_layer, selected_layers, selection, tool, camera, return_mode, share_answer,
+entry: StickerCheckpoint, held_update }`, `Session::sticker_edit: Option<StickerEdit>`, `AppState::sticker_canvas_rect`
+(the canvas rect of the last frame; `None` outside the view) and `AppState::sticker_ui: sticker::StickerUi` (canvas
+texture, thumbnails, the running drag, the Move tool's Auto-select, the last sticker tool), `Prefs::sticker_split`
+(default 0.55, read leniently, clamped to 0.15..=0.85), `PanelHit::{StickerCanvas, StickerDone, StickerRevert,
+StickerFit, StickerZoom100, StickerConvertText, StickerLayerRow/Eye/Lock(u32), StickerLayerNew/AddPicture/Duplicate/Up/
+Down/Delete, StickerToolButton(StickerTool), StickerEditButton}`. `AppAction::SetStickerTool(StickerTool)` and
+`AppAction::Sticker(sticker::StickerAction)` (Enter, Leave, Revert, SelectLayer, AddPictureLayer, AddPictureFile,
+DuplicateLayer, DeleteLayer, MoveLayer, MoveLayerTo, MergeDown, SetLayerVisible / Locked / Opacity / Blend, RenameLayer,
+SetLayerPosition, Nudge, DeleteKey, Escape, EnterKey, Fit, Zoom100, ConvertText, Rename; `None` layer = the active one).
+
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
 ```rust
@@ -6467,6 +6508,16 @@ Frame and flows: the new actions are one-line arms into `brush_flows.rs` (`load`
 `answer_openings`, `set_close`) and `text_ops.rs` (`load_font_samples`); `WteApp::new` calls `brush_flows::startup`
 after `start_fonts`; `brush_flows::sync_prefs(&mut state)` runs directly before both `prefs::save` calls (`on_exit`,
 `remember_recent`).
+
+**Stickers P6a.** `logic`: in the Sticker view the pen's eraser end runs `pen::sticker_eraser_override` (the sticker
+Eraser and back through `SetStickerTool`; busy also while a canvas drag runs) instead of the paint tools' override.
+`dispatch`: a guarded action ends a canvas drag first (`sticker::cancel_drag`: the moved layer goes back); in the
+Sticker view `run` maps `DeleteSelection` / `DuplicateActiveLayer` / `MergeActiveDown` / `MoveActiveLayer` to the
+sticker's commands (`in_sticker_view`: never a texture layer, never the stamp); `SetViewMode(Sticker)` opens the view on
+the selected stamp (`sticker::enter`), another mode leaves it first (`sticker::leave`, flushing a pending edit);
+`SetStickerTool` and `Sticker(..)` run in `sticker::run`; `validate` also runs `sticker::validate` (the view closes when
+its stamp is gone or the mode was changed under it; the active layer follows undo). `io_flows::install_document` leaves
+the view before a new document comes in.
 
 ### 8.4 GPU layer (`gpu/*`) [A2]
 
@@ -6815,6 +6866,15 @@ Turntable + speed (advances `yaw` by `speed * i.stable_dt`, then `ctx.request_re
 Back (Esc). The Export dialog embeds `preview_widget(.., ViewId::ExportPreview, .., matte)`: the same code path and the same
 composite, with `matte = Some(jpeg_matte)` when the chosen flattened format has `keeps_alpha() == false`. `preview_widget`
 writes its rect into `state.view_rects[id]`.
+
+**Stickers P6a: the Sticker view (8.15).** `central_views` resets `sticker_canvas_rect` every frame and shows
+`sticker::canvas::show` in `ViewMode::Sticker`: `split_rects(area, prefs.sticker_split)` gives `(canvas, divider, 3D)`;
+`split_divider` (now taking the ratio it moves) writes `prefs.sticker_split`; the right half is `view3d::input` +
+`render` of `ViewId::Main3D`. `tools::active_tool(state)` is Navigate in the Sticker view (the paint tool stays in
+`state.tool`): the `ToolController`, the hover cursor and `selected_outline` read it, so the 3D half orbits, pans, zooms
+and picks, and paints nothing. The mode strip has a fifth tab "Sticker" (key 4; enabled with a selected stamp or the
+view open, the disabled tooltip says what to do); the 3D display toggles show in the Sticker view too, and Frame frames
+the 3D half's camera.
 
 ### 8.6 Tools (`tools/*`) [A3]
 
@@ -7555,6 +7615,19 @@ gaps - at_part`): "running off the surface" when `reached_edge`, else "hidden or
 picture lies on the surface, mostly lost to cuts (2 %)" (`lost_cut` 1.96 %, below the cut line's 2 %). The "narrower"
 line names no cause (the room is the cause).
 
+**Stickers P6a (STICKER_PLAN 3.1, 3.2).** In the Sticker view: the tool strip shows the 14 sticker tools
+(`theme::sticker_tool_icon`; a tool that is not built yet is greyed in its icon and says so in its tooltip and the
+status line; buttons shrink to fit 14 plus the colour chip at 600 points); their rects stay in `panel_rects` across the
+side panel's clear (`PanelHit::StickerToolButton`). The lower group's Layers tab is `sticker::layers_ui::show`: the
+active layer's Name, Opacity (`continuous_edit`) and Blend, the rows top = top layer (eye, thumbnail drawn by
+`Document::sticker_layer_thumbnail` / `blob_thumbnail` under the 8.7 policy, name with kind, "clipped", opacity and
+blend, lock; click selects, a drag reorders), the footer New / Add picture... (with "(on the PC)" while a tablet is
+connected) / Duplicate / Up / Down / Delete; it records `LayersList` and `LayersFooter` like the texture layers' tab.
+The Tool tab is `layers_ui::tool_page`: "Sticker <tool> options" (Move: Auto-select layer) and the active layer's X / Y.
+Ways in: "Edit Sticker" on the Tool page of a selected stamp (`PanelHit::StickerEditButton`), Layer > Edit Sticker,
+the row menu of a stamp or text layer, a double-click on its thumbnail, Enter with a stamp selected, View > Sticker and
+the mode strip.
+
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
 ```rust
@@ -8041,11 +8114,31 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
 5. **Order.** `Modifiers::matches_logically` ignores extra Shift and Alt, so `consume_shortcut` for `Ctrl+S` also matches
    Ctrl+Shift+S. The table lists the more specific binding of every such pair first: Ctrl+Shift+S before Ctrl+S, Ctrl+Shift+N
    before Ctrl+N, Ctrl+Shift+Z before Ctrl+Z, Shift+X before X; objects-tabs: Shift+F before F, Shift+H and Alt+H before H.
-   A unit test checks that no entry is shadowed by an earlier one. The table has 40 entries.
+   A unit test checks that no entry is shadowed by an earlier one. The table has 42 entries (stickers P6a: 4 = "Sticker",
+   Enter = "Edit Sticker", both needing a selected stamp).
 6. **Brackets.** `consume_shortcut` matches the *logical* key: Shift+`[` arrives as `Key::OpenCurlyBracket`, Shift+`]` as
    `Key::CloseCurlyBracket`. Hardness is bound to `KeyboardShortcut::new(Modifiers::SHIFT, Key::OpenCurlyBracket)` /
    `Key::CloseCurlyBracket` with `display: Some("Shift+[")` / `Some("Shift+]")`; size to `Key::OpenBracket` / `CloseBracket` with
    `Modifiers::NONE`; layer move to `Modifiers::COMMAND` + the square brackets.
+7. **Stickers P6a: the Sticker view** (STICKER_PLAN 3.3, reviews A12 / B6). A second static table `STICKER_SHORTCUTS`
+   (`sticker_table()`, 31 entries, labels for `sticker_shortcut_text`) and one routing rule: in `ViewMode::Sticker` a
+   chord bound in `STICKER_SHORTCUTS` runs that binding and the global one does not; a chord not bound there runs the
+   global binding unless its label is in `NOT_IN_STICKER` ("Stamp", "Transform": the key is consumed and nothing runs).
+   Implemented as one list, `sticker_order()`: the sticker entries plus the global entries of unbound chords (with the
+   blocked flag), stably sorted by the number of modifiers, so Shift+F (Frame Selection) still precedes the sticker F,
+   Shift+X (Swap Colors) the sticker X. Rules 2-4 apply unchanged (a dialog lets only Esc through; typing skips the
+   keys; Esc and Delete / Backspace stay with an open popup). Outside the view only `table()` is used, exactly as before.
+   Tests: no chord twice, no entry of the routed order shadowed, and one test of every colliding chord in both modes.
+
+| Keys (Sticker view) | Action | Keys (Sticker view) | Action |
+|---|---|---|---|
+| V M L W C | `SetStickerTool(Move, Marquee, Lasso, Wand, Crop)` | B E G I | `SetStickerTool(Brush, Eraser, Fill, Eyedropper)` |
+| Shift+E / Shift+G | `SetStickerTool(MagicEraser / Gradient)` | X / U / H | `SetStickerTool(Text / Shape / Hand)` |
+| F | `Sticker(Fit)` (Shift+F stays Frame Selection) | S, R | blocked (`NOT_IN_STICKER`) |
+| Delete, Backspace | `Sticker(DeleteKey)`: clears a selection (P7b), else the status line "Select an area first, or use Delete Layer"; never the stamp | Esc | `Sticker(Escape)`: a canvas drag, then dialog / tool / pending edit (`Cancel`), then the selection, then leave |
+| Enter | `Sticker(EnterKey)` (crop, lasso: P7b, P8) | Ctrl+J / Ctrl+M | `Sticker(DuplicateLayer(None) / MergeDown(None))` |
+| Ctrl+`]` / Ctrl+`[` | `Sticker(MoveLayer(None, +1 / -1))` | arrows / Shift+arrows | `Sticker(Nudge)` by 1 / 10 pixels |
+| T, 1 2 3 4 F5, `[` `]` Shift+`[` Shift+`]`, D, Shift+X, Ctrl+Z ... | the global bindings (fall through) | Ctrl+A, Ctrl+D, Ctrl+Shift+I | selections, added by P7b |
 
 | Keys | Action (`AppAction`) | Keys | Action (`AppAction`) |
 |---|---|---|---|
@@ -8059,6 +8152,7 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
 | Ctrl+`]` / Ctrl+`[` | `MoveActiveLayer(+1 / -1)` | D / Shift+X | `ResetColors` / `SwapColors` |
 | Esc | `Cancel` | Space+drag, MMB | Pan (read by the views as "Space held"; not a table entry) |
 | H / Shift+H | `HideSelectedObjects` / `IsolateSelectedObjects` (objects-tabs) | Alt+H / Shift+F | `ShowAllObjects` / `FrameSelection` (objects-tabs) |
+| 4 | `SetViewMode(Sticker)` (stickers P6a; with a selected stamp) | Enter | `Sticker(Enter(None))` "Edit Sticker" (with a selected stamp) |
 
 `action_label`s (the `label` argument of `shortcut_text`, as implemented): "New from Model...", "Open Project...", "Save",
 "Save As...", "Export...", "Undo", "Redo", "Delete", "Cancel", "3D", "2D", "Split", "Preview", "Texture on Model", "Wireframe",
@@ -8097,18 +8191,20 @@ pub struct Scratch { pub values: BTreeMap<&'static str, u64>,
                      pub out_stem: PathBuf /* OUT without ".png"; scenario files go to "<out_stem>_assets", "<out_stem>_export", "<out_stem>.wtep" */ }
 pub enum Step {
     Do(AppAction),
-    Pointer { view: ViewId, path: Vec<[f32; 2]> /* normalized 0..1 in the view rect */, button: egui::PointerButton,
+    /// Stickers P6a: `view` is a `Target { View(ViewId), StickerCanvas }` (`From<ViewId>`; the sticker canvas is not a
+    /// view, its rect is `AppState::sticker_canvas_rect`), for Pointer, Click, Scroll, Hover and Pen.
+    Pointer { view: Target, path: Vec<[f32; 2]> /* normalized 0..1 in the target's rect */, button: egui::PointerButton,
               mods: egui::Modifiers, points_per_frame: usize },
-    Click { view: ViewId, at: [f32; 2], button: egui::PointerButton, mods: egui::Modifiers },
+    Click { view: Target, at: [f32; 2], button: egui::PointerButton, mods: egui::Modifiers },
     /// Primary button: press at the first point, one move per frame, release at the last; screen points (panel controls,
     /// e.g. the Layers rows of `state.panel_rects`). One point = a click.
     ScreenPointer { path: Vec<egui::Pos2> },
     /// Export-select: one click at a screen position with any button and modifiers (`click_frames`): Ctrl / Shift-click
     /// and the right-click on a Layers row, a click on an item of the row's context menu.
     ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
-    Scroll { view: ViewId, at: [f32; 2], notches: f32, mods: egui::Modifiers },
+    Scroll { view: Target, at: [f32; 2], notches: f32, mods: egui::Modifiers },
     /// Round 4 (S2): one `Event::PointerMoved` to the point (normalized in the view rect), no button.
-    Hover { view: ViewId, at: [f32; 2] },
+    Hover { view: Target, at: [f32; 2] },
     Key(egui::Modifiers, egui::Key),
     /// Branch pen-input: a recorded Windows Ink pen fed in-process (`pen_frames`): per sample the events egui-winit makes
     /// for a pen (`Touch` with winit's force, then `PointerMoved` / `PointerButton` / `PointerGone`) and the window
@@ -8116,10 +8212,13 @@ pub enum Step {
     /// follows the last one, a Leave record (no event) ends the step. Hover runs and contact moves go `points_per_frame`
     /// to a frame, Down / Up / Leave get a frame each. Fixed touch id / pointer id 77. `at` is normalized in the view
     /// rect; values outside 0..1 reach the panels (the scenario taps a Layers row this way).
-    Pen { view: ViewId, samples: Vec<PenPoint /* at: [f32; 2], pressure: f32 */>, inverted: bool, barrel: bool, points_per_frame: usize },
+    Pen { view: Target, samples: Vec<PenPoint /* at: [f32; 2], pressure: f32 */>, inverted: bool, barrel: bool, points_per_frame: usize },
     /// Window inner size in physical pixels: one `ViewportCommand::InnerSize(size / pixels_per_point)`, then 10 frames.
     Resize([u32; 2]),
     WaitFrames(u32),
+    /// Stickers P6a (review A14): keeps ticking until `n` ms of wall-clock time have passed (`Active::WaitUntil`); what
+    /// follows asserts state (history length, cache hash, a watcher's counter), never a frame count.
+    WaitMs(u64),
     WaitIdle,
     /// Direct state preparation or bookkeeping: register the sample stamp image as a blob, write asset files, remember a
     /// hash in `Scratch`.
@@ -8131,8 +8230,10 @@ pub enum Step {
     Dyn(&'static str, fn(&AppState, &Scratch) -> Result<Vec<Step>, String>),
     Screenshot,
     /// Round 4 (gate 1): a named mid-run capture written to `<out_stem>_<name>.png`; `OUT.png` stays the final
-    /// `Screenshot` (`brush_shape` and `text_tab` keep their hover frame as `<out>_hover.png`).
-    Shot(&'static str),
+    /// `Screenshot` (`brush_shape` and `text_tab` keep their hover frame as `<out>_hover.png`). Stickers P6a (review
+    /// B15): `expect` says what the picture must show; every shot's `{ name, expect }` goes into `OUT.json` ("shots");
+    /// the scenario-count test fails a sticker scenario whose shot has no `expect` (older scenarios pass "").
+    Shot { name: &'static str, expect: &'static str },
     /// Round 5: switches the runner's wait for pending Final stamp bakes after input and `Do` steps off (false) and on
     /// (true, the default); `WaitIdle` always waits for them.
     BakeWait(bool),
@@ -8201,7 +8302,7 @@ pointer step ends only when its stroke is complete, however long its paint trail
   `gpu.device.poll(wgpu::PollType::Poll)` (required to fire the readback) and `rx.try_recv()`. On receipt: force alpha to 255,
   `wte_core::image_io::encode_png(w, h, img.as_raw(), PngLevel::Balanced)`, write `OUT.png` and `OUT.json`
   (`{ "scenario", "ok", "frames", "requested_size": [w, h], "size": [w, h] /* of the captured image */, "size_clamped",
-  "errors": [..] }`), then `ViewportCommand::Close` with `allow_close = true`.
+  "errors": [..], "shots": [{ "name", "expect" }] /* stickers P6a */ }`), then `ViewportCommand::Close` with `allow_close = true`.
 - **Exit codes** (stored in the shared `AtomicI32`; `main` calls `std::process::exit(code)` after `run_native` returns): `0` ok;
   `2` a failed `Setup` / `Assert` / `Dyn`, or `state.toasts.error_count()` grew during the scenario (the remaining steps are
   skipped, a capture is still attempted); `3` timeout (a step takes longer than 30 s, or the run longer than 180 s, wall
@@ -8286,6 +8387,7 @@ counted down) instead of failing (`export_errors`).
 | `objects_flow_path` PATH | objects-tabs completeness critic (`selftest/scenarios/objects.rs`). PATH = a model with several objects whose largest-footprint object (the board) has a texture set of its own (gate: `ABeautifulGame.glb`). The user's workflow: the board (largest x/z footprint) hidden from its row (revealed) with H; the piece (first object named "pawn", else the largest other one) selected from its row, Shift+F; a Navigate click where only the hidden board is, then on the piece; Brush (green, +2 size steps): a stroke from the piece's centre out to a point whose ray hits the board when shown and nothing now (`Shot("piece_selected")`); a projected image stamp (size 0.4) on the piece; a wrapped stamp with "jump small gaps" low on the piece; a text on the piece; Navigate (`Shot("designed")`), Preview (`Shot("preview")`); Save As, reopen (`Shot("reopened")`); export the piece's paint layer (per-layer PNG) and every set's flattened PNG; Show all; then the piece hidden and a 6 px stroke on its screen centre | the board-only sets exist; rays straight down over the board hit it when shown, none while hidden (also after the reopen); hiding is view state; the miss deselects, the pick selects the piece; the stroke changes the piece's sets and one undo entry; every stamp / text inks the piece's sets and no layer of a board-only set; the wrapped stamp is a new Wrap placement with jump gaps; the board-only sets' composites never change while it is hidden; the tint is shown with Navigate; after the reopen: the board hidden, one toast names it, not modified, nothing selected, structure and composites as saved; the layer PNG equals the layer and has ink; 15 flattened PNGs verified (`verify_export`, the hidden board's set included); Show all brings the board's ray hits back; with the piece hidden the stroke paints the object behind it (sets disjoint from the piece's), leaves the piece's sets unchanged and ends with "Brush Stroke" |
 | `pen` | Branch pen-input (`selftest/scenarios/pen.rs`; recorded pen samples through `Step::Pen`, never OS input). The Sphere sample; the brush at 40 texels, hardness 1, flow 1, pressure Size on (min 0), Flow off; in 2D a pen stroke along the row v = 0.5 from u 0.15 to 0.85 with pressure 0.1 -> 1.0 (`Shot("pen_ramp")`); undo; the same path as a mouse `Pointer` and as a pen at pressure 1.0; Size off, Flow on (min 0), flow 0.5: pen strokes at constant 0.2 (v 0.3) and 1.0 (v 0.7); in 3D pen strokes at 0.25 and 1.0, the mouse stroke of the same path, a light stroke beside it (`Shot("pen_3d")`); in 2D a mouse patch, then the inverted pen (two hover samples, a stroke across the patch); a barrel drag in 3D; a pen tap on the name of the Base row; a 3D pen ramp 0.05 -> 1.0 for the final shot; Help > Tablet setup opened (`Shot("tablet_help")`) and closed | no readout before the pen; the 2D column near 20 % of the ramp is less than half as tall as near 90 % and the end column is 40 +- 3 texels; "Pen N %" was the readout in a contact frame; after the Leave no readout, the pen seen; 2D and 3D: pen at 1.0 == mouse (paint hash); the 0.2 row is fainter than the 1.0 row and not empty; 3D: 0 < texels(0.25) < texels(1.0) / 2; the eraser end: the patch centre has alpha 0, the tool was the Eraser in every contact frame, the history label is "Erase", one frame after the step the Brush is back; the barrel drag turned the camera and painted nothing; the tap selected Base; the dialog opens and closes |
 | `companion` | Branch companion (`selftest/scenarios/companion.rs`; loopback only, no Android). Sphere, 2D, brush as `pen`. `CompanionAction::StartTest` (127.0.0.1:0, auto-allow); a `TestClient` thread ("Galaxy Tab S8 Ultra (test)", USB, confirm mode) gets the KEY frame (= the window's surface size); shot `companion_dialog`; a 2D pen ramp 0.1 -> 1.0 (`assert_ramp`, contact frames); an eraser-flag stroke (centre erased, Eraser in every contact frame, Brush back); ACTION Undo (ramp whole); 3D barrel drag (camera turned, no paint); two-finger pinch (camera distance smaller); KEY H + TEXT "h", TEXT "i", Backspace into the Text tool's content field after TEXT_WANTED (content "h"); half a stroke and the cable pulled (no button down, no contact, one undo step, chip "Tablet: waiting"). Each input step waits with `Step::Until` until a FRAME's `last_input_seq` confirms it. Final screenshot: the ramp and the cut-off stroke. |
+| `sticker_view` | Stickers P6a (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; the key 4 opens the Sticker view (shot `sticker_enter`); a second picture layer (a red disc) added; the disc dragged on the canvas (`Step::Pointer` on `Target::StickerCanvas`, shot `sticker_moved`); its opacity 50 %; the Layers tab's Down button (shot `sticker_reordered`); Delete; 900x600 (shot `sticker_small`) and back; four undos and four redos; Revert (button) and its undo; Esc (shot `sticker_left`); four undos | opening changes nothing (image stamp, no entry, composite); the add promotes in one entry and changes the model; the drag moves the disc by the drag (+-1 px) in one entry; opacity and reorder one entry each, each changing the model; Delete leaves stamp and sticker with the status line; at 900x600 canvas, divider and 3D half are laid out and the 14 tool buttons fit; each undo restores the composite of the step before (one undo per step), the redos the last state; Revert gives the image stamp and the start picture in one entry "Revert Sticker", its undo the edited state; Esc returns to the 3D view with the Transform tool; undoing everything gives the start (history length, stamps, composite) |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
 
 Branch `companion`: `Step::Until(label, fn(&AppState, &Scratch) -> Result<bool, String>)` waits, one check per frame
@@ -8365,6 +8467,12 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
     input through the OS (`SendInput` etc.): it goes through `raw_input_hook`.
 22. Branch `companion`: fingers right after the pen are a palm (300 ms hold, `input::PALM_HOLD`); a test that pinches
     right after a pen stroke must wait that long (the `companion` scenario's test tablet does).
+23. Stickers P6a: the UI never keeps an `Arc<StickerDoc>` or a picture `Arc` across frames (a stroke's `Arc::make_mut`
+    would then copy the whole picture at every dab): caches compare by value (`LayerKey`) or by blob id; `Shown` holds
+    the `Arc` only within a frame. A canvas drag is not a `ToolController` interaction: everything that ends
+    interactions must also end it (`sticker::cancel_drag`, dispatch's guard). Key handling stays in `shortcuts::handle`
+    (the sticker table there); the side panel's clear of `panel_rects` keeps the tool strip's `StickerToolButton`
+    entries (the strip is drawn first).
 
 ### 8.14 Tablet companion (`companion/*`, branch `companion`)
 
@@ -8421,6 +8529,67 @@ monitor (`fit_size`); only when the pref allows it and the window is neither max
 **Status.** `AppState::companion: CompanionStatus` (chip text, session, confirm request, code, bound addresses, dialog
 lines, scenario counters) is written by `logic`. The status chip ("Tablet: waiting" / "Tablet: <name> (USB)" /
 "Tablet: pairing"; only while a server runs; planned right after the texture size) opens the dialog.
+
+### 8.15 Sticker view (`sticker/*`, stickers P6a; STICKER_PLAN 3.1-3.3, 3.5, 3.10)
+
+**Opening and leaving.** `sticker::enter(app, stamp)` (the selected stamp for `None`; without one the status line says
+"Select a stamp or a text first ...") flushes a pending edit, cancels a tool interaction and stores
+`Session::sticker_edit`: target `Stamp(id)`, the active layer (a sticker's top layer; the virtual layer 1 of an image
+stamp; none for a text stamp), the last sticker tool, a default camera (fitted on the first draw), `return_mode` (the
+mode it was opened from; a switch between stamps keeps it) and `entry = Document::sticker_checkpoint(&[stamp], &[])`.
+Opening changes nothing in the document. `leave(app, to)` (Done, Esc, another view mode, a new document) cancels a
+canvas drag, flushes a pending edit and returns to `to` or `return_mode`; the paint tool was never changed.
+`validate` (after every dispatch) closes the view when its stamp is gone and keeps the active layer on an existing
+layer (the top one after an undo removed it).
+
+**What is shown (`Shown`).** A sticker stamp (or a tray sticker, P6b): the sticker. An image stamp: a virtual
+`StickerDoc::from_picture` built per frame (no buffer: a blob reference); its first content edit goes through
+`StickerRef::OfStamp(stamp, share_answer or ThisStamp)` and the core promotes inside that edit (one undo step). A text
+stamp: its picture with its stamp styles, read-only, and "Convert to layered sticker" (`convert_text_stamp`). The E6
+question before editing a shared picture is P6b's; until then edits act on the stamp's sticker (all its users).
+
+**Commands** (`StickerAction`, `sticker::run` / `run_in`): every document change is one `Document::set_sticker` (or
+`restore_sticker_state` / `convert_text_stamp`), so one history entry; the labels: "Add Picture Layer", "New Picture
+Layer", "Duplicate Sticker Layer", "Delete Sticker Layer", "Reorder Sticker Layers", "Show / Hide Sticker Layer",
+"Lock / Unlock Sticker Layer", "Sticker Layer Opacity" and "Move Sticker Layer" (Preview calls fold), "Sticker Layer
+Blend", "Rename Sticker Layer", "Nudge Sticker Layer", "Rename Sticker", "Revert Sticker". Rules: a sticker keeps at
+least one layer; a locked layer is not moved or deleted; a new picture layer goes above the active layer, a blob picture
+centred on the artboard (whole pixels), an empty one of the artboard's size; the new or duplicated layer becomes active.
+Merge Down (Ctrl+M) only reports that it is not available yet (P8) and never touches a texture layer. Revert is enabled
+while `differs_from_entry`.
+
+**Canvas** (`canvas.rs`). Header (28 pt): the sticker's name (a field; image / text stamps: the stamp's name),
+Done, Revert, a text stamp's Convert button, and right-aligned the zoom, Fit and 100 % (dropped from the right in a
+narrow canvas). Below it the canvas rect (`AppState::sticker_canvas_rect`, `PanelHit::StickerCanvas`): background,
+an 8-pt checkerboard anchored at the artboard, the picture (`Document::sticker_picture(id, None, 1.0)`, an image stamp's
+`stamp_picture(.., false)`, a text stamp's `stamp_picture(.., true)`) as a texture uploaded only when its `CanvasKey`
+changes (the sticker's artboard, shape and per layer id, visible, opacity, blend, clip and `LayerKey`: compared by value,
+no buffer kept; nearest magnification), the artboard outline, a pixel grid from 800 %, the active picture layer's
+outline. Spans `sticker.canvas` and `sticker.render` in the frame profile. Coordinates: `Geom { origin, size }` of the
+artboard with `Canvas2D` (`uv_to_screen` / `screen_to_uv` with the artboard as the texture).
+
+**Pointer routing** (`handle_input`, gated like the views): a Secondary or Middle press, or a Primary press with Hand
+or Space held, starts a pan (`Canvas2D::pan`); the Move tool's Primary press picks the top layer under the pointer when
+Auto-select is on (`Document::sticker_layer_at`: alpha above 0 at that point, mask applied, hidden layers skipped; the
+virtual image layer wherever the picture is) and drags the active layer: `SetLayerPosition(.., Preview)` with whole-pixel
+deltas while moving, `Final` at the release (a click sends nothing), a release outside the window included; a locked
+layer and a text stamp say why in the status line; a tool that is not built yet says so. The wheel (and the companion's
+pinch, which arrives as wheel events) zooms about the pointer. The companion's gesture mapper gets the canvas rect
+through `companion::finger_views` (review A16): one finger over it is a Secondary drag (pan), two fingers zoom,
+`FingerMode::Mouse` gives the Primary button.
+
+**Keys, pen, tablet.** `STICKER_SHORTCUTS` and the routing rule (8.10). The pen's eraser end selects the sticker Eraser
+(`pen::sticker_eraser_override`, its own memory `PenState::sticker_eraser_restore`). File dialogs ("Add picture...")
+carry "(on the PC)" while a tablet is connected. Every feature has a button: Done, Revert, Fit, 100 %, the footer,
+the eye and lock icons, the X / Y fields (STICKER_PLAN 3.10).
+
+**Tests.** `sticker/tests.rs` (enter / leave keep the mode and change nothing, the split preference, promotion inside
+the add, every layer command one entry with its rules, Delete never deletes the stamp, Revert, the view closing with its
+stamp, a text stamp read-only and converted, the canvas's Move drag one entry, pans and zoom touch only the camera, a
+locked layer and an unbuilt tool, Auto-select), `shortcuts.rs` (the sticker table and every colliding chord in both
+modes), `pen/mod.rs` (the eraser end in the view), `companion/input.rs` (fingers over the canvas), `io_flows.rs` (never
+in `ui_state`), `dispatch.rs` (the menu commands in the view), `selftest/mod.rs` (`Target`, `WaitMs`, shots), the
+scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1).
 
 ---
 
@@ -9024,6 +9193,9 @@ and text layers (exactly those two files, each = `dense(layer)`).
   picture, MaxCompat-on shape, masks, 16 bit, a flat file, the profile note, Lab refused); ignored
   `k5_link_make_f15_input`. The P4 test `k4_unknown_extra_fields_in_the_new_entries_still_load` now asserts the
   `editor` default.
+- Branch `stickers`, P6a (`doc_stickers_tests.rs`): `k6a_layer_at_and_layer_thumbnail` (the top visible layer under a
+  point, hidden layers skipped, a masked pixel not hit, NaN and outside points none; a layer's thumbnail alone at half
+  scale; no history entry). The app-side tests of the Sticker view are listed in 8.15.
 
 ### 9.2 `wte_app` tests
 

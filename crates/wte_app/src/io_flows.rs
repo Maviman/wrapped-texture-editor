@@ -69,7 +69,8 @@ fn lenient_names<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Ve
 
 impl UiState {
     fn capture(state: &crate::state::AppState, session: &Session) -> UiState {
-        let view_mode = if state.view_mode == ViewMode::Preview { state.last_edit_mode } else { state.view_mode };
+        // Stickers P6a: never Preview, never the Sticker view (the mode it returns to is written).
+        let view_mode = state.remembered_view_mode();
         UiState {
             camera: Some(session.camera),
             preview_camera: Some(session.preview_camera),
@@ -702,6 +703,10 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
     if app.tools.is_busy() {
         app.tools.cancel(&mut app.state);
     }
+    // Stickers P6a: the Sticker view belongs to the document it was opened on.
+    if app.state.view_mode == ViewMode::Sticker {
+        crate::sticker::leave(app, None);
+    }
     // Stamp Preview bakes run throttled by the views (`view::bake_stale_previews`), not inside every drag frame.
     doc.set_defer_preview_bakes(true);
     // Round 5 (R5-1): Final bakes run on a worker (`stamp_bakes`) when the app is in that mode.
@@ -746,6 +751,7 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         object_anchor: None,
         object_selection_rev: 0,
         object_reveal: None,
+        sticker_edit: None,
     };
     if let Some(ui) = restored {
         if let Some(c) = ui.camera.filter(camera_is_sane) {
@@ -760,7 +766,7 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         if let Some(set) = ui.active_set {
             session.active_set = TextureSetId(set);
         }
-        if let Some(mode) = ui.view_mode.filter(|m| *m != ViewMode::Preview) {
+        if let Some(mode) = ui.view_mode.filter(|m| !matches!(m, ViewMode::Preview | ViewMode::Sticker)) {
             app.state.view_mode = mode;
             app.state.last_edit_mode = mode;
         }
@@ -906,6 +912,7 @@ mod tests {
             object_anchor: None,
             object_selection_rev: 0,
             object_reveal: None,
+            sticker_edit: None,
         };
         let ui = UiState::capture(&state, &session);
         let value = serde_json::to_value(&ui).unwrap();
@@ -954,7 +961,24 @@ mod tests {
             object_anchor: None,
             object_selection_rev: 0,
             object_reveal: None,
+            sticker_edit: None,
         }
+    }
+
+    /// Stickers P6a: the Sticker view is never written into the project's view state (the mode it returns to is), and
+    /// a stored "sticker" (which no build writes) is not restored.
+    #[test]
+    fn the_sticker_view_is_never_written_to_the_ui_state() {
+        let (mut state, _, _) = crate::sticker::tests::image_stamp_state(ViewMode::Split);
+        crate::sticker::enter_in(&mut state, None);
+        assert_eq!(state.view_mode, ViewMode::Sticker);
+        let session = state.session.as_ref().unwrap();
+        let ui = UiState::capture(&state, session);
+        assert_eq!(ui.view_mode, Some(ViewMode::Split));
+        let text = serde_json::to_string(&ui).unwrap();
+        assert!(!text.contains("sticker"), "{text}");
+        let read: UiState = serde_json::from_value(serde_json::json!({ "view_mode": "sticker" })).unwrap();
+        assert_eq!(read.view_mode, Some(ViewMode::Sticker), "it reads, and install_document filters it out");
     }
 
     #[test]
@@ -1025,6 +1049,7 @@ mod tests {
             object_anchor: None,
             object_selection_rev: 0,
             object_reveal: None,
+            sticker_edit: None,
         });
         assert_eq!(title_text(&state), "ball - Wrapped Texture Editor");
         let doc = state.doc_mut().unwrap();

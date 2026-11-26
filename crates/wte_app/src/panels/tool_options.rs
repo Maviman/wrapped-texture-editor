@@ -18,7 +18,7 @@ use crate::panels::text_block;
 use crate::panels::toolbar::tool_name;
 use crate::panels::{PanelState, SOURCE_THUMB_SIDE, continuous_edit, from_color32, paint_thumb, percent_slider, to_color32};
 use crate::shortcuts::shortcut_text;
-use crate::state::{AppState, BrushSettings, StampSettings, ToolKind, ViewMode};
+use crate::state::{AppState, BrushSettings, PanelHit, StampSettings, ToolKind, ViewMode};
 
 // Round 6 (R6-2, ROUND6_PLAN 5.1): the hover texts of the "On the model: Project | Wrap" selector and of the two Wrap
 // options.
@@ -326,6 +326,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
     if state.tool != ToolKind::Text {
         state.focus_text_content = false;
     }
+    // Stickers P6a: in the Sticker view the page shows the sticker tool's options.
+    if state.view_mode == ViewMode::Sticker {
+        return crate::sticker::layers_ui::tool_page(ui, state, ps);
+    }
     // Round 6: set again below by whichever options show the two Wrap controls in this frame.
     state.tool_probe.wrap_controls = None;
     let hint = wrong_view_hint(state);
@@ -397,10 +401,26 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
                     }
                 });
             }
+            // Stickers P6a (STICKER_PLAN 3.1): the selected stamp opens in the Sticker view.
+            if let Some(stamp) = selected_stamp(state) {
+                edit_sticker_button(ui, state, stamp.id, &mut actions);
+            }
             state.actions.extend(actions);
         });
     });
     out.response.rect
+}
+
+/// Stickers P6a: "Edit Sticker" for the selected stamp (its rect is `PanelHit::StickerEditButton`).
+fn edit_sticker_button(ui: &mut egui::Ui, state: &mut AppState, stamp: wte_core::StampId, actions: &mut Vec<AppAction>) {
+    let key = shortcut_text(ui.ctx(), "Sticker");
+    let resp = ui
+        .button("Edit Sticker")
+        .on_hover_text(format!("Open the stamp in the Sticker view: layers, picture and text, with the model beside it ({key})"));
+    state.panel_rects.insert(PanelHit::StickerEditButton, resp.rect);
+    if resp.clicked() {
+        actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(Some(stamp))));
+    }
 }
 
 /// Start of every wrong-view hint (so a stale one in the status bar is recognised and cleared).

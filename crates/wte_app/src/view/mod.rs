@@ -57,6 +57,7 @@ pub fn central(ui: &mut egui::Ui, cx: &mut ViewCx<'_>) {
 fn central_views(ui: &mut egui::Ui, cx: &mut ViewCx<'_>) {
     let full = ui.available_rect_before_wrap();
     cx.state.view_rects.clear();
+    cx.state.sticker_canvas_rect = None;
     cx.state.hover = Default::default();
     cx.tools.begin_frame();
     cx.tools.set_clock(ui.input(|i| i.time));
@@ -81,12 +82,13 @@ fn central_views(ui: &mut egui::Ui, cx: &mut ViewCx<'_>) {
         ViewMode::Preview => show_preview_mode(ui, cx, area),
         ViewMode::View3D => show_3d(ui, cx, area),
         ViewMode::View2D => show_2d(ui, cx, area),
+        ViewMode::Sticker => crate::sticker::canvas::show(ui, cx, area),
         ViewMode::Split => {
             let (left, divider, right) = split_rects(area, cx.state.split_ratio);
             // Phase A: input of both views, so neither lags the other by a frame.
             view3d::input(ui, cx, left);
             let image = view2d::input(ui, cx, right);
-            split_divider(ui, cx.state, area, divider);
+            split_divider(ui, &mut cx.state.split_ratio, area, divider);
             // Phase B: one scene sync, then both renders.
             if sync_scene(cx, false) {
                 view3d::render(ui, cx, left);
@@ -101,8 +103,9 @@ pub(crate) fn input_gated(state: &AppState) -> bool {
     state.busy.as_ref().is_some_and(|b| b.modal) || !matches!(state.dialog, Dialog::None)
 }
 
-/// `(3D rect, divider rect, 2D rect)` of the Split layout.
-fn split_rects(area: egui::Rect, ratio: f32) -> (egui::Rect, egui::Rect, egui::Rect) {
+/// `(3D rect, divider rect, 2D rect)` of the Split layout (stickers P6a: also `(canvas, divider, 3D)` of the Sticker
+/// view).
+pub(crate) fn split_rects(area: egui::Rect, ratio: f32) -> (egui::Rect, egui::Rect, egui::Rect) {
     let ratio = if ratio.is_finite() { ratio.clamp(SPLIT_LIMITS.0, SPLIT_LIMITS.1) } else { 0.5 };
     let x = (area.min.x + area.width() * ratio).round();
     let half = DIVIDER_WIDTH * 0.5;
@@ -112,13 +115,13 @@ fn split_rects(area: egui::Rect, ratio: f32) -> (egui::Rect, egui::Rect, egui::R
     (left, divider, right)
 }
 
-/// The draggable divider of the Split layout.
-fn split_divider(ui: &mut egui::Ui, state: &mut AppState, area: egui::Rect, divider: egui::Rect) {
+/// The draggable divider of the Split layout (stickers P6a: also of the Sticker view); `ratio` is the left share.
+pub(crate) fn split_divider(ui: &mut egui::Ui, ratio: &mut f32, area: egui::Rect, divider: egui::Rect) {
     let response = ui.allocate_rect(divider, egui::Sense::DRAG).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     if response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         let delta = response.drag_delta().x / area.width().max(1.0);
-        state.split_ratio = (state.split_ratio + delta).clamp(SPLIT_LIMITS.0, SPLIT_LIMITS.1);
+        *ratio = (*ratio + delta).clamp(SPLIT_LIMITS.0, SPLIT_LIMITS.1);
     }
     let visuals = ui.visuals();
     let color = if response.hovered() || response.dragged() {
@@ -144,12 +147,23 @@ fn mode_strip(ui: &mut egui::Ui, state: &mut AppState, strip: egui::Rect) {
             (ViewMode::View2D, "2D", "2D (UV) view of the texture"),
             (ViewMode::Split, "Split", "3D and 2D side by side"),
             (ViewMode::Preview, "Preview", "Clean preview of the result before export"),
+            (ViewMode::Sticker, "Sticker", "Edit the selected stamp as a layered sticker, with the model beside it"),
         ];
+        // Stickers P6a: the Sticker tab needs a selected stamp (or the open editor).
+        let can_sticker = state.view_mode == ViewMode::Sticker
+            || state.session.as_ref().is_some_and(|s| s.selected_stamp.is_some_and(|id| s.doc.stamp(id).is_some()));
         for (mode, label, tip) in tabs {
             let shortcut = crate::shortcuts::shortcut_text(ui.ctx(), label);
             let tip = if shortcut.is_empty() { tip.to_owned() } else { format!("{tip} ({shortcut})") };
-            let enabled = has_doc || mode != ViewMode::Preview;
-            let response = ui.add_enabled(enabled, egui::Button::selectable(state.view_mode == mode, label)).on_hover_text(tip);
+            let enabled = match mode {
+                ViewMode::Preview => has_doc,
+                ViewMode::Sticker => can_sticker,
+                _ => true,
+            };
+            let response = ui
+                .add_enabled(enabled, egui::Button::selectable(state.view_mode == mode, label))
+                .on_hover_text(tip)
+                .on_disabled_hover_text(crate::sticker::NO_STAMP_HINT);
             if response.clicked() && state.view_mode != mode {
                 state.push(AppAction::SetViewMode(mode));
             }
@@ -210,7 +224,7 @@ struct DisplayToggle {
 /// The display toggles of the current view mode, in strip order.
 fn display_toggles(ctx: &egui::Context, state: &AppState) -> Vec<DisplayToggle> {
     let mut out = Vec::new();
-    let show_3d_toggles = matches!(state.view_mode, ViewMode::View3D | ViewMode::Split);
+    let show_3d_toggles = matches!(state.view_mode, ViewMode::View3D | ViewMode::Split | ViewMode::Sticker);
     let show_2d_toggles = matches!(state.view_mode, ViewMode::View2D | ViewMode::Split);
     if show_3d_toggles {
         let shortcut = crate::shortcuts::shortcut_text(ctx, "Texture on Model");
@@ -472,7 +486,7 @@ pub(crate) fn route_pointer(ui: &egui::Ui, cx: &mut ViewCx<'_>, view: ViewId, re
 
 /// Cursor shape over an editing view for the active tool.
 fn hover_cursor(ui: &egui::Ui, state: &AppState) {
-    let icon = match state.tool {
+    let icon = match crate::tools::active_tool(state) {
         ToolKind::Navigate => egui::CursorIcon::Grab,
         ToolKind::Transform => return, // the transform tool sets its own cursor over the gizmo
         _ => egui::CursorIcon::Crosshair,
@@ -673,7 +687,7 @@ pub(crate) fn wrapped_outline_in_2d(doc: &Document, id: wte_core::StampId, set: 
 pub(crate) fn selected_outline(state: &AppState, xf: &ViewXform, painter: &egui::Painter) {
     let Some(session) = state.session.as_ref() else { return };
     let Some(stamp) = session.selected_stamp.and_then(|id| session.doc.stamp(id)) else { return };
-    let gizmo_here = state.tool == ToolKind::Transform
+    let gizmo_here = crate::tools::active_tool(state) == ToolKind::Transform
         && match &stamp.placement {
             Placement::Projected(_) => xf.is_3d,
             Placement::Uv(u) => !xf.is_3d && u.set == session.active_set,

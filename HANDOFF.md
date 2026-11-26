@@ -80,8 +80,11 @@ and a log `<out>.log`. Scenario names (`crates/wte_app/src/selftest/scenarios.rs
 import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_path stamp_edge_path pan2d
 brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
-save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen` (52; `scenarios::tests` checks
-the count; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2)
+save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
+companion_host sticker_view` (55; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
+what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
+`stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
+`sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`)
 
 `*_path` scenarios need a PATH argument (a model); `objects_path` needs a model with **several objects** (gate:
 `ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model; `objects_flow_path` (the whole user workflow: hide the board,

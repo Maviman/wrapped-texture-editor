@@ -11,7 +11,7 @@ use wte_core::{
     BlendMode, CloseMode, Commit, ExportOptions, LayerId, Placement, SampleKind, StampId, StampSource, TextureSetId,
 };
 
-use crate::state::{CameraPreset, Dialog, Pending, ShadingMode, ToolKind, ViewMode};
+use crate::state::{CameraPreset, Dialog, Pending, ShadingMode, StickerTool, ToolKind, ViewMode};
 
 /// One command.
 ///
@@ -171,6 +171,12 @@ pub enum AppAction {
 
     // ---- tablet companion (branch `companion`; logic in `companion/mod.rs`) ----
     Companion(crate::companion::CompanionAction),
+
+    // ---- stickers (STICKER_PLAN 3; logic in `sticker/mod.rs`) ----
+    /// The tool of the Sticker view (its tool strip, `STICKER_SHORTCUTS`, the pen's eraser end).
+    SetStickerTool(StickerTool),
+    /// Every other command of the Sticker view.
+    Sticker(crate::sticker::StickerAction),
 }
 
 /// Severity of a toast.

@@ -71,7 +71,7 @@ pub(super) fn objects() -> Vec<Step> {
             selection_is(s, &[CUBE])?;
             panel_rect(s, PanelHit::ObjectRow(CUBE)).map(|_| ())
         }),
-        Step::Shot("selected"),
+        Step::Shot { name: "selected", expect: "" },
         // (3) The ray through that point hits the Cube; the document's revision, modified flag and history.
         Step::Setup("remember the ray through the Cube and the document state", |s, sc| {
             let xf = view_xf(s, ViewId::Main3D)?;
@@ -98,10 +98,10 @@ pub(super) fn objects() -> Vec<Step> {
         }),
         Step::Do(AppAction::ToggleWireframe),
         Step::WaitFrames(3),
-        Step::Shot("hidden"),
+        Step::Shot { name: "hidden", expect: "" },
         Step::Do(AppAction::SetViewMode(ViewMode::View2D)),
         Step::WaitFrames(3),
-        Step::Shot("hidden_2d"),
+        Step::Shot { name: "hidden_2d", expect: "" },
         Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
         Step::Do(AppAction::ToggleWireframe),
         Step::WaitFrames(3),
@@ -208,7 +208,7 @@ pub(super) fn objects() -> Vec<Step> {
             }
             Ok(())
         }),
-        Step::Shot("shown"),
+        Step::Shot { name: "shown", expect: "" },
         // (8) A click on the Ball's row, Shift+H isolates it, Shift+F frames it.
         Step::Setup("the Objects tab", |s, _| {
             s.upper_tab = UpperTab::Objects;
@@ -241,7 +241,7 @@ pub(super) fn objects() -> Vec<Step> {
             }
             Ok(())
         }),
-        Step::Shot("isolated"),
+        Step::Shot { name: "isolated", expect: "" },
         // (9) The Floor's eye shows the Floor; the selection stays.
         Step::Dyn("click the Floor's eye", |s, _| hit_click(s, PanelHit::ObjectEye(FLOOR), egui::Modifiers::NONE)),
         Step::WaitFrames(3),
@@ -510,7 +510,7 @@ pub(super) fn objects_path(has_path: bool) -> Vec<Step> {
             }
             Ok(())
         }),
-        Step::Shot("isolated"),
+        Step::Shot { name: "isolated", expect: "" },
         // (4) Scroll the list back to the top, then a Navigate click on the last object selects it and reveals its row.
         Step::Setup("scroll the list to the top", |s, _| {
             s.session.as_mut().ok_or("no session")?.object_reveal = Some(0);
@@ -663,7 +663,7 @@ pub(super) fn objects_flow_path(has_path: bool) -> Vec<Step> {
             log::info!("objects_flow_path: board hidden: {on_big} of {total} ray hits on the board");
             if on_big != 0 { Err(format!("{on_big} rays down still hit the hidden board")) } else { Ok(()) }
         }),
-        Step::Shot("board_hidden"),
+        Step::Shot { name: "board_hidden", expect: "" },
         // (3) The piece: its row (revealed), Shift+F.
         Step::Setup("reveal the piece's row", |s, sc| {
             s.session.as_mut().ok_or("no session")?.object_reveal = Some(remembered(sc, "piece")? as u32);
@@ -710,7 +710,7 @@ pub(super) fn objects_flow_path(has_path: bool) -> Vec<Step> {
         }),
         Step::WaitFrames(3),
         Step::Assert("the pick selected the piece", |s, sc| selection_is(s, &[remembered(sc, "piece")? as u32])),
-        Step::Shot("piece_selected"),
+        Step::Shot { name: "piece_selected", expect: "" },
         // (6) The brush stroke: the piece's sets change, the board's do not; one undo entry.
         Step::Setup("remember the piece's sets and the history", |s, sc| {
             let doc = doc_of(s)?;
@@ -844,12 +844,12 @@ pub(super) fn objects_flow_path(has_path: bool) -> Vec<Step> {
             hidden_are(s, &[remembered(sc, "big")? as u32])?;
             if crate::view::view3d::highlight_shown(s) { Ok(()) } else { Err("the selection tint is not shown with Navigate".to_owned()) }
         }),
-        Step::Shot("designed"),
+        Step::Shot { name: "designed", expect: "" },
         // (10) Preview with the selection (no tint there, the board left out).
         Step::Do(AppAction::SetViewMode(ViewMode::Preview)),
         Step::WaitIdle,
         Step::WaitFrames(30),
-        Step::Shot("preview"),
+        Step::Shot { name: "preview", expect: "" },
         Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
         Step::WaitIdle,
         Step::WaitFrames(3),
@@ -900,7 +900,7 @@ pub(super) fn objects_flow_path(has_path: bool) -> Vec<Step> {
             }
             board_untouched(s, sc)
         }),
-        Step::Shot("reopened"),
+        Step::Shot { name: "reopened", expect: "" },
         // (12) Export one layer (the piece's paint layer), then every set's flattened PNG: hiding changes no export.
         Step::Dyn("export the piece's paint layer", |s, sc| {
             let dir = fresh_out_dir(sc, "_export_layer")?;

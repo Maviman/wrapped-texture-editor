@@ -32,6 +32,11 @@ pub fn dispatch(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
     // Interaction guard: a command never meets an open stroke or a half-finished gizmo drag. Save and Export finish
     // it (the file gets what the user sees); Undo discards it (round 4: also a released brush stroke that is still
     // being painted, FEATURE_BRUSH 5.10); every other command cancels it, which completes such a finishing stroke.
+    // Stickers P6a: a drag on the sticker canvas is no `ToolController` interaction; a document command ends it the
+    // same way (the moved layer goes back; its own Final at the release comes after the drag has ended).
+    if needs_interaction_guard(&action) && app.state.sticker_ui.busy() {
+        crate::sticker::cancel_drag(&mut app.state);
+    }
     if needs_interaction_guard(&action) && app.tools.is_busy() {
         if finishes_interaction(&action) {
             app.tools.finish(&mut app.state);
@@ -105,6 +110,8 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
         | A::UpdateStampSource(_, _, commit)
         | A::UpdateStampPlacement(_, _, commit)
         | A::UpdateStampTint(_, _, commit) => *commit == Commit::Final,
+        // Stickers P6a: the editor's document commands.
+        A::Sticker(s) => s.changes_document(),
         _ => false,
     }
 }
@@ -269,6 +276,21 @@ fn validate(app: &mut WteApp) {
     if let Some(session) = app.state.session.as_mut() {
         session.validate();
     }
+    // Stickers P6a: the Sticker view follows its stamp and its layers.
+    crate::sticker::validate(app);
+}
+
+/// Stickers P6a (STICKER_PLAN 3.3): in the Sticker view the layer commands of the Layer and Edit menus act on the
+/// active sticker layer, never on a texture layer, and Delete never deletes the stamp.
+fn in_sticker_view(action: AppAction) -> AppAction {
+    use crate::sticker::StickerAction as S;
+    match action {
+        AppAction::DeleteSelection => AppAction::Sticker(S::DeleteKey),
+        AppAction::DuplicateActiveLayer => AppAction::Sticker(S::DuplicateLayer(None)),
+        AppAction::MergeActiveDown => AppAction::Sticker(S::MergeDown(None)),
+        AppAction::MoveActiveLayer(delta) => AppAction::Sticker(S::MoveLayer(None, delta)),
+        other => other,
+    }
 }
 
 /// `tools.cancel` when an interaction is running (a no-op otherwise).
@@ -279,7 +301,7 @@ fn cancel_tool(app: &mut WteApp) {
 }
 
 /// Turns a rejected core command into a warning toast; `Some(value)` on success.
-fn edited<T>(state: &mut AppState, result: Result<T, EditError>) -> Option<T> {
+pub(crate) fn edited<T>(state: &mut AppState, result: Result<T, EditError>) -> Option<T> {
     match result {
         Ok(v) => Some(v),
         Err(e) => {
@@ -340,7 +362,7 @@ fn ask_unsaved(app: &mut WteApp, pending: &Pending) -> bool {
 
 /// Resolves an `Option<PathBuf>` action argument: `Some` is used as is, `None` opens the native dialog (never in
 /// self-test mode). A picked path updates `prefs.last_dir`.
-fn resolve_path(
+pub(crate) fn resolve_path(
     app: &mut WteApp,
     path: Option<PathBuf>,
     pick: impl FnOnce(&crate::state::Prefs) -> Option<PathBuf>,
@@ -515,7 +537,7 @@ fn step_brush_size(size: f32, steps: i32) -> f32 {
 }
 
 /// Selects a stamp and makes its layer in its home set the active layer there (8.2).
-fn select_stamp(state: &mut AppState, id: Option<wte_core::StampId>) {
+pub(crate) fn select_stamp(state: &mut AppState, id: Option<wte_core::StampId>) {
     let Some(session) = state.session.as_mut() else { return };
     session.selected_stamp = id;
     let Some(id) = id else { return };
@@ -542,7 +564,7 @@ fn fit_uv_view(state: &mut AppState) {
 }
 
 /// Reads and registers a stamp image; `None` (after the error toast and message) when it fails.
-fn add_stamp_image(app: &mut WteApp, path: &Path) -> Option<(wte_core::BlobId, String)> {
+pub(crate) fn add_stamp_image(app: &mut WteApp, path: &Path) -> Option<(wte_core::BlobId, String)> {
     let name = file_name_of(path);
     let bytes: Arc<[u8]> = match std::fs::read(path) {
         Ok(b) => b.into(),
@@ -601,6 +623,7 @@ fn texture_choices(choices: &[SetChoiceUi]) -> Result<Vec<TextureChoice>, String
 
 fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
     use AppAction as A;
+    let action = if app.state.view_mode == ViewMode::Sticker { in_sticker_view(action) } else { action };
     match action {
         // ---- file ----
         A::NewFromModel(p) => run_pending(app, Pending::NewFromModel(p), frame, true),
@@ -790,6 +813,15 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
             if mode == ViewMode::Preview && app.state.session.is_none() {
                 return;
             }
+            // Stickers P6a: the Sticker view opens on the selected stamp; another mode leaves it first (its return
+            // mode becomes the mode Preview goes back to).
+            if mode == ViewMode::Sticker {
+                crate::sticker::enter(app, None);
+                return;
+            }
+            if app.state.view_mode == ViewMode::Sticker {
+                crate::sticker::leave(app, None);
+            }
             cancel_tool(app);
             if mode == ViewMode::Preview {
                 if let Some(doc) = app.state.doc_mut() {
@@ -824,7 +856,7 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
                 // objects-tabs: the visible objects (the whole model when nothing is hidden).
                 let bounds = session.doc.visible_bounds();
                 match mode {
-                    ViewMode::View3D | ViewMode::Split => session.camera.frame(bounds),
+                    ViewMode::View3D | ViewMode::Split | ViewMode::Sticker => session.camera.frame(bounds),
                     ViewMode::Preview => session.preview_camera.frame(bounds),
                     ViewMode::View2D => {}
                 }
@@ -992,6 +1024,17 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::CancelJob => app.jobs.cancel_modal(),
         A::Toast(level, text) => app.state.toasts.push(level, text),
         A::Companion(c) => companion_command(app, c, frame),
+
+        // ---- stickers (P6a) ----
+        A::SetStickerTool(tool) => {
+            crate::sticker::cancel_drag(&mut app.state);
+            if let Some(edit) = crate::sticker::edit_mut(&mut app.state) {
+                edit.tool = tool;
+                app.state.sticker_ui.last_tool = tool;
+                app.state.status_hint.clear();
+            }
+        }
+        A::Sticker(s) => crate::sticker::run(app, s, frame),
     }
 }
 
@@ -1121,6 +1164,22 @@ mod tests {
         ] {
             assert!(!needs_interaction_guard(&a), "{a:?}");
         }
+    }
+
+    /// Stickers P6a (STICKER_PLAN 3.3): in the Sticker view the Edit menu's Delete and the Layer menu's layer commands
+    /// act on the sticker, never on a texture layer or the stamp; the editor's document commands are guarded.
+    #[test]
+    fn the_sticker_view_maps_the_layer_commands_to_the_sticker() {
+        use crate::sticker::StickerAction as S;
+        let text = |a: AppAction| format!("{:?}", in_sticker_view(a));
+        assert_eq!(text(AppAction::DeleteSelection), format!("{:?}", AppAction::Sticker(S::DeleteKey)));
+        assert_eq!(text(AppAction::DuplicateActiveLayer), format!("{:?}", AppAction::Sticker(S::DuplicateLayer(None))));
+        assert_eq!(text(AppAction::MergeActiveDown), format!("{:?}", AppAction::Sticker(S::MergeDown(None))));
+        assert_eq!(text(AppAction::MoveActiveLayer(-1)), format!("{:?}", AppAction::Sticker(S::MoveLayer(None, -1))));
+        assert_eq!(text(AppAction::Undo), "Undo");
+        assert!(needs_interaction_guard(&AppAction::Sticker(S::AddPictureLayer(None))));
+        assert!(!needs_interaction_guard(&AppAction::Sticker(S::SelectLayer(wte_core::StickerLayerId(1)))));
+        assert!(!needs_interaction_guard(&AppAction::SetStickerTool(crate::state::StickerTool::Hand)));
     }
 
     /// The Sphere sample with two more paint layers: [Base, Paint 1, A, B] bottom to top, B active.

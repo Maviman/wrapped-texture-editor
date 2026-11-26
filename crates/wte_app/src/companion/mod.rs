@@ -375,8 +375,7 @@ impl Companion {
         self.injected_seq = self.injected_seq.max(dropped_seq);
         self.probe_strokes(&msgs);
         let ppp = ctx.pixels_per_point();
-        let views: Vec<egui::Rect> =
-            if matches!(state.dialog, Dialog::None) { state.view_rects.values().copied().collect() } else { Vec::new() };
+        let views = finger_views(state);
         let cx = StageCtx { ppp, views: &views, fingers: state.prefs.companion.fingers, now: Instant::now() };
         let out = self.stage.process(&mut raw.events, &mut state.pen.feed, msgs, &cx);
         if out.last_seq > 0 {
@@ -740,6 +739,15 @@ impl Drop for Companion {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// The rects in which the gesture mapper treats one finger as navigation (8.14, `StageCtx::views`): the views of the
+/// last frame and (stickers P6a, review A16) the sticker canvas, which is not a `ViewId`; none while a dialog is open.
+pub(crate) fn finger_views(state: &AppState) -> Vec<egui::Rect> {
+    if !matches!(state.dialog, Dialog::None) {
+        return Vec::new();
+    }
+    state.view_rects.values().copied().chain(state.sticker_canvas_rect).collect()
 }
 
 /// "USB", "Wi-Fi", "Bluetooth".

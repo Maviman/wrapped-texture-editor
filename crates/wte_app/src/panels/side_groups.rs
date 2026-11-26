@@ -103,7 +103,8 @@ pub(crate) fn with_visible_scroll_bars(ui: &mut egui::Ui) {
 /// The side panel (see the head of this file). Records `state.panel_rects` and `state.side_rects` for the self-test.
 pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState) {
     ps.begin_frame(state);
-    state.panel_rects.clear();
+    // Stickers P6a: the tool strip (drawn before the side panel) keeps the rects of its sticker tool buttons.
+    state.panel_rects.retain(|hit, _| matches!(hit, PanelHit::StickerToolButton(_)));
     // The Text tool asks for the keyboard focus in its content field: that field is on the Tool page (6.4 exception 1).
     // A request left over from another tool is dropped (the Tool page would drop it too, but may not be shown).
     if state.focus_text_content {
@@ -178,6 +179,8 @@ fn lower_group(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, sho
         with_visible_scroll_bars(ui);
         rects.tab_buttons = lower_tab_strip(ui, state, shown);
         match shown {
+            // Stickers P6a: in the Sticker view the Layers tab lists the sticker's layers.
+            SideTab::Layers if state.view_mode == crate::state::ViewMode::Sticker => crate::sticker::layers_ui::show(ui, state, ps),
             SideTab::Layers => layers::show(ui, state, ps),
             SideTab::Brush => {
                 rects.brush_tab = Some(tab_content(ui, "side_brush_tab_scroll", |ui| brush_tab::show(ui, state, ps)));

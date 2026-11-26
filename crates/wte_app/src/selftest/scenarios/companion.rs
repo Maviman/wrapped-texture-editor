@@ -294,7 +294,7 @@ pub(super) fn companion() -> Vec<Step> {
         }),
         Step::Do(AppAction::ShowDialog(Dialog::Companion)),
         Step::WaitIdle,
-        Step::Shot("companion_dialog"),
+        Step::Shot { name: "companion_dialog", expect: "" },
         Step::Do(AppAction::CloseDialog),
         Step::WaitIdle,
         // (2) The 2D ramp from the tablet: thin at 20 %, full width at the end.

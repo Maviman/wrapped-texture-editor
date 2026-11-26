@@ -829,6 +829,51 @@ mod tests {
         events
     }
 
+    /// Stickers P6a (STICKER_PLAN 3.10, review A16): with the sticker canvas registered, one finger over it is a
+    /// Secondary drag and the canvas pans; two fingers pinch-zoom it; "act like the mouse" gives the Primary button,
+    /// which the Move tool takes. The mapper itself is unchanged: it gets the canvas's rect through `finger_views`.
+    #[test]
+    fn fingers_over_the_sticker_canvas_pan_zoom_or_act_like_the_mouse() {
+        use crate::sticker::tests::{CANVAS, canvas_pass, canvas_state};
+        let (mut state, _, geom) = canvas_state();
+        state.sticker_canvas_rect = Some(CANVAS);
+        let views = crate::companion::finger_views(&state);
+        assert!(views.contains(&CANVAS));
+        let c = cx(1.0, &views);
+        let ctx = egui::Context::default();
+        let hit = crate::sticker::canvas::Hit::Image;
+        let mut stage = InputStage::default();
+        let camera = |s: &crate::state::AppState| crate::sticker::edit_of(s).unwrap().camera;
+        // One finger dragging over the canvas: a Secondary drag, the canvas pans.
+        let before = camera(&state);
+        let e = run(&mut stage, vec![touch(1, &[(0, 0, 300.0, 300.0)]), touch(2, &[(0, 1, 320.0, 300.0)])], &c);
+        assert!(e.contains(&button(300.0, 300.0, PointerButton::Secondary, true)), "{e:?}");
+        canvas_pass(&ctx, &mut state, geom, hit, e);
+        let e = run(&mut stage, vec![touch(3, &[(0, 1, 340.0, 310.0)])], &c);
+        canvas_pass(&ctx, &mut state, geom, hit, e);
+        let e = run(&mut stage, vec![touch(4, &[(0, 2, 340.0, 310.0)])], &c);
+        canvas_pass(&ctx, &mut state, geom, hit, e);
+        let after = camera(&state);
+        assert!(after.center_uv != before.center_uv && after.zoom == before.zoom, "{before:?} -> {after:?}");
+        assert!(state.sticker_ui.drag.is_none());
+        // Two fingers pinching out: wheel notches at the centroid, the canvas zooms in.
+        let before = camera(&state);
+        run(&mut stage, vec![touch(5, &[(1, 0, 250.0, 300.0), (2, 0, 350.0, 300.0)])], &c);
+        let e = run(&mut stage, vec![touch(6, &[(1, 1, 200.0, 300.0), (2, 1, 400.0, 300.0)])], &c);
+        canvas_pass(&ctx, &mut state, geom, hit, e);
+        run(&mut stage, vec![touch(7, &[(1, 2, 200.0, 300.0), (2, 2, 400.0, 300.0)])], &c);
+        assert!(camera(&state).zoom > before.zoom, "{:?} -> {:?}", before.zoom, camera(&state).zoom);
+        // "Act like the mouse": one finger is the Primary button: the Move tool starts a drag of the layer.
+        let mouse = StageCtx { fingers: FingerMode::Mouse, ..cx(1.0, &views) };
+        let e = run(&mut stage, vec![touch(8, &[(3, 0, 300.0, 300.0)])], &mouse);
+        assert!(e.contains(&button(300.0, 300.0, PointerButton::Primary, true)), "{e:?}");
+        canvas_pass(&ctx, &mut state, geom, hit, e);
+        assert!(matches!(state.sticker_ui.drag, Some(crate::sticker::CanvasDrag::Move { .. })), "{:?}", state.sticker_ui.drag);
+        let e = run(&mut stage, vec![touch(9, &[(3, 2, 300.0, 300.0)])], &mouse);
+        canvas_pass(&ctx, &mut state, geom, hit, e);
+        assert!(state.sticker_ui.drag.is_none());
+    }
+
     #[test]
     fn one_finger_gestures() {
         let view = [egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(500.0, 500.0))];

@@ -319,7 +319,14 @@ impl eframe::App for WteApp {
         self.state.frame_work.begin();
         // Branch `pen-input` (decision D7): the pen's eraser end switches to the Eraser and back, through the normal
         // `SetTool` dispatch, before the tools and panels see this frame's input.
-        if let Some(tool) = crate::pen::eraser_override(&mut self.state.pen, self.state.tool, self.tools.is_busy()) {
+        // Stickers P6a: in the Sticker view the eraser end selects the sticker Eraser (`SetStickerTool`) instead.
+        if self.state.view_mode == crate::state::ViewMode::Sticker {
+            let busy = self.tools.is_busy() || self.state.sticker_ui.busy();
+            let tool = crate::sticker::tool_of(&self.state);
+            if let Some(tool) = crate::pen::sticker_eraser_override(&mut self.state.pen, tool, busy) {
+                dispatch::dispatch(self, AppAction::SetStickerTool(tool), frame);
+            }
+        } else if let Some(tool) = crate::pen::eraser_override(&mut self.state.pen, self.state.tool, self.tools.is_busy()) {
             dispatch::dispatch(self, AppAction::SetTool(tool), frame);
         }
         // Part G: the "Tablet input" preference takes effect at once (never in a self-test run).

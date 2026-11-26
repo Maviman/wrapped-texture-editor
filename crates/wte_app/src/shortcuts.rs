@@ -6,13 +6,22 @@
 // "Frame Model", the tool names "Navigate", "Brush", "Eraser", "Eyedropper", "Fill", "Stamp", "Text", "Transform",
 // "Smaller Brush", "Larger Brush", "Softer Brush", "Harder Brush", "New Paint Layer", "Duplicate Layer", "Merge Down",
 // "Move Layer Up", "Move Layer Down", "Reset Colors", "Swap Colors"; objects-tabs: "Frame Selection", "Isolate Selected",
-// "Show All", "Hide Selected".
+// "Show All", "Hide Selected"; stickers P6a: "Sticker", "Edit Sticker".
+//
+// Stickers P6a (STICKER_PLAN 3.3, reviews A12 / B6): the second table `STICKER_SHORTCUTS` and one routing rule. In the
+// Sticker view a chord is looked up in `STICKER_SHORTCUTS` first; when it is bound there that binding runs and the
+// global one does not; otherwise the global binding runs unless its label is in `NOT_IN_STICKER`. Outside the Sticker
+// view only the global table is used, exactly as before. Labels of the sticker table (`sticker_shortcut_text`): the
+// sticker tool labels ("Move", "Marquee", ... `StickerTool::label`), "Fit Sticker", "Sticker Delete", "Sticker Esc",
+// "Sticker Enter", "Duplicate Sticker Layer", "Merge Sticker Layer Down", "Move Sticker Layer Up", "Move Sticker Layer
+// Down", "Nudge Left" ... "Nudge Down 10".
 
 use eframe::egui;
 use egui::{Key, KeyboardShortcut, Modifiers};
 
 use crate::action::AppAction;
-use crate::state::{AppState, ToolKind, ViewMode};
+use crate::state::{AppState, StickerTool, ToolKind, ViewMode};
+use crate::sticker::StickerAction;
 
 /// One keyboard shortcut.
 pub struct ShortcutDef {
@@ -47,10 +56,20 @@ fn with_doc(state: &AppState, action: AppAction) -> Option<AppAction> {
     state.session.is_some().then_some(action)
 }
 
+/// Stickers P6a: "Edit Sticker" (Enter) needs a selected stamp.
+fn with_stamp(state: &AppState, action: AppAction) -> Option<AppAction> {
+    state.session.as_ref().filter(|s| s.selected_stamp.is_some_and(|id| s.doc.stamp(id).is_some())).map(|_| action)
+}
+
+/// A command of the Sticker view.
+fn sticker(action: StickerAction) -> Option<AppAction> {
+    Some(AppAction::Sticker(action))
+}
+
 /// The shortcut table, ordered most-specific-first: of every pair that `Modifiers::matches_logically` could confuse
 /// (Ctrl+Shift+S / Ctrl+S, Ctrl+Shift+N / Ctrl+N, Ctrl+Shift+Z / Ctrl+Z, Shift+X / X, Shift+F / F, Shift+H and Alt+H / H)
 /// the more specific one comes first.
-static TABLE: [ShortcutDef; 40] = [
+static TABLE: [ShortcutDef; 42] = [
     // file (fire while typing: they release the focus first, rule 4)
     def("Save As...", CMD_SHIFT, Key::S, None, true, |s| with_doc(s, AppAction::SaveAs(None))),
     def("Save", CMD, Key::S, None, true, |s| with_doc(s, AppAction::Save)),
@@ -74,6 +93,9 @@ static TABLE: [ShortcutDef; 40] = [
     def("2D", NONE, Key::Num2, None, false, |_| Some(AppAction::SetViewMode(ViewMode::View2D))),
     def("Split", NONE, Key::Num3, None, false, |_| Some(AppAction::SetViewMode(ViewMode::Split))),
     def("Preview", NONE, Key::F5, None, true, |s| with_doc(s, AppAction::SetViewMode(ViewMode::Preview))),
+    // Stickers P6a: the Sticker view (4) and "Edit Sticker" on the selected stamp (Enter).
+    def("Sticker", NONE, Key::Num4, None, false, |s| with_stamp(s, AppAction::SetViewMode(ViewMode::Sticker))),
+    def("Edit Sticker", NONE, Key::Enter, None, false, |s| with_stamp(s, AppAction::Sticker(StickerAction::Enter(None)))),
     def("Texture on Model", NONE, Key::T, None, false, |_| Some(AppAction::ToggleTexture)),
     def("Wireframe", NONE, Key::W, None, false, |_| Some(AppAction::ToggleWireframe)),
     def("Frame Selection", SHIFT, Key::F, None, false, |s| with_doc(s, AppAction::FrameSelection)),
@@ -106,6 +128,82 @@ pub fn table() -> &'static [ShortcutDef] {
     &TABLE
 }
 
+const fn tool(label: &'static str, modifiers: Modifiers, key: Key, make: fn(&AppState) -> Option<AppAction>) -> ShortcutDef {
+    def(label, modifiers, key, None, false, make)
+}
+
+/// Stickers P6a (STICKER_PLAN 3.3): the keys of the Sticker view, ordered most-specific-first. They win over the global
+/// table there (`sticker_order`). Ctrl+A / Ctrl+D / Ctrl+Shift+I (selections) come with P7b.
+static STICKER_SHORTCUTS: [ShortcutDef; 31] = [
+    // tools (X is the Text key of both modes)
+    tool("Move", NONE, Key::V, |_| Some(AppAction::SetStickerTool(StickerTool::Move))),
+    tool("Marquee", NONE, Key::M, |_| Some(AppAction::SetStickerTool(StickerTool::Marquee))),
+    tool("Lasso", NONE, Key::L, |_| Some(AppAction::SetStickerTool(StickerTool::Lasso))),
+    tool("Magic Wand", NONE, Key::W, |_| Some(AppAction::SetStickerTool(StickerTool::Wand))),
+    tool("Crop", NONE, Key::C, |_| Some(AppAction::SetStickerTool(StickerTool::Crop))),
+    tool("Brush", NONE, Key::B, |_| Some(AppAction::SetStickerTool(StickerTool::Brush))),
+    tool("Magic Eraser", SHIFT, Key::E, |_| Some(AppAction::SetStickerTool(StickerTool::MagicEraser))),
+    tool("Eraser", NONE, Key::E, |_| Some(AppAction::SetStickerTool(StickerTool::Eraser))),
+    tool("Gradient", SHIFT, Key::G, |_| Some(AppAction::SetStickerTool(StickerTool::Gradient))),
+    tool("Fill", NONE, Key::G, |_| Some(AppAction::SetStickerTool(StickerTool::Fill))),
+    tool("Eyedropper", NONE, Key::I, |_| Some(AppAction::SetStickerTool(StickerTool::Eyedropper))),
+    tool("Text", NONE, Key::X, |_| Some(AppAction::SetStickerTool(StickerTool::Text))),
+    tool("Shape", NONE, Key::U, |_| Some(AppAction::SetStickerTool(StickerTool::Shape))),
+    tool("Hand", NONE, Key::H, |_| Some(AppAction::SetStickerTool(StickerTool::Hand))),
+    // view and edit
+    def("Fit Sticker", NONE, Key::F, None, false, |_| sticker(StickerAction::Fit)),
+    def("Sticker Delete", NONE, Key::Delete, None, false, |_| sticker(StickerAction::DeleteKey)),
+    def("Sticker Delete", NONE, Key::Backspace, None, false, |_| sticker(StickerAction::DeleteKey)),
+    def("Sticker Esc", NONE, Key::Escape, Some("Esc"), false, |_| sticker(StickerAction::Escape)),
+    def("Sticker Enter", NONE, Key::Enter, None, false, |_| sticker(StickerAction::EnterKey)),
+    // the active sticker layer (never a texture layer)
+    def("Duplicate Sticker Layer", CMD, Key::J, None, false, |_| sticker(StickerAction::DuplicateLayer(None))),
+    def("Merge Sticker Layer Down", CMD, Key::M, None, false, |_| sticker(StickerAction::MergeDown(None))),
+    def("Move Sticker Layer Up", CMD, Key::CloseBracket, Some("Ctrl+]"), false, |_| sticker(StickerAction::MoveLayer(None, 1))),
+    def("Move Sticker Layer Down", CMD, Key::OpenBracket, Some("Ctrl+["), false, |_| sticker(StickerAction::MoveLayer(None, -1))),
+    // the Move tool's nudge (Shift: 10 pixels)
+    def("Nudge Left 10", SHIFT, Key::ArrowLeft, None, false, |_| sticker(StickerAction::Nudge(-10, 0))),
+    def("Nudge Right 10", SHIFT, Key::ArrowRight, None, false, |_| sticker(StickerAction::Nudge(10, 0))),
+    def("Nudge Up 10", SHIFT, Key::ArrowUp, None, false, |_| sticker(StickerAction::Nudge(0, -10))),
+    def("Nudge Down 10", SHIFT, Key::ArrowDown, None, false, |_| sticker(StickerAction::Nudge(0, 10))),
+    def("Nudge Left", NONE, Key::ArrowLeft, None, false, |_| sticker(StickerAction::Nudge(-1, 0))),
+    def("Nudge Right", NONE, Key::ArrowRight, None, false, |_| sticker(StickerAction::Nudge(1, 0))),
+    def("Nudge Up", NONE, Key::ArrowUp, None, false, |_| sticker(StickerAction::Nudge(0, -1))),
+    def("Nudge Down", NONE, Key::ArrowDown, None, false, |_| sticker(StickerAction::Nudge(0, 1))),
+];
+
+/// Global entries that never run in the Sticker view (STICKER_PLAN 3.3): a paint tool cannot become active there.
+const NOT_IN_STICKER: [&str; 2] = ["Stamp", "Transform"];
+
+/// The sticker table (tests, the Shortcuts dialog).
+pub fn sticker_table() -> &'static [ShortcutDef] {
+    &STICKER_SHORTCUTS
+}
+
+/// Number of modifiers of a chord (for the most-specific-first order of `sticker_order`).
+fn modifier_count(m: Modifiers) -> u8 {
+    u8::from(m.alt) + u8::from(m.shift) + u8::from(m.ctrl || m.command || m.mac_cmd)
+}
+
+/// The routing rule of the Sticker view as one ordered list: every `STICKER_SHORTCUTS` entry, and every global entry
+/// whose chord the sticker table does not bind (`true` = in `NOT_IN_STICKER`: its key is consumed and nothing runs),
+/// sorted most-specific-first (stable), so Shift+F (Frame Selection) still comes before the sticker F (Fit) and
+/// Shift+X (Swap Colors) before the sticker X (Text).
+pub fn sticker_order() -> &'static [(&'static ShortcutDef, bool)] {
+    static ORDER: std::sync::OnceLock<Vec<(&'static ShortcutDef, bool)>> = std::sync::OnceLock::new();
+    ORDER.get_or_init(|| {
+        let mut order: Vec<(&'static ShortcutDef, bool)> = STICKER_SHORTCUTS.iter().map(|d| (d, false)).collect();
+        for d in table() {
+            if STICKER_SHORTCUTS.iter().any(|s| s.shortcut == d.shortcut) {
+                continue;
+            }
+            order.push((d, NOT_IN_STICKER.contains(&d.action_label)));
+        }
+        order.sort_by_key(|(d, _)| std::cmp::Reverse(modifier_count(d.shortcut.modifiers)));
+        order
+    })
+}
+
 /// Consumes the key presses of this frame and returns the resulting actions; `App::ui` appends them to
 /// `state.actions` after the panels and dialogs have run (8.3).
 pub fn handle(ctx: &egui::Context, state: &mut AppState) -> Vec<AppAction> {
@@ -118,7 +216,16 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) -> Vec<AppAction> {
     let modal_job = state.busy.as_ref().is_some_and(|b| b.modal);
     if !modal_job {
         let dialog_open = !matches!(state.dialog, crate::state::Dialog::None);
-        for def in table() {
+        // Stickers P6a: the routing rule of the Sticker view (`sticker_order`).
+        let in_sticker = state.view_mode == ViewMode::Sticker;
+        let global: Vec<(&ShortcutDef, bool)>;
+        let order: &[(&ShortcutDef, bool)] = if in_sticker {
+            sticker_order()
+        } else {
+            global = table().iter().map(|d| (d, false)).collect();
+            &global
+        };
+        for &(def, blocked) in order {
             let is_esc = def.shortcut.logical_key == Key::Escape;
             if dialog_open && !is_esc {
                 continue;
@@ -129,7 +236,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) -> Vec<AppAction> {
             if is_esc && state.typing_prev {
                 continue; // the first Esc only left the text field (egui cleared the focus before this pass)
             }
-            if popup_open && (is_esc || def.shortcut.logical_key == Key::Delete) {
+            if popup_open && (is_esc || matches!(def.shortcut.logical_key, Key::Delete | Key::Backspace)) {
                 continue; // not consumed: the popup closes on this Esc
             }
             if !ctx.input_mut(|i| i.consume_shortcut(&def.shortcut)) {
@@ -142,6 +249,9 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) -> Vec<AppAction> {
                     ctx.memory_mut(|m| m.surrender_focus(id));
                 }
             }
+            if blocked {
+                continue; // a paint tool cannot become active in the Sticker view
+            }
             if let Some(action) = (def.make)(state) {
                 out.push(action);
             }
@@ -153,8 +263,17 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) -> Vec<AppAction> {
 
 /// The shortcut text of an action label, for menus and tooltips; "" if the label has no binding.
 pub fn shortcut_text(ctx: &egui::Context, label: &str) -> String {
-    table()
-        .iter()
+    text_in(table(), ctx, label)
+}
+
+/// Stickers P6a: the shortcut text of a label of `STICKER_SHORTCUTS` (the tool strip and the menus of the Sticker
+/// view); "" if it has none.
+pub fn sticker_shortcut_text(ctx: &egui::Context, label: &str) -> String {
+    text_in(sticker_table(), ctx, label)
+}
+
+fn text_in(defs: &[ShortcutDef], ctx: &egui::Context, label: &str) -> String {
+    defs.iter()
         .find(|d| d.action_label == label)
         .map(|d| d.display.map_or_else(|| ctx.format_shortcut(&d.shortcut), str::to_owned))
         .unwrap_or_default()
@@ -230,12 +349,14 @@ mod tests {
             (SHIFT, Key::H),
             (ALT, Key::H),
             (NONE, Key::H),
+            (NONE, Key::Num4),
+            (NONE, Key::Enter),
         ] {
             assert!(find(m, k).is_some(), "missing binding {m:?} {k:?}");
         }
         let text_ok: Vec<_> = table().iter().filter(|d| d.text_ok).map(|d| d.action_label).collect();
         assert_eq!(text_ok, ["Save As...", "Save", "New from Model...", "Open Project...", "Export...", "Preview"]);
-        assert_eq!(table().len(), 40);
+        assert_eq!(table().len(), 42);
     }
 
     /// objects-tabs: H, Shift+H, Alt+H and Shift+F need a document and map to their actions; H in a focused text
@@ -288,6 +409,86 @@ mod tests {
         let mut actions = Vec::new();
         crate::theme::run_test_pass(ctx, input, |ui| actions = handle(ui.ctx(), state));
         actions
+    }
+
+    /// Stickers P6a: the sticker table binds no chord twice, and in the routed order of the Sticker view no entry is
+    /// shadowed by an earlier one (Shift+F before F, Shift+X before X, Shift+E / Shift+G before E / G).
+    #[test]
+    fn the_sticker_table_has_no_chord_twice_and_its_order_shadows_nothing() {
+        for (i, a) in sticker_table().iter().enumerate() {
+            for b in &sticker_table()[i + 1..] {
+                assert!(a.shortcut != b.shortcut, "{} and {} share {:?}", a.action_label, b.action_label, a.shortcut);
+            }
+        }
+        let order = sticker_order();
+        for (j, (b, _)) in order.iter().enumerate() {
+            for (a, _) in &order[..j] {
+                let shadowed = a.shortcut.logical_key == b.shortcut.logical_key
+                    && b.shortcut.modifiers.matches_logically(a.shortcut.modifiers);
+                assert!(!shadowed, "{} ({:?}) is shadowed by the earlier {}", b.action_label, b.shortcut, a.action_label);
+            }
+        }
+        // Every chord of either table is in the order once.
+        assert_eq!(order.len(), sticker_table().len() + table().iter().filter(|d| !sticker_table().iter().any(|s| s.shortcut == d.shortcut)).count());
+        let blocked: Vec<&str> = order.iter().filter(|(_, b)| *b).map(|(d, _)| d.action_label).collect();
+        assert_eq!(blocked, ["Stamp", "Transform"]);
+    }
+
+    /// Stickers P6a (STICKER_PLAN 3.3): every colliding chord, in both modes: the action that runs.
+    #[test]
+    fn colliding_chords_run_the_action_of_their_mode() {
+        use crate::sticker::StickerAction as S;
+        let ctx = egui::Context::default();
+        let (mut state, _, _) = crate::sticker::tests::image_stamp_state(ViewMode::View3D);
+        let none: Vec<AppAction> = Vec::new();
+        let one = |a: AppAction| vec![a];
+        let cases: Vec<(Modifiers, Key, Vec<AppAction>, Vec<AppAction>)> = vec![
+            (NONE, Key::V, one(AppAction::SetTool(ToolKind::Navigate)), one(AppAction::SetStickerTool(StickerTool::Move))),
+            (NONE, Key::W, one(AppAction::ToggleWireframe), one(AppAction::SetStickerTool(StickerTool::Wand))),
+            (NONE, Key::H, one(AppAction::HideSelectedObjects), one(AppAction::SetStickerTool(StickerTool::Hand))),
+            (NONE, Key::F, one(AppAction::FrameModel), one(AppAction::Sticker(S::Fit))),
+            (NONE, Key::X, one(AppAction::SetTool(ToolKind::Text)), one(AppAction::SetStickerTool(StickerTool::Text))),
+            (NONE, Key::B, one(AppAction::SetTool(ToolKind::Brush)), one(AppAction::SetStickerTool(StickerTool::Brush))),
+            (NONE, Key::E, one(AppAction::SetTool(ToolKind::Eraser)), one(AppAction::SetStickerTool(StickerTool::Eraser))),
+            (NONE, Key::G, one(AppAction::SetTool(ToolKind::Fill)), one(AppAction::SetStickerTool(StickerTool::Fill))),
+            (NONE, Key::I, one(AppAction::SetTool(ToolKind::Eyedropper)), one(AppAction::SetStickerTool(StickerTool::Eyedropper))),
+            (NONE, Key::S, one(AppAction::SetTool(ToolKind::Stamp)), none.clone()),
+            (NONE, Key::R, one(AppAction::SetTool(ToolKind::Transform)), none.clone()),
+            (NONE, Key::Delete, one(AppAction::DeleteSelection), one(AppAction::Sticker(S::DeleteKey))),
+            (NONE, Key::Backspace, none.clone(), one(AppAction::Sticker(S::DeleteKey))),
+            (NONE, Key::Escape, one(AppAction::Cancel), one(AppAction::Sticker(S::Escape))),
+            (NONE, Key::Enter, one(AppAction::Sticker(S::Enter(None))), one(AppAction::Sticker(S::EnterKey))),
+            (CMD, Key::J, one(AppAction::DuplicateActiveLayer), one(AppAction::Sticker(S::DuplicateLayer(None)))),
+            (CMD, Key::M, one(AppAction::MergeActiveDown), one(AppAction::Sticker(S::MergeDown(None)))),
+            (CMD, Key::CloseBracket, one(AppAction::MoveActiveLayer(1)), one(AppAction::Sticker(S::MoveLayer(None, 1)))),
+            (CMD, Key::OpenBracket, one(AppAction::MoveActiveLayer(-1)), one(AppAction::Sticker(S::MoveLayer(None, -1)))),
+            (NONE, Key::M, none.clone(), one(AppAction::SetStickerTool(StickerTool::Marquee))),
+            // Outside the Sticker view Shift+E / Shift+G have no binding of their own; E / G match them logically (Shift
+            // is ignored by a pattern without it), as before.
+            (SHIFT, Key::E, one(AppAction::SetTool(ToolKind::Eraser)), one(AppAction::SetStickerTool(StickerTool::MagicEraser))),
+            (SHIFT, Key::G, one(AppAction::SetTool(ToolKind::Fill)), one(AppAction::SetStickerTool(StickerTool::Gradient))),
+            (NONE, Key::ArrowLeft, none.clone(), one(AppAction::Sticker(S::Nudge(-1, 0)))),
+            (SHIFT, Key::ArrowDown, none.clone(), one(AppAction::Sticker(S::Nudge(0, 10)))),
+            // Not bound in the sticker table: the global binding runs in both modes.
+            (SHIFT, Key::F, one(AppAction::FrameSelection), one(AppAction::FrameSelection)),
+            (SHIFT, Key::X, one(AppAction::SwapColors), one(AppAction::SwapColors)),
+            (NONE, Key::T, one(AppAction::ToggleTexture), one(AppAction::ToggleTexture)),
+            (NONE, Key::Num1, one(AppAction::SetViewMode(ViewMode::View3D)), one(AppAction::SetViewMode(ViewMode::View3D))),
+            (NONE, Key::Num4, one(AppAction::SetViewMode(ViewMode::Sticker)), one(AppAction::SetViewMode(ViewMode::Sticker))),
+            (CMD, Key::Z, one(AppAction::Undo), one(AppAction::Undo)),
+            (NONE, Key::CloseBracket, one(AppAction::BrushSizeStep(1)), one(AppAction::BrushSizeStep(1))),
+        ];
+        for (mode, sticker) in [(ViewMode::View3D, false), (ViewMode::Sticker, true)] {
+            state.view_mode = mode;
+            for (mods, key, outside, inside) in &cases {
+                let want = if sticker { inside } else { outside };
+                let got = run(&ctx, &mut state, vec![key_event(*key, *mods)], *mods);
+                assert_eq!(format!("{got:?}"), format!("{want:?}"), "{mods:?} {key:?} in {mode:?}");
+            }
+        }
+        assert_eq!(sticker_shortcut_text(&ctx, "Move"), "V");
+        assert_eq!(sticker_shortcut_text(&ctx, "Sticker Esc"), "Esc");
+        assert_eq!(shortcut_text(&ctx, "Sticker"), "4");
     }
 
     #[test]

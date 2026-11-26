@@ -142,7 +142,7 @@ pub(crate) fn frame_selection(state: &mut AppState) {
     let Some(session) = state.session.as_mut() else { return };
     let bounds = selection_bounds(session);
     match mode {
-        ViewMode::View3D | ViewMode::Split => session.camera.frame(bounds),
+        ViewMode::View3D | ViewMode::Split | ViewMode::Sticker => session.camera.frame(bounds),
         ViewMode::Preview => session.preview_camera.frame(bounds),
         ViewMode::View2D => {}
     }

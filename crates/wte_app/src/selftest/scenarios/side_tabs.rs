@@ -35,7 +35,7 @@ pub(super) fn side_tabs() -> Vec<Step> {
         steps.push(upper_tab_click(tab));
         steps.push(Step::WaitFrames(3));
         steps.push(Step::Assert(shot, page_check(tab)));
-        steps.push(Step::Shot(shot));
+        steps.push(Step::Shot { name: shot, expect: "" });
     }
     steps.extend([
         Step::Assert("the Objects rows: the Cube selected, the Ball hidden", |s, _| {
@@ -66,7 +66,7 @@ pub(super) fn side_tabs() -> Vec<Step> {
         }),
         Step::WaitFrames(3),
         Step::Assert("G1 with the Brush tab below", g1),
-        Step::Shot("tab_brush"),
+        Step::Shot { name: "tab_brush", expect: "" },
         // (5) A tool change keeps the upper tab; the Text tool asking for the focus in its content field (a click in
         // the view with no text typed) shows the Tool tab; placing a text keeps the tab.
         Step::Do(AppAction::SetTool(ToolKind::Eraser)),
@@ -111,7 +111,7 @@ pub(super) fn side_tabs() -> Vec<Step> {
         Step::WaitIdle,
         Step::WaitFrames(3),
         Step::Assert("G1 with a selected text (Transform) and the Text tab below", g1),
-        Step::Shot("tab_text"),
+        Step::Shot { name: "tab_text", expect: "" },
         // (4) G2: the Tool tab with the Brush, with the Layers and with the Brush tab below.
         Step::Do(AppAction::SelectStamp(None)),
         Step::Do(AppAction::SetTool(ToolKind::Brush)),
@@ -123,7 +123,7 @@ pub(super) fn side_tabs() -> Vec<Step> {
         Step::WaitIdle,
         Step::WaitFrames(3),
         Step::Assert("G2 with the Layers tab below", g2),
-        Step::Shot("tab_layers"),
+        Step::Shot { name: "tab_layers", expect: "" },
         Step::Setup("the Brush tab below", |s, _| {
             s.side_tab = SideTab::Brush;
             Ok(())
@@ -206,7 +206,7 @@ pub(super) fn side_tabs() -> Vec<Step> {
                 }
                 groups_ok(s, sc)
             }),
-            Step::Shot(shot),
+            Step::Shot { name: shot, expect: "" },
         ]);
     }
     steps.extend([

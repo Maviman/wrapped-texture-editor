@@ -33,6 +33,7 @@ mod companion;
 mod objects;
 mod pen;
 mod side_tabs;
+mod sticker;
 
 /// Every scenario `scenario` accepts, in the order of the 8.11 table.
 const NAMES: &[&str] = &[
@@ -90,6 +91,7 @@ const NAMES: &[&str] = &[
     "pen",
     "companion",
     "companion_host",
+    "sticker_view",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -169,6 +171,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "pen" => pen::pen(),
         "companion" => companion::companion(),
         "companion_host" => companion::companion_host(),
+        "sticker_view" => sticker::sticker_view(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -326,13 +329,13 @@ fn pan2d() -> Vec<Step> {
         long_pan([0.5, 0.5], [10.5, 10.5]),
         Step::WaitIdle,
         Step::Assert("2D: pan drag of ten view widths down-right", |s, _| texture_in_view(s, "2D pan down-right")),
-        Step::Scroll { view: ViewId::Main2D, at: [0.99, 0.99], notches: 10.0, mods: egui::Modifiers::NONE },
-        Step::Scroll { view: ViewId::Main2D, at: [0.99, 0.99], notches: 10.0, mods: egui::Modifiers::NONE },
+        Step::Scroll { view: ViewId::Main2D.into(), at: [0.99, 0.99], notches: 10.0, mods: egui::Modifiers::NONE },
+        Step::Scroll { view: ViewId::Main2D.into(), at: [0.99, 0.99], notches: 10.0, mods: egui::Modifiers::NONE },
         Step::WaitIdle,
         Step::Assert("2D: zoom in at the view corner", |s, _| texture_in_view(s, "2D zoom in")),
         long_pan([0.5, 0.5], [0.5, -9.5]),
-        Step::Scroll { view: ViewId::Main2D, at: [0.01, 0.01], notches: -10.0, mods: egui::Modifiers::NONE },
-        Step::Scroll { view: ViewId::Main2D, at: [0.01, 0.01], notches: -10.0, mods: egui::Modifiers::NONE },
+        Step::Scroll { view: ViewId::Main2D.into(), at: [0.01, 0.01], notches: -10.0, mods: egui::Modifiers::NONE },
+        Step::Scroll { view: ViewId::Main2D.into(), at: [0.01, 0.01], notches: -10.0, mods: egui::Modifiers::NONE },
         Step::WaitIdle,
         Step::Assert("2D: pan up and zoom out at the view corner", |s, _| texture_in_view(s, "2D zoom out")),
         Step::Do(AppAction::FrameModel),
@@ -441,7 +444,7 @@ fn stamp() -> Vec<Step> {
         }),
         Step::Dyn("Ctrl+wheel two notches over the stamp", |s, _| {
             let (xf, shape) = selected_gizmo(s)?;
-            Ok(vec![Step::Scroll { view: ViewId::Main3D, at: norm(&xf, shape.center), notches: 2.0, mods: egui::Modifiers::CTRL }])
+            Ok(vec![Step::Scroll { view: ViewId::Main3D.into(), at: norm(&xf, shape.center), notches: 2.0, mods: egui::Modifiers::CTRL }])
         }),
         Step::WaitIdle,
         Step::Assert("one undo entry for the wheel gesture", |s, sc| undo_since(s, sc, 4)),
@@ -1254,7 +1257,7 @@ fn export_selected() -> Vec<Step> {
             Ok(())
         }),
         Step::WaitFrames(3),
-        Step::Shot("dialog"),
+        Step::Shot { name: "dialog", expect: "" },
         Step::Setup("export into <out>_export_sel", |s, sc| dialog_into(s, sc, "_export_sel")),
         Step::Dyn("Export (the dialog's options)", run_dialog_export),
         Step::WaitIdle,
@@ -1633,7 +1636,7 @@ fn export_checks() -> Vec<Step> {
             }
             Ok(())
         }),
-        Step::Shot("hidden"),
+        Step::Shot { name: "hidden", expect: "" },
         Step::Setup("(E2) export into <out>_ec_sel", |s, sc| dialog_into(s, sc, "_ec_sel")),
         Step::Dyn("(E2) Export (the dialog's options)", run_dialog_export),
         Step::WaitIdle,
@@ -1805,7 +1808,7 @@ fn export_zip() -> Vec<Step> {
             }
             Ok(())
         }),
-        Step::Shot("replace"),
+        Step::Shot { name: "replace", expect: "" },
         Step::Do(AppAction::CloseDialog),
         Step::WaitIdle,
     ]);
@@ -4109,7 +4112,7 @@ fn densify(points: &[egui::Pos2]) -> Vec<egui::Pos2> {
 /// A left-button drag along a polyline (screen positions) in the view of `xf`.
 fn drag(xf: &ViewXform, points: &[egui::Pos2]) -> Step {
     Step::Pointer {
-        view: xf.view,
+        view: xf.view.into(),
         path: densify(points).into_iter().map(|p| norm(xf, p)).collect(),
         button: egui::PointerButton::Primary,
         mods: egui::Modifiers::NONE,
@@ -4118,7 +4121,7 @@ fn drag(xf: &ViewXform, points: &[egui::Pos2]) -> Step {
 }
 
 fn click(view: ViewId, at: [f32; 2]) -> Step {
-    Step::Click { view, at, button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }
+    Step::Click { view: view.into(), at, button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }
 }
 
 /// A stroke over the model along disc coordinates.
@@ -5335,7 +5338,7 @@ fn tool_spot(f: &mut Fuzz, state: &AppState, view: ViewId) -> [f32; 2] {
 }
 
 fn pointer(view: ViewId, path: Vec<[f32; 2]>, button: egui::PointerButton, mods: egui::Modifiers, ppf: usize) -> Step {
-    Step::Pointer { view, path, button, mods, points_per_frame: ppf }
+    Step::Pointer { view: view.into(), path, button, mods, points_per_frame: ppf }
 }
 
 /// Frames to wait after an action that can change the layout, so the next action sees the new view rects.
@@ -5380,7 +5383,7 @@ fn fuzz_action(f: &mut Fuzz, state: &AppState) -> (String, Vec<Step>) {
                     let notches = f.pick(&[-4.0, -2.0, -1.0, 1.0, 2.0, 3.0]);
                     let mods = f.pick(&[egui::Modifiers::NONE, egui::Modifiers::NONE, egui::Modifiers::CTRL, egui::Modifiers::SHIFT]);
                     let at = f.spot();
-                    (format!("wheel {notches} notches ({mods:?}) in {view:?}"), vec![Step::Scroll { view, at, notches, mods }])
+                    (format!("wheel {notches} notches ({mods:?}) in {view:?}"), vec![Step::Scroll { view: view.into(), at, notches, mods }])
                 }
             }
         }
@@ -5516,7 +5519,7 @@ fn fuzz_action(f: &mut Fuzz, state: &AppState) -> (String, Vec<Step>) {
                         format!("stamp {id:?}: wheel {notches} ({mods:?}) over the gizmo in {:?}", xf.view),
                         vec![
                             Step::Do(A::SetTool(ToolKind::Transform)),
-                            Step::Scroll { view: xf.view, at: norm(&xf, shape.center), notches, mods },
+                            Step::Scroll { view: xf.view.into(), at: norm(&xf, shape.center), notches, mods },
                         ],
                     );
                 }
@@ -5882,7 +5885,7 @@ fn brush_types() -> Vec<Step> {
             };
             Ok(())
         }),
-        Step::Hover { view: ViewId::Main3D, at: [0.5, 0.5] },
+        Step::Hover { view: ViewId::Main3D.into(), at: [0.5, 0.5] },
         Step::WaitFrames(3),
         Step::Assert("the shape cursor and the status bar hint are shown", |s, _| {
             let probe = &s.tool_probe;
@@ -6110,11 +6113,11 @@ fn brush_shape() -> Vec<Step> {
         Step::Dyn("a 40-point stroke across the front face", bs_stroke),
         Step::WaitIdle,
         Step::Assert("the stroke is exactly one more history entry", |s, sc| undo_since(s, sc, 1)),
-        Step::Hover { view: ViewId::Main3D, at: [0.5, 0.5] },
+        Step::Hover { view: ViewId::Main3D.into(), at: [0.5, 0.5] },
         Step::WaitFrames(3),
         Step::Assert("the Brush tab is open while hovering with the shape", |s, _| bs_tab_shown(s)),
         // Gate 1: a named capture (`<out>_hover.png`), so the final screenshot no longer overwrites this frame.
-        Step::Shot("hover"),
+        Step::Shot { name: "hover", expect: "" },
         // The same cube from a GLB and from an FBX file: one click each, then Undo.
         Step::Do(AppAction::Undo),
         Step::WaitIdle,
@@ -6178,7 +6181,7 @@ fn brush_shape() -> Vec<Step> {
             Ok(())
         }),
         // Gate 3 (ROUND4_PLAN 3.3 item 7): the closing dialog of an open model, `<out>_dialog.png`.
-        Step::Shot("dialog"),
+        Step::Shot { name: "dialog", expect: "" },
         Step::Dyn("click \"Flat caps\" in the dialog", |s, _| {
             Ok(vec![Step::ScreenPointer { path: vec![panel_rect(s, PanelHit::OpeningsChoice(0))?.center()] }])
         }),
@@ -6297,7 +6300,7 @@ fn bs_stroke(state: &AppState, _scratch: &Scratch) -> Result<Vec<Step>, String> 
         })
         .collect();
     Ok(vec![Step::Pointer {
-        view: ViewId::Main3D,
+        view: ViewId::Main3D.into(),
         path,
         button: egui::PointerButton::Primary,
         mods: egui::Modifiers::NONE,
@@ -6411,7 +6414,7 @@ fn brush_tab() -> Vec<Step> {
             Ok(())
         }),
         Step::WaitFrames(3),
-        Step::Hover { view: ViewId::Main3D, at: [0.5, 0.5] },
+        Step::Hover { view: ViewId::Main3D.into(), at: [0.5, 0.5] },
         Step::WaitIdle,
         Step::WaitFrames(3),
         Step::Assert("A12 on the window with the Cube: Color, slider rows, tab rows, 300 pt", |s, _| brush_tab_layout(s, "Cube")),
@@ -6464,7 +6467,7 @@ fn brush_tab() -> Vec<Step> {
             }
             brush_tab_layout(s, "back to the Brush")
         }),
-        Step::Hover { view: ViewId::Main3D, at: [0.52, 0.48] },
+        Step::Hover { view: ViewId::Main3D.into(), at: [0.52, 0.48] },
         Step::WaitIdle,
         Step::WaitFrames(3),
         Step::Assert("the shape cursor of the file shape: a footprint and wires", brush_tab_cursor),
@@ -6850,7 +6853,7 @@ fn text_gaps() -> Vec<Step> {
     steps.extend(t7_place_3d(false));
     steps.extend(t7_gap_steps());
     // Gate 3 (ROUND4_PLAN 3.3 item 7): the text with one widened gap on the model, `<out>_gap3d.png`.
-    steps.extend([Step::WaitFrames(3), Step::Shot("gap3d")]);
+    steps.extend([Step::WaitFrames(3), Step::Shot { name: "gap3d", expect: "" }]);
     steps.extend(t7_place_2d());
     steps.extend(t7_gap_steps());
     steps
@@ -7002,7 +7005,7 @@ fn text_warp(has_path: bool) -> Vec<Step> {
     steps.extend(t7_warp_steps());
     steps.extend([Step::WaitFrames(3), Step::Assert("the 3D view rectangle did not move", same_view_rect)]);
     // Gate 3 (ROUND4_PLAN 3.3 item 7): the warped text (Arc 50 %) on the model, `<out>_warp3d.png`.
-    steps.push(Step::Shot("warp3d"));
+    steps.push(Step::Shot { name: "warp3d", expect: "" });
     steps.extend(t7_place_2d());
     steps.extend(t7_warp_steps());
     steps.extend([Step::Do(AppAction::SetViewMode(ViewMode::Split)), Step::WaitIdle, Step::WaitFrames(3)]);
@@ -7117,7 +7120,7 @@ fn t7_path_steps_shot(circle_shot: Option<&'static str>) -> Vec<Step> {
         Step::Setup("remember the Circle", t7_remember_rect),
     ];
     if let Some(name) = circle_shot {
-        steps.extend([Step::WaitFrames(3), Step::Shot(name)]);
+        steps.extend([Step::WaitFrames(3), Step::Shot { name, expect: "" }]);
     }
     steps.extend([
         Step::Setup("Path: Curve", |s, _| {
@@ -7213,12 +7216,12 @@ fn text_tab() -> Vec<Step> {
         Step::Setup("remember the 3D view rect with the Stamp tool", remember_view_rect),
         Step::Do(AppAction::SetTool(ToolKind::Text)),
         Step::WaitIdle,
-        Step::Hover { view: ViewId::Main3D, at: [0.5, 0.5] },
+        Step::Hover { view: ViewId::Main3D.into(), at: [0.5, 0.5] },
         Step::WaitIdle,
         Step::WaitFrames(3),
         Step::Assert("the Text tool holds a see-through picture of the draft", assert_text_hover),
         // Gate 1 (ROUND4_PLAN 3.3 "a screenshot" of the hover frame): `<out>_hover.png`.
-        Step::Shot("hover"),
+        Step::Shot { name: "hover", expect: "" },
     ];
     steps.extend(text_tab_pages(false));
     steps.extend([
@@ -7373,7 +7376,7 @@ fn text_tab_pages(shots: bool) -> Vec<Step> {
             same_view_rect(s, sc)
         }));
         if shots {
-            steps.push(Step::Shot(shot));
+            steps.push(Step::Shot { name: shot, expect: "" });
         }
     }
     steps
@@ -7562,7 +7565,7 @@ fn text_fonts() -> Vec<Step> {
             log::info!("font picker: samples of {families} families ({} cells, {} atlases)", s.font_samples.cells.len(), s.font_samples.atlases.len());
             Ok(())
         }),
-        Step::Shot("picker"),
+        Step::Shot { name: "picker", expect: "" },
         Step::Setup("gate: font picker closed", |_, _| {
             log::info!("gate: font picker closed");
             Ok(())
@@ -8262,7 +8265,7 @@ fn brush_hover() -> Vec<Step> {
     ];
     let hovers = || (0..60).map(|i| {
         let t = i as f32 / 59.0;
-        Step::Hover { view: ViewId::Main3D, at: [0.42 + 0.16 * t, 0.45 + 0.1 * (t * 6.0).sin()] }
+        Step::Hover { view: ViewId::Main3D.into(), at: [0.42 + 0.16 * t, 0.45 + 0.1 * (t * 6.0).sin()] }
     });
     steps.push(gate_mark("gate: hover circular start"));
     steps.extend(hovers());
@@ -8272,7 +8275,7 @@ fn brush_hover() -> Vec<Step> {
             s.tools.brush = BrushSettings { kind: BrushType::Sphere, shape: ShapeChoice::Cube, size_px: 64.0, ..BrushSettings::default() };
             Ok(())
         }),
-        Step::Hover { view: ViewId::Main3D, at: [0.45, 0.5] },
+        Step::Hover { view: ViewId::Main3D.into(), at: [0.45, 0.5] },
         Step::WaitIdle,
         Step::WaitFrames(10),
         gate_mark("gate: hover cube start"),
@@ -8427,7 +8430,7 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
         }),
         Step::Setup("(2) remember H1", |s, sc| remember_composite(s, sc, "ws_h1")),
         Step::WaitFrames(2),
-        Step::Shot("wrapped"),
+        Step::Shot { name: "wrapped", expect: "" },
         // (3)
         Step::Dyn("(3) S back to Project (Final)", |s, sc| ws_edit(s, sc, |p| Projector { mode: SurfaceMode::Project, ..p })),
         Step::WaitIdle,
@@ -8491,7 +8494,7 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
             remember_undo(s, sc)
         }),
         Step::WaitFrames(2),
-        Step::Shot("band"),
+        Step::Shot { name: "band", expect: "" },
         // (4b)
         Step::Dyn("(4b) Overlap (Final)", |s, sc| ws_edit(s, sc, |p| Projector { wrap: WrapOptions { overlap: true, ..p.wrap }, ..p })),
         Step::WaitIdle,
@@ -8515,7 +8518,7 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
         }),
         Step::Setup("(4b) remember the Overlap state", |s, sc| remember_composite(s, sc, "ws_hov")),
         Step::WaitFrames(2),
-        Step::Shot("overlap"),
+        Step::Shot { name: "overlap", expect: "" },
         Step::Do(AppAction::Undo),
         Step::WaitIdle,
         Step::Assert("(4b) Undo: H2", |s, sc| ws_hash_is(s, sc, "ws_h2")),
@@ -8668,7 +8671,7 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
             Ok(())
         }),
         Step::WaitFrames(2),
-        Step::Shot("text"),
+        Step::Shot { name: "text", expect: "" },
         // (8)
         Step::Setup("(8) remember the composite before the toggle", |s, sc| remember_composite(s, sc, "ws_h8")),
         Step::BakeWait(false),
@@ -8697,7 +8700,7 @@ fn wrap_surface(path: Option<PathBuf>) -> Vec<Step> {
             log::info!("wrap_surface (9): S selected before the save, side panel {:?} pt", s.side_panel_rect.map(|r| r.width()));
             remember_composite(s, sc, "ws_saved")
         }),
-        Step::Shot("before_save"),
+        Step::Shot { name: "before_save", expect: "" },
         Step::Dyn("(9) Save As", |_, sc| Ok(vec![Step::Do(AppAction::SaveAs(Some(with_suffix(&sc.out_stem, WS_PROJECT))))])),
         Step::WaitIdle,
         Step::Assert("(9) saved", |s, sc| {
@@ -8796,7 +8799,7 @@ fn ws_path_steps(path: PathBuf) -> Vec<Step> {
         Step::Setup("(10) log the wrap (Jump small gaps off)", |s, sc| ws_log_path_stamp(s, sc, "off")),
         // Round 9 (package B, plan 6 step 6): the picture with Jump small gaps off (`<out>_off.png`).
         Step::WaitFrames(3),
-        Step::Shot("off"),
+        Step::Shot { name: "off", expect: "" },
         Step::Dyn("(10) Jump small gaps on (Final)", |s, sc| {
             ws_edit(s, sc, |p| Projector { wrap: WrapOptions { jump_gaps: true, ..p.wrap }, ..p })
         }),
@@ -9287,7 +9290,14 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 54);
+        assert_eq!(scenario_names().len(), 55);
+        // Stickers P6a (review B15): every shot of a sticker scenario says what it must show.
+        for name in scenario_names().iter().filter(|n| n.starts_with("sticker")) {
+            let steps = scenario(name, &args).unwrap();
+            let shots: Vec<&str> = steps.iter().filter_map(|s| if let Step::Shot { expect, .. } = s { Some(*expect) } else { None }).collect();
+            assert!(!shots.is_empty(), "{name} takes no named shot");
+            assert!(shots.iter().all(|e| e.trim().len() > 20), "{name}: a shot without its expected content: {shots:?}");
+        }
     }
 
     #[test]

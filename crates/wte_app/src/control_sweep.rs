@@ -316,6 +316,7 @@ pub(crate) fn sample_state(kind: SampleKind) -> AppState {
         object_anchor: None,
         object_selection_rev: 0,
         object_reveal: None,
+        sticker_edit: None,
     });
     state
 }

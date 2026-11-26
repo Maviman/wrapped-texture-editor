@@ -7,7 +7,7 @@ use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use crate::action::AppAction;
 use crate::panels::{paint_checker, to_color32};
 use crate::shortcuts::shortcut_text;
-use crate::state::{AppState, ToolKind, UpperTab};
+use crate::state::{AppState, PanelHit, StickerTool, ToolKind, UpperTab, ViewMode};
 use crate::theme;
 
 /// The tools in toolbar order with their `shortcut_text` labels (which are also the tooltip names).
@@ -33,8 +33,14 @@ fn with_key(ctx: &egui::Context, text: &str, label: &str) -> String {
     if key.is_empty() { text.to_owned() } else { format!("{text} ({key})") }
 }
 
-/// Draws the tool buttons and the primary / secondary colour chip.
+/// Draws the tool buttons and the primary / secondary colour chip. Stickers P6a: in the Sticker view the sticker tools
+/// replace the paint tools (the paint tool comes back on leaving).
 pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
+    state.panel_rects.retain(|hit, _| !matches!(hit, PanelHit::StickerToolButton(_)));
+    if state.view_mode == ViewMode::Sticker {
+        sticker_tools(ui, state);
+        return;
+    }
     let mut actions = Vec::new();
     ui.vertical_centered(|ui| {
         ui.add_space(4.0);
@@ -60,6 +66,47 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
         color_chip(ui, state, side, &mut actions);
     });
     state.actions.extend(actions);
+}
+
+/// Stickers P6a (STICKER_PLAN 3.2, 3.3): the sticker tools, smaller when the strip is short (14 buttons and the colour
+/// chip must fit a 600-point window), then the colour chip. A tool that is not built yet is shown and selectable (its
+/// key works); the canvas says so in the status line.
+fn sticker_tools(ui: &mut egui::Ui, state: &mut AppState) {
+    let mut actions = Vec::new();
+    let current = crate::sticker::tool_of(state);
+    let mut hits = Vec::new();
+    ui.vertical_centered(|ui| {
+        ui.add_space(4.0);
+        let room = (ui.available_height() - 90.0) / StickerTool::ALL.len() as f32;
+        let side = ui.available_width().clamp(24.0, 34.0).min(room.max(24.0));
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for tool in StickerTool::ALL {
+            let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+            hits.push((PanelHit::StickerToolButton(tool), rect));
+            let selected = current == tool;
+            let visuals = ui.visuals();
+            let (fill, fg) = if selected {
+                (theme::ACCENT, Color32::WHITE)
+            } else if resp.hovered() {
+                (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
+            } else {
+                (Color32::TRANSPARENT, visuals.widgets.inactive.fg_stroke.color)
+            };
+            let fg = if tool.built() { fg } else { fg.gamma_multiply(0.55) };
+            ui.painter().rect_filled(rect, 4.0, fill);
+            theme::sticker_tool_icon(ui.painter(), rect.shrink(side * 0.17), tool, fg);
+            let key = crate::shortcuts::sticker_shortcut_text(ui.ctx(), tool.label());
+            let tip = if key.is_empty() { tool.label().to_owned() } else { format!("{} ({key})", tool.label()) };
+            let tip = if tool.built() { tip } else { format!("{tip}: not available yet") };
+            if resp.on_hover_text(tip).clicked() && !selected {
+                actions.push(AppAction::SetStickerTool(tool));
+            }
+        }
+        ui.add_space(8.0);
+        color_chip(ui, state, side, &mut actions);
+    });
+    state.actions.extend(actions);
+    state.panel_rects.extend(hits);
 }
 
 /// Primary colour (top left) over the secondary colour (bottom right); clicking the secondary swaps them, clicking the
@@ -139,6 +186,16 @@ fn paint_swap_icon(painter: &egui::Painter, rect: Rect, color: Color32, hovered:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stickers P6a: every sticker tool has its key in `STICKER_SHORTCUTS` (the tooltip label is the tool's label).
+    #[test]
+    fn every_sticker_tool_has_a_key() {
+        let ctx = egui::Context::default();
+        crate::theme::run_test_pass(&ctx, egui::RawInput::default(), |_| {});
+        for tool in StickerTool::ALL {
+            assert!(!crate::shortcuts::sticker_shortcut_text(&ctx, tool.label()).is_empty(), "{tool:?} has no key");
+        }
+    }
 
     #[test]
     fn every_tool_has_a_shortcut_label() {

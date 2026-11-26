@@ -21,6 +21,7 @@ use wte_core::{
     ImportedModel, LayerId, PixelBuf, PressureDynamics, SampleKind, StampId, SurfaceMode, TextAlign, TextPath,
     TextureSetId, TipAlign, TipField, UvStats, Warp, WrapOptions,
 };
+use wte_core::{Selection, ShareScope, StickerCheckpoint, StickerId, StickerLayerId};
 
 use crate::action::AppAction;
 
@@ -37,6 +38,9 @@ pub enum ViewMode {
     View2D,
     Split,
     Preview,
+    /// Stickers P6a (STICKER_PLAN 3.1): the sticker canvas beside the 3D view. Never written to `Document::ui_state`
+    /// (the mode the editor returns to is written instead), so an older build reading the same file is not confused.
+    Sticker,
 }
 
 /// One rendered view (each has its own offscreen target).
@@ -101,6 +105,136 @@ pub enum PanelHit {
     ObjectsIsolate,
     ObjectsShowAll,
     ObjectsFrame,
+    /// Stickers P6a: the sticker canvas of the Sticker view (also `AppState::sticker_canvas_rect`).
+    StickerCanvas,
+    /// The canvas header's buttons: Done, Revert, Fit, 100 %, and the "Convert to layered sticker" of a text stamp.
+    StickerDone,
+    StickerRevert,
+    StickerFit,
+    StickerZoom100,
+    StickerConvertText,
+    /// A row of the sticker's Layers list, its eye and its lock (by `StickerLayerId::0`).
+    StickerLayerRow(u32),
+    StickerLayerEye(u32),
+    StickerLayerLock(u32),
+    /// The sticker Layers footer: New picture layer, Add picture..., Duplicate, Up, Down, Delete.
+    StickerLayerNew,
+    StickerLayerAddPicture,
+    StickerLayerDuplicate,
+    StickerLayerUp,
+    StickerLayerDown,
+    StickerLayerDelete,
+    /// A button of the tool strip in Sticker mode.
+    StickerToolButton(StickerTool),
+    /// The "Edit Sticker" button of the Tool page of a selected stamp.
+    StickerEditButton,
+}
+
+/// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
+/// the Sticker view is shown; the paint tool (`AppState::tool`) is kept and comes back on leaving.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum StickerTool {
+    Move,
+    Marquee,
+    Lasso,
+    Wand,
+    Crop,
+    Brush,
+    Eraser,
+    Fill,
+    MagicEraser,
+    Eyedropper,
+    Gradient,
+    Text,
+    Shape,
+    Hand,
+}
+
+impl StickerTool {
+    /// The tools in the order of the tool strip.
+    pub const ALL: [StickerTool; 14] = [
+        StickerTool::Move,
+        StickerTool::Hand,
+        StickerTool::Marquee,
+        StickerTool::Lasso,
+        StickerTool::Wand,
+        StickerTool::Crop,
+        StickerTool::Brush,
+        StickerTool::Eraser,
+        StickerTool::Fill,
+        StickerTool::MagicEraser,
+        StickerTool::Eyedropper,
+        StickerTool::Gradient,
+        StickerTool::Text,
+        StickerTool::Shape,
+    ];
+
+    /// The tool's name (tool strip, Tool tab) and its `shortcuts::sticker_shortcut_text` label.
+    pub fn label(self) -> &'static str {
+        match self {
+            StickerTool::Move => "Move",
+            StickerTool::Marquee => "Marquee",
+            StickerTool::Lasso => "Lasso",
+            StickerTool::Wand => "Magic Wand",
+            StickerTool::Crop => "Crop",
+            StickerTool::Brush => "Brush",
+            StickerTool::Eraser => "Eraser",
+            StickerTool::Fill => "Fill",
+            StickerTool::MagicEraser => "Magic Eraser",
+            StickerTool::Eyedropper => "Eyedropper",
+            StickerTool::Gradient => "Gradient",
+            StickerTool::Text => "Text",
+            StickerTool::Shape => "Shape",
+            StickerTool::Hand => "Hand",
+        }
+    }
+
+    /// The tool works on the canvas in this build (stickers P6a: Move and Hand; the others come with P7a, P7b and P8).
+    pub fn built(self) -> bool {
+        matches!(self, StickerTool::Move | StickerTool::Hand)
+    }
+}
+
+/// Stickers P6a (STICKER_PLAN 3.1): what the Sticker view edits.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum StickerTarget {
+    /// The sticker of a stamp (an image stamp shows a virtual one-layer sticker until its first content edit).
+    Stamp(StampId),
+    /// A sticker of the tray (stickers P6b).
+    #[allow(dead_code, reason = "stickers P6b: the tray")]
+    Tray(StickerId),
+    /// The Stamp tool's sticker that is not placed yet (stickers P6b, E4).
+    #[allow(dead_code, reason = "stickers P6b: edit before placing")]
+    ToolSource,
+}
+
+/// Pan / zoom of the sticker canvas: the 2D view's camera type (`view2d.rs` methods) with the artboard as its
+/// "texture" (`center_uv` in artboard units, `zoom` in points per sticker pixel).
+pub type Canvas2D = UvViewState;
+
+/// Stickers P6a (STICKER_PLAN 3.1): the open Sticker view of a session. App state: not in the document, not in the
+/// history, not saved.
+#[derive(Clone, Debug)]
+pub struct StickerEdit {
+    pub target: StickerTarget,
+    /// The active sticker layer (the layer the tools and the Layers tab's opacity / blend act on).
+    pub active_layer: Option<StickerLayerId>,
+    #[allow(dead_code, reason = "stickers P7b / P8: multi-select")]
+    pub selected_layers: Vec<StickerLayerId>,
+    /// The pixel selection (3.4; stickers P7b).
+    pub selection: Option<Selection>,
+    pub tool: StickerTool,
+    pub camera: Canvas2D,
+    /// The view mode the editor returns to.
+    pub return_mode: ViewMode,
+    /// E6: the answer to "This picture is used by N stickers" for this opening of the editor (stickers P6b).
+    #[allow(dead_code, reason = "stickers P6b: the shared-picture question")]
+    pub share_answer: Option<ShareScope>,
+    /// The stamp(s) and sticker as they were when the editor opened (`Arc` clones), for Revert.
+    pub entry: StickerCheckpoint,
+    /// A link update waits for the stroke or drag to end (5.6; stickers P9a).
+    #[allow(dead_code, reason = "stickers P9a: the link watcher")]
+    pub held_update: bool,
 }
 
 /// What the 3D view shows on the surface. The discriminant is the value handed to the shaders.
@@ -965,6 +1099,8 @@ pub struct Session {
     pub selected_objects: std::collections::BTreeSet<u32>,
     /// The object a Shift-click in the Objects list extends from (the last plain / Ctrl-clicked object).
     pub object_anchor: Option<u32>,
+    /// Stickers P6a: the open Sticker view (`None` outside it).
+    pub sticker_edit: Option<StickerEdit>,
     /// +1 at every change of `selected_objects` (the GPU highlight buffer follows it).
     pub object_selection_rev: u64,
     /// Request: the Objects list scrolls this row into view once (set by a pick in the 3D view).
@@ -1191,6 +1327,10 @@ pub struct Prefs {
     /// Branch `companion`: the Tablet companion settings. Read leniently: an entry that does not read is the default.
     #[serde(deserialize_with = "lenient_prefs_serde::companion")]
     pub companion: CompanionPrefs,
+    /// Stickers P6a (STICKER_PLAN 3.1): the width share of the sticker canvas in the Sticker view (`0.15..=0.85`; a
+    /// value that does not read is 0.55).
+    #[serde(deserialize_with = "lenient_prefs_serde::sticker_split")]
+    pub sticker_split: f32,
 }
 
 impl Default for Prefs {
@@ -1214,9 +1354,13 @@ impl Default for Prefs {
             side_split: None,
             tablet_input: TabletInput::WindowsInk,
             companion: CompanionPrefs::default(),
+            sticker_split: STICKER_SPLIT_DEFAULT,
         }
     }
 }
+
+/// Default of `Prefs::sticker_split`.
+pub const STICKER_SPLIT_DEFAULT: f32 = 0.55;
 
 /// The running job shown in the status bar or, when `modal`, in the progress dialog.
 #[derive(Clone, Debug, PartialEq)]
@@ -1321,6 +1465,11 @@ pub struct AppState {
     pub frame_work: FrameWork,
     /// Branch `pen-input` (ARCHITECTURE 8.2): the pen's records, router, this frame's pen input and the eraser override.
     pub pen: crate::pen::PenState,
+    /// Stickers P6a: the rect of the sticker canvas in the last frame (points; `None` outside the Sticker view). The
+    /// canvas is not a `ViewId` (review A17); the self-test's `Target::StickerCanvas` and the companion read this.
+    pub sticker_canvas_rect: Option<egui::Rect>,
+    /// Stickers P6a: UI state of the Sticker view (canvas texture, thumbnails, the running drag, tool options).
+    pub sticker_ui: crate::sticker::StickerUi,
 }
 
 /// When the deferred stamp Preview bakes (`Document::bake_stale_previews`) may run next: after a bake that took `t`,
@@ -1417,6 +1566,8 @@ impl AppState {
             wrap_jobs_pending: false,
             frame_work: FrameWork::default(),
             pen: crate::pen::PenState::default(),
+            sticker_canvas_rect: None,
+            sticker_ui: crate::sticker::StickerUi::default(),
         }
     }
 
@@ -1433,6 +1584,24 @@ impl AppState {
     /// Queues a command for dispatch at the end of the frame.
     pub fn push(&mut self, a: AppAction) {
         self.actions.push(a);
+    }
+
+    /// Stickers P6a: the view mode remembered for this state (`Document::ui_state`): never Preview (the mode it was
+    /// entered from) and never Sticker (the mode the editor returns to).
+    pub fn remembered_view_mode(&self) -> ViewMode {
+        let mode = match self.view_mode {
+            ViewMode::Sticker => {
+                self.session.as_ref().and_then(|s| s.sticker_edit.as_ref()).map_or(self.last_edit_mode, |e| e.return_mode)
+            }
+            other => other,
+        };
+        match mode {
+            ViewMode::Preview | ViewMode::Sticker => match self.last_edit_mode {
+                ViewMode::Preview | ViewMode::Sticker => ViewMode::View3D,
+                m => m,
+            },
+            m => m,
+        }
     }
 }
 
@@ -1516,6 +1685,15 @@ mod lenient_prefs_serde {
             _ => SideTab::Layers,
         };
         Ok(tab.pref_name().to_owned())
+    }
+
+    /// Stickers P6a: the Sticker view's split: a number, clamped to `0.15..=0.85`; anything else is 0.55.
+    pub fn sticker_split<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+        let value = match Value::deserialize(deserializer)? {
+            Value::Number(n) => n.as_f64().map(|v| v as f32).filter(|v| v.is_finite()),
+            _ => None,
+        };
+        Ok(value.map_or(super::STICKER_SPLIT_DEFAULT, |v| v.clamp(0.15, 0.85)))
     }
 
     /// The user-sized split: a value that is not a number reads as `None` (automatic).
@@ -1835,6 +2013,7 @@ mod tests {
             object_anchor: None,
             object_selection_rev: 0,
             object_reveal: None,
+            sticker_edit: None,
         };
 
         // Nothing to fix.

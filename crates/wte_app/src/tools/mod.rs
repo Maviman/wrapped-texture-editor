@@ -234,6 +234,12 @@ enum Slot {
     Transform,
 }
 
+/// The paint tool the editing views use: `AppState::tool`, except in the Sticker view, whose 3D half only navigates
+/// (stickers P6a, STICKER_PLAN 3.1: orbit, pan, zoom, frame; the paint tool comes back when the view is left).
+pub(crate) fn active_tool(state: &AppState) -> ToolKind {
+    if state.view_mode == crate::state::ViewMode::Sticker { ToolKind::Navigate } else { state.tool }
+}
+
 /// The tool instance for a tool kind; Alt turns Brush / Eraser / Fill into the eyedropper (8.6).
 fn slot_for(tool: ToolKind, alt: bool) -> Option<Slot> {
     match tool {
@@ -317,7 +323,7 @@ impl ToolController {
 
     /// The tool that is shown right now (the captured one during a drag).
     fn current_slot(&self, state: &AppState) -> Option<Slot> {
-        self.captured.or_else(|| slot_for(state.tool, self.alt))
+        self.captured.or_else(|| slot_for(active_tool(state), self.alt))
     }
 
     /// The current interaction.
@@ -406,7 +412,7 @@ impl ToolController {
             return;
         }
         self.alt = p.mods.alt;
-        if let Some(slot) = slot_for(state.tool, p.mods.alt) {
+        if let Some(slot) = slot_for(active_tool(state), p.mods.alt) {
             self.tool_mut(slot).hover(state, xf, p);
         }
     }
@@ -422,7 +428,7 @@ impl ToolController {
         let navigate = match button {
             egui::PointerButton::Secondary => Some(xf.is_3d),
             egui::PointerButton::Middle => Some(false),
-            egui::PointerButton::Primary if state.tool == ToolKind::Navigate => Some(xf.is_3d),
+            egui::PointerButton::Primary if active_tool(state) == ToolKind::Navigate => Some(xf.is_3d),
             egui::PointerButton::Primary => None,
             egui::PointerButton::Extra1 | egui::PointerButton::Extra2 => return,
         };
@@ -435,7 +441,7 @@ impl ToolController {
             if let Some(session) = state.session.as_ref()
                 && orbit
                 && button == egui::PointerButton::Primary
-                && state.tool == ToolKind::Navigate
+                && active_tool(state) == ToolKind::Navigate
                 && xf.view == ViewId::Main3D
                 && session.doc.mesh.object_count() >= 2
             {
@@ -446,7 +452,7 @@ impl ToolController {
         self.alt = p.mods.alt;
         // Round 4 (FEATURE_TEXT 6.2): the Text tool always places the text of its options (the draft), also while a
         // placed text is selected; the selected text is edited with the Transform tool.
-        let Some(slot) = slot_for(state.tool, p.mods.alt) else { return };
+        let Some(slot) = slot_for(active_tool(state), p.mods.alt) else { return };
         if self.tool_mut(slot).press(state, xf, p) {
             self.interaction = Interaction::Tool(xf.view);
             self.captured = Some(slot);
@@ -513,7 +519,7 @@ impl ToolController {
         if self.is_busy() || !notches.is_finite() || notches == 0.0 {
             return false;
         }
-        match slot_for(state.tool, p.mods.alt) {
+        match slot_for(active_tool(state), p.mods.alt) {
             Some(slot) => self.tool_mut(slot).scroll(state, xf, p, notches),
             None => false,
         }
@@ -667,6 +673,7 @@ pub(crate) mod test_support {
             object_anchor: None,
             object_selection_rev: 0,
             object_reveal: None,
+            sticker_edit: None,
         });
         state
     }

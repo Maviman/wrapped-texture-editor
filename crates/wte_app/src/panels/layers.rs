@@ -43,7 +43,22 @@ pub(crate) fn row_click_action(mods: egui::Modifiers, layer: LayerId, active: bo
 /// The context menu of a layer row (right-click on the row, its thumbnail or its name): "Export selected layers... (N)"
 /// when the row is part of a selection of several layers, and "Export this layer...". Opening it changes neither the
 /// selection nor the active layer. The items' rects go to `hits` for the self-test.
-fn row_menu(ui: &mut egui::Ui, selection: &[LayerId], layer: LayerId, actions: &mut Vec<AppAction>, hits: &mut Vec<(PanelHit, Rect)>) {
+fn row_menu(
+    ui: &mut egui::Ui,
+    selection: &[LayerId],
+    layer: LayerId,
+    stamp: Option<StampId>,
+    actions: &mut Vec<AppAction>,
+    hits: &mut Vec<(PanelHit, Rect)>,
+) {
+    // Stickers P6a (STICKER_PLAN 3.1): a stamp or text layer opens its stamp in the Sticker view.
+    if let Some(stamp) = stamp {
+        if ui.button("Edit Sticker").clicked() {
+            actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(Some(stamp))));
+            ui.close();
+        }
+        ui.separator();
+    }
     if selection.len() > 1 && selection.contains(&layer) {
         let resp = ui.button(format!("Export selected layers... ({})", selection.len()));
         hits.push((PanelHit::LayerMenuExportSelected, resp.rect));
@@ -305,7 +320,7 @@ fn drag_row(
     {
         actions.push(action);
     }
-    row_resp.context_menu(|ui| row_menu(ui, selection, layer.id, actions, hits));
+    row_resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), actions, hits));
     hits.push((PanelHit::LayerRow(layer.id), rect));
     rect
 }
@@ -356,12 +371,17 @@ fn row(
         if let Some(is_3d) = stamp_is_3d(doc, layer) {
             paint_dim_tag(ui.painter(), rect, is_3d, badge_color(layer));
         }
-        if resp.clicked()
+        if resp.double_clicked()
+            && let Some(stamp) = layer.stamp_id()
+        {
+            // Stickers P6a: a double-click on a stamp layer's thumbnail opens the Sticker view.
+            actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(Some(stamp))));
+        } else if resp.clicked()
             && let Some(action) = row_click_action(mods, layer.id, active, multi)
         {
             actions.push(action);
         }
-        resp.context_menu(|ui| row_menu(ui, selection, layer.id, actions, hits));
+        resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), actions, hits));
 
         // Badge + name (or the rename field).
         let right_width = 2.0 * ICON_SIDE + 8.0;
@@ -384,7 +404,7 @@ fn row(
                 {
                     actions.push(action);
                 }
-                resp.context_menu(|ui| row_menu(ui, selection, layer.id, actions, hits));
+                resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), actions, hits));
                 resp.on_hover_text(
                     "Click: select  |  Ctrl / Shift-click: select more  |  Right-click: export  |  Double-click: rename  |  Drag: reorder",
                 );
@@ -626,12 +646,12 @@ pub(crate) fn rasterize_multi_hover(active: &str, blocked: Option<&str>) -> Stri
     }
 }
 
-fn icon_color(ui: &egui::Ui, resp: &egui::Response) -> Color32 {
+pub(crate) fn icon_color(ui: &egui::Ui, resp: &egui::Response) -> Color32 {
     if resp.hovered() { ui.visuals().widgets.hovered.fg_stroke.color } else { ui.visuals().widgets.inactive.fg_stroke.color }
 }
 
 /// An open eye, or a crossed-out one.
-pub(super) fn paint_eye(painter: &egui::Painter, rect: Rect, open: bool, color: Color32) {
+pub(crate) fn paint_eye(painter: &egui::Painter, rect: Rect, open: bool, color: Color32) {
     let c = rect.center();
     let w = ICON_SIDE * 0.42;
     let h = ICON_SIDE * 0.22;
@@ -654,7 +674,7 @@ pub(super) fn paint_eye(painter: &egui::Painter, rect: Rect, open: bool, color: 
 }
 
 /// A padlock, closed or open.
-fn paint_lock(painter: &egui::Painter, rect: Rect, closed: bool, color: Color32) {
+pub(crate) fn paint_lock(painter: &egui::Painter, rect: Rect, closed: bool, color: Color32) {
     let c = rect.center();
     let body = Rect::from_center_size(c + vec2(0.0, 2.5), vec2(ICON_SIDE * 0.55, ICON_SIDE * 0.38));
     let stroke = Stroke::new(1.3, if closed { color } else { color.linear_multiply(0.5) });

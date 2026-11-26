@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, pos2, vec2};
 
-use crate::state::ToolKind;
+use crate::state::{StickerTool, ToolKind};
 
 /// Accent colour of the app (selection, focus).
 pub const ACCENT: Color32 = Color32::from_rgb(70, 140, 220);
@@ -181,6 +181,100 @@ pub fn tool_icon(painter: &egui::Painter, rect: Rect, tool: ToolKind, color: Col
             }
             painter.line_segment([at(0.5, 0.32), at(0.5, 0.16)], Stroke::new(w * 0.7, color));
             painter.circle_stroke(at(0.5, 0.12), s * 0.06, stroke);
+        }
+    }
+}
+
+/// Stickers P6a: the icon of a sticker tool (the paint tools' icons where the tool is the same kind; simple vector
+/// marks for the others).
+pub fn sticker_tool_icon(painter: &egui::Painter, rect: Rect, tool: StickerTool, color: Color32) {
+    let s = rect.width().min(rect.height());
+    let c = rect.center();
+    let at = |x: f32, y: f32| -> Pos2 { pos2(c.x + (x - 0.5) * s, c.y + (y - 0.5) * s) };
+    let w = (s * 0.075).max(1.0);
+    let stroke = Stroke::new(w, color);
+    let star = |painter: &egui::Painter, centre: Pos2, r: f32| {
+        for k in 0..4 {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            let d = vec2(a.cos(), a.sin()) * r;
+            painter.line_segment([centre - d, centre + d], Stroke::new(w * 0.8, color));
+        }
+    };
+    match tool {
+        StickerTool::Move => {
+            // A four-way arrow.
+            painter.line_segment([at(0.2, 0.5), at(0.8, 0.5)], stroke);
+            painter.line_segment([at(0.5, 0.2), at(0.5, 0.8)], stroke);
+            arrow_head(painter, at(0.86, 0.5), vec2(1.0, 0.0), s * 0.14, color);
+            arrow_head(painter, at(0.14, 0.5), vec2(-1.0, 0.0), s * 0.14, color);
+            arrow_head(painter, at(0.5, 0.14), vec2(0.0, -1.0), s * 0.14, color);
+            arrow_head(painter, at(0.5, 0.86), vec2(0.0, 1.0), s * 0.14, color);
+        }
+        StickerTool::Hand => {
+            // A palm with four fingers and a thumb.
+            painter.rect_filled(Rect::from_min_max(at(0.3, 0.5), at(0.72, 0.85)), s * 0.1, color);
+            for (k, top) in [0.22f32, 0.15, 0.17, 0.25].iter().enumerate() {
+                let x = 0.34 + k as f32 * 0.115;
+                painter.line_segment([at(x, 0.55), at(x, *top)], Stroke::new(w * 1.4, color));
+            }
+            painter.line_segment([at(0.32, 0.68), at(0.18, 0.52)], Stroke::new(w * 1.4, color));
+        }
+        StickerTool::Marquee => {
+            let r = Rect::from_min_max(at(0.18, 0.25), at(0.82, 0.75));
+            let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            for pair in corners.windows(2) {
+                painter.add(egui::Shape::dashed_line(&[pair[0], pair[1]], stroke, s * 0.1, s * 0.07));
+            }
+        }
+        StickerTool::Lasso => {
+            let ring: Vec<Pos2> = (0..=16)
+                .map(|k| {
+                    let a = k as f32 / 16.0 * std::f32::consts::TAU;
+                    at(0.52 + 0.3 * a.cos(), 0.4 + 0.2 * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(ring, stroke));
+            painter.line_segment([at(0.3, 0.52), at(0.24, 0.84)], stroke);
+        }
+        StickerTool::Wand => {
+            painter.line_segment([at(0.18, 0.84), at(0.6, 0.42)], Stroke::new(w * 1.5, color));
+            star(painter, at(0.7, 0.3), s * 0.16);
+        }
+        StickerTool::Crop => {
+            painter.line_segment([at(0.3, 0.12), at(0.3, 0.7)], stroke);
+            painter.line_segment([at(0.3, 0.7), at(0.88, 0.7)], stroke);
+            painter.line_segment([at(0.12, 0.3), at(0.7, 0.3)], stroke);
+            painter.line_segment([at(0.7, 0.3), at(0.7, 0.88)], stroke);
+        }
+        StickerTool::Brush => tool_icon(painter, rect, ToolKind::Brush, color),
+        StickerTool::Eraser => tool_icon(painter, rect, ToolKind::Eraser, color),
+        StickerTool::Fill => tool_icon(painter, rect, ToolKind::Fill, color),
+        StickerTool::Eyedropper => tool_icon(painter, rect, ToolKind::Eyedropper, color),
+        StickerTool::Text => tool_icon(painter, rect, ToolKind::Text, color),
+        StickerTool::MagicEraser => {
+            tool_icon(painter, Rect::from_min_max(at(0.0, 0.2), at(0.8, 1.0)), ToolKind::Eraser, color);
+            star(painter, at(0.78, 0.22), s * 0.14);
+        }
+        StickerTool::Gradient => {
+            let r = Rect::from_min_max(at(0.15, 0.25), at(0.85, 0.75));
+            for k in 0..4 {
+                let band = Rect::from_min_max(
+                    pos2(r.min.x + r.width() * k as f32 / 4.0, r.min.y),
+                    pos2(r.min.x + r.width() * (k + 1) as f32 / 4.0, r.max.y),
+                );
+                painter.rect_filled(band, 0.0, color.gamma_multiply(0.25 + 0.25 * k as f32));
+            }
+            painter.rect_stroke(r, 0.0, Stroke::new(w * 0.7, color), egui::StrokeKind::Middle);
+        }
+        StickerTool::Shape => {
+            let points: Vec<Pos2> = (0..10)
+                .map(|k| {
+                    let a = k as f32 / 10.0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                    let r = if k % 2 == 0 { 0.36 } else { 0.16 };
+                    at(0.5 + r * a.cos(), 0.54 + r * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(points, stroke));
         }
     }
 }

@@ -35,7 +35,7 @@ pub mod toolbar;
 /// Layer thumbnails regenerated per frame at most (8.7).
 const THUMBS_PER_FRAME: usize = 2;
 /// Side of a layer thumbnail in points (8.7: "40-px thumbnail").
-const LAYER_THUMB_SIDE: f32 = 40.0;
+pub(crate) const LAYER_THUMB_SIDE: f32 = 40.0;
 /// Side of a texture-set thumbnail in points.
 const SET_THUMB_SIDE: f32 = 36.0;
 /// Side of the Stamp tool's source preview in points.
@@ -89,14 +89,14 @@ pub struct PanelState {
     /// Height of the Color page's content when it was last shown (points); the automatic split keeps room for it.
     color_content_height: f32,
     /// Height of the Layers footer in the last frame (points).
-    layers_footer_height: f32,
+    pub(crate) layers_footer_height: f32,
     /// Outer height the Layers area needed in the last frame to show all its rows and the footer (points); `None`
     /// until measured.
     layers_natural_height: Option<f32>,
     /// Bottom of the Layers section's content (header, or body when open) in the last frame (screen y).
-    layers_content_bottom: Option<f32>,
+    pub(crate) layers_content_bottom: Option<f32>,
     /// Height of the layer rows scrolled out of the list's view in the last frame (points).
-    layers_list_overflow: f32,
+    pub(crate) layers_list_overflow: f32,
     /// The Layers area's rect in the last frame (for the resize-edge press).
     layers_area_rect: Option<Rect>,
     /// The user dragged the Layers area's edge: from then on the area keeps the size they chose (kept across
@@ -279,17 +279,17 @@ pub(crate) fn action_target_exists(doc: &Document, action: &AppAction) -> bool {
 }
 
 /// True while a stroke, a gizmo drag or a slider drag is running: thumbnails keep their old image (8.7).
-fn interacting(doc: &Document) -> bool {
+pub(crate) fn interacting(doc: &Document) -> bool {
     doc.stroke_active() || doc.has_pending_edit()
 }
 
 /// Thumbnail side in physical pixels for `points` (crisp on high-DPI screens, bounded).
-fn thumb_pixels(ctx: &egui::Context, points: f32) -> u32 {
+pub(crate) fn thumb_pixels(ctx: &egui::Context, points: f32) -> u32 {
     (points * ctx.pixels_per_point()).round().clamp(16.0, 160.0) as u32
 }
 
 /// Uploads a straight-alpha thumbnail (`ColorImage::from_rgba_unmultiplied`, pitfall 3), reusing `old` when given.
-fn upload(
+pub(crate) fn upload(
     ctx: &egui::Context,
     name: &str,
     old: Option<egui::TextureHandle>,
@@ -504,6 +504,7 @@ mod tests {
             object_anchor: None,
             object_selection_rev: 0,
             object_reveal: None,
+            sticker_edit: None,
         });
         state
     }

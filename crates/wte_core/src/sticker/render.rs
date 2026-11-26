@@ -255,6 +255,28 @@ pub fn layer_content(input: &StickerRenderInput, layer: &StickerLayer, s: f32, q
     content_raster(input, layer, s, quality, clip, false).filter(|c| !c.is_empty())
 }
 
+/// The alpha (0..=255) that layer `layer` draws at the layer-space point `p` at render scale 1, its mask applied and
+/// before its styles, its opacity and clipping: the hit test of the editor's Move tool (STICKER_PLAN 3.3, stickers
+/// P6a). 0 outside its content and for a point that is not finite.
+pub fn layer_alpha_at(input: &StickerRenderInput, layer: &StickerLayer, p: Vec2) -> u8 {
+    if !p.is_finite() {
+        return 0;
+    }
+    let doc = &*input.doc;
+    // Output pixels at scale 1 have the artboard's top-left corner at 0.
+    let x = (p.x - doc.artboard.x0 as f32).floor() as i32;
+    let y = (p.y - doc.artboard.y0 as f32).floor() as i32;
+    let clip = IRect::new(x, y, x.saturating_add(1), y.saturating_add(1));
+    let Some(c) = content_raster(input, layer, 1.0, RasterQuality::Full, clip, true).filter(|c| !c.is_empty()) else {
+        return 0;
+    };
+    if !c.rect.contains(x, y) {
+        return 0;
+    }
+    let i = ((y - c.rect.y0) as usize * c.rect.width() as usize + (x - c.rect.x0) as usize) * 4 + 3;
+    c.data.get(i).copied().unwrap_or(0)
+}
+
 /// The mask of a picture layer placed like its picture (`layer_content`): an output-pixel buffer whose red channel is
 /// the mask value wherever the picture lands (alpha > 0 there); `None` without a mask (or when the mask does not have
 /// the picture's size).

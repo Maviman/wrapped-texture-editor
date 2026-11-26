@@ -45,23 +45,47 @@ pub struct Scratch {
     pub out_stem: PathBuf,
 }
 
+/// Stickers P6a (STICKER_PLAN 3.1, 8.2): where a pointer, click, wheel, hover or pen step goes: a rendered view, or the
+/// sticker canvas (which is not a `ViewId`, review A17; its rect is `AppState::sticker_canvas_rect`).
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum Target {
+    View(ViewId),
+    StickerCanvas,
+}
+
+impl From<ViewId> for Target {
+    fn from(view: ViewId) -> Target {
+        Target::View(view)
+    }
+}
+
+impl std::fmt::Debug for Target {
+    /// A view prints as before (`Main3D`), so step descriptions in the logs keep their wording.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Target::View(view) => write!(f, "{view:?}"),
+            Target::StickerCanvas => write!(f, "StickerCanvas"),
+        }
+    }
+}
+
 /// One step of a scenario.
 pub enum Step {
     Do(AppAction),
-    /// `path`: normalized 0..1 in the view rect.
-    Pointer { view: ViewId, path: Vec<[f32; 2]>, button: egui::PointerButton, mods: egui::Modifiers, points_per_frame: usize },
-    Click { view: ViewId, at: [f32; 2], button: egui::PointerButton, mods: egui::Modifiers },
+    /// `path`: normalized 0..1 in the target's rect.
+    Pointer { view: Target, path: Vec<[f32; 2]>, button: egui::PointerButton, mods: egui::Modifiers, points_per_frame: usize },
+    Click { view: Target, at: [f32; 2], button: egui::PointerButton, mods: egui::Modifiers },
     /// Primary-button press at the first point, moves through the others, release at the last one; positions in
     /// screen points (for panel controls, e.g. the Layers rows of `AppState::panel_rects`). One point = a click.
     ScreenPointer { path: Vec<egui::Pos2> },
     /// One click at a screen position (points) with any button and modifiers: Ctrl / Shift-click and the right-click
     /// on a Layers row, a click on an item of the row's context menu.
     ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
-    Scroll { view: ViewId, at: [f32; 2], notches: f32, mods: egui::Modifiers },
+    Scroll { view: Target, at: [f32; 2], notches: f32, mods: egui::Modifiers },
     /// The pointer moves to `at` (normalized 0..1 in the view rect) without a button: one hover frame (round 4, for the
     /// Text tool's picture under the pointer and the brush cursor).
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
-    Hover { view: ViewId, at: [f32; 2] },
+    Hover { view: Target, at: [f32; 2] },
     Key(egui::Modifiers, egui::Key),
     /// Branch `pen-input` (ARCHITECTURE 8.11): a recorded Windows Ink pen fed in-process: per sample exactly the events
     /// egui-winit makes for the pen (`Touch` with its force, the emulated `PointerMoved` / `PointerButton` /
@@ -69,10 +93,15 @@ pub enum Step {
     /// normalized in the view rect (values outside 0..1 reach the panels); pressure 0 = hover. The first contact sample
     /// is the Down, the last one is followed by an Up, a Leave record ends the step. `inverted` = the eraser end,
     /// `barrel` = the barrel button held.
-    Pen { view: ViewId, samples: Vec<PenPoint>, inverted: bool, barrel: bool, points_per_frame: usize },
+    Pen { view: Target, samples: Vec<PenPoint>, inverted: bool, barrel: bool, points_per_frame: usize },
     /// Window inner size in physical pixels (one `ViewportCommand::InnerSize`), then `RESIZE_FRAMES` frames of waiting.
     Resize([u32; 2]),
     WaitFrames(u32),
+    /// Stickers P6a (review A14): the runner keeps ticking until `n` milliseconds of wall-clock time have passed (the
+    /// runner repaints every frame, so "nothing happened for 3 s" cannot be told from a frame count). What follows
+    /// asserts state, never a frame counter.
+    #[allow(dead_code, reason = "stickers P9a: the link watcher's idle check")]
+    WaitMs(u64),
     WaitIdle,
     /// Direct state preparation or bookkeeping: register the sample stamp image as a blob, write asset files, remember
     /// a hash in `Scratch`.
@@ -88,8 +117,10 @@ pub enum Step {
     Screenshot,
     /// Round 4 (gate): a named capture in the middle of a run, written to `<out_stem>_<name>.png` (the run's own
     /// `OUT.png` is still the final `Screenshot`). Lets a scenario keep the picture of an intermediate frame (the
-    /// hover of `text_tab` and `brush_shape`).
-    Shot(&'static str),
+    /// hover of `text_tab` and `brush_shape`). Stickers P6a (review B15): `expect` says what the picture must show;
+    /// the runner writes every shot's name and `expect` into `OUT.json` (`"shots"`) for the checker and the gate. The
+    /// sticker scenarios must give one (the scenario-count test); older scenarios have "".
+    Shot { name: &'static str, expect: &'static str },
     /// Round 5 (R5-1): switches the runner's wait for the Final stamp bakes after input and `Do` steps off (`false`)
     /// and on again (`true`, the default). With it off the next step starts while a bake still runs (the scenario
     /// `final_bake_async`); `WaitIdle` always waits for the bakes.
@@ -119,13 +150,14 @@ impl Step {
             }
             Step::Resize([w, h]) => format!("Resize({w}x{h})"),
             Step::WaitFrames(n) => format!("WaitFrames({n})"),
+            Step::WaitMs(n) => format!("WaitMs({n})"),
             Step::WaitIdle => "WaitIdle".to_owned(),
             Step::Setup(name, _) => format!("Setup({name})"),
             Step::Assert(name, _) => format!("Assert({name})"),
             Step::Dyn(name, _) => format!("Dyn({name})"),
             Step::Until(name, _) => format!("Until({name})"),
             Step::Screenshot => "Screenshot".to_owned(),
-            Step::Shot(name) => format!("Shot({name})"),
+            Step::Shot { name, .. } => format!("Shot({name})"),
             Step::BakeWait(on) => format!("BakeWait({on})"),
             Step::Exit => "Exit".to_owned(),
         }
@@ -160,6 +192,8 @@ enum Active {
     Bakes,
     /// Branch `companion`: `Step::Until`.
     Until(&'static str, fn(&AppState, &Scratch) -> Result<bool, String>),
+    /// Stickers P6a: `Step::WaitMs`, until this wall-clock instant.
+    WaitUntil(Instant),
 }
 
 /// Drives a scenario: injects input, waits, asserts, captures the screenshot and writes the report.
@@ -193,6 +227,8 @@ pub struct Runner {
     exited_at: Option<u64>,
     /// Round 5: input and `Do` steps also wait for the pending Final stamp bakes (`Step::BakeWait`; default on).
     bake_wait: bool,
+    /// Stickers P6a (review B15): the named shots taken, with what each must show (`"shots"` of `OUT.json`).
+    shots: Vec<(&'static str, &'static str)>,
 }
 
 impl Runner {
@@ -254,6 +290,7 @@ impl Runner {
             last_rects: HashMap::new(),
             exited_at: None,
             bake_wait: true,
+            shots: Vec::new(),
         })
     }
 
@@ -433,6 +470,7 @@ impl Runner {
                 }
             },
             Active::Frames(n) => (n > 1).then_some(Active::Frames(n - 1)),
+            Active::WaitUntil(at) => wait_until(at),
             Active::Idle { count } => {
                 let idle = is_idle(state, tools_busy) && state.view_rects == self.last_rects;
                 let count = if idle { count + 1 } else { 0 };
@@ -525,6 +563,7 @@ impl Runner {
                     self.active = Some((Active::Frames(n), name));
                 }
             }
+            Step::WaitMs(ms) => self.active = Some((Active::WaitUntil(Instant::now() + Duration::from_millis(ms)), name)),
             Step::WaitIdle => self.active = Some((Active::Idle { count: 0 }, name)),
             Step::Setup(label, f) => {
                 if let Err(e) = f(state, &mut self.scratch) {
@@ -546,16 +585,24 @@ impl Runner {
             },
             Step::Until(label, f) => self.active = Some((Active::Until(label, f), name)),
             Step::Screenshot => self.capture(ctx, None, name),
-            Step::Shot(shot) => self.capture(ctx, Some(shot), name),
+            Step::Shot { name: shot, expect } => {
+                self.shots.push((shot, expect));
+                self.capture(ctx, Some(shot), name);
+            }
             Step::BakeWait(on) => self.bake_wait = on,
             Step::Exit => self.finish(ctx, state, frame),
         }
     }
 
-    /// The view rect of the previous frame; fails the scenario when the view was not laid out.
-    fn view_rect(&mut self, state: &AppState, view: ViewId, step: &str) -> Option<egui::Rect> {
-        match state.view_rects.get(&view) {
-            Some(r) if r.width() > 0.0 && r.height() > 0.0 => Some(*r),
+    /// The rect of a step's target in the previous frame (a view, or the sticker canvas); fails the scenario when it
+    /// was not laid out.
+    fn view_rect(&mut self, state: &AppState, view: Target, step: &str) -> Option<egui::Rect> {
+        let rect = match view {
+            Target::View(v) => state.view_rects.get(&v).copied(),
+            Target::StickerCanvas => state.sticker_canvas_rect,
+        };
+        match rect {
+            Some(r) if r.width() > 0.0 && r.height() > 0.0 => Some(r),
             _ => {
                 self.fail(EXIT_FAILED, format!("{step}: the view {view:?} is not shown"));
                 None
@@ -654,6 +701,7 @@ impl Runner {
             self.captured_size.unwrap_or([0, 0]),
             self.size_clamped,
             &self.errors,
+            &self.shots,
         );
         if let Err(e) = write_file(&self.out_json, report.as_bytes()) {
             log::error!("cannot write {}: {e}", self.out_json.display());
@@ -678,6 +726,11 @@ fn timeouts(scenario: &str) -> (Duration, Duration) {
         std::env::var(name).ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|&s| s > 0).map_or(default, Duration::from_secs)
     };
     (env("WTE_SELFTEST_STEP_TIMEOUT", step), env("WTE_SELFTEST_RUN_TIMEOUT", run))
+}
+
+/// Stickers P6a: a `WaitMs` step goes on while `at` has not come.
+fn wait_until(at: Instant) -> Option<Active> {
+    (Instant::now() < at).then_some(Active::WaitUntil(at))
 }
 
 /// `WaitIdle` conditions other than the stable view rects (8.11).
@@ -837,7 +890,8 @@ fn pen_up(pos: egui::Pos2, up: PenRecord) -> FrameInput {
     }
 }
 
-/// The JSON report of a run.
+/// The JSON report of a run; stickers P6a: `"shots"` lists every named shot with what it must show.
+#[expect(clippy::too_many_arguments, reason = "one field per report entry")]
 fn report_json(
     scenario: &str,
     ok: bool,
@@ -846,7 +900,10 @@ fn report_json(
     size: [u32; 2],
     size_clamped: bool,
     errors: &[String],
+    shots: &[(&str, &str)],
 ) -> String {
+    let shots: Vec<serde_json::Value> =
+        shots.iter().map(|(name, expect)| serde_json::json!({ "name": name, "expect": expect })).collect();
     let value = serde_json::json!({
         "scenario": scenario,
         "ok": ok,
@@ -855,6 +912,7 @@ fn report_json(
         "size": size,
         "size_clamped": size_clamped,
         "errors": errors,
+        "shots": shots,
     });
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
 }
@@ -980,7 +1038,8 @@ mod tests {
         let h = hover_frames(egui::pos2(5.0, 6.0));
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].events, vec![egui::Event::PointerMoved(egui::pos2(5.0, 6.0))]);
-        assert_eq!(Step::Hover { view: ViewId::Main3D, at: [0.25, 0.5] }.describe(), "Hover(Main3D, [0.25, 0.5])");
+        assert_eq!(Step::Hover { view: ViewId::Main3D.into(), at: [0.25, 0.5] }.describe(), "Hover(Main3D, [0.25, 0.5])");
+        assert_eq!(Step::Hover { view: Target::StickerCanvas, at: [0.5, 0.5] }.describe(), "Hover(StickerCanvas, [0.5, 0.5])");
     }
 
     #[test]
@@ -989,7 +1048,7 @@ mod tests {
         let r = Runner::new(&args("smoke", r"E:\x\shot.png"), Arc::new(AtomicI32::new(0))).unwrap();
         assert_eq!(r.shot_path(None), PathBuf::from(r"E:\x\shot.png"));
         assert_eq!(r.shot_path(Some("hover")), PathBuf::from(r"E:\x\shot_hover.png"));
-        assert_eq!(Step::Shot("hover").describe(), "Shot(hover)");
+        assert_eq!(Step::Shot { name: "hover", expect: "" }.describe(), "Shot(hover)");
     }
 
     #[test]
@@ -1043,7 +1102,7 @@ mod tests {
 
     #[test]
     fn report_has_the_contract_fields() {
-        let json = report_json("smoke", true, 42, [1280, 800], [1280, 800], false, &[]);
+        let json = report_json("smoke", true, 42, [1280, 800], [1280, 800], false, &[], &[("a", "the model")]);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["scenario"], "smoke");
         assert_eq!(v["ok"], true);
@@ -1052,6 +1111,52 @@ mod tests {
         assert_eq!(v["size"], serde_json::json!([1280, 800]));
         assert_eq!(v["size_clamped"], false);
         assert_eq!(v["errors"], serde_json::json!([]));
+        assert_eq!(v["shots"], serde_json::json!([{ "name": "a", "expect": "the model" }]));
+    }
+
+    /// Stickers P6a: a step aimed at the sticker canvas finds its rect in `AppState::sticker_canvas_rect` and fails
+    /// clearly when the canvas is not shown; a view target reads `view_rects` as before.
+    #[test]
+    fn targets_resolve_to_the_view_or_the_sticker_canvas() {
+        let mut r = Runner::new(&args("smoke", r"E:\x\shot.png"), Arc::new(AtomicI32::new(0))).unwrap();
+        let mut state = AppState::new(crate::state::Prefs::default(), true);
+        let canvas = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(300.0, 200.0));
+        let view = egui::Rect::from_min_size(egui::pos2(320.0, 20.0), egui::vec2(300.0, 200.0));
+        state.view_rects.insert(ViewId::Main3D, view);
+        assert_eq!(r.view_rect(&state, ViewId::Main3D.into(), "probe"), Some(view));
+        assert!(r.errors.is_empty());
+        assert_eq!(r.view_rect(&state, Target::StickerCanvas, "probe"), None);
+        assert!(r.errors[0].contains("StickerCanvas"), "{:?}", r.errors);
+        state.sticker_canvas_rect = Some(canvas);
+        assert_eq!(r.view_rect(&state, Target::StickerCanvas, "probe"), Some(canvas));
+        assert_eq!(Target::from(ViewId::Main2D), Target::View(ViewId::Main2D));
+    }
+
+    /// Stickers P6a (review A14): `WaitMs` waits wall-clock time, however many frames pass; a named shot is listed
+    /// with its `expect`.
+    #[test]
+    fn wait_ms_waits_wall_clock_time_and_shots_keep_their_expectation() {
+        let mut r = Runner::new(&args("smoke", r"E:\x\shot.png"), Arc::new(AtomicI32::new(0))).unwrap();
+        let mut state = AppState::new(crate::state::Prefs::default(), true);
+        let ctx = egui::Context::default();
+        r.steps = VecDeque::from([Step::WaitMs(60), Step::WaitMs(0)]);
+        let start = Instant::now();
+        r.start_next(&ctx, &mut state, 1);
+        let Some((Active::WaitUntil(at), _)) = r.active.take() else { panic!("WaitMs is a WaitUntil step") };
+        let mut frames = 0u64;
+        while wait_until(at).is_some() {
+            frames += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(start.elapsed() >= Duration::from_millis(60), "ended after {:?}", start.elapsed());
+        assert!(frames >= 2, "{frames} polls");
+        r.start_next(&ctx, &mut state, 2);
+        assert!(matches!(r.active.as_ref().map(|a| &a.0), Some(Active::WaitUntil(_))));
+        assert_eq!(Step::WaitMs(3000).describe(), "WaitMs(3000)");
+        r.active = None;
+        r.steps = VecDeque::from([Step::Shot { name: "canvas", expect: "the photo on a checkerboard" }]);
+        r.start_next(&ctx, &mut state, 3);
+        assert_eq!(r.shots, [("canvas", "the photo on a checkerboard")]);
     }
 
     #[test]

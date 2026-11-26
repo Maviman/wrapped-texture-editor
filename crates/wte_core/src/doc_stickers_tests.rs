@@ -926,3 +926,45 @@ fn check_p3a_identity_at_512_with_styles_switched_off_and_promoted() {
     }
     assert_eq!(cache_hash(&mut doc), P0_IDENTITY_HASH_512, "promoted stamps with styles off bake exactly as before");
 }
+
+/// Stickers P6a: the Move tool's hit test finds the top visible layer that draws a pixel at the point (its mask
+/// applied), and the Layers tab's thumbnail draws one layer alone, scaled to the side asked for.
+#[test]
+fn k6a_layer_at_and_layer_thumbnail() {
+    let mut doc = doc_from_raw(samples::two_material_model(), 64);
+    let mut sticker = StickerDoc::new("hit", 40, 20);
+    let bottom = sticker.alloc_layer();
+    let red = owned(&mut doc, disc(20, 10.0, [255, 0, 0, 255]));
+    sticker.layers.push(StickerLayer::new(bottom, "red", StickerContent::Picture(red)));
+    let top = sticker.alloc_layer();
+    let blue = owned(&mut doc, disc(20, 10.0, [0, 0, 255, 255]));
+    let mut layer = StickerLayer::new(top, "blue", StickerContent::Picture(blue));
+    layer.transform.translate = Vec2::new(20.0, 0.0);
+    sticker.layers.push(layer);
+    let id = doc.add_sticker(sticker).unwrap();
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(10.5, 10.5)), Some(bottom));
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(30.5, 10.5)), Some(top));
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(0.5, 0.5)), None, "a corner outside both discs");
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(-5.0, 10.0)), None);
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(f32::NAN, 10.0)), None);
+    // Hidden layers are skipped; a mask that hides a pixel hides it from the click too.
+    doc.set_sticker(StickerRef::Id(id), |d| d.layers[1].visible = false, "Hide", Commit::Final).unwrap();
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(30.5, 10.5)), None);
+    let mut mask = AlphaBuf::new(20, 20);
+    mask.data.fill(255);
+    mask.data[10 * 20 + 10] = 0;
+    let version = doc.next_pixel_version();
+    doc.set_sticker(StickerRef::Id(id), |d| d.layers[0].mask = Some(LayerMask { pixels: Arc::new(mask), version }), "Mask", Commit::Final)
+        .unwrap();
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(10.5, 10.5)), None, "masked pixel");
+    assert_eq!(doc.sticker_layer_at(id, Vec2::new(9.5, 10.5)), Some(bottom));
+    // The thumbnail: the whole 40 x 20 artboard at side 20 (scale 1/2), the hidden blue layer drawn on its own.
+    let thumb = doc.sticker_layer_thumbnail(id, top, 20).unwrap();
+    assert_eq!((thumb.width, thumb.height), (20, 10));
+    let px = |b: &PixelBuf, x: u32, y: u32| b.data[((y * b.width + x) * 4) as usize..][..4].to_vec();
+    assert_eq!(px(&thumb, 15, 5)[2], 255, "the blue disc in the right half: {:?}", px(&thumb, 15, 5));
+    assert_eq!(px(&thumb, 5, 5)[3], 0, "nothing of the red layer");
+    assert!(doc.sticker_layer_thumbnail(id, StickerLayerId(99), 20).is_none());
+    assert!(doc.sticker_layer_thumbnail(StickerId(9_999), top, 20).is_none());
+    assert_eq!(doc.history.undo_len(), 3, "read-outs make no entry");
+}

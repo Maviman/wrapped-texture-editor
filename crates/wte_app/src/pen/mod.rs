@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 
 use eframe::egui;
 
-use crate::state::{TabletInput, ToolKind};
+use crate::state::{StickerTool, TabletInput, ToolKind};
 
 pub use route::PenRouter;
 
@@ -150,6 +150,9 @@ pub struct PenState {
     pub eraser_restore: Option<ToolKind>,
     /// A manual tool change dropped the override: no new one until the eraser end leaves (or turns around).
     pub eraser_hold_off: bool,
+    /// Stickers P6a: the sticker tool to return to when the eraser end goes away in the Sticker view
+    /// (`sticker_eraser_override`).
+    pub sticker_eraser_restore: Option<StickerTool>,
     /// Part G: the pressure source in effect (`sync_tablet_input`); `None` before the first interactive frame.
     pub tablet_applied: Option<TabletInput>,
     /// Part G: the WinTab pressure ramp between frames.
@@ -294,14 +297,14 @@ pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
     }
 }
 
-/// What the eraser override does this frame.
+/// What the eraser override does this frame (`T`: the paint tools, or the sticker tools of the Sticker view).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum EraserStep {
+pub enum EraserStep<T = ToolKind> {
     Nothing,
     /// Switch to the Eraser and remember this tool.
-    Engage(ToolKind),
+    Engage(T),
     /// Go back to this tool.
-    Restore(ToolKind),
+    Restore(T),
     /// The user changed the tool meanwhile: forget the override, keep the tool.
     Drop,
 }
@@ -310,21 +313,25 @@ pub enum EraserStep {
 /// Eraser; when the pen turns back, leaves the range or the mouse presses, the previous tool returns. Nothing happens
 /// while the tools are busy (an open stroke or drag); a manual tool change during the override drops it.
 pub fn eraser_step(pen: &PenState, tool: ToolKind, busy: bool) -> EraserStep {
+    step_of(&pen.frame, pen.eraser_restore, pen.eraser_hold_off, tool, ToolKind::Eraser, busy)
+}
+
+/// The eraser-end rule for any tool set (`eraser` = its Eraser), pure.
+fn step_of<T: Copy + PartialEq>(f: &PenFrame, restore: Option<T>, hold_off: bool, tool: T, eraser: T, busy: bool) -> EraserStep<T> {
     if busy {
         return EraserStep::Nothing;
     }
-    let f = &pen.frame;
     let eraser_end = f.in_range && f.inverted;
-    match pen.eraser_restore {
+    match restore {
         None => {
-            if eraser_end && !pen.eraser_hold_off && tool != ToolKind::Eraser {
+            if eraser_end && !hold_off && tool != eraser {
                 EraserStep::Engage(tool)
             } else {
                 EraserStep::Nothing
             }
         }
         Some(previous) => {
-            if tool != ToolKind::Eraser {
+            if tool != eraser {
                 EraserStep::Drop
             } else if !eraser_end || f.mouse_press {
                 EraserStep::Restore(previous)
@@ -335,31 +342,49 @@ pub fn eraser_step(pen: &PenState, tool: ToolKind, busy: bool) -> EraserStep {
     }
 }
 
+/// Applies a step to the remembered tool and the hold-off flag; returns the tool to set, if any.
+fn apply_step<T: Copy>(step: EraserStep<T>, eraser: T, eraser_end: bool, restore: &mut Option<T>, hold_off: &mut bool) -> Option<T> {
+    match step {
+        EraserStep::Nothing => None,
+        EraserStep::Engage(previous) => {
+            *restore = Some(previous);
+            Some(eraser)
+        }
+        EraserStep::Restore(previous) => {
+            *restore = None;
+            // Restored by a mouse press while the eraser end still lies in range: the user works with the mouse, so
+            // the Eraser does not come back after every mouse stroke (until the end leaves or turns; check, pen-input).
+            *hold_off = eraser_end;
+            Some(previous)
+        }
+        EraserStep::Drop => {
+            *restore = None;
+            *hold_off = eraser_end;
+            None
+        }
+    }
+}
+
 /// Applies `eraser_step` to the pen state and returns the tool to set through the normal `SetTool` dispatch, if any.
 pub fn eraser_override(pen: &mut PenState, tool: ToolKind, busy: bool) -> Option<ToolKind> {
     let eraser_end = pen.frame.in_range && pen.frame.inverted;
     if !eraser_end {
         pen.eraser_hold_off = false;
     }
-    match eraser_step(pen, tool, busy) {
-        EraserStep::Nothing => None,
-        EraserStep::Engage(previous) => {
-            pen.eraser_restore = Some(previous);
-            Some(ToolKind::Eraser)
-        }
-        EraserStep::Restore(previous) => {
-            pen.eraser_restore = None;
-            // Restored by a mouse press while the eraser end still lies in range: the user works with the mouse, so
-            // the Eraser does not come back after every mouse stroke (until the end leaves or turns; check, pen-input).
-            pen.eraser_hold_off = eraser_end;
-            Some(previous)
-        }
-        EraserStep::Drop => {
-            pen.eraser_restore = None;
-            pen.eraser_hold_off = eraser_end;
-            None
-        }
+    let step = eraser_step(pen, tool, busy);
+    apply_step(step, ToolKind::Eraser, eraser_end, &mut pen.eraser_restore, &mut pen.eraser_hold_off)
+}
+
+/// Stickers P6a (STICKER_PLAN 3.3, 3.10): the same rule in the Sticker view: the pen's eraser end selects the sticker
+/// Eraser and the previous sticker tool comes back; the tool to set goes through `AppAction::SetStickerTool`. The paint
+/// tools' override (`eraser_override`) is not run while the Sticker view is shown.
+pub fn sticker_eraser_override(pen: &mut PenState, tool: StickerTool, busy: bool) -> Option<StickerTool> {
+    let eraser_end = pen.frame.in_range && pen.frame.inverted;
+    if !eraser_end {
+        pen.eraser_hold_off = false;
     }
+    let step = step_of(&pen.frame, pen.sticker_eraser_restore, pen.eraser_hold_off, tool, StickerTool::Eraser, busy);
+    apply_step(step, StickerTool::Eraser, eraser_end, &mut pen.sticker_eraser_restore, &mut pen.eraser_hold_off)
 }
 
 #[cfg(test)]
@@ -453,6 +478,29 @@ mod tests {
         p.apply_wintab(&events);
         assert_eq!(p.frame, PenFrame::default(), "no context: nothing laid over the frame");
         assert_eq!(p.sync_tablet_input(TabletInput::WindowsInk), None);
+    }
+
+    /// Stickers P6a: in the Sticker view the eraser end selects the sticker Eraser and gives the sticker tool back; the
+    /// paint tools' override keeps its own memory, so the paint tool is untouched by it.
+    #[test]
+    fn the_eraser_end_selects_the_sticker_eraser_in_the_sticker_view() {
+        let mut p = pen(true, true);
+        assert_eq!(sticker_eraser_override(&mut p, StickerTool::Move, true), None, "never while busy");
+        assert_eq!(sticker_eraser_override(&mut p, StickerTool::Move, false), Some(StickerTool::Eraser));
+        assert_eq!(p.sticker_eraser_restore, Some(StickerTool::Move));
+        assert_eq!(p.eraser_restore, None, "the paint tool is not remembered");
+        assert_eq!(sticker_eraser_override(&mut p, StickerTool::Eraser, false), None, "held while the end is in range");
+        p.frame.inverted = false;
+        assert_eq!(sticker_eraser_override(&mut p, StickerTool::Eraser, false), Some(StickerTool::Move));
+        assert_eq!(p.sticker_eraser_restore, None);
+        // A manual change while the end hovers drops it.
+        let mut p = pen(true, true);
+        assert_eq!(sticker_eraser_override(&mut p, StickerTool::Hand, false), Some(StickerTool::Eraser));
+        assert_eq!(sticker_eraser_override(&mut p, StickerTool::Marquee, false), None);
+        assert_eq!(p.sticker_eraser_restore, None);
+        // Outside the Sticker view the paint override gives the paint Eraser, as before.
+        let mut p = pen(true, true);
+        assert_eq!(eraser_override(&mut p, ToolKind::Brush, false), Some(ToolKind::Eraser));
     }
 
     #[test]

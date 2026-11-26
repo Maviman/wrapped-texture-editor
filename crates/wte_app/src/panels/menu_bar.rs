@@ -140,10 +140,21 @@ fn edit_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
 
 fn view_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
     let has_doc = state.session.is_some();
-    for (label, mode) in
-        [("3D", ViewMode::View3D), ("2D", ViewMode::View2D), ("Split", ViewMode::Split), ("Preview", ViewMode::Preview)]
-    {
-        let enabled = mode != ViewMode::Preview || has_doc;
+    // Stickers P6a: the Sticker view needs a selected stamp (or is open).
+    let can_sticker = state.view_mode == ViewMode::Sticker
+        || state.session.as_ref().is_some_and(|s| s.selected_stamp.is_some_and(|id| s.doc.stamp(id).is_some()));
+    for (label, mode) in [
+        ("3D", ViewMode::View3D),
+        ("2D", ViewMode::View2D),
+        ("Split", ViewMode::Split),
+        ("Preview", ViewMode::Preview),
+        ("Sticker", ViewMode::Sticker),
+    ] {
+        let enabled = match mode {
+            ViewMode::Preview => has_doc,
+            ViewMode::Sticker => can_sticker,
+            _ => true,
+        };
         if item(ui, label, label, enabled, state.view_mode == mode) {
             actions.push(AppAction::SetViewMode(mode));
         }
@@ -234,6 +245,12 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     let can_down = index.is_some_and(|i| i > 0);
     let active_id = active.map(|l| l.id);
 
+    // Stickers P6a (STICKER_PLAN 3.1): the selected stamp opens in the Sticker view.
+    let stamp_selected = session.is_some_and(|s| s.selected_stamp.is_some_and(|id| s.doc.stamp(id).is_some()));
+    if item(ui, "Edit Sticker", "Edit Sticker", stamp_selected && state.view_mode != ViewMode::Sticker, false) {
+        actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(None)));
+    }
+    ui.separator();
     if item(ui, "New Paint Layer", "New Paint Layer", has_doc, false) {
         actions.push(AppAction::AddPaintLayer);
     }

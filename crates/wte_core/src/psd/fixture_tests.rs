@@ -750,3 +750,122 @@ fn k5_ps_byte_flips_never_panic() {
     eprintln!("k5_ps_byte_flips_never_panic: {oks} ok, {errs} refused, {:.1} s", started.elapsed().as_secs_f64());
 }
 
+
+
+/// P5a checker: one more PhotoCraft v0.2.0 CLI fixture that the builder did not make (`make_f13_check.sh`): a 16-bit
+/// **PSB** (layers in the `Lr16` block with an 8-byte length, PackBits rows with 4-byte counts at 16 bits), a soft
+/// user mask on the lower layer, and an upper layer named "Слой ü" (only `luni` holds it; the Pascal name is
+/// `???? ?`) with opacity 153 and Screen. Its layers must equal PhotoCraft's own per-layer PNGs and its merged
+/// picture PhotoCraft's `convert` PNG.
+#[test]
+fn k5_check_pc_16bit_psb_against_photocrafts_pngs() {
+    let bytes = std::fs::read(fixture_dir().join("f13_check_16bit.psb")).unwrap();
+    RESYNCS.with(|r| r.set(0));
+    let p = parse(&bytes, &PsdLimits::default()).unwrap();
+    assert_eq!(RESYNCS.with(|r| r.get()), 0);
+    assert_eq!(p.end, bytes.len());
+    let doc = p.doc;
+    assert!(doc.psb && doc.depth == 16 && !doc.is_flat() && doc.has_real_merged);
+    assert_eq!(doc.layers.len(), 2);
+    let (lower, upper) = (&doc.layers[0], &doc.layers[1]);
+    assert_eq!((lower.name.as_str(), lower.lyid), ("Layer 1", Some(1)));
+    assert_eq!(upper.name, "\u{0421}\u{043B}\u{043E}\u{0439} \u{00FC}", "luni wins over the Pascal name");
+    assert_eq!((upper.opacity, upper.blend), (153, PsdBlend::Known(BlendMode::Screen)));
+    let m = lower.mask.as_ref().expect("the user mask");
+    assert_eq!((m.rect, m.default, m.disabled), (IRect::new(6, 2, 50, 40), 0, false));
+    assert!(doc.forcing(true).is_empty() && !doc.editor_native());
+    assert_eq!(mode(&doc, true), Mode::Layers);
+    // Layer pixels against PhotoCraft's 16-bit layer PNGs (reduced to 8 bits by the image crate: within 1 level).
+    let pngs = pc_layer_pngs("f13_check_16bit");
+    assert_eq!(pngs.len(), 2);
+    for ((file, want), l) in pngs.iter().zip(&doc.layers) {
+        assert!(file.ends_with(&format!("_{}.png", l.name)), "{file} vs {}", l.name);
+        assert!(same_visible(&visible_layer(&doc, l), want, 1), "layer {}", l.name);
+    }
+    // The merged picture (16-bit RLE, un-matted at 16 bits) against the convert PNG: alpha within 1 (the PNG is
+    // 8-bit, reduced by PhotoCraft), colour within the un-matting bound of k5_pc_merged_equals_photocrafts_convert_png.
+    let want = png(fixture_dir().join("f13_check_16bit_merged.png"));
+    let got = doc.merged.as_ref().unwrap();
+    assert_eq!((got.width, got.height), (want.width, want.height));
+    for (p, q) in got.data.as_chunks::<4>().0.iter().zip(want.data.as_chunks::<4>().0.iter()) {
+        assert!(p[3].abs_diff(q[3]) <= 1, "alpha {} vs {}", p[3], q[3]);
+        let a = p[3].min(q[3]) as u32;
+        if a < 16 {
+            continue;
+        }
+        let bound = if a >= 254 { 1 } else { 1 + 255_u32.div_ceil(2 * a) };
+        for k in 0..3 {
+            assert!(p[k].abs_diff(q[k]) as u32 <= bound, "colour {} vs {} at alpha {a}", p[k], q[k]);
+        }
+    }
+    // And the merged picture equals the composite of the layers (WTE's Screen kernel against PhotoCraft's).
+    let d = composite_vs_merged(&doc);
+    assert!(d <= 2, "{d}");
+}
+
+
+/// P5a checker: the 8 samples of 13.4 that are not repository fixtures (two of unclear origin, six left out for size),
+/// read from the planner's download when it is on this machine (`G:\Claude_Resources\ref\psd-samples\psd-tools`, or
+/// the folder in `WTE_PSD_SAMPLES`). Ignored: it needs files outside the repository. Results are in
+/// `docs/notes/sticker/check-P5a.md`.
+#[test]
+#[ignore]
+fn k5_check_outside_samples() {
+    let dir = std::env::var("WTE_PSD_SAMPLES").unwrap_or_else(|_| "G:/Claude_Resources/ref/psd-samples/psd-tools".into());
+    let dir = PathBuf::from(dir);
+    if !dir.is_dir() {
+        eprintln!("k5_check_outside_samples: {} is missing; nothing checked", dir.display());
+        return;
+    }
+    let read_at = |rel: &str| {
+        let bytes = std::fs::read(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        RESYNCS.with(|r| r.set(0));
+        let p = parse(&bytes, &PsdLimits::default());
+        let resyncs = RESYNCS.with(|r| r.get());
+        p.map(|p| {
+            assert_eq!(p.end, bytes.len(), "{rel}: the walk ends at the last byte");
+            assert_eq!(resyncs, 0, "{rel}: no re-sync");
+            p.doc
+        })
+    };
+    // 2layers.psd (unknown old writer): Cyrillic UTF-8 Pascal names, no lyid, no luni, no 1057 (= real).
+    let d = read_at("2layers.psd").unwrap();
+    assert_eq!(d.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["\u{0424}\u{043E}\u{043D}", "\u{0421}\u{043B}\u{043E}\u{0439}"]);
+    assert!(d.layers.iter().all(|l| l.lyid.is_none() && l.features.is_empty()));
+    assert!(d.has_real_merged && mode(&d, true) == Mode::Layers);
+    assert!(composite_vs_merged(&d) <= 1);
+    // cactus_top.psd (third-party): channel -1 last, lsct type 0 on plain layers, a hidden Background. Layers mode.
+    // Its header has 4 channels but a positive layer count, so the merged picture is read as opaque (5.2: transparency
+    // only with a negative count); Layers mode does not use it.
+    let d = read_at("third-party-psds/cactus_top.psd").unwrap();
+    assert_eq!(d.layers.len(), 2);
+    assert!(d.layers.iter().all(|l| l.section == PsdSection::Layer && l.features.is_empty() && l.pixels.is_some()));
+    assert!(!d.layers[0].visible && d.layers[1].visible);
+    assert_eq!(mode(&d, true), Mode::Layers);
+    // empty-layer.psd: an ordinary empty layer, a shape (with a rendered mask, dropped) inside a pass-through group.
+    let d = read_at("empty-layer.psd").unwrap();
+    assert_eq!(layer(&d, "empty").pixels, Some(CroppedBuf::empty()));
+    let shape = layer(&d, "normal");
+    assert!(shape.features == PsdFeatures::FILL && shape.mask.is_none() && shape.pixels.is_some());
+    assert_eq!(d.forcing(true), PsdFeatures::GROUP | PsdFeatures::BLEND_OTHER);
+    assert_eq!(mode(&d, true), Mode::Merged);
+    assert_eq!(composite_vs_merged(&d), 0);
+    // blend-modes/normal.psd: three shape layers with pixels (vmsk, flags 0x18) at opacity 128: Layers mode.
+    let d = read_at("blend-modes/normal.psd").unwrap();
+    assert!(d.layers.iter().all(|l| l.features == PsdFeatures::FILL && l.opacity == 128));
+    assert_eq!(mode(&d, true), Mode::Layers);
+    assert!(composite_vs_merged(&d) <= 2);
+    // 32-bit grayscale: the 32-bit sentence.
+    assert_eq!(read_at("colormodes/4x4_32bit_grayscale.psd"), Err(PsdError::Unsupported(PsdRefusal::Depth32)));
+    // An adjustment layer: ADJUSTMENT and NO_PIXELS, Merged.
+    let d = read_at("layers/hue-saturation.psd").unwrap();
+    assert_eq!(d.forcing(true), PsdFeatures::ADJUSTMENT | PsdFeatures::NO_PIXELS);
+    assert_eq!(mode(&d, true), Mode::Merged);
+    // Gradient and pattern fill with MaxCompat off: NO_PIXELS, no real merged picture.
+    for rel in ["layers-minimal/gradient-fill.psd", "layers-minimal/pattern-fill.psd"] {
+        let d = read_at(rel).unwrap();
+        assert_eq!(d.forcing(true), PsdFeatures::NO_PIXELS, "{rel}");
+        assert!(!d.has_real_merged, "{rel}");
+        assert_eq!(mode(&d, true), Mode::NeedsMerged, "{rel}");
+    }
+}

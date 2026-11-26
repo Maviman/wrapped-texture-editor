@@ -848,3 +848,23 @@ fn k5_synth_layer_order_clipping_opacity_blend() {
         assert_eq!(m.psd_key(), *key);
     }
 }
+
+/// P5a checker: the layer-count plausibility check used 46 bytes per record, but a record without channels, with empty
+/// blending ranges and an empty name padded to 2 (deviation 6 of the build note: names padded to 2 read the same) has
+/// only 44, and the smallest legal record 43. Such a file was refused as damaged.
+#[test]
+fn k5_check_layer_count_floor_is_the_smallest_record() {
+    for pad in [0usize, 1] {
+        let mut f = File::rgb(2, 2);
+        for _ in 0..4 {
+            let mut l = Layer::empty("");
+            l.channels.clear();
+            l.ranges.clear();
+            l.name_pad = Some(pad);
+            f.layers.push(l);
+        }
+        let doc = ok(&f.build());
+        assert_eq!(doc.layers.len(), 4, "pad {pad}");
+        assert!(doc.layers.iter().all(|l| l.pixels == Some(CroppedBuf::empty()) && l.features.is_empty()), "pad {pad}");
+    }
+}

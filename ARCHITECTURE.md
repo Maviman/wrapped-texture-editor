@@ -8686,6 +8686,9 @@ and text layers (exactly those two files, each = `dense(layer)`).
   sentence, the third-party shapes, flat 16-bit vs `Lr16`, effects rules, empty layers and NO_PIXELS, the shape rule,
   masks, block padding and re-sync, ICC v2 / v4 and the grey exemption, limits, merged transparency rules, damaged
   channels) and `k5_desc_walker_steps_over_every_item_type` (every value type and every `obj ` reference item kind).
+  P5a checker: `k5_check_layer_count_floor_is_the_smallest_record` (records of 43 / 44 bytes are read),
+  `k5_check_pc_16bit_psb_against_photocrafts_pngs` (fixture f13, a 16-bit PSB with PackBits rows, against PhotoCraft's
+  PNGs) and the ignored `k5_check_outside_samples` (the 8 samples of 13.4 outside the repository, when present).
 
 ### 9.2 `wte_app` tests
 

@@ -35,6 +35,9 @@ const ADJUSTMENT_KEYS: [&[u8; 4]; 19] = [
 
 /// Most channels a header or layer record may name.
 const MAX_CHANNELS: u16 = 56;
+/// The smallest layer record: rect 16, channel count 2, signature 4, blend key 4, opacity, clipping, flags, filler
+/// 4, extra length 4, then the mask and blending-range lengths 8 and the name's length byte 1.
+const MIN_RECORD: usize = 43;
 /// The largest ratio of inflated to deflated bytes a zlib stream can reach (deflate's limit is about 1032:1).
 const MAX_INFLATE_RATIO: usize = 1100;
 
@@ -623,8 +626,9 @@ fn read_record(c: &mut Cur<'_>) -> Result<Record, PsdError> {
 fn read_layer_info(c: &mut Cur<'_>, ctx: &Ctx) -> Result<LayerSet, PsdError> {
     let count = c.i16()?;
     let n = count.unsigned_abs() as usize;
-    // A layer record has at least 34 bytes plus its extra data length fields; a count the bytes cannot hold is damage.
-    if n.saturating_mul(46) > c.remaining() {
+    // A layer record has at least 34 bytes plus the 9 bytes of its extra data (mask and blending-range lengths, the
+    // name's length byte): 43 bytes with no channel, no name and no padding. A count the bytes cannot hold is damage.
+    if n.saturating_mul(MIN_RECORD) > c.remaining() {
         return Err(c.short.clone());
     }
     let mut records = Vec::with_capacity(n);

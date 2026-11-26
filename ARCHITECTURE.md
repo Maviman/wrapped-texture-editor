@@ -4333,7 +4333,10 @@ Written with PhotoCraft's MIT source open (each file starts with the notice of S
 distance_to_ink(255 - a)`, `nearest_ink` = the same two passes keeping the site. Tent blur `tent(buf, w, h, b)`: per axis
 two box blurs of width `b`, the first over `[x - (b-1)/2, x + b-1-(b-1)/2]`, the second mirrored (an even width stays
 symmetric), outside = 0, integer running sums, rounding `(sum + b/2) / b`; rows in parallel, columns in bands of
-`max(64, b)` rows (exact integer sums: the band split and the thread count never change a value). `tent_width(len) =
+`max(64, b)` rows (exact integer sums: the band split and the thread count never change a value). The first pass of each
+axis is kept `b - 1` pixels beyond the buffer for the second, so the result is the tent of the zero-extended picture
+right up to the buffer's edges (checker P1: cutting it at the edge made a blur next to the border about a fifth too
+weak; an opaque photo's inner glow and bevel showed it). `tent_width(len) =
 max(1, round(len))`; `b = 1` changes nothing. Spread split of a shadow / glow: `solid = round(size * spread)`, dilation
 `max(S, clamp(solid + 0.5 - dist_out(S), 0, 1))` (the distance field is computed only when `solid >= 1`), blur length
 `size - solid`.
@@ -4358,8 +4361,11 @@ cropped to `m` at the end:
 3. Outline `S = max(A, M, So)` (`M` itself when there is no outside stroke).
 4. Drop shadow: dilate `S`, move by `round(distance * (-cos a, sin a))` (y down; 0 = light from the right, 90 = from the
    top), tent blur. 5. Outer glow: the same without the move.
-6. Inner shadow / inner glow: the same on `1 - A` (the pad and pixels moved in from outside count as 255), multiplied by
-   `A` when drawn.
+6. Inner shadow / inner glow: the same on `1 - A`, multiplied by `A` when drawn, where **everything outside the picture
+   counts as 255**, not only the working pad (checker P1). Built on the complement: the artwork eroded by `solid`
+   (`255 - max(1 - A, clamp(solid + 0.5 - dist_in(A)))`), moved into a buffer larger by the move on every side (so
+   artwork moved past the plane's edge is kept), tent-blurred (outside 0), cropped back and inverted. An opaque photo
+   therefore gets the same inner styles as the same artwork inside a transparent frame (`k1_inner_styles_see_the_whole_outside`).
 7. Bevel: `H` = 16-bit tent of `A` with width `size`; `g = (dH/dx, dH/dy) * depth * size` (central differences, `H`
    in 0..1), `n = (-g.x, -g.y, 1) / |..|`, light `L = (cos a cos e, -sin a cos e, sin e)`, `shade = n.L - sin e`;
    highlight `min(shade / (1 - sin e), 1)`, shadow `min(-shade / sin e, 1)`, each times `A`, opacity and colour alpha.
@@ -4390,8 +4396,9 @@ use luma `round(0.299 r + 0.587 g + 0.114 b)`; Posterize `n`: `round(floor(x n /
 
 **Shapes** (`shape.rs`, plan 4.8): coverage `clamp(0.5 - sd)`; rectangle and rounded rectangle exact SDF; ellipse
 `(f - 1) / |grad f|`; polygons and stars: corners on the box's ellipse, first corner at the top, distance to the edge
-list with the non-zero winding rule (per row: crossings for the winding, exact distances only within 1.5 px of an
-edge); line = horizontal capsule through the box middle, caps inside the box. Outline `clamp(width/2 + 0.5 - |sd|)`
+list with the non-zero winding rule (per row: crossings for the winding, exact distances within a band of the row: 1.5
+px for the fill and for `polygon_coverage`, `outline width / 2 + 1` when an outline is drawn, so a thick polygon or star
+outline is not cut to about 2 px, checker P1); line = horizontal capsule through the box middle, caps inside the box. Outline `clamp(width/2 + 0.5 - |sd|)`
 centred on the edge, drawn over the fill. `Paint::Linear` uses the gradient mapping of the overlay over the content box.
 The raster is a `CroppedBuf` in content pixels at the render scale, grown by half the outline width plus one pixel.
 
@@ -7860,10 +7867,13 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `inside_styles_work_on_a_fully_opaque_picture` (review A7), `overlays_keep_alpha_and_gradient_endpoints_are_exact`,
   `a_bevel_leaves_a_flat_interior_alone`, `tent_blur_keeps_the_sum_and_is_symmetric`,
   `apply_styles_is_thread_count_independent` (local pools of 1 and 8), `half_working_scale_matches_the_reduced_full_result`
-  (mean <= 3 / 255), `dist_helpers`); `sticker::style::tests` (gradient endpoints and interpolation, sanitize, margin
+  (mean <= 3 / 255), `dist_helpers`; checker P1: `inner_styles_see_the_whole_outside` (opaque photo = framed square
+  within 1 level for inner glow / inner shadow / bevel), `checker_fuzz_degenerate_and_extreme_inputs`, and the tent's
+  zero-extension check in `tent_blur_keeps_the_sum_and_is_symmetric`); `sticker::style::tests` (gradient endpoints and interpolation, sanitize, margin
   rules, light offsets); `sticker::adjust::tests` (identity settings byte-identical, hand-computed values, sanitize,
   parallel path); `sticker::shape::tests` (ellipse / star / hexagon / rounded rectangle / line areas within 0.5 %,
-  outline ring, gradient fill endpoints, thread independence, polygon coverage rules); `sticker::resample::tests`
+  outline ring, gradient fill endpoints, thread independence, polygon coverage rules; checker P1:
+  `thick_polygon_and_star_outlines_follow_the_edge_distance` against brute force); `sticker::resample::tests`
   (identity and whole-pixel moves copy bytes, flips, four quarter turns = identity, bilinear and mip paths, no edge
   darkening, thread independence); `sticker::tests::k1_layer_transform_basics`; `pixel::tests::k1_alpha_buf_basics`;
   `text::edt::tests::k1_nearest_ink_matches_brute_force_on_16x16` (and the parallel path). The text tests of

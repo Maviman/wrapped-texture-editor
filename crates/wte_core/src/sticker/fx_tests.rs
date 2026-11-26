@@ -299,6 +299,51 @@ fn k1_the_margin_is_enough_for_200_random_stacks() {
     assert!(drawn_outside > 100, "most stacks draw outside: {drawn_outside}");
 }
 
+#[test]
+fn k1_checker_fuzz_degenerate_and_extreme_inputs() {
+    // Checker P1 (plan 7 "P1" checker line): empty, 1 x 1, one row / column, fully opaque and fully transparent
+    // inputs with random stacks (lengths up to the 256 limit at small scales, and beyond it before sanitizing):
+    // never a panic, always (w + 2m) x (h + 2m), and nothing on the output border when the margin is not 0.
+    let mut rng = XorShift::new(777);
+    let mut cases = 0;
+    for case in 0..240 {
+        let max_len = [4.0f32, 40.0, 256.0, 1000.0][case % 4];
+        let st = random_stack(&mut rng, max_len);
+        let scale = [0.02f32, 0.1, 0.5, 1.0][(case / 4) % 4];
+        let base = match case % 6 {
+            0 => PixelBuf::new(0, 0),
+            1 => PixelBuf::filled(1, 1, [9, 8, 7, 255]),
+            2 => PixelBuf::filled(1, 13, [200, 100, 0, 255]),
+            3 => PixelBuf::filled(11, 1, [0, 100, 200, 90]),
+            4 => PixelBuf::filled(9, 7, [50, 60, 70, 255]),
+            _ => PixelBuf::new(9, 7),
+        };
+        if st.margin(scale) > 300 {
+            continue;
+        }
+        let m = st.margin(scale);
+        let out = apply_styles(&base, &st, scale);
+        assert_eq!([out.width, out.height], [base.width + 2 * m, base.height + 2 * m], "case {case}");
+        assert_eq!(out.data.len(), (out.width * out.height * 4) as usize);
+        if m > 0 && out.width > 0 && out.height > 0 {
+            let (ow, oh) = (out.width, out.height);
+            for x in 0..ow {
+                assert_eq!(out.get(x, 0), [0; 4], "case {case}");
+                assert_eq!(out.get(x, oh - 1), [0; 4], "case {case}");
+            }
+            for y in 0..oh {
+                assert_eq!(out.get(0, y), [0; 4], "case {case}");
+                assert_eq!(out.get(ow - 1, y), [0; 4], "case {case}");
+            }
+        }
+        if case % 6 == 5 {
+            assert!(out.data.iter().all(|&v| v == 0), "case {case}: a transparent base stays transparent");
+        }
+        cases += 1;
+    }
+    assert!(cases > 150, "{cases} cases ran");
+}
+
 /// Turns every present entry off (the numbers stay).
 fn switch_all_off(s: &mut StyleStack) {
     if let Some(c) = &mut s.contour {
@@ -414,6 +459,51 @@ fn k1_inside_styles_work_on_a_fully_opaque_picture() {
         }
         assert_eq!(out.get(32, 32), blue, "{name}: the middle stays");
     }
+}
+
+#[test]
+fn k1_inner_styles_see_the_whole_outside() {
+    // Checker P1: everything outside the picture counts as transparent for the inner styles, not only the one-pixel
+    // working pad. An opaque 64 x 64 photo must get the same inner glow / inner shadow / bevel as the same square in
+    // the middle of a large transparent picture (where the outside is real pixels).
+    let blue = [0, 0, 255, 255];
+    let photo = PixelBuf::filled(64, 64, blue);
+    let mut framed = PixelBuf::new(200, 200);
+    for y in 68..132 {
+        for x in 68..132 {
+            framed.set(x, y, blue);
+        }
+    }
+    let stacks = [
+        ("inner glow", StyleStack { inner_glow: Some(glow(0.0, 20.0, [255, 255, 0, 255])), ..StyleStack::default() }),
+        ("inner glow, spread", StyleStack { inner_glow: Some(glow(0.5, 16.0, [255, 255, 0, 255])), ..StyleStack::default() }),
+        ("inner shadow", StyleStack { inner_shadow: Some(shadow(120.0, 5.0, 0.0, 14.0)), ..StyleStack::default() }),
+        ("inner shadow, spread", StyleStack { inner_shadow: Some(shadow(30.0, 3.0, 0.4, 10.0)), ..StyleStack::default() }),
+        ("bevel", StyleStack { bevel: StylePreset::Badge.styles([64, 64]).bevel, ..StyleStack::default() }),
+    ];
+    for (name, st) in stacks {
+        let a = apply_styles(&photo, &st, 1.0);
+        let b = apply_styles(&framed, &st, 1.0);
+        assert_eq!([a.width, a.height], [64, 64], "{name}");
+        let mut worst = 0i32;
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let (p, q) = (a.get(x, y), b.get(x + 68, y + 68));
+                for c in 0..4 {
+                    worst = worst.max((p[c] as i32 - q[c] as i32).abs());
+                }
+            }
+        }
+        assert!(worst <= 1, "{name}: the opaque photo differs from the framed square by {worst} levels");
+    }
+    // The inner glow of size 20 is about half strength at the picture's own edge, as for any other edge.
+    let out = apply_styles(&photo, &stacks_glow(), 1.0);
+    let edge = out.get(0, 32);
+    assert!(edge[0] > 100, "inner glow at the edge of an opaque photo: {edge:?}");
+}
+
+fn stacks_glow() -> StyleStack {
+    StyleStack { inner_glow: Some(glow(0.0, 20.0, [255, 255, 0, 255])), ..StyleStack::default() }
 }
 
 #[test]
@@ -534,6 +624,36 @@ fn k1_tent_blur_keeps_the_sum_and_is_symmetric() {
     tent(&mut c, 50, 50, 5);
     assert_eq!(c[25 * 50 + 25], 200);
     assert!(c[0] < 200, "outside counts as 0");
+    // Checker P1: next to the buffer's edges the result is the tent of the zero-extended picture, the same as the
+    // middle of a larger zero buffer (the first pass is not cut at the edge), for odd and even widths, u8 and u16.
+    let mut rng = XorShift::new(31);
+    let (sw, sh) = (37usize, 29usize);
+    let small: Vec<u8> = (0..sw * sh).map(|_| (rng.next_u32() % 256) as u8).collect();
+    for b in [2u32, 5, 12, 40] {
+        let (bw, off) = (sw + 100, 50usize);
+        let mut big = vec![0u8; bw * (sh + 100)];
+        for y in 0..sh {
+            big[(y + off) * bw + off..(y + off) * bw + off + sw].copy_from_slice(&small[y * sw..(y + 1) * sw]);
+        }
+        let mut s8 = small.clone();
+        tent(&mut s8, sw as u32, sh as u32, b);
+        tent(&mut big, bw as u32, (sh + 100) as u32, b);
+        let mut s16: Vec<u16> = small.iter().map(|&v| v as u16 * 257).collect();
+        tent(&mut s16, sw as u32, sh as u32, b);
+        let mut big16 = vec![0u16; bw * (sh + 100)];
+        for y in 0..sh {
+            for x in 0..sw {
+                big16[(y + off) * bw + off + x] = small[y * sw + x] as u16 * 257;
+            }
+        }
+        tent(&mut big16, bw as u32, (sh + 100) as u32, b);
+        for y in 0..sh {
+            for x in 0..sw {
+                assert_eq!(s8[y * sw + x], big[(y + off) * bw + off + x], "b {b}: u8 at ({x}, {y})");
+                assert_eq!(s16[y * sw + x], big16[(y + off) * bw + off + x], "b {b}: u16 at ({x}, {y})");
+            }
+        }
+    }
 }
 
 #[test]

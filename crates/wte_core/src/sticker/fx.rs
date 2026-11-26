@@ -52,57 +52,67 @@ impl TentCell for u16 {
     }
 }
 
-/// One box pass along a line: `dst[i] = round(sum(src[i - lo ..= i + hi]) / (lo + hi + 1))`, outside the line 0.
-fn box_line<T: TentCell>(src: &[T], dst: &mut [T], lo: usize, hi: usize) {
-    let n = src.len();
-    if n == 0 {
-        return;
-    }
+/// One box pass along a line: `dst[k] = round(sum(src[j - lo ..= j + hi]) / (lo + hi + 1))` with `j = start + k`
+/// (positions in `src`'s coordinates; `src` is 0 outside `0..src.len()`). `dst` may extend beyond `src` on either
+/// side, so a first pass can keep what it spreads past the ends for the second pass.
+fn box_line<T: TentCell>(src: &[T], dst: &mut [T], lo: usize, hi: usize, start: isize) {
+    let n = src.len() as isize;
     let b = (lo + hi + 1) as u32;
-    let mut sum: u32 = src[..=hi.min(n - 1)].iter().map(|v| v.get()).sum();
-    for i in 0..n {
-        dst[i] = T::put((sum + b / 2) / b);
-        if i + hi + 1 < n {
-            sum += src[i + hi + 1].get();
+    let (lo, hi) = (lo as isize, hi as isize);
+    let mut sum: u32 = 0;
+    for j in (start - lo).max(0)..=(start + hi).min(n - 1) {
+        sum += src[j as usize].get();
+    }
+    for (k, d) in dst.iter_mut().enumerate() {
+        let j = start + k as isize;
+        *d = T::put((sum + b / 2) / b);
+        let add = j + hi + 1;
+        if (0..n).contains(&add) {
+            sum += src[add as usize].get();
         }
-        if i >= lo {
-            sum -= src[i - lo].get();
+        let sub = j - lo;
+        if (0..n).contains(&sub) {
+            sum -= src[sub as usize].get();
         }
     }
 }
 
-/// One vertical box pass `src -> dst` (both `w * h`), in bands of rows; exact integer sums, so the result does not
-/// depend on the band split or the thread count.
-fn box_cols<T: TentCell>(src: &[T], dst: &mut [T], w: usize, h: usize, lo: usize, hi: usize) {
+/// One vertical box pass: row `r` of `dst` (`w` wide) is row position `start + r` of `src` (`w x src_h`, 0 outside),
+/// averaged over rows `start + r - lo ..= start + r + hi`. In bands of rows; exact integer sums, so the result does
+/// not depend on the band split or the thread count.
+fn box_cols<T: TentCell>(src: &[T], src_h: usize, dst: &mut [T], w: usize, lo: usize, hi: usize, start: isize) {
     let b = (lo + hi + 1) as u32;
     let band = 64.max(lo + hi + 1);
+    let sh = src_h as isize;
+    let (lo, hi) = (lo as isize, hi as isize);
+    let row = |y: isize| &src[y as usize * w..(y as usize + 1) * w];
     let do_band = |(bi, chunk): (usize, &mut [T])| {
-        let y0 = bi * band;
+        let y0 = start + (bi * band) as isize;
         let rows = chunk.len() / w;
         let mut sum = vec![0u32; w];
-        for y in y0.saturating_sub(lo)..=(y0 + hi).min(h - 1) {
-            for (s, v) in sum.iter_mut().zip(&src[y * w..(y + 1) * w]) {
+        for y in (y0 - lo).max(0)..=(y0 + hi).min(sh - 1) {
+            for (s, v) in sum.iter_mut().zip(row(y)) {
                 *s += v.get();
             }
         }
         for r in 0..rows {
-            let y = y0 + r;
+            let y = y0 + r as isize;
             for (d, s) in chunk[r * w..(r + 1) * w].iter_mut().zip(&sum) {
                 *d = T::put((s + b / 2) / b);
             }
-            if y + hi + 1 < h {
-                for (s, v) in sum.iter_mut().zip(&src[(y + hi + 1) * w..(y + hi + 2) * w]) {
+            if (0..sh).contains(&(y + hi + 1)) {
+                for (s, v) in sum.iter_mut().zip(row(y + hi + 1)) {
                     *s += v.get();
                 }
             }
-            if y >= lo {
-                for (s, v) in sum.iter_mut().zip(&src[(y - lo) * w..(y - lo + 1) * w]) {
+            if (0..sh).contains(&(y - lo)) {
+                for (s, v) in sum.iter_mut().zip(row(y - lo)) {
                     *s -= v.get();
                 }
             }
         }
     };
-    if w * h >= PAR_PIXELS {
+    if dst.len() >= PAR_PIXELS {
         dst.par_chunks_mut(band * w).enumerate().for_each(do_band);
     } else {
         dst.chunks_mut(band * w).enumerate().for_each(do_band);
@@ -112,6 +122,10 @@ fn box_cols<T: TentCell>(src: &[T], dst: &mut [T], w: usize, h: usize, lo: usize
 /// Tent blur (4.2): two box blurs of width `b` per axis (the second box mirrored, so an even width stays
 /// symmetric), outside = 0, integer arithmetic with rounding `(sum + b/2) / b`. `b <= 1` changes nothing; `b` is
 /// capped at 16,384. Rows, then columns; rows and column bands run in parallel for large buffers.
+///
+/// The result is the tent of the zero-extended picture everywhere, also next to the buffer's edges: the first box
+/// pass of each axis is kept `b - 1` pixels beyond the buffer for the second (checker P1; cutting it at the edge
+/// made a blur next to the border about a fifth too weak, which an opaque photo's inner glow and bevel showed).
 pub fn tent<T: TentCell>(buf: &mut [T], width: u32, height: u32, b: u32) {
     let (w, h) = (width as usize, height as usize);
     if b <= 1 || w == 0 || h == 0 || buf.len() < w * h {
@@ -121,11 +135,12 @@ pub fn tent<T: TentCell>(buf: &mut [T], width: u32, height: u32, b: u32) {
     let lo = (b - 1) / 2;
     let hi = b - 1 - lo;
     let buf = &mut buf[..w * h];
+    // The first pass covers positions -hi ..= n - 1 + lo, exactly what the mirrored second pass reads.
     let do_row = |scratch: &mut Vec<T>, row: &mut [T]| {
         scratch.clear();
-        scratch.resize(row.len(), T::default());
-        box_line(row, scratch, lo, hi);
-        box_line(scratch, row, hi, lo);
+        scratch.resize(row.len() + lo + hi, T::default());
+        box_line(row, scratch, lo, hi, -(hi as isize));
+        box_line(scratch, row, hi, lo, hi as isize);
     };
     if w * h >= PAR_PIXELS {
         buf.par_chunks_mut(w).for_each_init(Vec::new, do_row);
@@ -133,9 +148,10 @@ pub fn tent<T: TentCell>(buf: &mut [T], width: u32, height: u32, b: u32) {
         let mut scratch = Vec::new();
         buf.chunks_mut(w).for_each(|row| do_row(&mut scratch, row));
     }
-    let mut tmp = vec![T::default(); w * h];
-    box_cols(buf, &mut tmp, w, h, lo, hi);
-    box_cols(&tmp, buf, w, h, hi, lo);
+    let ext = h + lo + hi;
+    let mut tmp = vec![T::default(); w * ext];
+    box_cols(buf, h, &mut tmp, w, lo, hi, -(hi as isize));
+    box_cols(&tmp, ext, buf, w, hi, lo, hi as isize);
 }
 
 /// Tent box width of a blur length: `max(1, round(width))` (4.2).
@@ -379,19 +395,61 @@ pub(crate) fn drop_shadow_plane(s: &Plane, d: Option<&[f32]>, sh: &Shadow) -> Pl
     plane
 }
 
-/// Outer glow coverage (4.3 step 5); on `1 - A` (pad 255) the inner glow before the multiplication by `A`.
+/// Outer glow coverage (4.3 step 5).
 pub(crate) fn glow_plane(s: &Plane, d: Option<&[f32]>, g: &Glow) -> Plane {
     let (mut plane, blur) = spread_plane(s, d, g.size, g.spread, (0, 0), 0);
     plane.blur(blur);
     plane
 }
 
+/// The dilated, shifted and blurred outside `1 - A` (4.3 step 6) where **everything beyond the plane counts as
+/// outside (255)**, not only the working pad: the tent blur treats pixels beyond the buffer as 0, so it runs on the
+/// complement (the artwork eroded by `solid`, shifted with 0 coming in) and the result is inverted back. Blurring
+/// `1 - A` directly would make an opaque photo (pad 1) see a one-pixel outside and get a far weaker inner glow /
+/// inner shadow than the same artwork inside a transparent frame (checker P1).
+fn inner_plane(inv: &Plane, d_in: Option<&[f32]>, size: f32, spread: f32, shift: (i32, i32)) -> Plane {
+    let solid = solid_of(size, spread);
+    let eroded = match d_in {
+        Some(d) if solid >= 1.0 => inv.map(|i, v| 255 - v.max(cov(solid + 0.5 - d[i]))),
+        _ => inv.map(|_, v| 255 - v),
+    };
+    let (dx, dy) = shift;
+    let e = dx.unsigned_abs().max(dy.unsigned_abs()) as usize;
+    if e == 0 {
+        let mut plane = eroded;
+        plane.blur(size - solid);
+        plane.v.par_iter_mut().with_min_len(1 << 14).for_each(|v| *v = 255 - *v);
+        return plane;
+    }
+    // Shifted into a buffer `e` larger on every side, so the artwork moved past the plane's edge is kept for the
+    // blur instead of being cut off (it would leave an "outside" along the far edges of an opaque photo).
+    let (w, h) = (eroded.w, eroded.h);
+    let (ew, eh) = (w + 2 * e, h + 2 * e);
+    let mut big = vec![0u8; ew * eh];
+    let (ox, oy) = ((e as i64 + dx as i64) as usize, (e as i64 + dy as i64) as usize);
+    for y in 0..h {
+        big[(y + oy) * ew + ox..(y + oy) * ew + ox + w].copy_from_slice(&eroded.v[y * w..(y + 1) * w]);
+    }
+    drop(eroded);
+    tent(&mut big, ew as u32, eh as u32, tent_width(size - solid));
+    let mut v = vec![0u8; w * h];
+    for (y, row) in v.chunks_mut(w.max(1)).enumerate() {
+        for (o, &b) in row.iter_mut().zip(&big[(y + e) * ew + e..(y + e) * ew + e + w]) {
+            *o = 255 - b;
+        }
+    }
+    Plane { w, h, v }
+}
+
+/// Inner glow coverage before the multiplication by `A` (4.3 step 6): the glow of `1 - A`, the outside unbounded.
+pub(crate) fn inner_glow_plane(inv: &Plane, d_in: Option<&[f32]>, g: &Glow) -> Plane {
+    inner_plane(inv, d_in, g.size, g.spread, (0, 0))
+}
+
 /// Inner shadow coverage before the multiplication by `A` (4.3 step 6): the drop shadow of `1 - A`; pixels that
-/// come in from outside count as outside (255).
+/// come in from outside, and everything beyond the plane, count as outside (255).
 pub(crate) fn inner_shadow_plane(inv: &Plane, d_in: Option<&[f32]>, sh: &Shadow) -> Plane {
-    let (mut plane, blur) = spread_plane(inv, d_in, sh.size, sh.spread, light_offset(sh.angle_deg, sh.distance), 255);
-    plane.blur(blur);
-    plane
+    inner_plane(inv, d_in, sh.size, sh.spread, light_offset(sh.angle_deg, sh.distance))
 }
 
 /// Straight-alpha source-over of colour `rgb` (0..=255) with coverage `sa` (0..=1) onto pixel `d`. A result whose
@@ -568,7 +626,7 @@ pub fn apply_styles(base: &PixelBuf, styles: &StyleStack, scale: f32) -> PixelBu
         let d = need_d.then(|| inv.dist());
         let si = d.as_deref().filter(|_| wi > 0.0).map(|d| inside_stroke_plane(&inv, d, wi));
         let isp = ishadow.map(|sh| inner_shadow_plane(&inv, d.as_deref(), sh));
-        let igp = iglow.map(|g| glow_plane(&inv, d.as_deref(), g));
+        let igp = iglow.map(|g| inner_glow_plane(&inv, d.as_deref(), g));
         (si, isp, igp)
     } else {
         (None, None, None)

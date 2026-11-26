@@ -124,8 +124,11 @@ pub fn shape_points(kind: &ShapeKind, size: Vec2) -> Option<Vec<Vec2>> {
 }
 
 /// Signed distances of one row of pixel centres to a polygon (non-zero rule), for the pixels `x0..x0 + n` of row
-/// `yc` (pixel-centre y). Only distances below 1 are exact; farther pixels report +-1 or more (enough for coverage).
-fn polygon_row(points: &[Vec2], yc: f32, x0: i32, n: usize, out: &mut [f32]) {
+/// `yc` (pixel-centre y). Distances below `reach` (at least 1.5) are exact; farther pixels report `reach` or more
+/// (`+-1e6`). The fill needs 1.5; a centred outline of width `w` needs `w / 2 + 1` (checker P1: with a fixed band of
+/// 1.5 px a thick polygon or star outline was cut to about 2 px).
+fn polygon_row(points: &[Vec2], yc: f32, x0: i32, n: usize, reach: f32, out: &mut [f32]) {
+    let reach = if reach.is_finite() { reach.max(1.5) } else { 1.5 };
     out.fill(f32::INFINITY);
     let m = points.len();
     // Crossings of the scan line (half-open in y), with direction.
@@ -136,8 +139,8 @@ fn polygon_row(points: &[Vec2], yc: f32, x0: i32, n: usize, out: &mut [f32]) {
             let t = (yc - a.y) / (b.y - a.y);
             cross.push((a.x + (b.x - a.x) * t, if b.y > a.y { 1 } else { -1 }));
         }
-        // Exact distances for pixels near this edge: the part of the edge within 1.5 px of the row.
-        let (ylo, yhi) = (yc - 1.5, yc + 1.5);
+        // Exact distances for pixels near this edge: the part of the edge within `reach` of the row.
+        let (ylo, yhi) = (yc - reach, yc + reach);
         let (lo, hi) = if a.y == b.y {
             if a.y < ylo || a.y > yhi {
                 continue;
@@ -152,8 +155,8 @@ fn polygon_row(points: &[Vec2], yc: f32, x0: i32, n: usize, out: &mut [f32]) {
             let (xa, xb) = (a.x + (b.x - a.x) * t0, a.x + (b.x - a.x) * t1);
             (xa.min(xb), xa.max(xb))
         };
-        let first = ((lo - 1.5).floor() as i64 - x0 as i64).max(0) as usize;
-        let last = ((hi + 1.5).ceil() as i64 - x0 as i64).min(n as i64 - 1);
+        let first = ((lo - reach).floor() as i64 - x0 as i64).max(0) as usize;
+        let last = ((hi + reach).ceil() as i64 - x0 as i64).min(n as i64 - 1);
         if last < first as i64 {
             continue;
         }
@@ -189,7 +192,7 @@ pub fn polygon_coverage(points: &[Vec2], width: u32, height: u32) -> AlphaBuf {
     }
     let do_row = |row_buf: &mut Vec<f32>, (y, row): (usize, &mut [u8])| {
         row_buf.resize(w, 0.0);
-        polygon_row(points, y as f32 + 0.5, 0, w, row_buf);
+        polygon_row(points, y as f32 + 0.5, 0, w, 1.5, row_buf);
         for (o, &sd) in row.iter_mut().zip(row_buf.iter()) {
             *o = cov(0.5 - sd);
         }
@@ -243,6 +246,8 @@ pub fn rasterize(spec: &ShapeSpec, scale: f32) -> CroppedBuf {
     let size = (spec.size * scale).min(Vec2::splat(MAX_SHAPE_SIDE));
     let outline = spec.outline.map(|(c, w)| (c, w * scale)).filter(|(c, w)| *w > 0.0 && c[3] > 0);
     let pad = outline.map_or(1.0, |(_, w)| w * 0.5 + 1.0);
+    // Exact signed distances are needed out to the outline's half width (plus the anti-aliasing pixel).
+    let reach = outline.map_or(1.5, |(_, w)| w * 0.5 + 1.0);
     let rect = IRect::new((-pad).floor() as i32, (-pad).floor() as i32, (size.x + pad).ceil() as i32, (size.y + pad).ceil() as i32);
     let mut out = CroppedBuf::new(rect);
     let rw = rect.width() as usize;
@@ -268,7 +273,7 @@ pub fn rasterize(spec: &ShapeSpec, scale: f32) -> CroppedBuf {
         let yc = y as f32 + 0.5;
         sd_row.resize(rw, 0.0);
         match &points {
-            Some(pts) => polygon_row(pts, yc, rect.x0, rw, sd_row),
+            Some(pts) => polygon_row(pts, yc, rect.x0, rw, reach, sd_row),
             None => {
                 for (k, o) in sd_row.iter_mut().enumerate() {
                     let p = Vec2::new((rect.x0 + k as i32) as f32 + 0.5, yc);
@@ -402,6 +407,32 @@ mod tests {
         let a = pools[0].install(|| rasterize(&big, 1.0));
         let b = pools[1].install(|| rasterize(&big, 1.0));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn k1_thick_polygon_and_star_outlines_follow_the_edge_distance() {
+        // Checker P1: an outline wider than the 1.5-px exact band used for the fill must still be
+        // `clamp(width / 2 + 0.5 - |sd|)` against the true distance to the edge list (brute force here).
+        for (kind, ow) in [
+            (ShapeKind::Polygon { sides: 6 }, 10.0f32),
+            (ShapeKind::Star { points: 5, inner: 0.45 }, 8.0),
+            (ShapeKind::Polygon { sides: 3 }, 24.0),
+        ] {
+            let size = Vec2::new(90.0, 80.0);
+            let spec = ShapeSpec { kind: kind.clone(), size, fill: Paint::None, outline: Some(([0, 0, 0, 255], ow)) };
+            let r = rasterize(&spec, 1.0);
+            let pts = shape_points(&kind, size).unwrap();
+            let mut worst = 0i32;
+            for y in r.rect.y0..r.rect.y1 {
+                for x in r.rect.x0..r.rect.x1 {
+                    let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                    let d = (0..pts.len()).map(|i| seg_dist(p, pts[i], pts[(i + 1) % pts.len()])).fold(f32::INFINITY, f32::min);
+                    let want = cov(ow * 0.5 + 0.5 - d) as i32;
+                    worst = worst.max((r.get(x, y)[3] as i32 - want).abs());
+                }
+            }
+            assert!(worst <= 1, "{kind:?} outline {ow}: off by {worst} levels");
+        }
     }
 
     #[test]

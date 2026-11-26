@@ -29,7 +29,13 @@ use crate::pixel::{PixelBuf, SparseBuf};
 use crate::pixel_ops::{PremulMips, resize, unpremultiply};
 use crate::stamp::{BakeQuality, Placement, Projector, StampObject, StampSource, SurfaceMode, text_stamp_name};
 use crate::stamp_bake::{bake_projected, bake_uv, fit_projector_depth, projector_depth_is_auto};
-use crate::stamp_job::{FinalBake, JobPicture, OwnFace, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview, text_fonts_of, wrap_bake};
+use crate::doc_stickers::BaseIdentity;
+use crate::stamp_job::{
+    DrawnPicture, FinalBake, JobBase, JobPicture, OwnFace, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview, text_fonts_of,
+    wrap_bake,
+};
+use crate::sticker::pipeline::{STYLE_REFERENCE_EM, Styling, bake_placement_of, work_level};
+use crate::sticker::style::StyleStack;
 use crate::texel_map::SurfacePoint;
 use crate::wrap_param::{WrapMeshCell, WrapMeshWarmup, WrapParam, WrapStats, wrap_param_in};
 use crate::text::frame::{Keep, refit_placement};
@@ -51,7 +57,7 @@ const MAX_TEXT_PX: f32 = 512.0;
 pub const TEXT_EDIT_PREVIEW_PIXELS: u32 = 1 << 20;
 
 /// The picture quality a bake of `quality` needs (FEATURE_TEXT 5.8).
-fn raster_quality(quality: BakeQuality) -> RasterQuality {
+pub(crate) fn raster_quality(quality: BakeQuality) -> RasterQuality {
     match quality {
         BakeQuality::Preview => RasterQuality::Preview { max_pixels: TEXT_EDIT_PREVIEW_PIXELS },
         BakeQuality::Full => RasterQuality::Full,
@@ -195,7 +201,7 @@ impl Document {
 
     /// `new` (a changed footprint of the placement `old`) with its depth range re-fitted when `old` is projected with
     /// an automatic depth; otherwise (UV placement, hand-set depth, nothing changed) `new` as it is.
-    fn refit_auto_depth(&self, old: &Placement, new: Placement) -> Placement {
+    pub(crate) fn refit_auto_depth(&self, old: &Placement, new: Placement) -> Placement {
         match (old, new) {
             (Placement::Projected(o), Placement::Projected(n)) if n != *o && self.stamp_depth_is_auto(o) => {
                 Placement::Projected(self.fit_stamp_depth(&n))
@@ -286,6 +292,8 @@ impl Document {
                 spec.sanitize_fx();
                 Ok(self.frame_of_spec(&spec)?.size)
             }
+            // Stickers: the artboard (pixels at render scale 1).
+            StampSource::Sticker { sticker } => Ok(self.sticker_state.map.get(sticker).ok_or(EditError::UnknownSticker)?.size()),
         }
     }
 
@@ -327,6 +335,10 @@ impl Document {
                 self.image_source(blob)?;
                 (StampSource::Image { blob }, None)
             }
+            StampSource::Sticker { sticker } => {
+                self.sticker_state.map.get(&sticker).ok_or(EditError::UnknownSticker)?;
+                (StampSource::Sticker { sticker }, None)
+            }
             StampSource::Text(mut spec) => {
                 spec.sanitize_fx();
                 // FEATURE_TEXT 5.14 (round 4 T7): the Text tool's hover picture is reused when it is the full picture
@@ -352,7 +364,7 @@ impl Document {
 
         let before = self.snapshot_structure(&[]);
         let id = StampId(self.alloc_id());
-        let object = StampObject { id, name: name.to_owned(), source, placement, tint: [255; 4], home_set };
+        let object = StampObject { id, name: name.to_owned(), source, placement, tint: [255; 4], home_set, styles: StyleStack::default() };
         let at = self.stamps.partition_point(|s| s.id < id);
         self.stamps.insert(at, object);
         let is_text = text.is_some();
@@ -451,7 +463,13 @@ impl Document {
                 spec.sanitize_fx();
                 StampSource::Text(spec)
             }
-            _ => return Err(EditError::InvalidParam("a stamp cannot switch between image and text")),
+            (StampSource::Sticker { .. }, StampSource::Sticker { sticker }) => {
+                self.sticker_state.map.get(&sticker).ok_or(EditError::UnknownSticker)?;
+                StampSource::Sticker { sticker }
+            }
+            // Stickers (2.5): an image or text stamp becomes a sticker stamp only through `promote_stamp` /
+            // `convert_text_stamp`.
+            _ => return Err(EditError::InvalidParam("a stamp cannot switch between image, text and sticker")),
         };
         let changed = source != current;
         if !changed && !self.continues_edit() {
@@ -503,11 +521,19 @@ impl Document {
                     let old_size = self.image_source(*old).ok().map(|m| m.size());
                     refit_aspect(&mut placement, old_size, new_size);
                 }
+                (StampSource::Sticker { sticker: old }, StampSource::Sticker { sticker }) => {
+                    let new_size = self.sticker_state.map.get(sticker).map(|d| d.size()).ok_or(EditError::UnknownSticker)?;
+                    let old_size = self.sticker_state.map.get(old).map(|d| d.size());
+                    refit_aspect(&mut placement, old_size, new_size);
+                }
                 _ => {}
             }
             // Fix round 2, item 2: an automatic depth range follows the new footprint (longer text, wider image);
-            // a depth typed in by hand is kept.
-            placement = self.refit_auto_depth(&old_placement, placement);
+            // a depth typed in by hand is kept. Stickers (2.6): measured on the bake footprints of a styled stamp.
+            let old_object = self.stamp(id).cloned().ok_or(EditError::UnknownStamp)?;
+            let new_object = StampObject { source: source.clone(), placement, ..old_object.clone() };
+            let (old_frame, new_frame) = (self.styled_frame(&old_object), self.styled_frame(&new_object));
+            placement = self.refit_auto_depth_framed(&old_placement, &old_frame, placement, &new_frame);
         }
 
         self.begin_pending(EDIT_LABEL);
@@ -599,6 +625,7 @@ impl Document {
         }
         self.stamps.retain(|s| s.id != id);
         self.forget_text_picture(id);
+        self.sticker_state.cache.styled.remove(&id);
         self.bakes.wrap_params.remove(id);
         self.preview_baked.remove(&id);
         self.bakes.preview_stale.remove(&id);
@@ -840,7 +867,7 @@ impl Document {
         };
         let stamped = self.stamps.iter().filter_map(|s| match &s.source {
             StampSource::Text(spec) => Some(&spec.font),
-            StampSource::Image { .. } => None,
+            StampSource::Image { .. } | StampSource::Sticker { .. } => None,
         });
         stamped.chain(self.text_caches.font_refs.iter()).find(|f| matches(f)).cloned()
     }
@@ -853,7 +880,7 @@ impl Document {
     }
 
     /// The fonts of `spec` as owned parts (`with_text_fonts`; round 5: what a bake job carries to its worker).
-    fn text_fonts_owned(&mut self, spec: &TextSpec) -> Result<(Option<OwnFace>, Arc<fontdue::Font>), EditError> {
+    pub(crate) fn text_fonts_owned(&mut self, spec: &TextSpec) -> Result<(Option<OwnFace>, Arc<fontdue::Font>), EditError> {
         let px = raster_px(spec);
         let fallback = self.fonts.fallback(px);
         let own = match self.fonts.get(&self.blobs, &spec.font, px) {
@@ -868,12 +895,12 @@ impl Document {
     }
 
     /// The frame of `spec` at its own size (geometry only, no pixels).
-    fn frame_of_spec(&mut self, spec: &TextSpec) -> Result<TextFrame, EditError> {
+    pub(crate) fn frame_of_spec(&mut self, spec: &TextSpec) -> Result<TextFrame, EditError> {
         Ok(self.with_text_fonts(spec, |fonts| text_frame(fonts, spec))??)
     }
 
     /// Renders `spec` at its own size (counted in the test build).
-    fn render_spec(&mut self, spec: &TextSpec, quality: RasterQuality) -> Result<TextRaster, EditError> {
+    pub(crate) fn render_spec(&mut self, spec: &TextSpec, quality: RasterQuality) -> Result<TextRaster, EditError> {
         raster_counter::bump();
         Ok(self.with_text_fonts(spec, |fonts| render_text(fonts, spec, quality))??)
     }
@@ -965,27 +992,34 @@ impl Document {
     /// The common tail of the `set_stamp_*` commands, after `begin_pending` and the change itself.
     fn preview_edit(&mut self, id: StampId, changed: bool, commit: Commit) {
         if changed {
-            // A Final edit is baked at full quality right away by the flush below (`finalize_stamp_bake`), which
-            // replaces every cache a Preview bake would write: it gets no Preview bake first (fix round 3, R3-4: each
-            // Final edit cost two bakes). A deferred Preview bake still waiting (`preview_stale`) ends with that flush.
-            if commit == Commit::Preview {
-                if self.defer_preview_bakes || self.wrap_preview_deferred(id) {
-                    // Baked by `bake_stale_previews` (or by the final bake of the flush); round 8: a wrapped stamp's by
-                    // its Preview job (`next_wrap_preview_job`).
-                    self.bakes.preview_stale.insert(id);
-                } else if let Err(e) = self.bake_and_apply(id, BakeQuality::Preview) {
-                    log::warn!("stamp {}: the preview bake failed: {e}", id.0);
-                }
-            }
-            // Round 8: a new pending edit gets a new serial.
-            if self.preview_baked.is_empty() {
-                self.bakes.edit_serial += 1;
-            }
-            self.preview_baked.insert(id);
+            self.mark_stamp_edited(id, commit);
         }
         if commit == Commit::Final {
             self.flush_pending_edit();
         }
+    }
+
+    /// Stamp `id` changed inside the open pending edit: a `Commit::Preview` bakes it at Preview quality (or defers that
+    /// bake); either way it joins `preview_baked`, so the flush of the edit gives it its Final bake. Stickers: also what
+    /// `set_sticker` and `set_stamp_styles` do for every stamp they change.
+    pub(crate) fn mark_stamp_edited(&mut self, id: StampId, commit: Commit) {
+        // A Final edit is baked at full quality right away by the flush (`finalize_stamp_bake`), which replaces every
+        // cache a Preview bake would write: it gets no Preview bake first (fix round 3, R3-4: each Final edit cost two
+        // bakes). A deferred Preview bake still waiting (`preview_stale`) ends with that flush.
+        if commit == Commit::Preview {
+            if self.defer_preview_bakes || self.wrap_preview_deferred(id) {
+                // Baked by `bake_stale_previews` (or by the final bake of the flush); round 8: a wrapped stamp's by its
+                // Preview job (`next_wrap_preview_job`).
+                self.bakes.preview_stale.insert(id);
+            } else if let Err(e) = self.bake_and_apply(id, BakeQuality::Preview) {
+                log::warn!("stamp {}: the preview bake failed: {e}", id.0);
+            }
+        }
+        // Round 8: a new pending edit gets a new serial.
+        if self.preview_baked.is_empty() {
+            self.bakes.edit_serial += 1;
+        }
+        self.preview_baked.insert(id);
     }
 
     /// Defers the bakes of `Commit::Preview` stamp edits (default off). While on, a Preview edit only updates the stamp
@@ -1025,7 +1059,7 @@ impl Document {
     }
 
     /// Decoded mips of an image blob (cached per blob).
-    fn image_source(&mut self, blob: BlobId) -> Result<Arc<PremulMips>, EditError> {
+    pub(crate) fn image_source(&mut self, blob: BlobId) -> Result<Arc<PremulMips>, EditError> {
         if let Some(mips) = self.image_mips.get(&blob) {
             return Ok(Arc::clone(mips));
         }
@@ -1039,7 +1073,7 @@ impl Document {
     /// Mips of the picture of stamp `id` for `spec` at `quality` (cached per stamp in `text_mips`, rebuilt when the
     /// spec changes). A cached picture serves a `Preview` request whatever its quality; a `Full` request never uses a
     /// preview picture (FEATURE_TEXT 5.8): it draws the text again in full and replaces the cache.
-    fn text_source(&mut self, id: StampId, spec: &TextSpec, quality: RasterQuality) -> Result<Arc<PremulMips>, EditError> {
+    pub(crate) fn text_source(&mut self, id: StampId, spec: &TextSpec, quality: RasterQuality) -> Result<Arc<PremulMips>, EditError> {
         let wants_full = matches!(quality, RasterQuality::Full);
         if let Some((cached, mips)) = self.text_mips.get(&id)
             && cached == spec
@@ -1052,11 +1086,19 @@ impl Document {
         Ok(Arc::clone(&self.text_mips[&id].1))
     }
 
-    /// Source pixels of a stamp; a text at `quality` (`text_source`).
+    /// Source pixels of a stamp; a text at `quality` (`text_source`); a sticker its base picture (render) at the
+    /// scale of the stamp's placement (`sticker_base`). The stamp's styles are not drawn here (`bake_picture`).
     fn source_mips(&mut self, id: StampId, source: &StampSource, quality: RasterQuality) -> Result<Arc<PremulMips>, EditError> {
         match source {
             StampSource::Image { blob } => self.image_source(*blob),
             StampSource::Text(spec) => self.text_source(id, spec, quality),
+            StampSource::Sticker { sticker } => {
+                let doc = Arc::clone(self.sticker_state.map.get(sticker).ok_or(EditError::UnknownSticker)?);
+                let object = self.stamp(id).ok_or(EditError::UnknownStamp)?.clone();
+                let bake = if matches!(quality, RasterQuality::Full) { BakeQuality::Full } else { BakeQuality::Preview };
+                let s = self.sticker_scale_of(&object, &doc, bake);
+                Ok(self.sticker_base(&doc, s, bake)?.0)
+            }
         }
     }
 
@@ -1103,8 +1145,11 @@ impl Document {
         let mut placement = old_placement;
         refit_placement(&mut placement, &old_frame, &new_frame, Keep::Anchor);
         // The raster rounding changes the footprint slightly: an automatic depth range is re-fitted so it stays the
-        // automatic one (and keeps following later moves, 6.5).
-        let placement = self.refit_auto_depth(&old_placement, placement);
+        // automatic one (and keeps following later moves, 6.5); stickers (2.6): on the bake footprints when styled.
+        let Some(old_object) = self.stamp(id).cloned() else { return };
+        let new_object = StampObject { placement, source: StampSource::Text(new_spec.clone()), ..old_object.clone() };
+        let (of, nf) = (self.styled_frame(&old_object), self.styled_frame(&new_object));
+        let placement = self.refit_auto_depth_framed(&old_placement, &of, placement, &nf);
         if let Some(stamp) = self.stamps.iter_mut().find(|s| s.id == id) {
             stamp.placement = placement;
             stamp.source = StampSource::Text(new_spec.clone());
@@ -1126,9 +1171,11 @@ impl Document {
             let job = self.make_bake_job(id)?;
             return self.apply_bake_output(job.run());
         }
-        let stamp = self.stamp(id).ok_or(EditError::UnknownStamp)?;
-        let (source, placement, tint) = (stamp.source.clone(), stamp.placement, stamp.tint);
-        let mips = self.source_mips(id, &source, raster_quality(quality))?;
+        let stored = self.stamp(id).ok_or(EditError::UnknownStamp)?.placement;
+        // Stickers (2.6): the picture with its margin, on the bake placement (the stored one without a margin).
+        let picture = self.bake_picture(id, quality)?;
+        let (mips, tint) = (picture.mips, picture.tint);
+        let placement = bake_placement_of(&stored, &picture.frame);
         let baked = match placement {
             Placement::Projected(p) if p.mode == SurfaceMode::Wrap => {
                 // Round 6 (4.6): the cached parameterization when it serves, else a fresh one (cached).
@@ -1290,13 +1337,7 @@ impl Document {
             return FinalBake::Busy(Box::new(out));
         }
         let id = out.id;
-        let same_maps = out.maps.len() == self.sets.len()
-            && out.maps.iter().zip(&self.sets).all(|(m, set)| Arc::ptr_eq(m, &set.texel_map));
-        let fresh = self.stamp(id).is_some_and(|s| *s == out.object)
-            && self.bakes.unbaked.contains(&id)
-            && !self.preview_baked.contains(&id)
-            && Arc::ptr_eq(&out.mesh, &self.mesh)
-            && same_maps;
+        let fresh = self.job_inputs_current(&out) && self.bakes.unbaked.contains(&id) && !self.preview_baked.contains(&id);
         if !fresh {
             return FinalBake::Stale;
         }
@@ -1365,8 +1406,8 @@ impl Document {
     pub(crate) fn make_bake_job(&mut self, id: StampId) -> Result<StampBakeJob, EditError> {
         let object = self.stamp(id).ok_or(EditError::UnknownStamp)?.clone();
         let picture = match &object.source {
-            StampSource::Image { blob } => JobPicture::Image(self.image_source(*blob)?),
-            StampSource::Text(spec) => match self.text_mips.get(&id) {
+            StampSource::Image { blob } if !object.styles.any_on() => JobPicture::Image(self.image_source(*blob)?),
+            StampSource::Text(spec) if !object.styles.any_on() => match self.text_mips.get(&id) {
                 Some((cached, mips)) if cached == spec && !self.text_caches.preview_ids.contains(&id) => {
                     JobPicture::TextCached(Arc::clone(mips))
                 }
@@ -1375,6 +1416,8 @@ impl Document {
                     JobPicture::TextDraw { spec: Box::new(spec.clone()), own, fallback }
                 }
             },
+            // Stickers (2.6, 2.7): styled stamps and sticker stamps; the job renders and styles (never this thread).
+            _ => self.derived_job_picture(&object)?,
         };
         if let Placement::Uv(p) = &object.placement {
             self.set(p.set).ok_or(EditError::UnknownSet)?;
@@ -1384,6 +1427,7 @@ impl Document {
             Placement::Projected(p) if p.mode == SurfaceMode::Wrap => self.bakes.wrap_params.get(id),
             _ => None,
         };
+        let sticker = self.sticker_of(&object);
         Ok(StampBakeJob {
             id,
             object,
@@ -1395,16 +1439,116 @@ impl Document {
             kind: StampJobKind::Full,
             serial: self.bakes.edit_serial,
             graph: self.wrap_mesh_cell(),
+            sticker,
         })
+    }
+
+    /// The picture of a Full job of a styled or sticker stamp (2.6, 2.7): a cached Full picture that serves it as it
+    /// is (`Ready`), else the base the job starts from (cached mips, a text to draw, a sticker to render) and the
+    /// styling. Cheap: nothing is drawn here (an image may be decoded and fonts parsed on a cache miss, as before).
+    fn derived_job_picture(&mut self, object: &StampObject) -> Result<JobPicture, EditError> {
+        let id = object.id;
+        let full = BakeQuality::Full;
+        let (base, ref_scale, size) = match &object.source {
+            StampSource::Image { blob } => {
+                let mips = self.image_source(*blob)?;
+                let size = mips.size();
+                (JobBase::Mips { mips, identity: BaseIdentity::Blob(*blob) }, 1.0, size)
+            }
+            StampSource::Text(spec) => {
+                let ref_scale = raster_px(spec) / STYLE_REFERENCE_EM;
+                match self.text_mips.get(&id) {
+                    Some((cached, mips)) if cached == spec && !self.text_caches.preview_ids.contains(&id) => {
+                        let mips = Arc::clone(mips);
+                        let size = mips.size();
+                        (JobBase::Mips { identity: BaseIdentity::Text(Arc::clone(&mips)), mips }, ref_scale, size)
+                    }
+                    _ => {
+                        let (own, fallback) = self.text_fonts_owned(spec)?;
+                        let size = self.stamp_text_frame(id).map(|f| f.size).unwrap_or([1, 1]);
+                        (JobBase::TextDraw { spec: Box::new(spec.clone()), own, fallback }, ref_scale, size)
+                    }
+                }
+            }
+            StampSource::Sticker { sticker } => {
+                let doc = Arc::clone(self.sticker_state.map.get(sticker).ok_or(EditError::UnknownSticker)?);
+                let s = self.sticker_scale_of(object, &doc, full);
+                let identity = BaseIdentity::Sticker(Arc::clone(&doc), s.to_bits());
+                if let Some(mips) = self.trivial_mips(&doc) {
+                    let size = mips.size();
+                    (JobBase::Mips { mips, identity }, s, size)
+                } else if let Some(e) = self.sticker_state.cache.find_render(&doc, s, full, true) {
+                    let size = e.mips.size();
+                    (JobBase::Mips { mips: e.mips, identity }, s, size)
+                } else {
+                    let input = self.sticker_render_input(&doc)?;
+                    let size = crate::sticker::render_size(&doc, s);
+                    (JobBase::Sticker { input: Box::new(input), scale: s }, s, size)
+                }
+            }
+        };
+        if !object.styles.any_on() {
+            // A sticker without stamp styles: its render as it is, the tint applied by the bake.
+            return Ok(match base {
+                JobBase::Mips { mips, .. } => {
+                    let frame = crate::sticker::SourceFrame::plain(mips.size());
+                    JobPicture::Ready { mips, frame, tint: object.tint }
+                }
+                base => JobPicture::Derived { base, styling: None },
+            });
+        }
+        let styling = Styling {
+            styles: object.styles.sanitized(),
+            tint: object.tint,
+            ref_scale,
+            texels: self.texels_of(object),
+            quality: full,
+        };
+        let (_, scale, _) = work_level(size, &styling);
+        if let (JobBase::Mips { identity, .. }, Some(entry)) = (&base, self.sticker_state.cache.styled.get(&id))
+            && entry.quality == full
+            && entry.base.same(identity)
+            && entry.styles == styling.styles
+            && entry.tint == styling.tint
+            && entry.scale_bits == scale.to_bits()
+        {
+            return Ok(JobPicture::Ready { mips: Arc::clone(&entry.mips), frame: entry.frame, tint: [255; 4] });
+        }
+        Ok(JobPicture::Derived { base, styling: Some(Box::new(styling)) })
+    }
+
+    /// Stickers (review A1): true when output `out` was made for stamp `out.id` as it is now: the same stamp object
+    /// (source, placement, tint, styles), the same sticker value (`Arc::ptr_eq`; both `None` for image and text stamps)
+    /// and the document's mesh and texel maps. Used by `apply_final_bake` and `apply_wrap_preview`.
+    pub(crate) fn job_inputs_current(&self, out: &StampBakeOutput) -> bool {
+        self.stamp(out.id).is_some_and(|s| *s == out.object) && self.job_sticker_current(out) && self.same_inputs(out)
+    }
+
+    /// True when the sticker value `out` drew is the stamp's sticker now (both `None` for image and text stamps).
+    fn job_sticker_current(&self, out: &StampBakeOutput) -> bool {
+        match (self.stamp(out.id).and_then(|s| self.sticker_of(s)), &out.sticker) {
+            (None, None) => true,
+            (Some(now), Some(then)) => Arc::ptr_eq(&now, then),
+            _ => false,
+        }
     }
 
     /// Applies a job's output without the staleness check: the drawn text picture (`store_text_mips`), then the caches
     /// (`apply_bake`). An output that carries an error changes nothing and returns it.
     fn apply_bake_output(&mut self, out: StampBakeOutput) -> Result<(), EditError> {
-        let StampBakeOutput { id, result, picture, wrap, bvh, .. } = out;
+        let StampBakeOutput { id, result, picture, wrap, bvh, drawn: extra, .. } = out;
         let baked = result?;
         if let Some(drawn) = picture {
             self.store_text_mips(id, drawn.spec, drawn.frame, drawn.full, drawn.mips);
+        }
+        // Stickers (review A27): what the job drew goes into the caches, so the next Preview draws nothing again.
+        if let Some(DrawnPicture { render, styled }) = extra {
+            if let Some(render) = render {
+                self.sticker_state.cache.insert_render(render);
+            }
+            if let Some(styled) = styled {
+                self.sticker_state.cache.styled.insert(id, styled);
+            }
         }
         // Objects-tabs: a parameterization made with other hidden objects is not cached (the pixels still apply).
         if let Some(used) = wrap
@@ -1465,7 +1609,8 @@ impl Document {
     /// shared texels are not found yet (the warm-up job), for a wrapped stamp without a parameterization of its
     /// placement, for a UV stamp and where no sample meets the surface. Cheap: no build on the calling thread.
     pub fn stamp_shared_texels(&self, id: StampId) -> Option<f32> {
-        let Placement::Projected(p) = self.stamp(id)?.placement else { return None };
+        // Stickers (2.6): the picture that is drawn, margin included.
+        let p = self.bake_projector(id)?;
         let cell = self.bakes.wrap_mesh.as_ref().filter(|c| c.is_for(&self.mesh))?;
         let uv = cell.uv_built()?;
         const N: usize = 16;
@@ -1507,9 +1652,10 @@ impl Document {
         }
     }
 
-    /// The cached parameterization of stamp `id` when it serves the stamp's current placement.
+    /// The cached parameterization of stamp `id` when it serves the stamp's current placement (stickers, 2.6: the
+    /// bake placement, the one parameterizations are made for; without styles the stored one).
     fn serving_wrap_param(&self, id: StampId) -> Option<&Arc<WrapParam>> {
-        let p = self.wrapped_projector(id)?;
+        let p = self.bake_wrapped_projector(id)?;
         self.bakes.wrap_params.peek(id).filter(|w| w.serves(&self.mesh, &p))
     }
 
@@ -1518,9 +1664,11 @@ impl Document {
     /// stamp that is not wrapped, an unknown id, a source that cannot be prepared, or a placement without surface.
     /// Not a command: no history, no pixels change.
     pub fn ensure_wrap_param(&mut self, id: StampId) -> Option<WrapStats> {
-        let p = self.wrapped_projector(id)?;
-        let source = self.stamp(id)?.source.clone();
-        let mips = self.source_mips(id, &source, raster_quality(BakeQuality::Preview)).ok()?;
+        self.wrapped_projector(id)?;
+        let stored = self.stamp(id)?.placement;
+        let picture = self.bake_picture(id, BakeQuality::Preview).ok()?;
+        let Placement::Projected(p) = bake_placement_of(&stored, &picture.frame) else { return None };
+        let mips = picture.mips;
         let maps = self.texel_maps();
         if let Some(w) = self.bakes.wrap_params.get(id)
             && w.serves_inputs(&self.mesh, &maps, mips.size(), &p)
@@ -1721,14 +1869,17 @@ impl Document {
     /// A Preview or ParamOnly job of wrapped stamp `id` (the Preview picture, the cached parameterization).
     fn make_wrap_job(&mut self, id: StampId, kind: StampJobKind) -> Result<StampBakeJob, EditError> {
         let object = self.stamp(id).ok_or(EditError::UnknownStamp)?.clone();
-        let mips = self.source_mips(id, &object.source, raster_quality(BakeQuality::Preview))?;
+        // The picture the synchronous Preview bake uses (stickers: rendered and styled here at Preview size, 2.6).
+        let bp = self.bake_picture(id, BakeQuality::Preview)?;
         let picture = match object.source {
-            StampSource::Image { .. } => JobPicture::Image(mips),
-            StampSource::Text(_) => JobPicture::TextCached(mips),
+            StampSource::Image { .. } if bp.frame.margin == 0 && bp.tint == object.tint => JobPicture::Image(bp.mips),
+            StampSource::Text(_) if bp.frame.margin == 0 && bp.tint == object.tint => JobPicture::TextCached(bp.mips),
+            _ => JobPicture::Ready { mips: bp.mips, frame: bp.frame, tint: bp.tint },
         };
         Ok(StampBakeJob {
             id,
             wrap: self.bakes.wrap_params.get(id),
+            sticker: self.sticker_of(&object),
             object,
             mesh: Arc::clone(&self.mesh),
             bvh: Arc::clone(&self.bvh),
@@ -1771,7 +1922,7 @@ impl Document {
                 && self.same_inputs(&out)
                 && Arc::ptr_eq(&out.bvh, &self.bvh)
                 && let Some(used) = out.wrap
-                && self.wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
+                && self.bake_wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
             {
                 self.store_wrap_param(id, used.param, used.fresh);
             }
@@ -1781,7 +1932,8 @@ impl Document {
             self.bakes.preview_stale.insert(id);
             return WrapPreview::Stale;
         }
-        let due_again = self.stamp(id).is_some_and(|s| *s != out.object);
+        // Stickers: a changed sticker value makes the picture the last good one too.
+        let due_again = !self.job_inputs_current(&out);
         let StampBakeOutput { result, wrap, bvh, .. } = out;
         match result {
             Ok(baked) => self.apply_bake(id, baked),
@@ -1789,7 +1941,7 @@ impl Document {
         }
         if let Some(used) = wrap
             && Arc::ptr_eq(&bvh, &self.bvh)
-            && self.wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
+            && self.bake_wrapped_projector(id).is_some_and(|p| used.param.serves(&self.mesh, &p))
         {
             self.store_wrap_param(id, used.param, used.fresh);
         }
@@ -1816,7 +1968,7 @@ impl Document {
             return false;
         }
         let id = out.id;
-        let Some(p) = self.wrapped_projector(id) else { return false };
+        let Some(p) = self.bake_wrapped_projector(id) else { return false };
         match out.wrap {
             Some(used) if used.param.serves(&self.mesh, &p) => {
                 self.store_wrap_param(id, used.param, used.fresh);
@@ -1899,7 +2051,7 @@ mod tests {
     fn spec_of(doc: &Document, id: StampId) -> TextSpec {
         match &doc.stamp(id).unwrap().source {
             StampSource::Text(spec) => spec.clone(),
-            StampSource::Image { .. } => panic!("not a text stamp"),
+            _ => panic!("not a text stamp"),
         }
     }
 
@@ -2985,7 +3137,7 @@ mod text_document_tests {
     fn spec_of(doc: &Document, id: StampId) -> TextSpec {
         match &doc.stamp(id).unwrap().source {
             StampSource::Text(spec) => spec.clone(),
-            StampSource::Image { .. } => panic!("not a text stamp"),
+            _ => panic!("not a text stamp"),
         }
     }
 
@@ -4108,7 +4260,7 @@ mod deferred_final_bake_tests {
     fn spec_of(doc: &Document, id: StampId) -> TextSpec {
         match &doc.stamp(id).unwrap().source {
             StampSource::Text(spec) => spec.clone(),
-            StampSource::Image { .. } => panic!("not a text stamp"),
+            _ => panic!("not a text stamp"),
         }
     }
 
@@ -4499,7 +4651,7 @@ mod deferred_final_bake_tests {
         let (mut doc, a) = placed();
         let blob = match doc.stamp(a).unwrap().source {
             StampSource::Image { blob } => blob,
-            StampSource::Text(_) => unreachable!(),
+            _ => unreachable!(),
         };
         let p = Placement::Projected(front(0.1, 0.2, 0.5, Vec2::splat(0.2), 0.6));
         let b = doc.add_stamp("B", StampSource::Image { blob }, p, TextureSetId(0)).unwrap();

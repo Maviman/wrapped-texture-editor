@@ -256,7 +256,9 @@ impl StampPlaceTool {
                 }
                 frame.map(|f| Measured { size: f.size, frame: Some(f) })
             }
-            StampSource::Image { .. } => doc.stamp_source_size(source).ok().map(|size| Measured { size, frame: None }),
+            StampSource::Image { .. } | StampSource::Sticker { .. } => {
+                doc.stamp_source_size(source).ok().map(|size| Measured { size, frame: None })
+            }
         }?;
         if measured.size[0] == 0 || measured.size[1] == 0 {
             return None;

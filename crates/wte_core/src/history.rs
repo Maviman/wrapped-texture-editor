@@ -2,15 +2,16 @@
 // structure snapshots for everything else, the history stacks with their memory budget, and pending
 // (`Commit::Preview`) edits.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::document::Document;
-use crate::ids::{LayerId, StampId, TextureSetId};
+use crate::ids::{LayerId, StampId, StickerId, TextureSetId};
 use crate::layer::{BlendMode, Layer, LayerKind};
 use crate::math::IRect;
 use crate::pixel::{PixelBuf, SparseBuf};
 use crate::stamp::{StampObject, StampSource};
+use crate::sticker::StickerDoc;
 
 /// Pixels of one tile of a `TilePatch`.
 pub enum TileData {
@@ -310,6 +311,8 @@ pub struct StructureSnapshot {
     /// Round 5 (5.20, 6.7): the stamps whose Full bake was still due (`Document::stamp_is_unbaked`). Their caches in
     /// `sets` are the earlier ones; restoring the snapshot restores "still needs its Full bake" with them.
     pub unbaked: BTreeSet<StampId>,
+    /// Stickers (STICKER_PLAN 2.10): the document's sticker map (`Arc` clones; no pixel is copied).
+    pub stickers: BTreeMap<StickerId, Arc<StickerDoc>>,
 }
 
 /// Payload of one history entry (swap semantics, section 6.7).
@@ -360,14 +363,28 @@ fn buffer_key<T>(buf: &Arc<T>) -> usize {
     Arc::as_ptr(buf) as usize
 }
 
+/// The owned picture and mask buffers of a sticker map (`buffer_key`, bytes): what a snapshot keeps alive (2.7).
+fn sticker_buffers(stickers: &BTreeMap<StickerId, Arc<StickerDoc>>) -> impl Iterator<Item = (usize, usize)> + '_ {
+    stickers.values().flat_map(|doc| doc.layers.iter()).flat_map(|l| {
+        let picture = l.owned_picture().map(|p| (buffer_key(p), p.byte_len()));
+        let mask = l.mask.as_ref().map(|m| (buffer_key(&m.pixels), m.pixels.byte_len()));
+        picture.into_iter().chain(mask)
+    })
+}
+
 /// Bytes an edit keeps alive beyond the document: tile patches in full; of a structure snapshot the pinned raster
-/// buffers and stamp/text caches that are neither in `live` (still used by the document) nor in `seen` (already
-/// counted for a newer entry).
+/// buffers, stamp/text caches and sticker pictures and masks that are neither in `live` (still used by the document)
+/// nor in `seen` (already counted for a newer entry).
 fn edit_cost(edit: &Edit, live: &HashSet<usize>, seen: &mut HashSet<usize>) -> usize {
     match edit {
         Edit::Pixels { patch, .. } => patch.byte_len(),
         Edit::Structure(snapshot) => {
             let mut total = 0usize;
+            for (key, bytes) in sticker_buffers(&snapshot.stickers) {
+                if !live.contains(&key) && seen.insert(key) {
+                    total = total.saturating_add(bytes);
+                }
+            }
             for record in snapshot.sets.iter().flat_map(|s| &s.layers) {
                 let (key, bytes) = match &record.pixels {
                     RecordPixels::Keep => continue,
@@ -564,7 +581,8 @@ impl Document {
                 self.mark_layer_dirty(id, dirty);
             }
             Edit::Structure(snapshot) => {
-                let empty = StructureSnapshot { sets: Vec::new(), stamps: Vec::new(), unbaked: BTreeSet::new() };
+                let empty =
+                    StructureSnapshot { sets: Vec::new(), stamps: Vec::new(), unbaked: BTreeSet::new(), stickers: BTreeMap::new() };
                 let stored = std::mem::replace(&mut **snapshot, empty);
                 **snapshot = self.restore_structure(stored);
             }
@@ -660,6 +678,7 @@ impl Document {
                 .collect(),
             stamps: self.stamps.clone(),
             unbaked: self.bakes.unbaked.clone(),
+            stickers: self.sticker_state.map.clone(),
         }
     }
 
@@ -684,6 +703,7 @@ impl Document {
                 .collect(),
             stamps: self.stamps.clone(),
             unbaked: self.bakes.unbaked.clone(),
+            stickers: self.sticker_state.map.clone(),
         };
 
         // Buffers, versions and content bounds the document currently holds, for the `Keep` records.
@@ -698,7 +718,7 @@ impl Document {
             })
             .collect();
 
-        let StructureSnapshot { sets: new_sets, stamps: new_stamps, unbaked: new_unbaked } = s;
+        let StructureSnapshot { sets: new_sets, stamps: new_stamps, unbaked: new_unbaked, stickers: new_stickers } = s;
         let mut version_counter = self.version_counter;
         for (set, structure) in self.sets.iter_mut().zip(new_sets) {
             let layers: Vec<Layer> = structure
@@ -740,6 +760,10 @@ impl Document {
         self.version_counter = version_counter;
         drop(current);
         self.stamps = new_stamps;
+        // Stickers (2.10): the sticker map comes back with the stamps that show it; the linked caches in `sets` are the
+        // ones baked from it, so no bake is needed. Derived pictures of changed stickers are found stale by their `Arc`.
+        self.sticker_state.map = new_stickers;
+        self.prune_sticker_caches();
         let stamps = &self.stamps;
         self.bakes.unbaked = new_unbaked.into_iter().filter(|id| stamps.iter().any(|s| s.id == *id)).collect();
 
@@ -756,7 +780,7 @@ impl Document {
         inverse
     }
 
-    /// Addresses of every pixel buffer the document's layers hold right now.
+    /// Addresses of every pixel buffer the document's layers and stickers hold right now.
     fn live_buffers(&self) -> HashSet<usize> {
         self.sets
             .iter()
@@ -765,6 +789,7 @@ impl Document {
                 LayerKind::Raster(buf) => buffer_key(buf),
                 LayerKind::Stamp { cache, .. } | LayerKind::Text { cache, .. } => buffer_key(cache),
             })
+            .chain(sticker_buffers(&self.sticker_state.map).map(|(key, _)| key))
             .collect()
     }
 
@@ -814,7 +839,7 @@ impl Document {
             return;
         }
         self.flush_pending_edit();
-        self.pending_edit = Some(PendingEdit { label: label.to_owned(), before: self.snapshot_structure(&[]) });
+        self.pending_edit = Some(Box::new(PendingEdit { label: label.to_owned(), before: self.snapshot_structure(&[]) }));
     }
 
     /// `history.push` + `touch()`; the new history state gets the new revision as its id (fresh: the revision only
@@ -1031,6 +1056,7 @@ pub(crate) mod testkit {
             }),
             tint: [255; 4],
             home_set: TextureSetId(0),
+            styles: Default::default(),
         };
         let parts = DocumentParts {
             name: "stamped".to_owned(),
@@ -1088,7 +1114,7 @@ mod tests {
             content: None,
         };
         let sets = vec![SetStructure { layers: vec![record], active: None }];
-        Edit::Structure(Box::new(StructureSnapshot { sets, stamps: Vec::new(), unbaked: BTreeSet::new() }))
+        Edit::Structure(Box::new(StructureSnapshot { sets, stamps: Vec::new(), unbaked: BTreeSet::new(), stickers: BTreeMap::new() }))
     }
 
     #[test]

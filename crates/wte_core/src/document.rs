@@ -2,20 +2,21 @@
 //! shared mutation helpers. Commands live in `doc_build.rs`, `doc_layers.rs`, `doc_stamps.rs`, `history.rs`,
 //! `composite.rs`, `stroke.rs` and `fill.rs`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blob::BlobStore;
 use crate::bvh::{Bvh, Cull, Hit, TriMask};
 use crate::error::{EditError, ImportWarning};
 use crate::history::History;
-use crate::ids::{BlobId, LayerId, StampId, TextureSetId};
+use crate::ids::{BlobId, LayerId, StampId, StickerId, TextureSetId};
 use crate::import::{ImportOptions, SourceBundle};
 use crate::layer::{Layer, LayerKind, TextureSet};
 use crate::math::{Aabb, IRect, Ray};
 use crate::mesh::MeshData;
 use crate::pixel_ops::PremulMips;
 use crate::stamp::{StampObject, StampSource};
+use crate::sticker::StickerDoc;
 use crate::texel_map::TexelMap;
 use crate::text::{FontCache, FontRef, TextFrame, TextRaster, TextSpec};
 use crate::wrap_param::WrapParam;
@@ -52,7 +53,8 @@ pub struct Document {
     /// The history state id (`History::state`) whose content is on disk (`mark_saved`).
     pub(crate) saved_revision: u64,
     pub(crate) stroke: Option<crate::stroke::StrokeSession>,
-    pub(crate) pending_edit: Option<crate::history::PendingEdit>,
+    /// Boxed (stickers, P3a): the structure snapshot inside it grew with the sticker map; `Document` stays small.
+    pub(crate) pending_edit: Option<Box<crate::history::PendingEdit>>,
     /// Stamps whose caches are currently `BakeQuality::Preview` (5.20, 6.7).
     pub(crate) preview_baked: BTreeSet<StampId>,
     /// The deferred bakes of stamps (`preview_stale`, round 5: `unbaked`); boxed so that `Document` stays small.
@@ -76,6 +78,22 @@ pub struct Document {
     pub(crate) hidden_objects: Vec<bool>,
     /// Objects-tabs: +1 at every `set_hidden_objects` that changed something.
     pub(crate) visibility_generation: u64,
+    /// Stickers (STICKER_PLAN 2.2, 2.7, 2.8): the sticker map, the picture-version counter and the derived sticker
+    /// caches; boxed so that `Document` stays small.
+    pub(crate) sticker_state: Box<StickerState>,
+}
+
+/// The sticker part of a document (STICKER_PLAN 2.2, 2.7).
+#[derive(Default)]
+pub(crate) struct StickerState {
+    /// The layered stickers stamps show (`StampSource::Sticker`), shared by `Arc`; history snapshots hold `Arc` clones.
+    /// Part of the structure state.
+    pub(crate) map: BTreeMap<StickerId, Arc<StickerDoc>>,
+    /// Source of picture versions (`next_pixel_version`, 2.2); not persisted, never reused.
+    pub(crate) pixel_version: u64,
+    /// Derived sticker data (renders, layer rasters, decoded blob pictures, styled stamp pictures); not persisted, not
+    /// in the history.
+    pub(crate) cache: crate::doc_stickers::StickerCaches,
 }
 
 /// Most parameterizations a document keeps (least recently used dropped first).
@@ -434,6 +452,13 @@ impl Document {
         self.version_counter
     }
 
+    /// A never-before-used picture version (STICKER_PLAN 2.2): owned sticker pictures and masks get one at every
+    /// change of their bytes. Monotonic for the life of the document, never reused, not saved.
+    pub fn next_pixel_version(&mut self) -> u64 {
+        self.sticker_state.pixel_version += 1;
+        self.sticker_state.pixel_version
+    }
+
     /// `debug_assert!`s the structure invariants of section 6.5. Called at the end of `push_structure_edit`,
     /// `restore_structure`, `flush_pending_edit` and `from_parts`; a no-op in release builds.
     pub(crate) fn debug_check_structure(&self) {
@@ -483,11 +508,15 @@ impl Document {
                             );
                         }
                     }
-                    // Every stamp/text layer references an existing stamp whose source kind matches.
+                    // Every stamp/text layer references an existing stamp whose source kind matches (a sticker stamp's
+                    // layers are image-stamp layers).
                     LayerKind::Stamp { stamp, .. } => {
                         debug_assert!(
-                            matches!(self.stamp(*stamp).map(|o| &o.source), Some(StampSource::Image { .. })),
-                            "set {s}: stamp layer {:?} does not reference an existing image stamp ({stamp:?})",
+                            matches!(
+                                self.stamp(*stamp).map(|o| &o.source),
+                                Some(StampSource::Image { .. } | StampSource::Sticker { .. })
+                            ),
+                            "set {s}: stamp layer {:?} does not reference an existing image or sticker stamp ({stamp:?})",
                             layer.id
                         );
                     }
@@ -502,8 +531,12 @@ impl Document {
             }
         }
 
-        // Every stamp has exactly one linked layer in `home_set` and at most one in any other set.
+        // Every stamp has exactly one linked layer in `home_set` and at most one in any other set; a sticker stamp's
+        // sticker exists.
         for stamp in &self.stamps {
+            if let StampSource::Sticker { sticker } = &stamp.source {
+                debug_assert!(self.sticker_state.map.contains_key(sticker), "stamp {:?}: sticker {sticker:?} does not exist", stamp.id);
+            }
             debug_assert!(
                 stamp.home_set.index() < self.sets.len(),
                 "stamp {:?}: home set {:?} does not exist",

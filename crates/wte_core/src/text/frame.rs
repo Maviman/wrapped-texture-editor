@@ -95,14 +95,14 @@ pub fn place_anchor_at_centre(placement: &mut Placement, frame: &TextFrame) {
 
 /// The frame of a placement in its host space (FEATURE_TEXT 5.11): unit directions of the picture's x and y axes and
 /// the full size of the rectangle.
-struct HostFrame {
-    ex: Vec3,
-    ey: Vec3,
-    size: Vec2,
+pub(crate) struct HostFrame {
+    pub(crate) ex: Vec3,
+    pub(crate) ey: Vec3,
+    pub(crate) size: Vec2,
 }
 
 impl HostFrame {
-    fn of(placement: &Placement) -> HostFrame {
+    pub(crate) fn of(placement: &Placement) -> HostFrame {
         match placement {
             Placement::Projected(p) => {
                 let (right, up, _) = p.axes();

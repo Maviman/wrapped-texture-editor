@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use crate::pixel::PixelBuf;
 use crate::sticker::fx::apply_styles;
+use crate::sticker::render::StickerRenderInput;
 use crate::sticker::style::StylePreset;
 use crate::text::edt::distance_to_ink;
 use crate::testutil::XorShift;
@@ -242,4 +243,59 @@ fn perf_k2_flood_fill_worst_case_4096() {
         std::hint::black_box(region(&comb, (0, 0), opts));
     });
     report("flood fill 4096 x 4096 comb (2,048 one-pixel teeth)", ms, 400.0);
+}
+
+/// 8.4 "sticker::render, 3 layers (picture, text, shape) with one layer style, 1024 x 1024: cold / one layer changed"
+/// (120 / 50 ms) and "Preview-quality render" (33 ms; the Preview scale of a 1024 x 1024 sticker is 1, so the Preview
+/// row is the cached case with the changed layer drawn at Preview quality). Stickers P3a.
+#[test]
+#[ignore = "perf: run serially in release (cargo test -p wte_core --release --lib perf_k3a -- --ignored --test-threads=1)"]
+fn perf_k3a_render_three_layers_1024() {
+    use std::sync::Arc;
+
+    use glam::Vec2;
+
+    use crate::ids::StickerLayerId;
+    use crate::sticker::model::{PicturePixels, StickerContent, StickerDoc, StickerLayer};
+    use crate::sticker::render::{LayerCache, render_with};
+    use crate::sticker::shape::{Paint, ShapeKind, ShapeSpec};
+    use crate::text::RasterQuality;
+
+    let mut doc = crate::testutil::doc_from_raw(crate::samples::flat_quad(), 32);
+    let mut sticker = StickerDoc::new("perf", 1024, 1024);
+    let picture = PicturePixels::Owned { pixels: Arc::new(photo(1024)), version: doc.next_pixel_version() };
+    let mut layer = StickerLayer::new(StickerLayerId(1), "photo", StickerContent::Picture(picture));
+    layer.styles = StylePreset::ClassicSticker.styles([1024, 1024]);
+    sticker.layers.push(layer);
+    let mut spec = crate::text::TextSpec::new("Sticker", doc.default_font());
+    spec.size_px = 160.0;
+    let mut text = StickerLayer::new(StickerLayerId(2), "text", StickerContent::Text(Box::new(spec)));
+    text.transform.translate = Vec2::new(512.0, 800.0);
+    sticker.layers.push(text);
+    let shape = ShapeSpec { kind: ShapeKind::Star { points: 5, inner: 0.5 }, size: Vec2::splat(300.0), fill: Paint::Solid([250, 200, 20, 255]), outline: Some(([0, 0, 0, 255], 8.0)) };
+    let mut star = StickerLayer::new(StickerLayerId(3), "star", StickerContent::Shape(shape));
+    star.transform.translate = Vec2::new(650.0, 80.0);
+    sticker.layers.push(star);
+    sticker.next_layer = 4;
+    let doc_arc = Arc::new(sticker.clone());
+    let input = doc.sticker_render_input(&doc_arc).unwrap();
+    let cold = median_ms(|| {
+        let _ = render_with(&input, 1.0, RasterQuality::Full, None);
+    });
+    report("sticker render, 3 layers + ClassicSticker on the photo, 1024, cold", cold, 120.0);
+    // One layer changed: the star moves, the photo and the text come from the layer cache.
+    let mut cache = LayerCache::default();
+    let _ = render_with(&input, 1.0, RasterQuality::Full, Some(&mut cache));
+    let mut step = 0.0f32;
+    let mut changed = |quality: RasterQuality| {
+        step += 1.0;
+        let mut moved = sticker.clone();
+        moved.layers[2].transform.translate.x += step;
+        let input = StickerRenderInput { doc: Arc::new(moved), ..input.clone() };
+        let _ = render_with(&input, 1.0, quality, Some(&mut cache));
+    };
+    let one = median_ms(|| changed(RasterQuality::Full));
+    report("sticker render, one layer changed (layer cache), 1024", one, 50.0);
+    let preview = median_ms(|| changed(RasterQuality::Preview { max_pixels: crate::doc_stamps::TEXT_EDIT_PREVIEW_PIXELS }));
+    report("sticker render at Preview quality, one layer changed, 1024", preview, 33.0);
 }

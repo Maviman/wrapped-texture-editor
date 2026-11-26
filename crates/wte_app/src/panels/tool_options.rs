@@ -590,9 +590,11 @@ fn stamp_properties(
         Placement::Uv(uv) => doc.set(uv.set).map_or(1.0, |s| s.width as f32),
         Placement::Projected(_) => 1.0,
     };
+    // Stickers (P3a): a sticker stamp shows like an image stamp, without the "Image: Choose..." row (the sticker
+    // editor of P6a / P6b replaces it).
     let source_name = match &stamp.source {
         StampSource::Image { blob } => doc.blobs.get(*blob).map(|b| b.name.clone()),
-        StampSource::Text(_) => None,
+        StampSource::Text(_) | StampSource::Sticker { .. } => None,
     };
     // A locked linked layer protects the stamp (core `stamp_locked`): only the name stays editable.
     let locked = doc.stamp_locked(id);

@@ -752,7 +752,7 @@ fn a_styled_text_keeps_its_anchor_through_typing_save_and_load() {
     doc.set_defer_preview_bakes(true);
     let mut typed = match &doc.stamp(id).unwrap().source {
         StampSource::Text(s) => s.clone(),
-        StampSource::Image { .. } => unreachable!(),
+        _ => unreachable!(),
     };
     for c in [" ", "2", "0", "2", "6"] {
         typed.content.push_str(c);
@@ -1126,7 +1126,7 @@ fn random_op(doc: &mut Document, rng: &mut XorShift, blobs: &[BlobId], pending: 
         24 => {
             if let Some(id) = pick(rng, &stamps) {
                 let source = match doc.stamp(id).unwrap().source.clone() {
-                    StampSource::Image { .. } => StampSource::Image { blob: pick(rng, blobs).unwrap() },
+                    StampSource::Image { .. } | StampSource::Sticker { .. } => StampSource::Image { blob: pick(rng, blobs).unwrap() },
                     StampSource::Text(mut spec) => {
                         spec.content = pick(rng, &WORDS).unwrap().to_owned();
                         spec.letter_spacing = rf(rng, 0.0, 0.2);

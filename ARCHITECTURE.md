@@ -314,7 +314,10 @@ PhotoCraft (a linked PSD, drag and drop, clipboard). Notes `docs/notes/sticker/`
 
 Traceability (P1): styles, adjustments, shapes, the resampler and the limits (2.1, 5.27, 6.11), `AlphaBuf` (5.5),
 `nearest_ink` (5.13 / 6.11), pitfalls (6.9), tests (9.1). (P2): selections, colour-tolerance regions, cut-out helpers,
-blur, sharpen and the gradient tool (2.1, 5.27, 6.12, 9.1); 1.3's non-goal now names texture layers only.
+blur, sharpen and the gradient tool (2.1, 5.27, 6.12, 9.1); 1.3's non-goal now names texture layers only. (P3a): the
+sticker document (`StickerDoc`, picture versions), `StampSource::Sticker`, `StampObject::styles`, the sticker render
+(6.10), the picture pipeline of a stamp (margin, working size, two placements: 6.5 "Stickers"), the `Document` sticker
+API and job freshness (2.1, 4.4, 5.1, 5.2, 5.12, 5.14, 5.18, 5.20 "Stickers", 5.27 part 3, 9.1).
 
 ---
 
@@ -352,7 +355,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `blob.rs` | S | `BlobStore`, `Blob`, `BlobKind` (fully implemented + tests; round 4 T3: allocation check before hashing) |
 | `mesh.rs` | S | `MeshData`, `MaterialSlot`, `SetInfo`, `TriFlags`, `RawMesh`, `RenderVertex`, `WireEdge`, `UvStats` + trivial accessors; objects-tabs: `ObjectInfo`, `RawObjects`, `MeshData::{tri_object, objects}` |
 | `layer.rs` | S | `Layer`, `LayerKind`, `BlendMode`, `TextureSet` struct |
-| `stamp.rs` | S; round 6 A | `StampObject`, `StampSource`, `Placement`, `Projector` (round 6: `mode`, `wrap`), `SurfaceMode`, `WrapOptions`, `UvPlacement`, `BakeQuality` (types only) |
+| `stamp.rs` | S; round 6 A; stickers P3a | `StampObject` (P3a: `styles`), `StampSource` (P3a: `Sticker`), `Placement`, `Projector` (round 6: `mode`, `wrap`), `SurfaceMode`, `WrapOptions`, `UvPlacement`, `BakeQuality` (types only) |
 | `document.rs` | S | `Document`, `DocumentSnapshot`, `Commit`, lookup accessors, id allocation, revision tracking, `guard_no_stroke`, `mark_layer_dirty`, `debug_check_structure` |
 | `testutil.rs` | S | test-only helpers: temp dir under `target/`, image comparison (PSNR), deterministic RNG, `doc_from_raw`, `imported_from_raw` (and their `_objects` forms) |
 | `mesh_build.rs` | C1 | `normalize`, UV tile normalisation, normals, fallback UVs, `wire_edges`, `render_vertices`, `uv_hash`, `uv_layout_image`; objects-tabs: `normalize_with_objects` (6.1 step 9) |
@@ -381,6 +384,11 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `sticker/cutout.rs` | stickers P2 | colour to alpha (`unmix_pixel`, `color_to_alpha`), `remove_matte`, `defringe`, `remove_background` / `BackgroundCut` (5.27, 6.12) |
 | `sticker/filter.rs` | stickers P2 | Gaussian `blur` / `blur_mask` (three boxes), `sharpen`, `draw_gradient` / `draw_gradient_mask` (5.27, 6.12) |
 | `sticker/bench.rs` | stickers P1, P2 | the ignored `perf_k1_*` and `perf_k2_*` timings (test-only) |
+| `sticker/model.rs` | stickers P3a | `StickerDoc`, `StickerLayer`, `StickerContent`, `PicturePixels`, `LayerMask`, `ArtboardShape`; limits check, the trivial-path test (5.27 part 3) |
+| `sticker/render.rs` | stickers P3a | `render` / `render_with` (6.10), `StickerRenderInput`, `LayerKey`, `LayerRaster`, `LayerCache`, `render_size` |
+| `sticker/pipeline.rs` | stickers P3a | `SourceFrame`, `bake_placement_of`, `Styling`, `work_level`, `styled_mips`, `styled_straight`, `sticker_scale` (6.5 "Stickers") |
+| `doc_stickers.rs` | stickers P3a | the sticker commands of `Document` (queries, add / remove / promote / detach, `set_sticker`, stamp styles, the two placements, finished pictures) and `StickerCaches` (5.20 "Stickers") |
+| `doc_stickers_tests.rs` | stickers P3a | the `k3a_*` tests of the sticker document (test-only child of the crate root) |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -390,7 +398,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `wrap_relax.rs` | round 8 A | child module `wrap_param::relax`: seams S1-S5, wedges, LSCM / ARAP with the matrix-free CG, the owner grid (6.5a "Round 8") |
 | `wrap_tests.rs` | round 6 A | the acceptance tests WA1-WA12, WA15-WA19 of the round-6 plan and (round 8) WA4 / WA4b, WA20-WA27, WA29 (round 9) WA31-WA34, WA36, WA37 and `r8_quality_survey` (test-only module) |
 | `wrap_stable_tests.rs` | stable (w1, w2) | the regression tests of the wrap correctness fixes after round 9 (`w1_*`, `w2_*`; a child module of `wrap_tests.rs`, test-only) |
-| `doc_stamps.rs` | C4; round 6 A | stamp/text commands on `Document`, source mip cache, `stamp_at`; round 6: the wrap dispatch of `bake_and_apply`, `ensure_wrap_param`, `stamp_wrap_*`, `stamp_ink_area` |
+| `doc_stamps.rs` | C4; round 6 A; stickers P3a | stamp/text commands on `Document`, source mip cache, `stamp_at`; round 6: the wrap dispatch of `bake_and_apply`, `ensure_wrap_param`, `stamp_wrap_*`, `stamp_ink_area`; P3a: sticker sources, the styled picture path of every bake (`bake_picture`, `derived_job_picture`), the bake placement at every bake / wrap call site, `job_inputs_current` |
 | `text/mod.rs` | S | `TextSpec` (with `fx: TextFx`), `FontRef`, `TextAlign`, `Outline`, `TextLayout`, `PlacedGlyph`; round 4: `TextFx`, `Gap`, `Warp`, `WarpStyle`, `TextPath`, `PathShape`, `TextFrame`, `RasterQuality`, `TextRaster`, the limits (`GAP_MIN_EM` ... `MAX_STYLED_PIXELS`), `TextSpec::new`/`sanitize_fx`/`floats`/`floats_mut`/`differs_only_in_spacing` (complete + tests) |
 | `text/font_catalog.rs` | C4; round 4 T3 | `FontCatalog` (fontdb; the Windows font folders, file sizes read once, faces shared per file), `FontCache` (fontdue), bundled fonts, `FaceTraits`, `face_traits`, `FontCatalog::sample` (picker samples drawn with the styled painter's outline and coverage code) |
 | `text/layout.rs` | C4; round 4 T2 | `layout_text`, `measure_text` (classic canvas); `lay_out_lines` (crate): the one layout rule of both painters (6.8 steps 2-3 with gap values and the thickening term), `Lines`, `LaidGlyph` |
@@ -706,6 +714,10 @@ No `build.rs`, no resource file: the window icon is set at runtime (`ViewportBui
 - `TextureSetId(n)` is the index `n` into `Document::sets` and `MeshData::sets`. Sets are created once and never reordered or removed.
 - `LayerId` and `StampId` come from `Document::alloc_id()` (monotonic `u64`, never reused, persisted as `next_id`).
 - `BlobId` is allocated by `BlobStore` (monotonic `u32`, the first id is 0).
+- Stickers (P3a): `StickerId` comes from `Document::alloc_id()` too (one counter for layers, stamps and stickers).
+  `StickerLayerId` is unique inside one `StickerDoc` (`next_layer`, `u32`, never reused). Picture versions
+  (`Document::next_pixel_version`) are not ids of anything persisted: monotonic for the life of the document, never
+  reused, never saved, new at load (5.27 part 3).
 - Nothing persisted references vertex or triangle indices.
 
 ### 4.5 Errors and logging
@@ -776,6 +788,8 @@ pub type TriId = u32;                         // triangle index; < 2^31
 #[serde(transparent)] pub struct LayerId(pub u64);        // same derives
 #[serde(transparent)] pub struct StampId(pub u64);        // same derives
 #[serde(transparent)] pub struct BlobId(pub u32);         // same derives
+#[serde(transparent)] pub struct StickerId(pub u64);      // same derives; stickers P3a (Document::alloc_id)
+#[serde(transparent)] pub struct StickerLayerId(pub u32); // same derives; stickers P3a (unique within one StickerDoc)
 
 impl TextureSetId { pub fn index(self) -> usize; }
 ```
@@ -870,6 +884,9 @@ pub enum EditError {
     #[error("a stroke is in progress")] StrokeInProgress,
     #[error("cannot merge: {0}")] CannotMerge(&'static str),
     #[error("invalid parameter: {0}")] InvalidParam(&'static str),
+    #[error("unknown sticker")] UnknownSticker,                       // stickers P3a
+    #[error("unknown sticker layer")] UnknownStickerLayer,            // stickers P3a
+    #[error("{0}")] StickerLimit(&'static str),                       // stickers P3a: a limit of STICKER_PLAN 2.7, user text
     #[error(transparent)] Text(#[from] TextError),
     #[error(transparent)] Image(#[from] ImageIoError),
 }
@@ -1483,7 +1500,7 @@ impl TextureSet {
 ```rust
 // stamp.rs
 #[derive(Clone, Debug, PartialEq)]
-pub enum StampSource { Image { blob: BlobId }, Text(TextSpec) }
+pub enum StampSource { Image { blob: BlobId }, Text(TextSpec), Sticker { sticker: StickerId } /* stickers P3a */ }
 
 /// Oriented projection box. Local frame: +X right, +Y up, +Z out of the surface toward the viewer.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1529,7 +1546,11 @@ pub struct StampObject {
     pub placement: Placement,
     pub tint: [u8; 4],                // multiplies the source (straight RGBA); default [255; 4]
     pub home_set: TextureSetId,       // the set that always keeps a layer for this stamp, even when its bake is empty
+    pub styles: StyleStack,           // stickers P3a: stamp-level layer styles; StyleStack::default() for every older stamp
 }
+// Stickers (P3a): the linked layers of a sticker stamp are `LayerKind::Stamp` (an image decal). `tint` multiplies the
+// base picture before the styles (6.5 "Stickers"). `set_stamp_source` refuses every kind switch except Sticker ->
+// Sticker (refit by the artboards' aspect, as an image); an image becomes a sticker only through `promote_stamp`.
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BakeQuality { Preview /* no occlusion rays, single mip level */, Full }
@@ -1876,7 +1897,7 @@ pub struct Document {
     pub(crate) revision: u64,
     pub(crate) saved_revision: u64,
     pub(crate) stroke: Option<crate::stroke::StrokeSession>,
-    pub(crate) pending_edit: Option<crate::history::PendingEdit>,
+    pub(crate) pending_edit: Option<Box<crate::history::PendingEdit>>,   // boxed since stickers P3a (Document size)
     pub(crate) preview_baked: BTreeSet<StampId>,    // stamps whose caches are currently BakeQuality::Preview (5.20, 6.7)
     pub(crate) bakes: Box<BakeSets>,                // round 5: boxed so that Document stays small (wte_app's
                                                     // JobOutput::Built carries it by value; clippy large_enum_variant):
@@ -1893,7 +1914,11 @@ pub struct Document {
     pub(crate) image_mips: HashMap<BlobId, Arc<PremulMips>>,              // decoded stamp images
     pub(crate) text_mips: HashMap<StampId, (TextSpec, Arc<PremulMips>)>,  // rasterized text per stamp
     pub(crate) text_caches: Box<TextCaches>,   // round-4 text caches, boxed so that Document stays small
+    pub(crate) sticker_state: Box<StickerState>, // stickers P3a: { map: BTreeMap<StickerId, Arc<StickerDoc>> (structure
+                                               // state, in snapshots), pixel_version: u64 (next_pixel_version), cache:
+                                               // StickerCaches (derived, 5.20 "Stickers") }
 }
+// Stickers (P3a): `pub fn next_pixel_version(&mut self) -> u64` (monotonic, never reused, not saved: 5.27 part 3).
 // Round 6: `BakeSets` (the boxed `bakes`) also holds `wrap_params: WrapCache`, the parameterizations of wrapped stamps
 // (6.5a "Reuse"): derived data, not in snapshots, not saved, not part of the structure state; at most 16 entries, least
 // recently used dropped first; an entry is used only when it `serves` the stamp's placement; `remove_stamp` drops its
@@ -2191,7 +2216,11 @@ pub struct LayerRecord { pub id: LayerId, pub name: String, pub visible: bool, p
 #[derive(Clone)] pub struct SetStructure { pub layers: Vec<LayerRecord>, pub active: Option<LayerId> }
 /// The complete layer/stamp structure of a document. Cheap: raster pixels are pinned only where a command asks for it.
 #[derive(Clone)] pub struct StructureSnapshot { pub sets: Vec<SetStructure>, pub stamps: Vec<StampObject>,
-                                               pub unbaked: BTreeSet<StampId> /* round 5: Document::unbaked at the time (6.7) */ }
+                                               pub unbaked: BTreeSet<StampId> /* round 5: Document::unbaked at the time (6.7) */,
+                                               pub stickers: BTreeMap<StickerId, Arc<StickerDoc>> /* stickers P3a: Arc clones */ }
+// Stickers (P3a): `restore_structure` swaps the sticker map with the stamps; the linked caches in `sets` are the ones
+// baked from it, so nothing is baked; styled pictures of removed stamps are dropped. The history cost of a snapshot also
+// counts its owned sticker pictures and masks the live document no longer holds (each buffer once, by `buffer_key`).
 
 pub enum Edit {
     Pixels { set: TextureSetId, layer: LayerId, patch: TilePatch },
@@ -2663,6 +2692,70 @@ impl Document {
   triangles use too, from 16 x 16 picture points (Wrap: `WrapParam::surface_of` of the cached parameterization; Project:
   rays along `-out`). `None` until the shared texels are built, for a wrapped stamp without a serving
   parameterization, for UV stamps. Never builds anything (UI thread).
+
+**Stickers (P3a; `doc_stickers.rs`, STICKER_PLAN 2.6-2.9).**
+
+```rust
+pub enum StickerRef { Id(StickerId), OfStamp(StampId, ShareScope) }   // OfStamp of an image stamp: P3b (InvalidParam here)
+pub enum ShareScope { ThisStamp, AllUsers }
+pub const STYLE_LABEL: &str = "Edit Sticker Style";
+impl Document {
+    pub fn sticker(&self, id: StickerId) -> Option<&Arc<StickerDoc>>;
+    pub fn stickers(&self) -> impl Iterator<Item = (StickerId, &Arc<StickerDoc>)>;   // ascending id
+    pub fn sticker_users(&self, id: StickerId) -> Vec<StampId>;
+    pub fn blob_users(&self, blob: BlobId) -> Vec<StampId>;                         // image stamps of that blob (E6)
+    pub fn add_sticker(&mut self, doc: StickerDoc) -> Result<StickerId, EditError>;   // "Add Sticker"; sanitized, new versions, limits
+    pub fn remove_sticker(&mut self, id: StickerId) -> Result<(), EditError>;         // "Delete Sticker"; InvalidParam while used
+    /// "Convert to Sticker": one Picture(Blob) layer, artboard = the image, identity; no pixel change, no bake, layer ids
+    /// and caches kept (the trivial path renders the image bit for bit). AllUsers: every image stamp of the blob shares it.
+    pub fn promote_stamp(&mut self, stamp: StampId, scope: ShareScope) -> Result<StickerId, EditError>;
+    pub(crate) fn promote_no_history(&mut self, stamp: StampId, scope: ShareScope) -> Result<StickerId, EditError>;
+    pub fn detach_sticker(&mut self, stamp: StampId) -> Result<StickerId, EditError>; // "Detach Sticker": own copy, pixels shared
+    /// The one structural edit: `edit` on a copy, sanitized, new buffers versioned, limits checked before anything
+    /// changes; an artboard change refits every user (sticker::refit_placement, 2.9) and an automatic depth; users are
+    /// re-baked through the pending edit (`label`; Preview calls fold, Final flushes). LayerLocked when a user is locked.
+    pub fn set_sticker(&mut self, on: StickerRef, edit: impl FnOnce(&mut StickerDoc), label: &str, commit: Commit)
+        -> Result<StickerId, EditError>;
+    pub fn set_stamp_styles(&mut self, stamp: StampId, styles: StyleStack, commit: Commit) -> Result<(), EditError>;
+    pub fn set_stamps_styles(&mut self, stamps: &[StampId], styles: &StyleStack) -> Result<(), EditError>; // "Paste Style", one entry
+    pub fn bake_placement(&self, stamp: StampId) -> Option<Placement>;          // 6.5 "Stickers"; margin 0 = stored, bit for bit
+    pub(crate) fn bake_wrapped_projector(&self, stamp: StampId) -> Option<Projector>;
+    pub fn stamp_source_frame2(&mut self, stamp: StampId) -> Result<SourceFrame, EditError>;   // reference frame (scale 1)
+    pub fn stamp_picture(&mut self, stamp: StampId, with_styles: bool) -> Result<PixelBuf, EditError>;   // with_styles: tint + styles
+    pub fn sticker_picture(&mut self, id: StickerId, styles: Option<&StyleStack>, scale: f32) -> Result<PixelBuf, EditError>;
+    pub(crate) fn bake_picture(&mut self, stamp: StampId, quality: BakeQuality) -> Result<BakePicture, EditError>;
+    pub(crate) fn job_inputs_current(&self, out: &StampBakeOutput) -> bool;
+}
+```
+
+- **The picture of every bake** goes through `bake_picture` (UI thread: Preview bakes, `ensure_wrap_param`, wrap Preview
+  jobs) or `make_bake_job` / `derived_job_picture` (Full). An image or text stamp without a style that is on keeps its
+  old path: the same mips, the stamp's tint, margin 0, the stored placement (bit-identical, test k3a-1). Styled stamps and
+  sticker stamps take the pipeline of 6.5 "Stickers"; their pictures are cached in `StickerCaches::styled` (one per
+  stamp: base identity, styles, tint, style-scale bits, quality, frame, mips; a Preview takes any entry of the same
+  source, styles and tint, a Full needs a Full entry of the same resolution and style scale).
+- **Jobs.** `JobPicture` gains `Ready { mips, frame, tint }` (a cached picture; a wrap Preview job's picture) and
+  `Derived { base: JobBase::{Mips, TextDraw, Sticker { input, scale }}, styling: Option<Box<Styling>> }`: a Final never
+  renders or styles on the UI thread. `StampBakeJob` and `StampBakeOutput` carry `sticker: Option<Arc<StickerDoc>>`; the
+  output carries `drawn: Option<DrawnPicture { render, styled }>`, which `apply_bake_output` puts into the render cache
+  and `styled` (review A27). The job bakes on `bake_placement_of(&object.placement, &frame)` with the frame's tint.
+- **Freshness (review A1).** `job_inputs_current(out)`: the stamp equals `out.object` (styles included), its sticker is
+  `out.sticker` (`Arc::ptr_eq`; both `None` for image and text) and the mesh and texel maps are the job's.
+  `apply_final_bake` uses it (else `Stale`, the stamp stays unbaked); `apply_wrap_preview` applies a picture made for an
+  older sticker as the last good one (`due_again`), as for an older stamp object.
+- **Caches** (`StickerCaches`, in `sticker_state`): decoded blob pictures (straight), the per-layer raster cache
+  (`LayerCache`: 64 entries, 256 MiB, keyed by `LayerKey`), finished renders (LRU of 8 and 512 MiB, an entry holds the
+  `Arc<StickerDoc>` it was made from and is found with `Arc::ptr_eq`, plus scale bits and quality), styled stamp pictures.
+  None is persisted or in the history.
+- **Wrapped stamps.** `serving_wrap_param`, `apply_wrap_preview` and `apply_wrap_param` ask whether a parameterization
+  serves the **bake** placement; `wrapped_projector` (the stored placement) stays for the gizmo outline, `stats`, `local`
+  and `surface` (the outline therefore keeps the artwork's box). `stamp_shared_texels` samples the bake footprint.
+- **Auto depth.** `refit_auto_depth_framed(old, old_frame, new, new_frame)`: with a margin on either side the "is it
+  automatic" test and the fit run on the bake placements and the fitted depth is written into the stored placement;
+  `set_stamp_source`, `retune_text`, `set_sticker` (artboard refit), `set_stamp_styles` and `set_stamps_styles` call it.
+  Without a margin it is `refit_auto_depth` (unchanged).
+- **Save.** Until format 4 (P4) `project::save` refuses a document with a sticker stamp or non-default stamp styles
+  (`ProjectError::ManifestInvalid`, nothing is written).
 
 ### 5.21 `import/` [C5]
 
@@ -3259,6 +3352,66 @@ pub fn draw_gradient_mask(mask: &mut AlphaBuf, from: Vec2, to: Vec2, gradient: &
 Crate-internal for P2 (no public API change of P1): `fx::cov`, `fx::over`, `shape::sd_round_box`, `shape::sd_ellipse`
 are now `pub(crate)`; `select::flood_plane`, `select::sel_at`, `select::mix_u8` are shared by `cutout` and `filter`.
 
+Part 3 (P3a; 6.10, 6.5 "Stickers"). The sticker document, its render and the stamp picture pipeline. `StickerDoc`,
+`StickerLayer`, `StickerContent`, `PicturePixels`, `LayerMask`, `ArtboardShape`, `SourceFrame`, `StickerRenderInput` are
+re-exported at the crate root.
+
+```rust
+// sticker/model.rs
+pub enum ArtboardShape { Rect /* default */, RoundedRect { radius: f32 }, Ellipse }
+pub struct LayerMask { pub pixels: Arc<AlphaBuf>, pub version: u64 }                  // PartialEq: version first, then bytes
+pub enum PicturePixels { Blob(BlobId), Owned { pixels: Arc<PixelBuf>, version: u64 } } // PartialEq: version first, then bytes
+pub enum StickerContent { Picture(PicturePixels), Text(Box<TextSpec>), Shape(ShapeSpec) }
+pub struct StickerLayer { pub id: StickerLayerId, pub name: String, pub visible: bool, pub locked: bool, pub opacity: f32,
+    pub blend: BlendMode, pub transform: LayerTransform, pub content: StickerContent, pub clip: bool,
+    pub mask: Option<LayerMask>, pub adjustments: Vec<Adjustment>, pub styles: StyleStack }
+impl StickerLayer { pub fn new(id, name, content) -> StickerLayer; pub fn owned_picture(&self) -> Option<&Arc<PixelBuf>>; pub fn sanitize(&mut self); }
+pub struct StickerDoc { pub name: String, pub artboard: IRect, pub shape: ArtboardShape, pub layers: Vec<StickerLayer>,
+    pub next_layer: u32, pub keep: bool }                                              // Clone shares the pixel Arcs
+impl StickerDoc {
+    pub fn new(name: &str, width: u32, height: u32) -> StickerDoc;
+    pub fn from_picture(name: &str, picture: PicturePixels, size: [u32; 2]) -> StickerDoc;   // the promoted image
+    pub fn alloc_layer(&mut self) -> StickerLayerId;  pub fn layer(&self, id) -> Option<&StickerLayer>;  pub fn layer_mut(..);
+    pub fn size(&self) -> [u32; 2];  pub fn owned_bytes(&self) -> u64;  pub fn blobs(&self) -> Vec<BlobId>;  pub fn sanitize(&mut self);
+    pub fn check_limits(&self) -> Result<(), EditError>;          // 2.7 limits without decoded pixels (StickerLimit / InvalidParam)
+    pub fn trivial_picture(&self) -> Option<&PicturePixels>;      // the 4.1 fast path (caller checks size = artboard)
+    pub fn scale_one_is_enough(&self) -> bool;                    // every visible layer a picture at scale >= 1
+}
+// sticker/render.rs
+pub struct StickerRenderInput { pub doc: Arc<StickerDoc>, pub pictures: Vec<(BlobId, Arc<PixelBuf>)>,
+    pub fonts: Vec<(StickerLayerId, Option<OwnFace>, Arc<fontdue::Font>)> }            // Send + Sync + 'static
+pub fn render_size(doc: &StickerDoc, s: f32) -> [u32; 2];                                // ceil(artboard * s), >= 1
+pub fn render(input: &StickerRenderInput, s: f32, quality: RasterQuality) -> PixelBuf;    // pure (6.10)
+pub fn render_with(input, s, quality, cache: Option<&mut LayerCache>) -> PixelBuf;
+pub struct LayerKey { /* content (blob id | owned version | text | shape), mask version, transform, adjustments, styles,
+                         artboard, scale bits, quality: never pixel bytes */ }
+impl LayerKey { pub fn of(layer: &StickerLayer, artboard: IRect, s: f32, quality: RasterQuality) -> LayerKey; }
+pub struct LayerRaster { pub content: Option<Arc<CroppedBuf>>, pub styled: Option<Arc<CroppedBuf>> }
+pub struct LayerCache { /* LRU, 64 entries, 256 MiB */ pub hits: u64 }
+// sticker/pipeline.rs (6.5 "Stickers")
+pub struct SourceFrame { pub content: [u32; 2], pub margin: u32 }   // picture = content + 2 * margin; plain(content), size()
+pub fn bake_placement_of(stored: &Placement, frame: &SourceFrame) -> Placement;
+pub fn placement_texels(p: &Placement, texel_world: f32) -> Vec2;
+pub fn level_size(size: [u32; 2], level: u32) -> [u32; 2];
+pub struct Styling { pub styles: StyleStack, pub tint: [u8; 4], pub ref_scale: f32, pub texels: Vec2, pub quality: BakeQuality }
+pub fn work_level(size: [u32; 2], styling: &Styling) -> (u32, f32, u32);              // (L, style scale, margin)
+pub fn styled_mips(mips: &PremulMips, styling: &Styling) -> (PremulMips, SourceFrame, f32);
+pub fn styled_straight(base: &PixelBuf, styling: &Styling) -> PixelBuf;
+pub fn sticker_scale(doc: &StickerDoc, texels_h: f32, quality: BakeQuality) -> f32;
+pub const PREVIEW_STYLE_PIXELS: u64 = 524_288;  pub const MAX_STYLE_SIDE: u32 = 4096;  pub const MAX_STYLED_SIDE: u32 = 6144;
+pub const MAX_RENDER_SIDE: u32 = 4096;  pub const MAX_RENDER_PIXELS: u64 = 16_777_216;  pub const PREVIEW_RENDER_PIXELS: u64 = 1_048_576;
+pub const STYLE_REFERENCE_EM: f32 = 128.0;
+// sticker/mod.rs
+pub fn refit_placement(placement: &mut Placement, old: &IRect, new: &IRect);   // 2.9 (shares text::frame::HostFrame)
+pub mod counters { pub fn renders() -> u64; pub fn styled_calls() -> u64; pub fn max_styled_side() -> u32;
+                   pub fn max_styled_pixels() -> u64; pub fn reset_max(); }        // thread-local, every build
+```
+
+Picture versions: `Document::next_pixel_version()` gives every owned picture and mask buffer a number at every change of
+its bytes; `add_sticker` / `set_sticker` give a fresh number to every buffer that is not one of the old value's buffers
+(same `Arc` and version; two layers sharing one buffer share its number). Caches key pixels by version (blob pictures by
+`BlobId`), never by address or content.
+
 ---
 
 ## 6. Algorithms
@@ -3754,7 +3907,8 @@ the one case in which a `Commit::Preview` changes `size_px`. `add_stamp` keeps t
 
 **Structure invariants** (checked by `Document::debug_check_structure`, document.rs [S], which `push_structure_edit`,
 `restore_structure`, `flush_pending_edit` and `from_parts` call last; `debug_assert!` only):
-every `LayerKind::Stamp/Text` references an existing stamp whose source kind matches; every stamp has exactly one linked layer in
+every `LayerKind::Stamp/Text` references an existing stamp whose source kind matches (`Stamp`: an image or a sticker stamp,
+stickers P3a); a sticker stamp's sticker exists; every stamp has exactly one linked layer in
 `home_set` and at most one in any other set; `stamps` is sorted by id; layer ids are unique across the document; `active` is `None`
 or an existing layer of that set; raster buffers have the set's size or are unallocated (`0 x 0`); a known content bound of a
 paint layer holds every non-zero pixel; outside a pending edit `preview_baked` is empty.
@@ -3763,6 +3917,32 @@ paint layer holds every non-zero pixel; outside a pending edit `preview_baked` i
 the lowest remaining set id, else the stamp is removed. `merge_down` on a stamp/text layer = rasterize + merge in one history entry.
 `merge_down` pixel rule: `below'[i] = blend_pixel(below[i], top[i], round(top.opacity * 255), top.blend)`; the result keeps the lower
 layer's id, name, opacity and blend (exact when the lower layer is Normal at 100%; otherwise an accepted approximation).
+
+**Stickers (P3a; STICKER_PLAN 2.6; `sticker/pipeline.rs`, `doc_stickers.rs`).** From a stamp's source to the picture its
+bake places:
+1. **Base picture** (straight RGBA8): image -> the blob's pixels; text -> its picture at `size_px` as before; sticker ->
+   `sticker::render` (6.10) at the render scale `sticker_scale`: 1 when every visible layer is a picture at scale >= 1,
+   else the smallest of 1, 2, 4 giving one sticker pixel per texel along the artboard height, capped at 4096 a side and
+   16.8 megapixels; a `Preview` halves it (down to 1/4) to at most 1,048,576 pixels. A promoted image at scale 1 (the
+   trivial path) uses the image's own mips: nothing is rendered and the bake is bit-identical to the image stamp's.
+2. **No style on** (`!styles.any_on()`): the base mips, the stamp's tint in the bake, margin 0. For image and text stamps
+   this is the old path, unchanged.
+3. **Styles on**: the working level `L` (`work_level`): the smallest `L` whose level has no side over 4096 and whose
+   styled output has none over 6144, and for a `Full` is not more than twice as dense as the texels it lands on (the
+   denser axis may stay up to 2 pixels per texel), for a `Preview` has at most 524,288 pixels with its margin. The working
+   picture = mip level `L` of the base, un-premultiplied; the tint is multiplied in (so a contour keeps its colour; the
+   bake then gets `[255; 4]`); `apply_styles(work, styles, ref_scale / 2^L)` with the reference scale 1 (image), `size_px
+   / 128` (text), the render scale (sticker). Frame = `{ content: level size, margin: (styled - work) / 2 }`.
+4. **Two placements.** The bake uses `bake_placement_of(stored, frame)`: the stored size times `(content + 2 margin) /
+   content` per axis, everything else unchanged (margin 0: the stored placement itself). Bake placement: `make_bake_job`
+   (in the job, from the job's frame), `bake_and_apply`, `ensure_wrap_param`, `make_wrap_job`, `stamp_shared_texels`,
+   `serving_wrap_param`, `apply_wrap_preview`, `apply_wrap_param`, the auto-depth refit. Stored placement: the gizmo and
+   its handles, `wrapped_projector` and its readers (`stamp_wrap_outline`, `stats`, `local`, `surface`),
+   `stamp_text_frame`, `text_raster_px`, the panels. `Document::bake_placement(id)` uses the frame of the stamp's current
+   styled picture (else the reference frame at `L = 0` from geometry), so it is the placement the cached
+   parameterization was made for.
+5. **Where it runs.** A Final (job) renders and styles on the job's thread; a Preview on the UI thread at the Preview
+   working size. A Final edit never calls `apply_styles` on the UI thread (test k3a-5, thread-local counters).
 
 ### 6.5a Wrap bake (round 6, `wrap_param.rs`, `wrap_bake.rs`)
 
@@ -4397,6 +4577,33 @@ centred on the anchor, its top-left corner at `(-box_w / 2, -box_h / 2)`; the fi
     copy pixels instead of resampling them (6.11 "Resampling").
 14. (Stickers) Box sums of `u16` planes: a tent of width `b` adds up to `65535 * b`; `b` is capped at 16,384 so the
     running sums stay in `u32`.
+
+### 6.10 Sticker render (`sticker/render.rs`) [stickers P3a]
+
+STICKER_PLAN 4.1 and 2.7 are the source. `render(input, s, quality)` -> `render_size(doc, s)` (`ceil(artboard * s)`):
+1. For each visible layer bottom to top, the layer raster in output pixels (the artboard's top-left corner at 0):
+   (a) content: a picture (blob or owned) -> its adjustments in order -> alpha times the mask; a text drawn by the text
+   engine at `size_px * s` (the engine's 8..=512 px per em: a larger em, or a picture over the engine's limits, is drawn
+   smaller and scaled up by the resampler); a shape rasterized at `size * s` (6.11); adjustments also apply to texts and
+   shapes. (b) Placed with the layer transform (6.11 resampler): pictures and shapes turn and scale about the content
+   centre, a text about its anchor, which sits at `translate`; the content is kept up to the layer's style margin beyond
+   the output, so styles can reach in. (c) `apply_styles(raster, layer.styles, s)`.
+2. Composite into a transparent output with `blend_row` (the seven kernels) and `opacity_u8(opacity)`, clipped to the
+   output: byte-identical to `flatten_layers` of the same pixels (test k3a-11). **Clipping:** a layer with `clip` (not the
+   bottom layer) has its raster's alpha multiplied by its base's step-(b) raster (the base = the nearest layer below with
+   `clip == false`, else the bottom layer); a hidden base hides it; the base's styles and opacity do not cut it.
+3. Alpha times the artboard shape's coverage `clamp(0.5 - sd, 0, 1)` at scale `s` (`RoundedRect`: radius `* s`,
+   clamped to half the shorter side; `Ellipse`: the first-order distance of 6.11).
+
+**Trivial fast path:** one visible layer that is a picture with identity transform, opacity 1, Normal, no clip, mask,
+adjustment or style, the artboard at the origin and of the picture's size, shape `Rect`, at `s = 1`: the picture's bytes.
+**Layer cache:** `render_with(.., Some(cache))` looks every layer raster up by its `LayerKey` (the layer's whole input by
+value, pixels by version or blob id; never pixel bytes), so a style slider on one layer redraws that layer and the
+composite only. **Determinism:** layers are composited in order on the calling thread; only the resampler and
+`apply_styles` use rayon (thread-count independent; test k3a-11 with pools of 1 and 8).
+**Placement refit (2.9):** `sticker::refit_placement(placement, old, new)` keeps the on-model size of a layer-space pixel
+(`k = host size / old artboard`) and the on-model position of every layer-space point (the centre moves by `(new centre -
+old centre) * k` along the placement's own axes, `HostFrame` with flips and rotation); an equal artboard changes nothing.
 
 ### 6.11 Sticker styles and picture maths (`sticker/fx.rs`, `style.rs`, `adjust.rs`, `shape.rs`, `resample.rs`) [stickers P1]
 
@@ -8052,6 +8259,25 @@ and text layers (exactly those two files, each = `dense(layer)`).
   (`mix_px_keeps_unchanged_pixels_and_faint_colours`, `wand_anti_alias_gives_no_value_to_unreached_matching_pixels`),
   `sticker::cutout::tests` (`defringe_leaves_shadows_glows_and_faint_strokes_alone`,
   `remove_background_on_a_noisy_white_background`).
+- Branch `stickers`, P3a (STICKER_PLAN 7 "P3a", names `k3a_*`): `doc_stickers_tests` (`k3a_1_identity_promotion_and_bake_placement`:
+  image and text stamps, projected / wrapped / UV, two sets, give the cache hash recorded from the P0 code
+  `0x63d26d88cd3f46ee`; promotion changes no byte, starts no bake, renders nothing; promoted stamps re-bake bit for bit;
+  `bake_placement` = stored bit for bit; `k3a_2_contour_grows_the_layer_and_keeps_the_artwork`;
+  `k3a_3_two_placements_and_the_auto_depth` (outline unchanged, footprint larger, serves / does not serve, auto depth on a
+  sphere, hand depth kept); `k3a_4_a_text_stroke_is_measured_in_em` (64 / 128 / 256 px per em, within 1 texel);
+  `k3a_5_styles_never_draw_more_pixels_than_the_model_shows` (8192 x 8192 image: worker side <= 4096, nothing styled on
+  the calling thread for a Final, Preview <= 524,288 px; styled width within 1 texel for L = 0, 1, 2);
+  `k3a_6_a_crop_keeps_every_layer_point_on_the_model` (UV, projected, turned and flipped); `k3a_7_..._shared_sticker...`;
+  `k3a_8_history_shares_pictures_and_counts_them_once`; `k3a_9_a_job_of_an_older_sticker_is_stale` (Final, undo, wrap
+  Preview; the applied job fills the caches: render and style counters 0 for the next Preview);
+  `k3a_10_caches_never_hand_out_another_stickers_picture` (1,000 add / drop cycles; `LayerKey` by version);
+  `k3a_11_render_matches_the_layer_compositor_...` (seven blend modes vs `flatten_layers`, fast path, pools of 1 and 8,
+  mask, ellipse crop, scale 2 doubles a shape) and `k3a_11_a_clipped_pattern_shows_only_inside_its_text`;
+  `k3a_finished_pictures_paste_style_and_save_refusal`); `sticker::model::tests` (`k3a_versions_decide_equality_before_bytes`,
+  `k3a_limits_are_checked`); `sticker::pipeline::tests` (`k3a_bake_placement_grows_by_the_margin_...`,
+  `k3a_work_level_bounds_the_picture`, `k3a_sticker_scale_rules`). Ignored, release, serial:
+  `sticker::bench::perf_k3a_render_three_layers_1024` (cold / one layer changed / Preview quality; `cargo test -p
+  wte_core --release --lib perf_k3a -- --ignored --test-threads=1 --nocapture`; numbers in `docs/notes/sticker/build-P3a.md`).
 
 ### 9.2 `wte_app` tests
 
@@ -8590,3 +8816,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | P0 | baseline (tests, clippy, exe hash, the 8.5 regression outputs), `.gitattributes`, PSD fixtures f1-f12, `licenses/photocraft-MIT.txt`, the CLI-vs-GUI save comparison | `crates/wte_core/tests/fixtures/psd/`, `tools/sticker/`, `docs/notes/sticker/{baseline,pc-save-paths}.md` | only fixtures added under `crates/`, notes LF, fixtures < 400 KB, README lines reproduce them |
 | P1 | styles and picture maths: `StyleStack` (margin, sanitize, presets), `apply_styles`, tent blur, `dist_out` / `dist_in`, `nearest_ink`, adjustments, shapes and polygon coverage, the affine resampler, `AlphaBuf`, the limits; no `Document` change | `crates/wte_core/src/sticker/{mod,style,fx,fx_tests,adjust,shape,resample,bench}.rs`, `pixel.rs`, `text/edt.rs` | every formula against plan 4; `apply_styles` fuzzed with empty, 1x1, opaque and transparent inputs; licence headers; `distance_to_ink` unchanged |
 | P2 | selection, cut-out and filter maths: `Selection` (marquee, lasso, combine, grow / shrink / feather), colour-tolerance regions (wand, colour range, flood fill), magic eraser, fill, colour to alpha, mattes, defringe, remove background, Gaussian blur, sharpen, gradient; no `Document` change | `crates/wte_core/src/sticker/{select,cutout,filter,bench}.rs` | the checker's own pictures (a noisy white background), a 4096 x 4096 single-colour flood (perf), determinism |
+| P3a | the sticker document in `Document`: `StickerDoc` and picture versions, `StampSource::Sticker`, `StampObject::styles`, the render (6.10), the stamp picture pipeline (margin, working size, two placements), promote / detach / `set_sticker` / stamp styles, job freshness and `DrawnPicture`, caches; save refuses stickers until P4; the app shows a sticker stamp like an image stamp | `crates/wte_core/src/{doc_stickers,doc_stickers_tests,doc_stamps,stamp_job,history,document,stamp}.rs`, `sticker/{model,render,pipeline}.rs` | every read of the placement and `wrapped_projector` in bake / wrap code listed as bake or stored; the stamp / wrap tests; scenarios against the P0 baseline |

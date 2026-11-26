@@ -231,6 +231,15 @@ pub enum EditError {
     CannotMerge(&'static str),
     #[error("invalid parameter: {0}")]
     InvalidParam(&'static str),
+    /// Stickers (STICKER_PLAN 2.8): no sticker with that id in the document.
+    #[error("unknown sticker")]
+    UnknownSticker,
+    /// No layer with that id in the sticker.
+    #[error("unknown sticker layer")]
+    UnknownStickerLayer,
+    /// A sticker limit (`sticker::MAX_*`) would be exceeded; the text names it for the user.
+    #[error("{0}")]
+    StickerLimit(&'static str),
     #[error(transparent)]
     Text(#[from] TextError),
     #[error(transparent)]

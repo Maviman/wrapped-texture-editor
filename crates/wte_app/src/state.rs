@@ -1866,6 +1866,7 @@ mod tests {
             }),
             tint: [255; 4],
             home_set: TextureSetId(0),
+            styles: Default::default(),
         });
         session.selected_stamp = Some(id);
         session.validate();

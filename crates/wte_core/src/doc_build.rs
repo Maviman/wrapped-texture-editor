@@ -366,6 +366,7 @@ impl Document {
             text_caches: Box::default(),
             hidden_objects: vec![false; object_count],
             visibility_generation: 0,
+            sticker_state: Box::default(),
         };
         document.debug_check_structure();
         progress.report(1.0, "Compositing layers");

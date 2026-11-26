@@ -3954,7 +3954,7 @@ fn text_stamp(state: &AppState) -> Result<(StampId, wte_core::TextSpec), String>
         .iter()
         .find_map(|s| match &s.source {
             StampSource::Text(spec) => Some((s.id, spec.clone())),
-            StampSource::Image { .. } => None,
+            StampSource::Image { .. } | StampSource::Sticker { .. } => None,
         })
         .ok_or_else(|| "there is no text stamp".to_owned())
 }
@@ -6579,7 +6579,7 @@ fn t7_selected_text(state: &AppState) -> Result<(StampId, wte_core::TextSpec), S
     let id = session.selected_stamp.ok_or("no stamp is selected")?;
     match &session.doc.stamp(id).ok_or("the selected stamp does not exist")?.source {
         StampSource::Text(spec) => Ok((id, spec.clone())),
-        StampSource::Image { .. } => Err("the selected stamp is an image stamp".to_owned()),
+        _ => Err("the selected stamp is not a text stamp".to_owned()),
     }
 }
 
@@ -7622,7 +7622,7 @@ fn press_bold(s: &mut AppState, id: StampId) -> Result<(), String> {
 fn stamp_spec(s: &AppState, id: u64) -> Result<wte_core::TextSpec, String> {
     match &doc_of(s)?.stamp(StampId(id)).ok_or("the text is gone")?.source {
         StampSource::Text(spec) => Ok(spec.clone()),
-        StampSource::Image { .. } => Err("not a text".to_owned()),
+        _ => Err("not a text".to_owned()),
     }
 }
 

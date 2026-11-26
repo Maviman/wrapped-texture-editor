@@ -835,7 +835,7 @@ mod tests {
         assert_ne!(second, first);
         let text = |id| match &session.doc.stamp(id).unwrap().source {
             wte_core::StampSource::Text(spec) => spec.content.clone(),
-            wte_core::StampSource::Image { .. } => String::new(),
+            _ => String::new(),
         };
         assert_eq!((text(first), text(second)), ("WTE".to_owned(), "Bob".to_owned()), "the first text is untouched");
         assert!(!state.focus_text_content);

@@ -82,6 +82,14 @@ fn check_finite(value: f32, what: impl Fn() -> String) -> Result<(), ProjectErro
 
 /// Step 1 of the save procedure: every float that goes into the manifest is finite (serde_json would write `null`).
 fn validate(snapshot: &DocumentSnapshot) -> Result<(), ProjectError> {
+    // Stickers (STICKER_PLAN P3a): sticker stamps and stamp styles are stored by project format 4 (package P4). Until
+    // then a project that uses them is refused rather than written without them.
+    if let Some(stamp) = snapshot.stamps.iter().find(|s| matches!(s.source, StampSource::Sticker { .. }) || !s.styles.is_default()) {
+        return Err(ProjectError::ManifestInvalid(format!(
+            "stamp \"{}\" uses a sticker or stamp styles, which this build cannot save yet",
+            stamp.name
+        )));
+    }
     for stamp in &snapshot.stamps {
         for (field, value) in stamp_floats(stamp) {
             check_finite(value, || format!("{field} of stamp \"{}\"", stamp.name))?;
@@ -273,13 +281,15 @@ fn layer_entry(layer: &Layer, pixels: Option<PixelsEntry>) -> LayerEntry {
     }
 }
 
-/// Ids of the blobs a stamp needs: the image of an image stamp, the font of a text stamp.
+/// Ids of the blobs a stamp needs: the image of an image stamp, the font of a text stamp. (Sticker stamps: format 4,
+/// package P4.)
 fn referenced_blobs(stamps: &[StampObject]) -> BTreeSet<BlobId> {
     stamps
         .iter()
-        .map(|s| match &s.source {
-            StampSource::Image { blob } => *blob,
-            StampSource::Text(spec) => spec.font.blob,
+        .filter_map(|s| match &s.source {
+            StampSource::Image { blob } => Some(*blob),
+            StampSource::Text(spec) => Some(spec.font.blob),
+            StampSource::Sticker { .. } => None,
         })
         .collect()
 }

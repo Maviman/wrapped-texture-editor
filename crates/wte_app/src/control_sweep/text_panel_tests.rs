@@ -187,7 +187,7 @@ fn text_app(content: &str, edit: impl FnOnce(&mut TextSpec), page: Option<TextPa
 fn spec_of(app: &PanelApp, id: StampId) -> TextSpec {
     match &app.state.doc().unwrap().stamp(id).unwrap().source {
         StampSource::Text(s) => s.clone(),
-        StampSource::Image { .. } => panic!("not a text"),
+        _ => panic!("not a text"),
     }
 }
 

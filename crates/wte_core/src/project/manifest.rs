@@ -378,6 +378,8 @@ impl From<&StampObject> for StampEntry {
             source: match &s.source {
                 StampSource::Image { blob } => StampSourceEntry::Image { blob: *blob },
                 StampSource::Text(spec) => StampSourceEntry::Text(TextEntry::from(spec)),
+                // Not reached: `save` refuses sticker stamps until format 4 (package P4) can store them.
+                StampSource::Sticker { .. } => StampSourceEntry::Image { blob: BlobId(u32::MAX) },
             },
             placement: PlacementEntry::from(&s.placement),
         }
@@ -397,6 +399,7 @@ impl StampEntry {
             placement: self.placement.to_placement(),
             tint: self.tint,
             home_set: self.home_set,
+            styles: crate::sticker::style::StyleStack::default(),
         }
     }
 }
@@ -606,6 +609,7 @@ mod tests {
             }),
             tint: [255, 128, 0, 200],
             home_set: TextureSetId(1),
+            styles: Default::default(),
         }
     }
 
@@ -635,6 +639,7 @@ mod tests {
             }),
             tint: [255; 4],
             home_set: TextureSetId(0),
+            styles: Default::default(),
         }
     }
 

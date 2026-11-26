@@ -133,7 +133,7 @@ pub(crate) fn current_spec(state: &AppState, target: TextTarget) -> Option<TextS
         TextTarget::Draft => Some(draft_spec(&state.tools.text)),
         TextTarget::Stamp(id) => match &state.doc()?.stamp(id)?.source {
             StampSource::Text(spec) => Some(spec.clone()),
-            StampSource::Image { .. } => None,
+            StampSource::Image { .. } | StampSource::Sticker { .. } => None,
         },
     }
 }

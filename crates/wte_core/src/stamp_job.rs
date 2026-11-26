@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::bvh::Bvh;
 use crate::doc_stamps::raster_counter;
+use crate::doc_stickers::{BaseIdentity, RenderEntry, StyledEntry};
 use crate::error::EditError;
 use crate::ids::{StampId, TextureSetId};
 use crate::mesh::MeshData;
@@ -15,6 +16,9 @@ use crate::pixel::SparseBuf;
 use crate::pixel_ops::PremulMips;
 use crate::stamp::{BakeQuality, Placement, Projector, StampObject, StampSource, SurfaceMode};
 use crate::stamp_bake::{bake_projected, bake_uv};
+use crate::sticker::StickerDoc;
+use crate::sticker::pipeline::{SourceFrame, Styling, bake_placement_of, styled_mips};
+use crate::sticker::render::{StickerRenderInput, render};
 use crate::texel_map::TexelMap;
 use crate::text::{FaceFonts, RasterQuality, TextFonts, TextFrame, TextSpec, default_font_bytes, render_text};
 use crate::wrap_bake::bake_wrapped;
@@ -39,6 +43,29 @@ pub(crate) enum JobPicture {
     TextCached(Arc<PremulMips>),
     /// A text whose full picture is drawn by the job (`render_text(.., RasterQuality::Full)`).
     TextDraw { spec: Box<TextSpec>, own: Option<OwnFace>, fallback: Arc<fontdue::Font> },
+    /// Stickers (2.6): a picture made already (a cached styled or sticker picture, a wrap Preview job's picture): the
+    /// mips, their frame and the tint the bake applies.
+    Ready { mips: Arc<PremulMips>, frame: SourceFrame, tint: [u8; 4] },
+    /// Stickers (2.6, 2.7): a styled or sticker picture the job makes on its thread: its base, then the styles when the
+    /// stamp has any (`styling`).
+    Derived { base: JobBase, styling: Option<Box<Styling>> },
+}
+
+/// The base picture of a `JobPicture::Derived` (2.6 step 1).
+pub(crate) enum JobBase {
+    /// Mips the document had (an image, a cached full text picture, a cached sticker render).
+    Mips { mips: Arc<PremulMips>, identity: BaseIdentity },
+    /// A text the job draws in full.
+    TextDraw { spec: Box<TextSpec>, own: Option<OwnFace>, fallback: Arc<fontdue::Font> },
+    /// A sticker the job renders (`sticker::render`) at `scale`, Full quality.
+    Sticker { input: Box<StickerRenderInput>, scale: f32 },
+}
+
+/// What a job drew besides a text (2.7, review A27): the sticker render and the styled picture, for the document's
+/// caches (`apply_bake_output`), so that the next Preview or thumbnail does not draw them again.
+pub(crate) struct DrawnPicture {
+    pub(crate) render: Option<RenderEntry>,
+    pub(crate) styled: Option<StyledEntry>,
 }
 
 /// Round 8 (3.4): what a job does.
@@ -70,6 +97,9 @@ pub struct StampBakeJob {
     /// Round 9 (package B, T7): the document's welded mesh graph (built by the first job that needs a fresh
     /// parameterization, or by the warm-up job; a Project bake never builds it).
     pub(crate) graph: Arc<WrapMeshCell>,
+    /// Stickers (2.7, review A1): the sticker value the job draws (`None` for image and text stamps). The output is
+    /// fresh only while the document's sticker is this `Arc` (`Document::job_inputs_current`).
+    pub(crate) sticker: Option<Arc<StickerDoc>>,
 }
 
 /// The parameterization a wrapped bake used and whether it was built for it (`true`) or reused.
@@ -104,6 +134,18 @@ pub struct StampBakeOutput {
     /// Round 8: the job's kind and pending-edit serial.
     pub(crate) kind: StampJobKind,
     pub(crate) serial: u64,
+    /// Stickers: the job's sticker value (`StampBakeJob::sticker`) and what it drew besides a text.
+    pub(crate) sticker: Option<Arc<StickerDoc>>,
+    pub(crate) drawn: Option<DrawnPicture>,
+}
+
+/// Draws the full picture of a text on the job's thread (counted, FEATURE_TEXT 8.1).
+fn draw_text(spec: TextSpec, own: &Option<OwnFace>, fallback: &fontdue::Font) -> Result<(Arc<PremulMips>, DrawnText), EditError> {
+    raster_counter::bump();
+    let raster = render_text(&text_fonts_of(own, fallback), &spec, RasterQuality::Full)?;
+    let mips = Arc::new(PremulMips::build(&raster.image));
+    let drawn = DrawnText { spec, frame: raster.frame, full: raster.full, mips: Arc::clone(&mips) };
+    Ok((mips, drawn))
 }
 
 /// What `Document::apply_final_bake` did with an output.
@@ -172,42 +214,107 @@ impl StampBakeJob {
     /// Bakes on the calling thread's rayon pool (the synchronous path). Never creates a pool.
     pub fn run(self) -> StampBakeOutput {
         let started = Instant::now();
-        let StampBakeJob { id, object, mesh, bvh, maps, picture, wrap, kind, serial, graph } = self;
+        let StampBakeJob { id, object, mesh, bvh, maps, picture, wrap, kind, serial, graph, sticker } = self;
         let quality = if kind == StampJobKind::Preview { BakeQuality::Preview } else { BakeQuality::Full };
         let mut drawn = None;
         let mut used = None;
+        let mut extra: Option<DrawnPicture> = None;
         let result = (|| -> Result<Vec<(TextureSetId, SparseBuf)>, EditError> {
-            let mips = match picture {
-                JobPicture::Image(mips) | JobPicture::TextCached(mips) => mips,
+            let plain = |m: &Arc<PremulMips>| SourceFrame::plain(m.size());
+            let (mips, frame, tint) = match picture {
+                JobPicture::Image(mips) | JobPicture::TextCached(mips) => {
+                    let frame = plain(&mips);
+                    (mips, frame, object.tint)
+                }
                 JobPicture::TextDraw { spec, own, fallback } => {
-                    // Counted on the thread that draws (FEATURE_TEXT 8.1).
-                    raster_counter::bump();
-                    let raster = render_text(&text_fonts_of(&own, &fallback), &spec, RasterQuality::Full)?;
-                    let mips = Arc::new(PremulMips::build(&raster.image));
-                    drawn = Some(DrawnText { spec: *spec, frame: raster.frame, full: raster.full, mips: Arc::clone(&mips) });
-                    mips
+                    let (mips, text) = draw_text(*spec, &own, &fallback)?;
+                    drawn = Some(text);
+                    let frame = plain(&mips);
+                    (mips, frame, object.tint)
+                }
+                JobPicture::Ready { mips, frame, tint } => (mips, frame, tint),
+                JobPicture::Derived { base, styling } => {
+                    let mut made = DrawnPicture { render: None, styled: None };
+                    let (base_mips, identity) = match base {
+                        JobBase::Mips { mips, identity } => (mips, identity),
+                        JobBase::TextDraw { spec, own, fallback } => {
+                            let (mips, text) = draw_text(*spec, &own, &fallback)?;
+                            drawn = Some(text);
+                            let identity = BaseIdentity::Text(Arc::clone(&mips));
+                            (mips, identity)
+                        }
+                        JobBase::Sticker { input, scale } => {
+                            let picture = render(&input, scale, RasterQuality::Full);
+                            let mips = Arc::new(PremulMips::build(&picture));
+                            made.render = Some(RenderEntry {
+                                doc: Arc::clone(&input.doc),
+                                scale_bits: scale.to_bits(),
+                                quality: BakeQuality::Full,
+                                picture: Arc::new(picture),
+                                mips: Arc::clone(&mips),
+                            });
+                            (mips, BaseIdentity::Sticker(Arc::clone(&input.doc), scale.to_bits()))
+                        }
+                    };
+                    let out = match styling {
+                        Some(st) => {
+                            let (styled, frame, scale) = styled_mips(&base_mips, &st);
+                            let mips = Arc::new(styled);
+                            made.styled = Some(StyledEntry {
+                                base: identity,
+                                styles: st.styles,
+                                tint: st.tint,
+                                scale_bits: scale.to_bits(),
+                                quality: st.quality,
+                                frame,
+                                mips: Arc::clone(&mips),
+                            });
+                            (mips, frame, [255; 4])
+                        }
+                        None => {
+                            let frame = plain(&base_mips);
+                            (base_mips, frame, object.tint)
+                        }
+                    };
+                    extra = Some(made);
+                    out
                 }
             };
-            Ok(match object.placement {
+            // 2.6 "Two placements": the bake places the whole picture, margin included, on the bake placement.
+            Ok(match bake_placement_of(&object.placement, &frame) {
                 Placement::Projected(p) if p.mode == SurfaceMode::Wrap && kind == StampJobKind::ParamOnly => {
                     used = wrap_param_only(id, &mesh, &bvh, &graph, &maps, mips.size(), &p, wrap);
                     Vec::new()
                 }
                 Placement::Projected(p) if p.mode == SurfaceMode::Wrap => {
-                    let (baked, w) = wrap_bake(id, &mesh, &bvh, &graph, &maps, &mips, object.tint, &p, wrap, quality);
+                    let (baked, w) = wrap_bake(id, &mesh, &bvh, &graph, &maps, &mips, tint, &p, wrap, quality);
                     used = w;
                     baked
                 }
                 _ if kind == StampJobKind::ParamOnly => Vec::new(),
-                Placement::Projected(p) => bake_projected(&mesh, &bvh, &maps, &mips, object.tint, &p, quality),
+                Placement::Projected(p) => bake_projected(&mesh, &bvh, &maps, &mips, tint, &p, quality),
                 Placement::Uv(p) => {
                     let map = maps.get(p.set.index()).ok_or(EditError::UnknownSet)?;
-                    let buf = bake_uv(&mips, object.tint, &p, map);
+                    let buf = bake_uv(&mips, tint, &p, map);
                     if buf.is_empty() { Vec::new() } else { vec![(p.set, buf)] }
                 }
             })
         })();
-        StampBakeOutput { id, object, mesh, bvh, maps, result, picture: drawn, elapsed: started.elapsed(), wrap: used, kind, serial }
+        StampBakeOutput {
+            id,
+            object,
+            mesh,
+            bvh,
+            maps,
+            result,
+            picture: drawn,
+            elapsed: started.elapsed(),
+            wrap: used,
+            kind,
+            serial,
+            sticker,
+            drawn: extra,
+        }
     }
 
     /// `run` inside the core's bake pool (`available_parallelism - 1` threads, at least 1): the bake's data-parallel

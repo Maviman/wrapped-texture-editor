@@ -24,6 +24,7 @@ pub mod composite;
 pub mod doc_build;
 pub mod doc_layers;
 pub mod doc_stamps;
+pub mod doc_stickers;
 pub mod document;
 pub mod error;
 pub mod export;
@@ -54,6 +55,8 @@ pub mod wrap_bake;
 pub mod uv_share;
 pub mod wrap_param;
 #[cfg(test)]
+mod doc_stickers_tests;
+#[cfg(test)]
 mod wrap_tests;
 
 #[doc(hidden)]
@@ -67,6 +70,7 @@ pub use bvh::*;
 pub use composite::*;
 pub use doc_build::*;
 pub use doc_layers::*;
+pub use doc_stickers::{STYLE_LABEL, ShareScope, StickerCaches, StickerRef};
 pub use document::*;
 pub use error::*;
 pub use fill::*;
@@ -91,6 +95,7 @@ pub use sticker::style::{
     Bevel, ColorOverlay, Contour, Glow, Gradient, GradientOverlay, Shadow, Stroke, StrokePos, StylePreset, StyleStack,
 };
 pub use sticker::{
+    ArtboardShape, LayerMask, PicturePixels, SourceFrame, StickerContent, StickerDoc, StickerLayer, StickerRenderInput,
     LayerTransform, MAX_ARTBOARD, MAX_CREATED_SIDE, MAX_GRADIENT_STOPS, MAX_OWNED_BYTES, MAX_PICTURE_SIDE,
     MAX_STICKER_LAYERS, MAX_STYLE_LENGTH,
 };

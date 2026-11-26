@@ -20,6 +20,17 @@ pub struct LayerId(pub u64);
 #[serde(transparent)]
 pub struct StampId(pub u64);
 
+/// Sticker id (STICKER_PLAN 2.1), allocated by `Document::alloc_id` (same counter as `LayerId` and `StampId`).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StickerId(pub u64);
+
+/// Layer id inside one sticker (STICKER_PLAN 2.1): unique within its `StickerDoc` (`StickerDoc::next_layer`), never
+/// reused.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StickerLayerId(pub u32);
+
 /// Blob id, allocated by `BlobStore` (monotonic).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(transparent)]

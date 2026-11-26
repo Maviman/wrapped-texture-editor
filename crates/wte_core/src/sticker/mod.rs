@@ -5,7 +5,9 @@
 //! Package P1: the layer styles ([`style`], drawn by [`fx::apply_styles`]), adjustments ([`adjust`]), vector shapes
 //! and polygon coverage ([`shape`]), the affine resampler ([`resample`]) and the limits below. Package P2:
 //! selections and colour-tolerance regions ([`select`]), the cut-out helpers ([`cutout`]) and blur, sharpen and the
-//! gradient tool ([`filter`]). The sticker document itself, its rendering and its place in `Document` follow in P3a.
+//! gradient tool ([`filter`]). Package P3a: the sticker document ([`model`]), its rendering ([`render`]), the
+//! pipeline from a stamp's source to the picture its bake places ([`pipeline`]), `refit_placement` (2.9) and the
+//! work counters ([`counters`]); the document commands are `doc_stickers.rs`.
 //!
 //! Determinism (ARCHITECTURE 4.7): integer or fixed-order `f32` arithmetic; rayon only over independent rows,
 //! columns or bands; results identical for any thread count (tested with local pools of 1 and 8 threads).
@@ -14,6 +16,9 @@ pub mod adjust;
 pub mod cutout;
 pub mod filter;
 pub mod fx;
+pub mod model;
+pub mod pipeline;
+pub mod render;
 pub mod resample;
 pub mod select;
 pub mod shape;
@@ -25,6 +30,13 @@ mod bench;
 mod fx_tests;
 
 use glam::Vec2;
+
+use crate::math::IRect;
+use crate::stamp::Placement;
+
+pub use model::{ArtboardShape, LayerMask, PicturePixels, StickerContent, StickerDoc, StickerLayer};
+pub use pipeline::SourceFrame;
+pub use render::{StickerRenderInput, render, render_size};
 
 /// Largest artboard side (pixels).
 pub const MAX_ARTBOARD: u32 = 4096;
@@ -92,6 +104,94 @@ impl LayerTransform {
         let (sin, cos) = self.rotation.sin_cos();
         let q = (p - c) * self.scale;
         self.translate + c + Vec2::new(q.x * cos - q.y * sin, q.x * sin + q.y * cos)
+    }
+}
+
+/// The placement refit of 2.9 when a sticker's artboard changes from `old` to `new` (crop, trim, padding, canvas
+/// size): the on-model size of one layer-space pixel stays (`k = host size / old artboard size` per axis), and so does
+/// the on-model position of every layer-space point: the centre moves by `(new centre - old centre) * k` along the
+/// placement's own axes (flips and rotation honoured), the size becomes `new size * k`. A degenerate `old` changes
+/// nothing; an unchanged artboard changes nothing (bit for bit).
+pub fn refit_placement(placement: &mut Placement, old: &IRect, new: &IRect) {
+    if old == new {
+        return;
+    }
+    let (ow, oh) = (old.width() as f32, old.height() as f32);
+    let (nw, nh) = (new.width() as f32, new.height() as f32);
+    if !(ow > 0.0 && oh > 0.0 && nw > 0.0 && nh > 0.0) {
+        return;
+    }
+    let host = crate::text::frame::HostFrame::of(placement);
+    let k = host.size / Vec2::new(ow, oh);
+    let centre = |r: &IRect| Vec2::new((r.x0 as f32 + r.x1 as f32) * 0.5, (r.y0 as f32 + r.y1 as f32) * 0.5);
+    let d = (centre(new) - centre(old)) * k;
+    let shift = host.ex * d.x + host.ey * d.y;
+    if !(k.is_finite() && shift.is_finite()) {
+        return;
+    }
+    let f = Vec2::new(nw / ow, nh / oh);
+    match placement {
+        Placement::Projected(p) => {
+            p.half_size *= f;
+            p.origin += shift;
+        }
+        Placement::Uv(p) => {
+            p.size_px *= f;
+            p.center_px += shift.truncate();
+        }
+    }
+}
+
+/// Thread-local work counters of the sticker code (tests and the frame budget): renders, `apply_styles` calls and the
+/// largest picture styled, per thread (one add per call, so they exist in every build, like the text raster counter).
+pub mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static RENDERS: Cell<u64> = const { Cell::new(0) };
+        static STYLED: Cell<u64> = const { Cell::new(0) };
+        static MAX_SIDE: Cell<u32> = const { Cell::new(0) };
+        static MAX_PIXELS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn rendered() {
+        RENDERS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn styled(width: u32, height: u32) {
+        STYLED.with(|c| c.set(c.get() + 1));
+        MAX_SIDE.with(|c| c.set(c.get().max(width.max(height))));
+    }
+
+    /// Records the pixel count (margin included) of a picture styled at the Preview working size.
+    pub(crate) fn styled_pixels(pixels: u64) {
+        MAX_PIXELS.with(|c| c.set(c.get().max(pixels)));
+    }
+
+    /// Sticker renders (`sticker::render`) on this thread so far.
+    pub fn renders() -> u64 {
+        RENDERS.with(Cell::get)
+    }
+
+    /// `apply_styles` calls that drew something, on this thread so far.
+    pub fn styled_calls() -> u64 {
+        STYLED.with(Cell::get)
+    }
+
+    /// The largest input side `apply_styles` drew on this thread so far.
+    pub fn max_styled_side() -> u32 {
+        MAX_SIDE.with(Cell::get)
+    }
+
+    /// The largest output (margin included, pixels) the stamp pipeline styled on this thread so far.
+    pub fn max_styled_pixels() -> u64 {
+        MAX_PIXELS.with(Cell::get)
+    }
+
+    /// Sets this thread's largest-side and largest-output records back to 0.
+    pub fn reset_max() {
+        MAX_SIDE.with(|c| c.set(0));
+        MAX_PIXELS.with(|c| c.set(0));
     }
 }
 

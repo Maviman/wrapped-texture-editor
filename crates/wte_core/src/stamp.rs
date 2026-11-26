@@ -3,14 +3,17 @@
 
 use glam::{Quat, Vec2, Vec3};
 
-use crate::ids::{BlobId, StampId, TextureSetId};
+use crate::ids::{BlobId, StampId, StickerId, TextureSetId};
+use crate::sticker::style::StyleStack;
 use crate::text::TextSpec;
 
-/// What a stamp shows: an image blob or a text specification.
+/// What a stamp shows: an image blob, a text specification or a layered sticker of the document (STICKER_PLAN 2.5;
+/// several stamps may show one sticker).
 #[derive(Clone, Debug, PartialEq)]
 pub enum StampSource {
     Image { blob: BlobId },
     Text(TextSpec),
+    Sticker { sticker: StickerId },
 }
 
 /// Oriented projection box. Local frame: +X right, +Y up, +Z out of the surface toward the viewer.
@@ -98,6 +101,9 @@ pub struct StampObject {
     pub tint: [u8; 4],
     /// The set that always keeps a layer for this stamp, even when its bake is empty.
     pub home_set: TextureSetId,
+    /// Stickers (STICKER_PLAN 2.5): the stamp-level layer styles (die-cut contour, stroke, shadow, ...), drawn around
+    /// the source picture before the bake; `StyleStack::default()` (all `None`) for every stamp made before.
+    pub styles: StyleStack,
 }
 
 /// Bake quality: `Preview` skips occlusion rays and samples a single mip level.

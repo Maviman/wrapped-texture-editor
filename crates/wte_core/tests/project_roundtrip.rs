@@ -786,7 +786,7 @@ fn uv_text(doc: &mut Document, name: &str, spec: TextSpec, center: [f32; 2]) -> 
 fn text_of(doc: &Document, id: StampId) -> TextSpec {
     match &doc.stamp(id).unwrap().source {
         StampSource::Text(spec) => spec.clone(),
-        StampSource::Image { .. } => panic!("stamp {id:?} is not a text"),
+        _ => panic!("stamp {id:?} is not a text"),
     }
 }
 

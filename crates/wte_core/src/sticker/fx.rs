@@ -562,6 +562,7 @@ pub fn apply_styles(base: &PixelBuf, styles: &StyleStack, scale: f32) -> PixelBu
     if !st.any_on() {
         return base.clone();
     }
+    crate::sticker::counters::styled(base.width, base.height);
     let scale = if scale.is_finite() { scale.max(0.0) } else { 0.0 };
     let m = st.margin(scale) as usize;
     let s = st.scaled(scale);

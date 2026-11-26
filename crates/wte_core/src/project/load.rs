@@ -311,6 +311,8 @@ fn load_stamps(manifest: &Manifest, set_count: usize, blobs: &mut BlobStore, war
                     out.rebake.insert(stamp.id);
                 }
             }
+            // A format-3 manifest has no sticker stamps (format 4: package P4).
+            StampSource::Sticker { .. } => {}
         }
         out.stamps.push(stamp);
     }

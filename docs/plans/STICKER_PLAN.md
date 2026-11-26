@@ -2,6 +2,11 @@
 
 Branch `stickers` (worktree `G:\software_projects\texture_wrapper_ap_stk`, cut from `main` @ b2fb8f5 = v0.3.0). Planned 2026-11-25;
 **revision 2** (same day) after two reviews: every finding and what was done about it is in section 12 "Review log".
+**Revision 3** (2026-11-26): the user added **Photoshop** as a second outside editor. Everything new is in section 13; the
+places it changes in sections 0, 5, 6, 7, 8, 9, 10 and 11 carry a "rev 3" note that points there. Revision 3 was then
+reviewed (17 findings, all against the sample files' bytes); what was done about each is the "Revision 3 review" table at
+the end of section 12, and the fixes are in place in sections 5, 7, 8, 9, 11 and 13 (**P5 is now P5a / P5b / P5c, P9 is
+P9a / P9b**).
 This plan is the contract for builders who have not seen the planning conversation. Read first: `CLAUDE.md`, `HANDOFF.md`,
 `ARCHITECTURE.md` section 1 and the sections named in section 10 of this plan, then all of `docs/notes/sticker/`
 (`OPTIONS.md` is the decision document; where its "## Critic" section and an earlier part disagree, the critic wins).
@@ -28,6 +33,8 @@ Three things are built:
    `<project>_links\`, Ctrl+S in PhotoCraft updates the sticker or layer in WTE), WTE's own PSD reader and writer, WTE's own
    Windows drop target (drop point, images without files), OS clipboard for pictures and text, and drag out of WTE (layer
    row, sticker thumbnail). All Windows code is hand-written `raw-dylib` FFI. No new crate.
+   **rev 3:** the same link works with **Photoshop** (CC 2019 on the user's machine): "Edit in..." lists Photoshop and
+   PhotoCraft with a default the user picks; one PSD reader and writer serve both (section 13).
 
 Key design choices (each justified in its section):
 
@@ -42,6 +49,7 @@ Key design choices (each justified in its section):
 | Link | per sticker (and per paint layer, P12), PSD 8-bit RGB written at the sticker's render scale. PSDs come back layer by layer (matched by a stable PSD layer id; masks, clipping and PhotoCraft's own text / smart layers included); only things WTE cannot draw (effects, groups, adjustment layers, other blend modes) make the file come back as one merged picture |
 | Link writes | WTE writes the PSD only on an explicit "Edit in PhotoCraft" / "Send to PhotoCraft", never at project save; a link needs a saved project |
 | Link state | outside the history (R6): undoing an update does not make the watcher apply the file again |
+| Outside editors (rev 3) | `ExternalEditor { PhotoCraft, Photoshop, Other(path) }`; the link remembers its editor and every text names it; the reader does not branch on who wrote a file; Photoshop is found through the App Paths registry key and is never started by a test or an agent (13.1) |
 | FFI | a new `ole/` module in `wte_app`; its own second window-procedure subclass (the pen subclass is not touched) |
 
 ### 0.1 The user's request and decisions (binding)
@@ -60,6 +68,8 @@ Decisions (2026-11-25):
    versions cannot open new projects)."
 3. "PhotoCraft: support BOTH the user's portable v0.2.0 and the latest (v0.23.x / HEAD); the user will update when convenient."
 4. "Pen + companion are landed (v0.3.0); stickers start from main (this worktree)."
+5. (rev 3, 2026-11-26) **"Yes, add Photoshop."** What the user was told about it is the list at the top of section 13 and
+   is binding.
 
 Defaults taken from `OPTIONS.md` (the user did not object): Sticker view in the main window with the 3D result beside it; link
 format PSD in `<project>_links\`, also stored in the `.wtep`; WTE reads and writes PSD itself; hand-written FFI; `DoDragDrop`
@@ -87,6 +97,7 @@ stays).
 Not possible at all, said plainly to the user (section 11, Help): **dragging from PhotoCraft into WTE**. PhotoCraft has no drag
 source in either version. The substitutes are Ctrl+S on a linked sticker or layer, Ctrl+C there and Ctrl+V in WTE, and dragging
 the saved file from Explorer.
+**rev 3:** the same is true for Photoshop (13.5).
 
 ### 0.3 "Done" in the user's words
 
@@ -104,7 +115,8 @@ the saved file from Explorer.
 2. Sources and text fixtures LF (`core.autocrlf=false`); P0 fixes the four CRLF notes (critic R11).
 3. Never take the user's focus. No test, scenario or agent starts `photocraft.exe` or any window that activates. `--screenshot`
    runs stay off-screen. `photocraft-cli.exe` (v0.2.0, console exe) may be run by an agent headless to make fixtures, always
-   with `CREATE_NO_WINDOW` when started from Rust.
+   with `CREATE_NO_WINDOW` when started from Rust. **rev 3:** `Photoshop.exe` is never started by a test, a scenario or
+   an agent either (stub launcher only); only the user's own click in an interactive run starts it.
 4. Never OS mouse / keyboard injection. A real drag between two apps is a user hand test.
 5. Tests never touch the real clipboard, the real `%LOCALAPPDATA%`, the registry (write), or the user's prefs.
 6. "No AI": background removal is classic image maths (flood fill, colour unmixing, GrabCut in S1).
@@ -112,7 +124,9 @@ the saved file from Explorer.
 8. For a project that uses no new feature: mouse, pen and companion behaviour, bakes, exports and saved layer PNGs are identical
    to the P0 baseline (section 8.5).
 9. Names and marks: the UI says "PhotoCraft" as plain text only ("Edit in PhotoCraft"). No ArtCraft name, wordmark or logo
-   anywhere in WTE. The one exception is the verbatim licence notice (section 4.0).
+   anywhere in WTE. The one exception is the verbatim licence notice (section 4.0). **rev 3:** "Photoshop" likewise:
+   plain text as a factual reference only, no Adobe logo, icon or wordmark, and one trademark sentence in About and Help
+   (13.8 D6).
 
 ---
 
@@ -1051,6 +1065,11 @@ the non-zero rule and edge distance. A shape outline is `clamp(width / 2 + 0.5 -
 
 ## 5. The PhotoCraft link
 
+> **rev 3:** this section is written with PhotoCraft as the editor, and stays valid. It applies to every editor of 13.1:
+> read "PhotoCraft" in a command, badge, toast, dialog or layer name as **the link's editor name** ("Edit in Photoshop",
+> "changed in Photoshop", "Updated from Photoshop", ...). Statements about what PhotoCraft's own code does (v0.2.0 / HEAD)
+> are about PhotoCraft only. Photoshop: reading its files 13.2, writing for it 13.3, starting it and the guards 13.1.
+
 ### 5.1 What the user does
 
 1. Select a sticker (or an image stamp; a text stamp is first converted, with a confirmation). Click **Edit in PhotoCraft**
@@ -1105,11 +1124,11 @@ Supported subset (everything else is `PsdError::Unsupported(&'static str)` with 
 | Part | Reader behaviour |
 |---|---|
 | Header | signature `8BPS`; version 1 (PSD) and 2 (PSB); mode RGB (3) or Grayscale (1, expanded); depth 8 or 16; 32-bit float, CMYK, Lab, Indexed, Multichannel, Duotone: Unsupported |
-| PSB lengths | 8-byte lengths for the layer-and-mask section, the layer info, each channel's data length, and the tagged blocks with these **13** keys (`pc020\crates\psd\src\tagged.rs:15`): `LMsk`, `Lr16`, `Lr32`, `Layr`, `Mt16`, `Mt32`, `Mtrn`, `Alph`, `FMsk`, `lnk2`, `FEid`, `FXid`, `PxSD`; 4-byte RLE row counts. Every other key keeps a 4-byte length |
+| PSB lengths | 8-byte lengths for the layer-and-mask section, the layer info, each channel's data length, and the tagged blocks with these **13** keys (`pc020\crates\psd\src\tagged.rs:15`): `LMsk`, `Lr16`, `Lr32`, `Layr`, `Mt16`, `Mt32`, `Mtrn`, `Alph`, `FMsk`, `lnk2`, `FEid`, `FXid`, `PxSD`; 4-byte RLE row counts. Every other key keeps a 4-byte length. **rev 3 review:** plus **`cinf`** (14 keys): Photoshop writes `8B64cinf` with an 8-byte length in a PSB (`layers\pattern-fill.psb`, offset 60128, length 452) |
 | Limits | side <= 30000 to parse; pixels are decoded only when the canvas is <= 8192 a side and <= 67 megapixels, else `merged = None`, layers without pixels, and the caller reports "too large" |
 | Image resources | only 1057 is read (`hasRealMergedData`). Everything else skipped by length |
 | Layer info | in the layer section, or in the `Lr16` global block for 16-bit files. Negative layer count = the first alpha of the merged image is transparency |
-| Layer record | rect; channels (ids -1 transparency, 0..2 colour, **-2 user mask: read into `mask`**, -3 real user mask: skipped, flagged MASK_EXTRA); blend key; opacity; clipping byte -> `clipped`; flags (bit 1 = hidden); layer mask data (rect, default colour, flags: bit 1 = disabled; a second "real" mask, or mask parameters density / feather -> MASK_EXTRA); blending ranges: **empty, or `(channel count + 1)` times the default pair `00 00 FF FF 00 00 FF FF`** (`pc020\crates\io\src\blocks.rs:36`) are the default, anything else -> BLEND_IF; Pascal name; tagged blocks |
+| Layer record | rect; channels (ids -1 transparency, 0..2 colour, **-2 user mask: read into `mask`**, -3 real user mask: skipped, flagged MASK_EXTRA); blend key; opacity; clipping byte -> `clipped`; flags (bit 1 = hidden); layer mask data (rect, default colour, flags: bit 1 = disabled; a second "real" mask, or mask parameters density / feather -> MASK_EXTRA); blending ranges: **default when the block is empty or when every 8-byte pair in it is `00 00 FF FF 00 00 FF FF`, whatever the number of pairs** (rev 3 review: Photoshop writes 5 pairs = 40 bytes on every layer, with 2, 3, 4, 5 or 6 channels alike; PhotoCraft writes `channel count + 1` pairs, `pc020\crates\io\src\blocks.rs:36`, and its own `blend_if_from_ranges` reads by the same all-default rule); a length that is not a multiple of 8, or any other pair -> BLEND_IF; Pascal name; tagged blocks |
 | Tagged blocks | `luni`, `lyid` read; `lsct` / `lsdk` -> GROUP; `lfx2` / `lrFX` / `lmfx` -> EFFECTS; `TySh` -> TEXT; `SoLd` / `PlLd` / `SoLE` -> SMART; `vmsk` / `vsms` -> VECTOR_MASK; `SoCo` / `GdFl` / `PtFl` -> FILL; `levl` `curv` `hue2` `brit` `blnc` `expA` `vibA` `blwh` `phfl` `mixr` `clrL` `nvrt` `post` `thrs` `grdm` `selc` -> ADJUSTMENT; `iOpa` < 255 -> FILL_OPACITY; unknown keys skipped by length |
 | Channel data | compression 0 raw, 1 PackBits, 2 ZIP, 3 ZIP with prediction (inflate with `miniz_oxide`, delta decode per row; 16-bit prediction on big-endian words) |
 | Merged image | planar, compression 0, 1, **2 or 3** (HEAD has `PsdExportOptions::merged_compression`; ZIP here is one stream per file section, the builder checks the layout against `PCHEAD:crates/psd` and builds the test file with the same layout); channels: colour, then transparency only if the layer count was negative (a flat file without layers: 4th channel is treated as transparency too), further channels (saved alphas, quick mask) ignored. With transparency the colours are **un-matted from white**: `C = clamp((P - (max - a)) * max / a)` per channel for `a > 0`, 0 for `a = 0` (both PhotoCraft versions and WTE's own writer matte on white). 3 channels = opaque |
@@ -1129,6 +1148,21 @@ SMART, FILL`. Two groups:
 `PsdDoc::forcing() -> PsdFeatures` (the union over visible layers) and `PsdDoc::pc_native() -> bool` (some layer has TEXT,
 SMART or FILL) are what `link.rs` asks.
 
+**rev 3 (binding changes to the reader table and the feature groups; reasons and sample files in 13.2):**
+`lsct` is a group only for types 1, 2 and 3 (type 0 is an ordinary layer); artboard keys count as GROUP; a layer rect with
+`bottom < top` or `right < left` is empty; channel ids come in any order; EFFECTS is decided by a descriptor walker
+(`masterFXSwitch`, `enab`; unreadable = on); a shape or fill layer with flags bit 4 and a non-empty rect is a picture layer
+(its vector mask and a bit-3 mask are already in its pixels), VECTOR_MASK stays forcing on ordinary pixel layers; mask
+parameters are mask-flags bit 4; a file with 0 layers is always "real"; Indexed, CMYK, Lab, Duotone, Multichannel, Bitmap
+and 32-bit files are refused each with its own sentence; the ICC profile is not applied, a non-sRGB one gives a note;
+`pc_native()` is renamed `editor_native()`.
+**rev 3 review (binding, details 13.2):** blending ranges are default when every pair is the default pair, whatever the
+count; NO_PIXELS is set only for an empty rect **together with** flags bits 3 + 4 or a FILL / ADJUSTMENT key, never on a
+group marker (an ordinary empty layer is an empty picture layer); `forcing` takes a parameter,
+`PsdDoc::forcing(smart_forces: bool)`: SMART is forcing unless the link's editor is PhotoCraft (statement 4 of section 13
+stays true; item 13 of section 11); `lfx2` / `lmfx` decide EFFECTS alone when present, `lrFX` alone counts as on; a Pascal
+name is tried as UTF-8 before Windows-1252; "0 layers" is counted after `Lr16` / `Lr32`; `cinf` is a 14th long-length key.
+
 **Writer** `psd::write_sticker(w, &StickerPsd) -> Result<(), PsdError>`: 8BPS v1, RGB, 8-bit, canvas as given; image resource
 1057 with `hasRealMergedData = 1`; one record per layer in order: rect, channels -1, 0, 1, 2 (and -2 when the layer has a
 mask) PackBits, blend key (`norm`, `mul `, `scrn`, `over`, `lddg` for Add, `dark`, `lite`), opacity, clipping byte, hidden
@@ -1137,7 +1171,14 @@ flag, layer mask data (rect, default 255), default blending ranges, `luni` + `ly
 as PhotoCraft does). **Layer pixels are normalised before writing** (review A11): the RGB of every pixel with alpha 0 is set
 to 0 and the rect is trimmed to the bounds of alpha > 0 (an empty layer is written with an empty rect), which is exactly what
 PhotoCraft's `Surface::content_bounds` trim produces at its own save (`pc020\crates\io\src\psd_export.rs:87`). Bytes are
-deterministic. Round-trip test against `psd::read` and against the old strict reader.
+deterministic. Round-trip test against `psd::read` and against a strict reader. **rev 3 review:** the strict reader is the new
+test-only `psd/strict.rs` walker (13.3), **not** `export/psd.rs` `read_psd`: that one rejects, by design, mask data, non-empty
+blending ranges, a clipping byte other than 0, non-ASCII Pascal names and anything but exactly 4 channels, so no sticker PSD
+can pass it.
+**rev 3:** the writer also writes image resources 1005 (72 dpi) and 1044 (the id seed, `next_lyid - 1`) and follows the
+byte rules of 13.3 (the layer info and the section rounded up to a multiple of 4, Photoshop's 40-byte default blending
+ranges on every layer, name and block padding, negative layer count with a transparent merged picture); a
+test-only strict walker and an independent Pillow check stand in for "Photoshop opens it" until hand test 19.
 
 ### 5.3 Link data (`link.rs`; ARCHITECTURE new 5.28, 6.13)
 
@@ -1163,6 +1204,9 @@ pub struct StickerLink {
 
 `Document::links: BTreeMap<StickerId, StickerLink>`; view-like state: not in history snapshots, changes do set the modified
 flag. Manifest `LinkEntry` mirrors it plus `archive: Option<String>` (`links/k<id:05>.psd`).
+**rev 3:** `StickerLink` gains `pub editor: String` (`"photocraft"`, `"photoshop"`, `"other"`; set at every "Edit in" and
+PSD-handle drag; manifest field optional with the default `"photocraft"`, added in P5, so P4's files load unchanged);
+`pc_native` is renamed `editor_native`; the session flag `stale_in_pc` is renamed `stale_in_editor` (13.1).
 
 Session state that is **not** saved (`wte_app` `link/mod.rs`, `LinkSession` per link): the launched child if any, `opened_at`
 (a launch happened this session), `stale_in_pc: bool` (5.5), `alias: Option<PathBuf>` (below), `held: Option<LinkEvent>` (5.6).
@@ -1230,6 +1274,12 @@ top.
   records it): a known `lyid` whose pixels differ **and** whose name differs from the name WTE wrote is treated as "a mapped
   WTE layer no longer in the PSD" plus "unknown `lyid`" (deleted + new). A k5 test on f12 proves the chosen rule.
 - The stamp's styles and the layer styles are not part of the file.
+- **rev 3:** ids are not trusted for an import ("ids lost", 13.2) when the file has layers but none carries an id of
+  `layer_map` (a writer without `lyid`), **or when the ids were renumbered** (a known id whose pixels and name both differ
+  from its map entry while its pixels equal another entry: Photoshop numbering 1..n by position would look like this).
+  Layers are then matched by normalised pixel CRC and size, then name, then order; a layer left over with the name of
+  exactly one left-over entry is that layer with changed pixels. Whether Photoshop keeps WTE's ids is assumption A1
+  (13.3, 13.7).
 
 What PhotoCraft therefore shows: the artwork without WTE's styles. This is deliberate: a style baked into pixels could not be
 re-applied correctly after the pixels are edited (an erased part would keep its old shadow). WTE re-applies layer styles and the
@@ -1271,6 +1321,8 @@ Merged mode needs real merged data. `has_real_merged == false` (latest PhotoCraf
 no update; a sticky message on the link badge: "PhotoCraft saved this file without a merged picture. In PhotoCraft turn on
 Preferences > File Handling > Maximize PSD and PSB File Compatibility and save again." If `photocraft-cli.exe` is known (5.7),
 the message has a button "Convert with PhotoCraft's command-line tool" (fallback). Layers mode does **not** need merged data.
+**rev 3:** the sentence depends on the link's editor (Photoshop: "...choose Edit > Preferences > File Handling, set
+"Maximize PSD and PSB File Compatibility" to Always, and save again."); the convert button only for a PhotoCraft link (13.2).
 
 **A PhotoCraft canvas larger than a sticker may be (review A18).** `MAX_ARTBOARD` is 4096 layer-space pixels. If
 `canvas / s` exceeds it (the user enlarged the canvas or the image in PhotoCraft): nothing is applied; the badge says
@@ -1291,6 +1343,8 @@ State of a linked sticker, from two comparisons: `file_changed` = the file's sta
 `wte_changed` = the sticker's hash differs from `synced_sticker`. The badge texts are fixed (one wording everywhere, also in
 scenarios): **"linked"**, **"changed in WTE"**, **"changed in PhotoCraft"** (waiting for Update), **"conflict"**,
 **"file missing"**, **"needs a merged picture"**.
+**rev 3:** "changed in PhotoCraft" is "changed in <editor name>" ("changed in Photoshop"); the other five are unchanged. A
+refused file (colour mode, 32 bits; 13.2) shows its sentence on the badge and changes nothing.
 
 | file_changed | wte_changed | What happens |
 |---|---|---|
@@ -1352,6 +1406,10 @@ table.
 
 ### 5.7 Starting PhotoCraft (`link/launch.rs`)
 
+**rev 3:** prefs, discovery, the "Edit in..." list and chooser, `command_for(editor, exe, file)` and the two-copies guard
+**per editor** are in 13.1 (Photoshop: App Paths registry key, single-instance hand-off, no "already open" question). The
+bullets below remain the rules for PhotoCraft and for the launcher and stub in general.
+
 - `Prefs::photocraft_exe: Option<PathBuf>`. Discovery when unset (review A19: **the registry only, no guessed folders**; the
   installed build's folders contain a name this plan may not write into WTE, rule 9 of 0.4), read-only with `advapi32`
   `RegGetValueW` via `raw-dylib`, `HKCU` then `HKLM`, in this order:
@@ -1389,6 +1447,7 @@ The user asked to link layers, not only stickers. A texture paint layer can be e
 
 - **What:** Layer menu and row context menu of a raster paint layer: **Edit Layer in PhotoCraft**. Not offered for stamp-linked
   layers (edit the sticker instead) and locked layers.
+  **rev 3:** "Edit Layer in <default editor>" with the same "Edit in" submenu; `PaintLink` gains `editor` (13.1, 13.9).
 - **File:** a one-layer PSD at the texture set's size (`<layer name>_l<id>.psd` in `X_links\`): the layer's pixels (straight,
   normalised), opacity 255, Normal (the layer's own opacity and blend stay in WTE and are not sent), merged image = the same
   pixels. Sizes up to the reader's limits (8192 a side); a larger set gets the message "This texture is too large to link."
@@ -1525,6 +1584,11 @@ tests).
 PhotoCraft both versions read `PNG` first, then DIBV5 (arboard): copy in WTE -> paste in PhotoCraft gives a layer; copy in
 PhotoCraft -> paste in WTE gives a sticker. Pixels only, no layer name or position (PhotoCraft has no richer format).
 
+**rev 3 (Photoshop, 13.5):** what Photoshop CC 2019 offers on the clipboard and which of WTE's formats it takes is unknown
+until hand test 24. The read order above stays; added: a 32-bit DIB whose alpha bytes are all zero is opaque;
+`clipboard::format_names()`, a log line per paste, the "Nothing WTE can paste. The clipboard offers: ..." text and Help >
+Clipboard contents... make the result recordable.
+
 ### 6.4 Drag out of WTE
 
 - **Where a drag can start:** a row of the Layers list (texture layers and sticker layers), the sticker thumbnails (Sticker
@@ -1542,6 +1606,9 @@ PhotoCraft -> paste in WTE gives a sticker. Pixels only, no layer name or positi
     project needed; the shared-picture question is asked at the press, before the drag can start). Dropped on PhotoCraft
     v0.2.0 it opens as a document whose Ctrl+S updates WTE. This is the only way a PSD leaves WTE by drag (R7); the file is
     watched from that moment and the link counts as `opened_at` (5.5).
+    **rev 3:** the caption is "drag to your editor: stays linked". In Photoshop the file stays linked only when dropped on
+    the tab bar or the empty workspace (dropped on a picture, Photoshop places a copy): one toast after such a drag says
+    so (13.5).
   - Effect offered: `DROPEFFECT_COPY` only.
 - **The file is prepared before the pointer leaves (review A23).** Encoding a 4096 x 4096 texture layer takes about a
   second; doing it when the pointer crosses the window edge would stall the UI. So: when egui recognises the drag (the
@@ -1582,6 +1649,10 @@ PhotoCraft -> paste in WTE gives a sticker. Pixels only, no layer name or positi
 | PhotoCraft -> WTE | Ctrl+C there, Ctrl+V in WTE | a sticker to place (or a layer in the Sticker view) | hand test 12 |
 | PhotoCraft -> WTE | drag the saved file from Explorer | as any picture / PSD drop | hand test 7 |
 | Any app <-> WTE | copy / paste of pictures and of text | - | hand tests 12, 13 |
+| WTE -> Photoshop (rev 3) | drag a thumbnail or row onto an open document / onto the tab bar | becomes a layer (Place Embedded, Enter confirms) / opens as a document. **Expected for CC 2019, not run here** | hand test 23 |
+| WTE -> Photoshop, linked (rev 3) | "Edit in Photoshop", or the PSD handle onto the tab bar | Photoshop works on WTE's PSD (a tab in the running Photoshop); Ctrl+S updates the sticker | hand tests 19, 23 |
+| **Photoshop -> WTE by drag** (rev 3) | **not possible** | Ctrl+S on a link, copy / paste, or the saved file from Explorer | - |
+| Photoshop <-> WTE (rev 3) | Ctrl+C / Ctrl+V both ways | a sticker to place / a new layer; transparency unknown | hand test 24 |
 
 ---
 
@@ -1596,7 +1667,9 @@ decisions, and writes the deviation into the note. The ARCHITECTURE sections a p
 (the contract stays in step with the code).
 
 "Kind": K = core logic (headless), U = app UI, F = Windows FFI. Revision 2 split P3, P6, P7 and P10 (review A15) and added
-P12; no package should now need more than one builder.
+P12; no package should now need more than one builder. **rev 3 review (binding):** P5 is built as **P5a, P5b, P5c** and P9
+as **P9a, P9b**, in that order, each with its own builder, its own checker, its own commit and note (`build-P5a.md`, ...);
+what goes into which part is the table of 13.9. "P5" / "P9" anywhere else in this plan means all of its parts.
 
 | Package | One line |
 |---|---|
@@ -1606,18 +1679,18 @@ P12; no package should now need more than one builder.
 | P3a | sticker types in `Document`, `StampSource::Sticker`, render, stamp styles pipeline, two placements, job freshness |
 | P3b | pixel strokes, generic tile patches, `StickerPixels` undo, promotion inside an edit, limits, `convert_text_stamp`, Revert |
 | P4 | project format 4 and `.wtes` |
-| P5 | PSD reader / writer and the link logic (mapping, states) |
+| P5a, P5b, P5c | PSD reader / writer and the link logic (mapping, states); **rev 3:** P5a = reader, descriptor walker, 55 public fixtures (13.2, 13.4); P5b = writer, strict walker, `psd_check.py` (13.3); P5c = link logic, document, project, the ids rules, the link's editor field (5.3-5.5, 13.2) |
 | P6a | Sticker view: mode, canvas, sticker layers in the Layers tab, Move and Hand, Sticker-mode shortcuts, companion rects |
 | P6b | Sticker tab (five tabs), stamp styles UI, presets, tray, edit before placing, copy / paste style, shared-picture question |
 | P7a | painting: brush, eraser, masks, fill, gradient, eyedropper, pen, the stroke-mode canvas |
 | P7b | selections and cut-out: marquee, lasso, wand, colour range, selection commands, move selection, magic eraser, cut-out, blur / sharpen |
 | P8 | layout (crop, trim, resize, rotate), transform handles, text and shape layers, clipping, adjustments UI, library, Export as PSD |
-| P9 | PhotoCraft link in the app: watcher, launcher, dialogs, save / Save As / load / close rules |
+| P9a, P9b | PhotoCraft link in the app: watcher, launcher, dialogs, save / Save As / load / close rules (P9a); **rev 3:** P9b = the editor list (Photoshop, PhotoCraft, Other), discovery, default editor, per-editor guard and texts (13.1) |
 | P10a | Windows drop target, `dnd.rs` on the OLE queue, `Step::Drop` |
-| P10b | clipboard: subclass key chords, pictures, text in egui fields, `Step::Chord` |
-| P11 | drag out (subclass message, `DoDragDrop`, prepared files, manifest cleanup, PSD handle) |
-| P12 | linked texture paint layers, Paste as New Paint Layer |
-| P13 | docs, hand-test sheet, licences in About and installer, version 0.4.0, the whole-workflow scenario |
+| P10b | clipboard: subclass key chords, pictures, text in egui fields, `Step::Chord`; **rev 3:** zero-alpha rule, clipboard format list (13.5) |
+| P11 | drag out (subclass message, `DoDragDrop`, prepared files, manifest cleanup, PSD handle); **rev 3:** handle caption and the tab-bar toast (13.5) |
+| P12 | linked texture paint layers, Paste as New Paint Layer; **rev 3:** any editor (13.9) |
+| P13 | docs, hand-test sheet, licences in About and installer, version 0.4.0, the whole-workflow scenario; **rev 3:** "Working with Photoshop" help and hand tests 19-25, trademark sentence (13.6, 13.8, 13.9) |
 | S1, S2 | stretch: GrabCut box cut-out; live PNG copy and watch folder |
 
 ### P0 - Baseline and housekeeping (K)
@@ -1782,17 +1855,26 @@ P12; no package should now need more than one builder.
 - Checker: feeds a v4 manifest with a sticker to a copy of the P0 version check (unit test, no exe run) and confirms the
   "made by a newer version" path; byte-compares the layer PNG entries of a re-saved v3 fixture.
 
-### P5 - PSD reader / writer and link logic (K)
+### P5 - PSD reader / writer and link logic (K); rev 3 review: built as P5a, P5b, P5c (13.9)
 
 - Files: new `psd/{mod,read,write}.rs`, new `link.rs`, `document.rs` (`links`), `doc_stickers.rs` (`apply_link_update`,
   `link_state`, `prepare_link_file`), `project/*` (archive entries, the save rule, `LoadReport::links`; **no disk write at
   load**).
 - Content: 5.2-5.5 (core parts).
 - ARCHITECTURE: new 5.28, new 6.13, 7.1, 7.7, new 7.9, 9.1. `export/psd.rs` untouched (its golden test proves it).
+- **rev 3 (Photoshop):** also everything in the P5a / P5b / P5c rows of 13.9: the reader rules of 13.2, new
+  `psd/descriptor.rs`, the writer rules of 13.3, test-only `psd/strict.rs`, `tools/sticker/psd_check.py`,
+  `StickerLink::editor`, the ids rules (lost, renumbered, one layer re-numbered), the 55 fixtures of 13.4 with
+  `LICENSE-psd-tools.txt` and a README under `crates/wte_core/tests/fixtures/psd/photoshop/`, tests `k5_ps_*` (one per
+  row of the 13.4 table). Inflate is `miniz_oxide`, already a direct dependency of `wte_core`: **no `Cargo.toml`
+  change**. **The split is binding (rev 3 review):** P5a = reader, descriptor walker, fixtures; P5b = writer, strict
+  walker, `psd_check.py`; P5c = `link.rs`, document, project. Three builders, three checkers; 13.9 says which of the tests
+  below belongs to which part.
 - Tests (`k5_`):
   - writer -> reader round trip (names incl. non-ASCII and > 31 bytes, hidden, opacity, all seven blends, a mask, a clipped
-    layer, layer partly outside the canvas, empty layer, opaque vs transparent merged, scale 1 / 2 / 4); writer output opens
-    in the old strict `read_psd`;
+    layer, layer partly outside the canvas, empty layer, opaque vs transparent merged, scale 1 / 2 / 4); writer output passes
+    the strict walker `psd/strict.rs` (rev 3 review: the old `read_psd` cannot read a sticker PSD, 5.2); **an empty layer
+    written by WTE reads back as an empty picture layer in Layers mode** (not NO_PIXELS, not Merged);
   - every fixture of 8.3: layer pixels equal the PhotoCraft-exported per-layer PNGs exactly, merged equals PhotoCraft's own
     `convert` PNG within 1 level for alpha >= 16 (the test states the bound per fixture), features flagged as listed in the
     fixture README;
@@ -1803,11 +1885,13 @@ P12; no package should now need more than one builder.
     again keeps the old ids and uses `next_lyid` for the new one;
   - synthetic files: 1057 says no real merged data -> `merged` is `None` and `has_real_merged` false, and Layers mode still
     imports; ZIP and ZIP-prediction channels (8 and 16 bit) for layers **and for the merged image**; PSB with each of the
-    13 long keys; default blending ranges in both forms (empty, `(cc + 1)` pairs) are not BLEND_IF, a changed range is;
+    14 long keys (rev 3 review: `cinf`); default blending ranges - empty, `(cc + 1)` pairs, **and Photoshop's 5 pairs on
+    layers with 2, 3, 4, 5 and 6 channels** - are not BLEND_IF, a changed pair and a length that is not a multiple of 8 are;
     16-bit soft transparency un-matted at 16 bits is closer to the truth than un-matting after reduction (bound in the
     test); grayscale; CMYK / 32-bit -> the right `Unsupported` text;
   - **truncation sweep**: every prefix length of the smallest fixture and 2,000 evenly spaced prefixes of the largest return
-    `Err` (never a panic, never `Ok` with a picture); random byte flips (fixed seed, 5,000) never panic;
+    `Err` (never a panic, never `Ok` with a picture); random byte flips (fixed seed, 5,000) never panic (rev 3 review:
+    the sweep over the Photoshop fixtures is capped as 13.4 says);
   - **the mapping table of 5.4 row by row (review B3):** unchanged; moved; mask added to a plain picture layer; mask added
     to a text layer; pixels changed; a new PhotoCraft layer; a PhotoCraft TEXT layer with pixels (fixture f5) -> one new
     picture layer **and every WTE layer kept**, `pc_native` set; a clipped layer (fixture f11) -> `clip`; a deleted layer;
@@ -1824,6 +1908,9 @@ P12; no package should now need more than one builder.
     missing and changed files with no file written by `load`; a link to a missing external file.
 - Checker: reads the reader for unchecked arithmetic on lengths (32-bit multiplication overflow, `usize` casts), runs the
   sweep under `--release` as well, makes one more fixture with the real CLI that the builder did not make and reads it.
+  **rev 3:** also (P5a checker) reads the 8 samples that are not repo fixtures (13.4; `2layers.psd` and
+  `third-party-psds\cactus_top.psd` are among them and stand for the synthetic third-party cases) and reports the
+  result, (P5b checker) runs `psd_check.py` on the writer's outputs, and confirms that no `Cargo.toml` or `Cargo.lock` line changed.
 
 ### P6a - Sticker view and canvas (U)
 
@@ -1925,6 +2012,13 @@ P12; no package should now need more than one builder.
   (the archive at save, Save As with aliases, restore and "changed while closed" after load, the close prompt line), menus,
   Sticker tab, Help.
 - Content: 5.1, 5.3 (app parts), 5.5 (dialogs, `stale_in_pc`), 5.6, 5.7, 5.8.
+- **rev 3 review:** built as **P9a** (everything of rev 2 in this section, with the editor's name already a parameter
+  of every text) and **P9b** (the Photoshop / editor-list part); the split is the table of 13.9.
+- **rev 3 (Photoshop):** the P9b row of 13.9: `link/editor.rs`, prefs for three editors and the default, discovery of
+  Photoshop through the injected registry reader, the "Edit in <default>" button with the "Edit in..." list, the chooser
+  dialog, Help > Editor locations..., the per-editor guard table, `stale_in_editor`, every text with the editor's name, the
+  editor-specific Maximize Compatibility sentence; tests and the second `sticker_link` pass with the stub as Photoshop as
+  listed there. The checker's grep for spawns covers `Photoshop` as well.
 - ARCHITECTURE: 3.3 (`advapi32`), 4.6 (the watcher thread), 8.3, 8.8, 8.9, 8.13, new 8.16, 9.2. HOW_TO_TEST chapter "Working
   with PhotoCraft".
 - Tests: watcher unit tests with temp files (a change is reported once; a half-written file waits; unreadable after the
@@ -1989,6 +2083,8 @@ P12; no package should now need more than one builder.
   `App::ui`: `CopyText`), `panels/menu_bar.rs`, `tools/stamp_place.rs` (paste as the tool source), `selftest/mod.rs`
   (`Step::Chord`).
 - Content: 6.3 and the key part of the subclass (6.1).
+- **rev 3:** the P10b row of 13.9 (all-zero alpha = opaque; `format_names()`, the log line, the "Nothing WTE can paste"
+  text, Help > Clipboard contents... on the in-memory clipboard in tests).
 - ARCHITECTURE: 1.3 (the "no OS clipboard" paragraph is replaced), 8.1 (the verified egui-winit clipboard facts of 6.3), 8.3,
   8.10, 8.17, 9.2.
 - Tests: the subclass routing on a fake previous procedure: `WM_KEYDOWN` V with Ctrl queues one `Chord(Paste)` and is
@@ -2011,6 +2107,8 @@ P12; no package should now need more than one builder.
 - Files: `ole/{subclass,drag_source}.rs`, `panels/layers.rs`, the Sticker tab thumbnails and the PSD handle, `app.rs`
   (`raw_input_hook` pointer-up injection), the drag-out job and `dragout\manifest.json`.
 - Content: 6.4, 6.5.
+- **rev 3:** the P11 row of 13.9 (caption "drag to your editor: stays linked"; the once-per-session toast after a
+  PSD-handle drag; the link's editor = the default editor).
 - ARCHITECTURE: 8.3, 8.7, 8.13, 8.17, 9.2.
 - Tests: the data object built for each drag kind offers the right formats and bytes (the PNG decodes to the expected picture
   **with the stamp styles**, the `DROPFILES` path exists on disk); the state machine: the job starts when the drag is
@@ -2033,6 +2131,8 @@ P12; no package should now need more than one builder.
   the one-layer PSD), `project/*` (entries, archive), `wte_app` `link/*` (the same watcher, launcher and dialogs keyed by
   `LinkId { Sticker(StickerId) | Layer(LayerId) }`), Layer menu, row context menu, Edit menu (Paste as New Paint Layer).
 - Content: 5.9.
+- **rev 3:** the P12 row of 13.9 ("Edit Layer in <name>", `PaintLink::editor`, refusal sentences on the layer badge,
+  `layer_link` once more with the stub as Photoshop).
 - ARCHITECTURE: 5.14, 5.28, 6.13, 7.1, 7.9, 8.16, 9.1, 9.2.
 - Tests: `replace_layer_pixels` is one `Edit::Pixels` entry with only the changed tiles, undo / redo restore; the PSD of a
   layer reads back to the same pixels; one-layer and multi-layer PSDs choose the right source; a size mismatch is refused
@@ -2048,6 +2148,9 @@ P12; no package should now need more than one builder.
 - Files: README, `dist/HOW_TO_TEST.txt` (final, every hand test of 8.7 with steps and expected result), Help texts (what is
   lost, the guard's limits, "no drag from PhotoCraft"), `dialogs/about.rs` (**new** "Licences..." window),
   `installer/WrappedTextureEditor.iss` (**new** `[Files]` line for `licenses\*`), release notes, workspace version 0.4.0.
+- **rev 3:** the P13 row of 13.9: Help chapter and HOW_TO_TEST chapter "Working with Photoshop" (hand tests 19-25, the
+  table "In Photoshop you... / In WTE" of 13.2, Maximize Compatibility = Always, "Leave as is" for profile questions, drop
+  on the tab bar, Export Clipboard, no drag from Photoshop), the trademark sentence in About > Licences and Help.
 - ARCHITECTURE: 10 (work-package list). HANDOFF 1, 5 (5.4: state and the hand tests owed), 8.
 - Tests: the About window lists the licence text (control sweep); the version string.
 - Scenario: `sticker_flow_path` (PATH = a model; gate: `ABeautifulGame.glb`, `DamagedHelmet.glb`): the user's whole workflow -
@@ -2133,6 +2236,18 @@ test's byte builder instead and says so in the README. Built in tests (no latest
 1057 with `hasRealMergedData = 0` and a white placeholder; ZIP and ZIP-prediction channels and a ZIP merged image; the 13 PSB
 long keys; both default blending-range forms; CMYK and 32-bit headers; truncated and corrupted files.
 
+**rev 3 - Photoshop-written fixtures (13.4).** WTE cannot run Photoshop, so P5a adds 55 public sample files (2.0 MB; from
+the psd-tools project's test collection, licence MIT as inferred from that repository's LICENSE file; 54 of them were last
+saved by Photoshop - CS3, CC, CC 2017, CC 2018, CC 2019 (22 files), 2020, 2022, 2026 by the version-info resource - and
+one by GIMP) under `crates/wte_core/tests/fixtures/psd/photoshop/` with the licence text. They cover RLE and raw channels,
+16-bit with ZIP-prediction, PSB (8-bit with RLE, and 16-bit), text, smart-object, shape, fill and adjustment layers,
+groups and artboards, effects on and off, masks (plain, disabled, with parameters, vector), clipping, fill opacity, blend
+keys, Maximize Compatibility off, ordinary empty layers, every colour mode and depth that is refused, a non-sRGB profile,
+a flat file. Built by the tests because no file of clear origin exists: compression 2, the third-party shapes (channel -1
+last, `lsct` type 0, no `lyid`, no resource 1057, UTF-8 Pascal names), blending ranges on 2- to 6-channel layers, a WTE
+file "re-saved by Photoshop", lost and renumbered ids. Hand tests 19-22 are the only check of CC 2019 on Windows and of a
+real re-save.
+
 ### 8.4 Performance budgets (ignored `perf_*` tests, serial, release, this machine; the gate records the numbers)
 
 | Operation | Budget |
@@ -2187,23 +2302,30 @@ hashes existing tests already assert. Tool: `tools/sticker/compare_baseline.py` 
    that does not match its `expect` is a red.
 4. The identity checks of 8.5 pass.
 5. `Cargo.lock` differs from `main` only in the workspace crates' version; no new `[dependencies]` line anywhere.
-6. Focus audit: nothing named `photocraft.exe` was started (the stub's log; a process list before and after the sweep), no
+6. Focus audit: nothing named `photocraft.exe` **or `Photoshop.exe` (rev 3)** was started (the stub's log; a process list before and after the sweep), no
    scenario window took focus (the existing `raw.focused` check), no clipboard call in tests (grep), no focus / flash / beep
    call in `link/`.
 7. LF audit (`git ls-files --eol`: no `w/crlf` among the branch's text files); the licence file ships; no "ArtCraft" outside
-   `licenses/photocraft-MIT.txt` and the notes (grep over `crates/`, `dist/`, `installer/`, README).
+   `licenses/photocraft-MIT.txt` and the notes (grep over `crates/`, `dist/`, `installer/`, README). **rev 3:** "Adobe"
+   appears only in the trademark sentence and in the user-facing Photoshop preference sentence if it needs it; no image
+   asset was added for either editor. **rev 3 review:** this grep runs with `grep -I` (binary files skipped) and leaves out
+   `crates/wte_core/tests/fixtures/psd/photoshop/`: every Photoshop-saved fixture carries "Adobe Photoshop" in its
+   version-info resource and XMP, and a plain grep over `crates/` would match all of them.
 8. The v3 fixture project opens and exports byte-identically; a v4 project with a sticker is refused by the P0 version check
    with the "newer version" message.
 9. The hand-test sheet (8.7) is complete, and the report lists, for each hand test, "reported by the user: result" or "owed".
 10. The report repeats what no automated test could prove: the real PhotoCraft GUI save (unless P0 showed CLI = GUI), every
     statement about the latest PhotoCraft (read at HEAD only), a real drag between two apps, the real clipboard.
+    **rev 3:** and everything about Photoshop itself: assumptions A1-A8 of 13.7 are listed as "unverified until the hand
+    test", with the hand test that settles each.
 11. Verdict PASS / PASS with listed reds / FAIL, with the numbers.
 
 **Landing on `main` (review B15).** A gate PASS alone does not land the branch. The main session lands it only when the user
 has reported hand tests **1, 3, 4, 7, 8, 12 and 15**, or when each of them that is still open is listed as owed in HANDOFF 5.4
-**and the user has said to land anyway**. A failed hand test is a red like a failed scenario.
+**and the user has said to land anyway**. A failed hand test is a red like a failed scenario. **rev 3:** the Photoshop
+tests **19, 21, 23 and 24** join this list (13.6); the same "owed, land anyway" rule applies.
 
-### 8.7 User hand tests (`dist/HOW_TO_TEST.txt`: "Stickers", "Working with PhotoCraft", "Drag, drop, copy, paste")
+### 8.7 User hand tests (`dist/HOW_TO_TEST.txt`: "Stickers", "Working with PhotoCraft", "Working with Photoshop" (rev 3), "Drag, drop, copy, paste")
 
 Each with steps and the expected result:
 
@@ -2245,6 +2367,21 @@ Each with steps and the expected result:
 18. In the Sticker view press V, W, H, F, X, Delete (with and without a selection), Esc: each does what the key table of
     Help says; outside the view the same keys do what they did before.
 
+**rev 3 - with Photoshop CC 2019** (full steps and expected results: 13.6; they go into HOW_TO_TEST word for word):
+
+19. Edit in Photoshop round trip: opens as a tab without a warning; paint, Ctrl+S; the model updates and WTE's text layer
+    is still text.
+20. New layer, a Photoshop text layer, rename, delete, reorder: the same stack in WTE; the text arrives as a picture layer.
+21. A layer style in Photoshop: the finished picture with the note (merged path); undo restores; a shape layer comes back
+    as a picture layer (8-bit, Maximize Compatibility on); a smart object gives the finished picture (item 13).
+22. Maximize Compatibility set to Never with a layer style on: "needs a merged picture" with the Photoshop sentence; set to
+    Always and save: updates.
+23. Drag a sticker from WTE onto an open Photoshop document (becomes a layer) and onto the tab bar (opens); the PSD handle
+    onto the tab bar, Ctrl+S: WTE updates.
+24. Copy / paste both ways; write down what happens to transparency and what Help > Clipboard contents... lists.
+25. Edit in Photoshop twice (no second copy, no question); conflict; Send while open; 16 bits (works); CMYK (refused with
+    the sentence); Edit Layer in Photoshop; WTE never comes to the front.
+
 ---
 
 ## 9. Risks and open questions
@@ -2269,6 +2406,7 @@ Risks the builders handle (with the fallback):
 | 14 | The subclass misses the paste chord on some keyboard layout or IME | Edit > Paste always works; hand tests 12, 13; the subclass never eats a message |
 | 15 | The generic tile patch changes texture-paint undo | the existing history tests untouched + a byte comparison of a recorded patch (P3b test 2) |
 | 16 | A clipped or masked PhotoCraft layer is positioned by a rule this plan read only in v0.2.0 | fixtures f4, f11; otherwise the test's byte builder and a note |
+| 17-21 | **rev 3, Photoshop:** nobody may run Photoshop, so eight behaviours are assumptions (ids kept, the command line opens a tab, re-open brings the tab forward, no reload, WTE's file opens without a warning, Ctrl+S saves in place, Export Clipboard is on, the open PSD is not locked) and what the clipboard carries is unknown | 13.7: each has a fallback and the hand test that settles it; the reader is proved on 54 public files last saved by Photoshop (eight versions, 22 files by CC 2019) |
 
 Open questions the code cannot settle (section 11 lists those for the user):
 
@@ -2285,6 +2423,7 @@ Open questions the code cannot settle (section 11 lists those for the user):
 | Document section | Change | Package |
 |---|---|---|
 | ARCH 1 | new **1.12 Stickers and PhotoCraft** (the decisions of 0 and 0.1 here, traceability to the sections below); 1.1 row R4 mentions stickers; 1.3 non-goals updated (selections and tolerance fill exist for stickers only; the OS clipboard paragraph is replaced) | P6a (1.12 skeleton in P1), P2, P10b |
+| **rev 3** | 1.12 is titled "Stickers and outside editors (PhotoCraft, Photoshop)"; 5.28 gets `psd::descriptor` and `StickerLink::editor`; 7.9 lists the reader subset of 13.2 and the writer rules of 13.3; 8.16 is "Editor link" (editor list, discovery, guards per editor); 8.9 prefs (three editor paths, the default editor) | P5, P9, P12 |
 | ARCH 2.1 / 2.2 | new modules `sticker/`, `doc_stickers.rs`, `psd/`, `link.rs`; app `sticker/`, `link/`, `ole/` | P1, P3a, P5, P6a, P9, P10a |
 | ARCH 3 | no new crate; the `raw-dylib` libraries (`ole32`, `shell32`, `advapi32` added) | P9, P10a |
 | ARCH 4.2, 4.4, 4.6, 4.7 | sticker colour rules; new ids; the watcher thread; determinism of the sticker maths (local pools in tests) | P1, P3a, P9 |
@@ -2323,6 +2462,14 @@ Things to know first (not choices):
 - **What was read but not tried.** Everything about the latest PhotoCraft (v0.23.x) comes from reading its source at HEAD;
   there is no build of it here. After you update, hand tests 1, 2, 2b, 6 and 8 are the real check. The "already open" warning
   works only for v0.2.0 and portable copies.
+- **Photoshop (rev 3).** Nobody but you may start Photoshop, so the part "Photoshop opens WTE's file, you save, WTE takes
+  it back" has never run. WTE's reader is tested on 54 public files that Photoshop saved (22 of them last saved by CC 2019); the
+  eight things assumed about Photoshop itself are in 13.7, each with what happens if it is wrong. Hand tests 19-25 are the
+  real check (about 15 minutes). You cannot drag from Photoshop into WTE either.
+- **A correction to what you were told about shape layers (rev 3 review).** "Photoshop text and shape layers come back as
+  pixels" is true for text always, and for shape and fill layers only from an **8-bit** document saved with **Maximize
+  Compatibility on**. With it off WTE asks for the setting; in a 16-bit document Photoshop stores no pixels for a shape
+  even with it on, so the sticker comes back as one finished picture. Nothing to decide; the Help table says it this way.
 
 Choices (each has a default; say so if you want the other):
 
@@ -2356,7 +2503,24 @@ Choices (each has a default; say so if you want the other):
     Assets) now, or after you have used the rest. Default: built only if P0-P13 are green.
 11. **Version and release**: the branch becomes v0.4.0; a tag and an installer release only on your word. **Landing on
     `main`** happens after the gate **and** after you have tried hand tests 1, 3, 4, 7, 8, 12 and 15 (about 20 minutes with
-    PhotoCraft v0.2.0 and the tablet), or earlier if you say "land, tests owed".
+    PhotoCraft v0.2.0 and the tablet), or earlier if you say "land, tests owed". **rev 3:** plus the Photoshop tests 19,
+    21, 23 and 24 (item 16).
+
+Added in revision 3 (Photoshop; details 13.8):
+
+12. **Default editor.** The first "Edit in..." asks which program (Photoshop or PhotoCraft) and can remember it. Option:
+    make Photoshop the default without asking. Default: ask once.
+13. **Smart objects.** As you were told, a smart object makes the sticker come back as **one merged picture** (this is
+    what is built). Photoshop's files show a smart object always carries its current pixels, like a text layer, so it
+    could instead come back **as its own picture layer** and keep your other layers (one switch, already prepared).
+    Option: its own layer. Default: merged, as said (rev 3 review: the default may not differ from what you were told).
+14. **Colour modes and profiles.** CMYK, Lab, Indexed and 32-bit documents are not converted: WTE says what to click in
+    Photoshop (Image > Mode). 16-bit and grayscale work. WTE reads colours as sRGB and embeds no profile; if Photoshop asks
+    about a profile, answer "Leave as is". Option (later, if Photoshop asks every time): WTE embeds an sRGB profile.
+15. **"Other program..."** in the list (any exe that edits PSD files, no promises), and one **trademark sentence** for
+    Adobe / Photoshop in About and Help. Default: both in.
+16. **Landing with Photoshop.** Hand tests 19, 21, 23 and 24 join the landing list. Option: land on the Photoshop tests
+    alone and leave the PhotoCraft ones owed (you say which).
 
 ---
 
@@ -2429,3 +2593,561 @@ shows it. Details: `docs/notes/sticker/check-P0.md`.
 Defaults of revision 1 that changed, for the main session to tell the user: a link needs a saved project; no PSD write at
 project save; the PSD handle replaces Alt+drag; linked paint layers are now in scope (P12); two rows of upper tabs; the
 packages are P0-P13.
+
+Revision 3 (2026-11-26): the user's decision "Yes, add Photoshop" is planned in section 13 and marked "rev 3" where
+sections 0-11 change. No new crate and no `Cargo.toml` change is needed.
+
+**Revision 3 review (2026-11-26).** One review of section 13 against the sample files' bytes and the code. Every finding
+was accepted. "rev 3 review" marks the changed places.
+
+| # | Finding (short) | Outcome | Where |
+|---|---|---|---|
+| C1 | "(cc + 1) default pairs" makes every Background, masked and grayscale layer BLEND_IF (Photoshop always writes 5 pairs) | fixed: default = every pair is the default pair, any count; the writer always writes the 40-byte form; synthetic 2- to 6-channel cases | 5.2, 13.3 item 4, 13.4, P5a / P5b tests |
+| C2 | default D3 (smart object = own layer) makes told statement 4 false | fixed: SMART is forcing for every editor but PhotoCraft; the other behaviour is one constant behind item 13 | 13 (list), 13.2, 13.8 D3, 11 item 13 |
+| C3 | NO_PIXELS by rect alone turns ordinary empty layers into Merged | fixed: NO_PIXELS needs flags bits 3 + 4 or a FILL / ADJUSTMENT key; an ordinary empty layer is an empty picture layer; Layers mode asserted on the grayscale and profile rows; writer round trip with an empty layer; the flags-bit-4 wording corrected and the evidence named | 13.2, 13.4, P5 tests |
+| C4 | "shape layers come back as pixels" is only true for 8-bit files with MaxCompat on | statement 3 corrected in the plan; a "things to know" line for the user in section 11 (the main session tells the user) | 13 (list), 13.2, 11 |
+| C5 | `cinf` has an 8-byte length in a PSB; no 8-bit RLE PSB fixture | fixed: 14 long keys; `layers\pattern-fill.psb` is a repo fixture with its own row | 5.2, 13.4 |
+| C6 | "writer output opens in the old strict `read_psd`" cannot pass | replaced by the `psd/strict.rs` walker | 5.2, P5 tests, 13.9 |
+| C7 | lengths are multiples of 4 with 0 to 3 pad bytes, not "even" | fixed: the writer rounds to 4; the walker accepts 0 to 3 zero pad bytes at those two places | 13.3 |
+| C8 | ids-lost never fires when ids are renumbered 1..n | fixed: a "renumbered" trigger, a single-layer re-number rule, a second matching pass by name; tests incl. renumbering after a delete | 5.4, 13.2, 13.3, P5c |
+| C9 | the origin of two fixture files is unknown | `third-party-psds\cactus_top.psd` and `2layers.psd` are **not** copied into the repo; their cases are built by the byte builder; the README says the licence is inferred; the checker still reads both from the reference folder | 13.4 |
+| C10 | "written by" came from XMP CreatorTool (who created, not who saved) | the column is rebuilt from the 1057 reader name; counts redone (54 Photoshop-saved repo files, 22 by CC 2019, newest "2026") | 13.4, 8.3, 9, 11 |
+| C11 | `lrFX` is a binary list and sits next to `lfx2`; `obj ` item types missing | rule stated (`lfx2` / `lmfx` decide alone, `lrFX` alone = on); reference item types listed | 13.2 |
+| C12 | P5 is three packages of work; P9 is large | binding split P5a / P5b / P5c and P9a / P9b, each with a checker | 7, 13.9 |
+| C13 | artboards, Duotone, Multichannel, 16-bit grayscale not in the fixtures; `artd` is a global block | four files added with rows; `artb` is the layer key, `artd` / `abdd` are skipped global blocks | 13.2, 13.4 |
+| C14 | the "Adobe" grep matches every binary fixture | `grep -I` and the fixture folder left out | 8.6 item 7, 13.9 P13 |
+| C15 | layer count 0 before `Lr16`; UTF-8 Pascal names; gray profiles | all three fixed and tested | 13.2, 13.4 |
+| C16 | Photoshop behaviour stated as fact; missing assumptions | R17 reworded; the launch text marked as assumed; A7 (Export Clipboard) and A8 (no lock; message when the rename fails) added | 13.1, 13.7, 13.6 |
+| C17 | `.gitattributes` already has `*.psb`; `current_dir`; the sweep is too large for a debug run | text corrected; `RealLauncher` sets `current_dir`; the sweep is capped | 13.1, 13.4 |
+
+Rejected: none. Not done, and why: nobody looked up who contributed the two files of C9 (it needs the upstream history; the
+plan no longer depends on them). `transparentbg-gimp.psd` stays a repo fixture under the same inferred licence; if the main
+session wants no file of unchecked origin at all, its row is also covered by the byte builder (no `lyid`, no 1057).
+
+---
+
+## 13. Photoshop (revision 3, 2026-11-26)
+
+User decision (2026-11-26): **"Yes, add Photoshop"**. The user has Photoshop CC 2019 (v20) at
+`C:\Program Files\Adobe\Adobe Photoshop CC 2019\Photoshop.exe`. This section is binding like the rest of the plan; where it
+and sections 0-11 disagree, this section wins (the affected places carry a "rev 3" note that points here). Packages P0-P4
+are not changed by it. Nothing here needs a new crate or a `Cargo.toml` change: `wte_core` already has `miniz_oxide = "0.8.9"`
+as a **direct** dependency (`crates/wte_core/Cargo.toml`, used for FBX), and that is the inflate for ZIP channels.
+
+What the user was told (every line must stay true; a builder who finds one false stops and reports it):
+
+1. The link works through PSD files. "Edit in PhotoCraft" becomes **"Edit in..."** listing Photoshop and PhotoCraft, with a
+   default the user picks.
+2. Ctrl+S in Photoshop updates WTE by itself. Photoshop opens the file as a tab in the running Photoshop.
+3. Layers come back one by one; Photoshop text and shape layers come back as pixels. (**Corrected by the rev 3 review;
+   the main session tells the user, section 11 "things to know":** true for text always; for shape and fill layers only
+   from an 8-bit document saved with MaxCompat on. With MaxCompat off, or in a 16-bit document, a shape has no pixels in
+   the file and the sticker takes the merged path of statement 4. The plan builds exactly that.)
+4. Photoshop's layer effects, adjustment layers and smart objects come back as one merged picture and need "Maximize PSD
+   and PSB File Compatibility" on; WTE says so when it is off. (**Smart objects: built as said** - forcing, 13.2. The
+   files show they could come back as their own layer; that is the option of decision D3 in 13.8, taken only on the
+   user's word.)
+5. Dragging out of WTE into Photoshop: dropped on an open document it becomes a layer (Place Embedded), elsewhere it opens.
+6. Ctrl+C in Photoshop / Ctrl+V in WTE works; whether transparency survives is unknown until the user's hand test.
+   ("Works" rests on Photoshop's preference "Export Clipboard" being on, its default: assumption A7 of 13.7, hand test 24.)
+7. No drag from Photoshop into WTE.
+8. Photoshop is never run by tests or agents; the real round trip is a user hand test.
+
+Words in this section: **PS** = Photoshop; **editor** = the outside program a link is opened in; **MaxCompat** = Photoshop's
+preference Edit > Preferences > File Handling > "Maximize PSD and PSB File Compatibility" (Never / Always / Ask);
+`PSS\` = `G:\Claude_Resources\ref\psd-samples\psd-tools\` (13.4).
+
+### 13.1 Editors: one abstraction, three kinds
+
+**Type** (`crates/wte_app/src/link/editor.rs`, new; the core only knows the name string):
+
+```rust
+pub enum ExternalEditor { PhotoCraft, Photoshop, Other(PathBuf) }
+impl ExternalEditor {
+    pub fn name(&self) -> String;      // "PhotoCraft" | "Photoshop" | the exe's file stem ("gimp-2.10")
+    pub fn key(&self) -> &str;         // "photocraft" | "photoshop" | "other"  (prefs, manifest)
+}
+```
+
+**Prefs** (replace `Prefs::photocraft_exe` of 5.7; an older prefs file with only `photocraft_exe` still loads):
+`photocraft_exe: Option<PathBuf>`, `photoshop_exe: Option<PathBuf>`, `other_editor_exe: Option<PathBuf>`,
+`default_editor: Option<String>` (a `key()`; `None` = not chosen yet).
+
+**Discovery** (all read-only, `advapi32` `RegGetValueW` through the injected registry reader of 5.7; never a guessed folder):
+
+| Editor | Where | Notes |
+|---|---|---|
+| Photoshop | 1. `HKCU` then `HKLM` `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Photoshop.exe`, default value (a plain path, no quotes; on this machine it is the CC 2019 path above); 2. `Software\Classes\Applications\Photoshop.exe\shell\open\command` (a quoted path followed by `"%1"`) | both the 64-bit and the 32-bit registry view are tried (`RRF_SUBKEY_WOW6464KEY`, then `RRF_SUBKEY_WOW6432KEY`); the path must exist. Not found: Photoshop is simply not listed (no question); "Other program..." or Help > "Editor locations..." can point at it |
+| PhotoCraft | as 5.7 (two keys), then ask once with the file dialog (the portable copy leaves no trace) | unchanged |
+| Other | only by the user's file dialog ("Other program...") | any exe; started as `exe <file>` |
+
+Discovery runs when "Edit in" is first used in a session and when Help > **Editor locations...** is opened (that dialog shows
+the three paths with Browse / Clear, and the default editor). Tests use the injected reader only (rule 5 of 0.4).
+
+**Menu and button texts** (plain text, rule 9; the word "PhotoCraft" in a command label of sections 3-6 is replaced as shown):
+
+| Place | Rev 2 | Rev 3 |
+|---|---|---|
+| Sticker tab, canvas header (the main button) | Edit in PhotoCraft | **Edit in Photoshop** / **Edit in PhotoCraft** / "Edit in <stem>" = the default editor; beside it a small arrow button **Edit in...** that opens the list |
+| the list (also Layer menu and row context menu as a submenu "Edit in") | - | **Photoshop**, **PhotoCraft** (each only when its exe is known; PhotoCraft also when unknown, because it can be located), **Other program...**, separator, **Default: <name>** (radio items) |
+| no default chosen yet and more than one editor known | - | the first click opens the chooser dialog "Edit in which program?" with one button per editor and the box "Always use this one" (sets `default_editor`); with exactly one editor known it is used and becomes the default without a question |
+| badge menu | Send to PhotoCraft; Edit in PhotoCraft | **Send to <name>**; **Edit in <name>**; **Edit in...** |
+| paint layers (5.9) | Edit Layer in PhotoCraft | **Edit Layer in <default name>**, and the same "Edit in" submenu |
+| PSD handle caption (6.4) | drag to PhotoCraft: stays linked | **drag to your editor: stays linked** |
+| Help menu | PhotoCraft location... | **Editor locations...** |
+
+`<name>` in a badge, dialog, toast or undo label is the **link's editor**: `StickerLink::editor: String` (a `key()`; new
+field, saved in the manifest `LinkEntry` as an optional string with a serde default of `"photocraft"`, so a format-4 file
+written by P4 loads unchanged; P5 adds it, P4 is not reopened). It is set at every "Edit in" / PSD-handle drag. So the fixed
+wordings of 5.5 become: **"linked"**, **"changed in WTE"**, **"changed in Photoshop"** / "changed in PhotoCraft" / "changed
+in <stem>", **"conflict"**, **"file missing"**, **"needs a merged picture"**; the toast is "Updated from <name>", the merged
+layer is named "<name> picture", the undo labels stay "Update Linked Sticker" / "Update Linked Layer". The core gets the
+name as a parameter (`link::import(.., editor_name: &str)`); it has no editor enum.
+
+**What the link status shows** (Sticker tab, under the badge, two plain lines): `Editor: Photoshop` and the file name; the
+badge menu as above plus **Show file in Explorer**, **Update now**, **Unlink**.
+
+**Launching** (`link/launch.rs`): `launch::command_for(editor, exe, file)` stays a pure function: program = the exe, one
+argument = the file path, for all three kinds (Photoshop takes a document path as its argument; that is what its own
+`shell\open\command` does). Never `ShellExecute`, never the file association, never a shell. `RealLauncher` as in 5.7 (stdio
+null, `CREATE_NO_WINDOW` kept: it only matters for console programs and does no harm to a GUI one; no console appears),
+and it sets the child's `current_dir` to the exe's folder (the App Paths key also carries a `Path` value naming that
+folder; this is what `ShellExecute` would have set).
+`StubLauncher` records `(editor key, exe, file)`. **Self-tests, `#[cfg(test)]` builds and agents get only the stub; nothing
+may start `Photoshop.exe`** (rule 3 of 0.4, rev 3).
+
+What is **expected** to happen for the user. None of this was observed (nobody may run Photoshop): it is assumptions A2
+and A3 of 13.7, settled by hand tests 19 and 25, and the code below does not depend on which way it turns out:
+
+- Photoshop not running: the child **is** Photoshop; it starts (its splash and window come to the front: that is the user's
+  own click) and opens the PSD.
+- Photoshop running (assumed single-instance): the new process hands the path to the running one and exits; the file
+  opens as a tab there. Whatever the child does, WTE never concludes from it whether the file is still open (same
+  situation as the installed PhotoCraft build): `LinkSession::opened_at` is set, the child state is "unknown".
+- WTE never raises itself; whether Photoshop raises itself is Photoshop's business.
+
+**Two-copies guard, per editor:**
+
+| Editor | Guard |
+|---|---|
+| PhotoCraft v0.2.0 / portable | as 5.7 (child still running -> the "already open" question) |
+| PhotoCraft installed | none possible (5.7) |
+| Photoshop | **none needed and none shown**: opening a path that is already open brings that tab forward instead of opening a second copy (A3). The first child, if it was the one that started Photoshop, lives as long as Photoshop does, so "child running" must **not** trigger the PhotoCraft question for a Photoshop link |
+| Other | child still running -> the same question as v0.2.0 (wording with `<name>`) |
+| a link opened in one editor, then "Edit in" a different one | one question: "<name> may still have this file open. Two programs saving the same file overwrite each other." **Open in <new name> anyway** / Cancel (when `opened_at` is set and the editor differs) |
+
+**Stale copy (5.5):** Photoshop, like PhotoCraft v0.2.0, does not reload a document whose file changed on disk (A4).
+`stale_in_pc` is renamed `stale_in_editor`; its rules, the warning before a rewrite ("Photoshop may still have this file
+open. Its next save will replace what you send now...") and the "saved over" conflict are unchanged and apply to every editor.
+
+**A file the editor keeps locked (assumption A8).** Every link write is "temp file, then rename over the PSD" (5.3). The
+plan assumes Photoshop does not hold the PSD open between its own load and save, so the rename succeeds while the document
+is open there. If the rename fails with a sharing or access error: three more tries 200 ms apart, then the temp file is
+deleted, **nothing** is changed (file, `.bak.psd`, `synced`, `own_writes`), the badge stays "changed in WTE" and one
+in-window message says: "<file> could not be replaced because another program has it open. Close it in <name> (or save
+it there), then choose Send to <name> again." The write function takes the rename as an injected step, so P5c tests the
+failure path without a locked file (state unchanged, temp file gone, the sentence); P9b shows the message.
+
+### 13.2 Reading PSDs that Photoshop wrote
+
+Source of the format: Adobe's "Photoshop File Formats Specification" (the public document; "the format document"
+below), plus what the 63 sample files of 13.4 really contain (300+ files of the same collection were surveyed with `psdinfo.py`; the numbers below are from
+that survey and from compositing layers against the merged picture with `psdcomp.py`, both in
+`G:\Claude_Resources\ref\psd-samples\`). The reader stays **one** reader: it does not branch on who wrote the file.
+Changes and additions to the table of 5.2:
+
+| Part | Rev 3 reader behaviour | Seen in |
+|---|---|---|
+| Colour mode | RGB (3): read. Grayscale (1): expanded to RGB (as rev 2). **Refused, each with its own sentence:** Bitmap (0), Indexed (2), CMYK (4), Multichannel (7), Duotone (8), Lab (9): "<name> is in <mode> mode. In Photoshop choose Image > Mode > RGB Color and save again." No conversion is built (CMYK and Lab need colour profiles) | `colormodes\*`, `gradients\noise-gradient-cmyk.psd` |
+| Depth | 8: read. 16: read, reduced as 5.2 (`(v + 128) / 257` after un-matting; the file holds 0..65535). **32 (float, linear): refused**: "<name> has 32 bits per channel. In Photoshop choose Image > Mode > 8 Bits/Channel and save again." 1: refused with the Bitmap sentence. A refused file never changes the sticker; the badge shows the sentence | `16bit5x5.psd`, `32bit5x5.psd`, `colormodes\4x4_16bit_rgb.psd` |
+| Compression | 0 raw; 1 RLE (PackBits; one 2-byte count per row, 4-byte in PSB; a row may be packed with any mix of runs, the no-op byte 128 is skipped); 2 ZIP; 3 ZIP with prediction (8-bit: per row, each byte += the byte before it; 16-bit: per row, each big-endian word += the word before it, wrapping; 32-bit is never decoded because the depth is refused first). Inflate = `miniz_oxide::inflate::decompress_to_vec_zlib_with_limit` with the limit `rows * row bytes` (a bomb cannot allocate more than the channel) | survey: 8-bit files use 0 and 1 only; 16-bit files use 3 for layers and 0 for the merged picture; **2 was not found in any Photoshop-written file** (synthetic test only) |
+| Where the layers are | 8-bit: the layer info. 16-bit: the `Lr16` block after the (empty) layer info; `Lr32` is recognised only to give the 32-bit sentence | `16bit5x5.psd` / `.psb` |
+| Layer rect | `bottom < top` or `right < left` is an **empty** layer, not an error (a CC 2019 file has `(0, 0, -1, 0)`); rects reach outside the canvas | `vector-mask2.psd`, `semi-transparent-layers.psd` |
+| Channels | ids in **any order** (third-party writers put -1 last); a layer without channel -1 is opaque over its rect (Photoshop's "Background" layer: channels 0, 1, 2 only, flags bit 0 set); a channel of an empty rect has length 2 | `third-party-psds\cactus_top.psd`, every file with a Background |
+| Layer flags | bit 1 hidden; bit 3 (0x08) says bit 4 is meaningful; **bit 4 (0x10)**: the format document's words are "pixel data irrelevant to appearance of document" (group markers, adjustment, fill and shape layers carry it). The document does **not** say that the pixels stored on such a layer are its finished picture; that WTE uses them (shape / fill row) rests **only on the fixture evidence** named there (composite = merged), and hand test 21 re-checks it with the user's Photoshop. Other bits ignored | all |
+| `lsct` / `lsdk` | **the type decides** (first 4 bytes): 1 or 2 = a group starts (GROUP), 3 = the hidden end marker (GROUP, never NO_PIXELS), **0 = an ordinary layer (no feature)**. Rev 2 flagged every `lsct` as a group; a third-party file has `lsct` type 0 on plain layers. Artboards: the layer key **`artb`** sits on the artboard's group-start marker (next to `lsct` 1) -> GROUP; `artd` / `abdd` are **global** blocks, not layer keys, and are skipped like any unknown block | `layers\group.psd`, `masks3.psd`, `gradient-sizes.psd` (three artboards); type 0: synthetic (the shape of `third-party-psds\cactus_top.psd`) |
+| Text, smart object | `TySh` -> TEXT, `SoLd` / `PlLd` / `SoLE` -> SMART. Photoshop writes current pixels for both **with MaxCompat on and off** (composite = merged exactly; with MaxCompat off the rect and pixels are still there). TEXT is not forcing. **SMART is forcing for every link whose editor is not PhotoCraft** (rev 3 review; told statement 4): `PsdDoc::forcing(smart_forces: bool)`, and `link::import` passes `SMART_FORCES_OUTSIDE_PHOTOCRAFT && editor != "photocraft"` (one constant in `link.rs`, `true`; a PSD imported without a link counts as "not PhotoCraft"). For a PhotoCraft link SMART stays not forcing (review B3, fixtures of 8.3). If the user answers item 13 of section 11 with "its own layer", the constant becomes `false` and the two smart rows of 13.4 assert Layers mode; nothing else changes | `layers\type-layer.psd`, `layers\smartobject-layer.psd`, `layers-minimal\type-layer.psd`, `layers-minimal\smartobject-layer.psd` |
+| Shape and fill layers | `SoCo` / `GdFl` / `PtFl` / `vscg` -> FILL; `vstk` (shape stroke) -> part of FILL. In an **8-bit file saved with MaxCompat on** Photoshop writes the finished shape into the pixel channels (the vector mask and the shape stroke are already in the alpha; composite vs merged differs by at most 1.3 levels on `stroke.psd`, 0.5 on a combined-path shape). So: a layer with flags bit 4 set, a FILL key **and a non-empty rect** is a picture layer; its `vmsk` / `vsms` is **not** VECTOR_MASK, and a mask whose flags have bit 3 set ("came from rendering other data") is ignored for it (it is that same vector mask). The same layer has an **empty rect** (no pixels) when MaxCompat is off, **and in a 16-bit file even with MaxCompat on** (rev 3 review: `colormodes\4x4_16bit_rgb.psd` and `4x4_16bit_grayscale.psd` have a real merged picture and a fill layer with rect `(0, 0, 0, 0)`) -> NO_PIXELS (next row) -> forcing: with a real merged picture the merged path works, without one the state is "needs a merged picture" | `layers\shape-layer.psd` vs `layers-minimal\shape-layer.psd`, `stroke.psd`, `hidden-layer.psd`, `layers\solid-color-fill.psd` vs `layers-minimal\solid-color-fill.psd`, `layers\pattern-fill.psb` |
+| Empty layers and NO_PIXELS (rev 3 review) | NO_PIXELS is set **only** when the rect is empty **and** (flags bits 3 and 4 are both set **or** the layer has a FILL or ADJUSTMENT key), and **never** on a group marker (`lsct` 1, 2, 3). Every other layer with an empty rect - flags `0x08`, no such key, rect `(0, 0, 0, 0)`: what Layer > New gives before anything is painted, and what WTE itself writes for an empty layer (13.3) - is an **empty picture layer**: `pixels = Some(empty)`, no feature, not forcing; with a known `lyid` and an empty map entry it is "untouched", with an unknown one a new empty picture layer. An empty TEXT layer likewise | "Layer 1" (flags `0x08`, no key) in `colormodes\4x4_8bit_grayscale.psd`, `4x4_16bit_rgb.psd`, `4x4_16bit_grayscale.psd`, `colorprofiles\north_america_newspaper.psd` |
+| Vector mask on an ordinary pixel layer | `vmsk` / `vsms` on a layer **without** flags bit 4: VECTOR_MASK, forcing (as rev 2). WTE does not rasterise paths. (The P5 builder may lift this for the case "mask channel -2 present with flags bit 3, no channel -3, no parameters" **only** with a fixture test that shows composite = merged within 2 levels; otherwise it stays forcing) | `masks\2.psd`, `vector-mask2.psd` |
+| Layer mask data | length 0, 20, 36 or longer. Flags: bit 0 position relative to layer (the rect is used as canvas coordinates either way), bit 1 disabled, bit 2 obsolete, bit 3 rendered from other data, **bit 4 (0x10) = mask parameters follow** (density, feather) -> MASK_EXTRA. Channel -3 (a second, "real" user mask) -> MASK_EXTRA. Default colour 0 or 255 outside the rect | `mask.psd`, `mask-disabled.psd` (flags 2), `mask_parameters.psd` (56 bytes, flags 0x18, channel -3) |
+| Effects | `lfx2` / `lmfx` are descriptors; `lrFX` is the old **binary list** (not a descriptor), and Photoshop writes it **next to** `lfx2` on every effects layer, also on the switched-off ones. Rule (rev 3 review): **when `lfx2` or `lmfx` is present it alone decides** and `lrFX` is not looked at; **`lrFX` alone** (old writers) **counts as on**, unparsed. Deciding from the descriptor: a small walker (`psd/descriptor.rs`) reads `masterFXSwitch` and each effect's `enab`; on = master on and at least one effect enabled. The walker must know every item type well enough to step over it: `Objc`, `GlbO`, `VlLs`, `doub`, `UntF`, `UnFl`, `TEXT`, `enum`, `long`, `comp`, `bool`, `type`, `GlbC`, `alis`, `tdta`, `ObAr`, `Pth `, and `obj ` (a reference: a count, then items of type `prop`, `Clss`, `Enmr`, `rele`, `Idnt`, `indx`, `name`, each with its own layout). **A descriptor the walker cannot read counts as on** (Merged is the safe side). Shape strokes (`vstk`) are not effects | `effects\effects-enabled.psd` (three layers, all with `lfx2` **and** `lrFX`: master on / effect off, and master off), `effects\outside-stroke.psd`, `transparency\fill-opacity.psd`; `lrFX` alone and each reference item type: synthetic |
+| Fill opacity | `iOpa` < 255 -> FILL_OPACITY (forcing), as rev 2 | `transparency\clip-opacity.psd` (128), `transparency\fill-opacity.psd` (0) |
+| Adjustment layers | the keys of 5.2 plus `CgEd` (with `brit`) -> ADJUSTMENT (forcing); they have an empty rect | `layers\levels.psd`, `layers\curves.psd`, `layers\hue-saturation.psd`, `clip-adjustment.psd` |
+| Blend keys | WTE's seven as 5.2 (`lddg` is Photoshop's Linear Dodge (Add)); `pass` (groups) and every other key -> BLEND_OTHER | `blend-modes\*` |
+| Clipping | clipping byte 1 -> `clipped`; a layer clipped to a layer that is itself forcing changes nothing (the file is Merged anyway) | `clipping-mask3.psd`, `clip-adjustment.psd` |
+| Names | `luni` (UTF-16BE, incl. characters outside the BMP as surrogate pairs) wins; else the Pascal name: **decoded as UTF-8 when its bytes are valid UTF-8** (rev 3 review: `2layers.psd` stores `D0 A4 D0 BE D0 BD`, the three Cyrillic letters U+0424 U+043E U+043D; Windows-1252 would give six garbage characters; ASCII reads the same either way), otherwise as Windows-1252 | `layer-name-emoji.psd`; UTF-8 and Windows-1252 Pascal names without `luni`: synthetic, with the decoded strings asserted |
+| `lyid` | read when present; absent in files of old or third-party writers (13.3 "ids lost") | `2layers.psd`, `transparentbg-gimp.psd` |
+| Merged picture, MaxCompat | resource 1057 byte 4 (`hasRealMergedData`) as 5.2. Photoshop with MaxCompat off writes 0 there and a placeholder picture; resource missing (old and third-party writers) = real. **A file with 0 layers (flattened in Photoshop) is always real**: its picture is the document. **"0 layers" is counted after `Lr16` / `Lr32`** (rev 3 review): a 16- or 32-bit file has an empty layer info in the main section and its layers in the global block, so the file is flat only when the main count is 0 **and** no `Lr16` / `Lr32` block holds layers | 11 of the 63 samples have 0 (all of `layers-minimal\*`, `effects\effects-enabled.psd`, `masks\2.psd`, `mask_parameters.psd`, `layer-name-emoji.psd`); `slices.psd` (0 layers); `16bit5x5.psd` (main count 0, three layers in `Lr16`: asserted **not** flat) |
+| ICC profile (resource 1039) | **not applied.** WTE takes the numbers as sRGB (Photoshop's default working space; WTE has no colour management and none is added). The reader extracts only the profile's description text (`desc` tag: v2 ASCII or v4 `mluc`); when it does not contain "sRGB", the update is still applied and **one** toast per link says: "<name> uses the colour profile "<desc>". WTE shows its colours as sRGB; they can look different. In Photoshop: Edit > Convert to Profile > sRGB." **Grayscale files are exempt** (rev 3 review): Photoshop puts a gray profile into every grayscale file ("Dot Gain 15%" in the fixtures), so the note would fire on all of them; WTE reads the gray numbers as they are and Help says so. The note is for RGB-mode files only | `colorprofiles\north_america_newspaper.psd`; `colormodes\4x4_8bit_grayscale.psd` (gray profile, **no** note) |
+| Resolution (1005) and every other resource | ignored | `semi-transparent-layers.psd` (300 dpi) |
+| Unknown tagged blocks | skipped by length; Photoshop writes many WTE does not use (`lnsr`, `clbl`, `infx`, `knko`, `lspf`, `lclr`, `shmd`, `fxrp`, `sn2P`, `vogk`, `lyvr`, `cust`, global `Patt`, `Txt2`, `FMsk`, `cinf`, `CAI `, `OCIO`, `GenI`, `lnk2`, `lnkE`, ...). Block lengths are even-padded in practice; the walker pads to 2 inside a layer record and to 4 in the global list, and re-synchronises on the next `8BIM` / `8B64` signature if the padding guess is wrong | all |
+
+The forcing / not-forcing split of 5.2 after rev 3: **forcing** = EFFECTS (switched on), GROUP (incl. artboards),
+ADJUSTMENT, VECTOR_MASK (ordinary pixel layers only), MASK_EXTRA, FILL_OPACITY, BLEND_OTHER, BLEND_IF (a non-default
+pair; never the pair count), NO_PIXELS (the rule in the table; this is where MaxCompat-off and 16-bit shape and fill
+layers land), and **SMART unless the link's editor is PhotoCraft** (decision D3). **Not forcing** = TEXT, FILL with pixels
+(shape and fill layers of an 8-bit file saved with MaxCompat on), SMART on a PhotoCraft link, an ordinary empty layer.
+`PsdDoc::pc_native()` is renamed `editor_native()`.
+
+**What this means for the user, in the user's words** (Help, HOW_TO_TEST, and the main session's summary):
+
+| In Photoshop you... | In WTE |
+|---|---|
+| paint on a layer, add a layer, paste, move, rename, reorder, hide, change opacity or one of the seven blend modes, add or paint a layer mask, clip a layer | comes back layer by layer; untouched WTE layers stay text / shape / live |
+| add an empty layer | an empty picture layer; everything else stays as it was |
+| add a text layer | a new picture layer (pixels); still text in the PSD |
+| add a shape or a fill layer | a new picture layer when Photoshop stored its pixels: an 8-bit document with MaxCompat on. In a 16-bit document the sticker comes back as one finished picture; with MaxCompat off -> the MaxCompat message |
+| add a smart object (also File > Place Embedded), a layer style (stroke, shadow, glow...), an adjustment layer, a group or artboard, a vector mask on a pixel layer, mask feather / density, Fill below 100 %, another blend mode | the sticker comes back as **one finished picture** (needs MaxCompat on); undo in WTE restores the layers |
+| flatten the image | one picture layer |
+| switch to 16 bits | works, reduced to 8 |
+| switch to CMYK, Lab, Indexed, 32 bits... | nothing is applied; the badge says how to switch back |
+
+**The MaxCompat message (5.4), rev 3 wording by editor.** Photoshop: "Photoshop saved this file without a merged picture.
+In Photoshop choose Edit > Preferences > File Handling, set "Maximize PSD and PSB File Compatibility" to Always, and save
+again." (PhotoCraft keeps its own sentence; Other: "The program saved this file without a finished picture...".) The
+`photocraft-cli` convert button is offered only when the link's editor is PhotoCraft. Layers mode never needs the merged
+picture, so a file with only pixel and text layers (and, on a PhotoCraft link, smart layers) updates with MaxCompat off
+as well.
+
+**Mapping a Photoshop PSD back onto the sticker (5.4 stays the rule; additions):**
+
+- **Match by `lyid`.** Assumption A1 (13.7): Photoshop keeps the `lyid` of every layer it loaded for the life of the
+  document and writes it back at save; layers the user adds get new ids above the document's id seed. Then the table of 5.4
+  works as written: known id + equal normalised pixels = untouched (stays text / shape); known id + other pixels = becomes a
+  picture; unknown id = new layer; a mapped id that is gone = deleted; renamed = same id, the name is simply taken.
+- **The "`lyid` reuse" rule of 5.4 stays on** for every editor (Photoshop is not expected to reuse an id; the rule costs
+  nothing and covers PhotoCraft).
+- **Ids that cannot be trusted (fallback, P5c; rewritten by the rev 3 review).** Three rules, checked in this order
+  before the table of 5.4 is used. "(CRC, size)" is the normalised pixel CRC and size of 5.4; the name per map entry is
+  the one the "`lyid` reuse" rule of 5.4 already stores.
+  1. *No known id.* The file has layers and **no** layer carries an id from `layer_map` (a writer without `lyid`, or
+     everything renumbered into a new range) -> **ids lost**.
+  2. *Renumbered.* If A1 is false, the likely form is that Photoshop numbers the layers 1..n in stack order. Those
+     numbers overlap WTE's own ids (WTE's first write is also 1..n), so rule 1 would never fire and, after a layer was
+     added or deleted in WTE, layers would be matched to the wrong entries. So: if some layer carries a known id `i`,
+     its (CRC, size) **and** its name both differ from map entry `i`, **and** its (CRC, size) equals a *different* map
+     entry -> **ids lost**. One such layer is enough. (PhotoCraft's lowest-free-id case of 5.4 does not trigger this
+     unless the new layer is a pixel-identical copy of another WTE layer, and then content matching gives the same
+     result as the reuse rule.)
+  3. *One layer re-numbered.* With ids trusted: a layer with an unknown id whose (CRC, size) and name equal a map entry
+     whose own id is absent from the file **is** that layer under a new id (the entry takes the new id); it is not
+     "deleted + new".
+
+  **Ids lost** means the ids are ignored for this import. Pass 1: layers are matched to map entries by (CRC, size), ties
+  broken by name, then by order; matched layers are "untouched" (or "moved"). Pass 2: a still-unmatched layer whose name
+  equals the name of **exactly one** still-unmatched entry is that layer with "pixels differ" (it becomes a picture and
+  keeps its WTE layer styles). The rest are new layers; entries left over are deleted. `layer_map` is rebuilt from the
+  file's ids (or from `next_lyid` upward when the file has none), `next_lyid` is set above every id seen, and the log gets
+  one line "layer ids of <file> were not kept (<rule>)".
+  Tests (P5c): a WTE-written file whose ids are rewritten to unknown values; a file without `lyid`; **ids renumbered
+  1..n by position after a delete and an add in WTE** (map ids 1, 2, 4, 5 -> file ids 1, 2, 3, 4: every layer is
+  recognised as untouched, a text stays text, nothing is deleted or added); the same with one layer repainted (pass 2
+  keeps it as the same layer, styles kept); rule 3 alone; and fixture f12 still gives "deleted + new".
+- **Background layer.** A Photoshop "Background" (no channel -1) is an ordinary opaque picture layer for WTE.
+- **Duplicate ids** in one file (seen once in the survey, a hand-edited sample): the first occurrence (from the bottom)
+  keeps the id, later ones are "unknown id".
+- **Canvas.** Image > Canvas Size / Image Size / Crop in Photoshop: the canvas rules of 5.4 (artboard = canvas / s, the
+  4096 limit and "Fit it into the sticker").
+- **Profile conversion.** If the user lets Photoshop convert the document to another profile, every pixel changes: every
+  layer comes back as "pixels differ" (text and shapes become pictures). Nothing can detect the intent; Help says: "If
+  Photoshop asks about a colour profile when it opens a sticker, choose Leave as is (or Assign sRGB), not Convert."
+
+### 13.3 Writing PSDs that Photoshop CC 2019 opens cleanly
+
+`psd::write_sticker` (5.2) is the one writer for every editor. What it must write, byte level (the structural rules below
+are checked by a strict walker, see the tests):
+
+1. Header: `8BPS`, version 1, 6 zero bytes, channels 3 (opaque merged picture) or 4, height, width, depth 8, mode 3.
+2. Colour mode data: length 0.
+3. Image resources, each `8BIM`, id, an empty Pascal name (two zero bytes), length, data padded to even:
+   **1005** resolution (72 dpi both ways, units pixels/inch; fixed bytes), **1044** document id seed = the largest `lyid`
+   ever used in this link (`next_lyid - 1`; in the survey 294 of the 295 files that have both have seed >= the
+   largest `lyid`, so Photoshop numbers new layers above it), **1057** version info (version 1, `hasRealMergedData` 1,
+   writer and reader name "Wrapped Texture Editor" as UTF-16 strings, file version 1). **No ICC profile** (decision D4).
+4. Layer and mask info: section length (a multiple of 4); layer info length **rounded up to a multiple of 4** with zero
+   bytes after the last channel's data (rev 3 review: every Photoshop fixture has both lengths as multiples of 4, with 0
+   to 3 pad bytes there - 29 of 53 files have some - and WTE's old exporter rounds the same way); layer count, **negative when the
+   merged picture has a transparency channel**; then per layer, bottom to top:
+   rect (top, left, bottom, right; an empty layer `0, 0, 0, 0`); channel count 4, or 5 with a mask, in the order -1, 0, 1,
+   2, (-2), each with its data length **including** the 2 compression bytes; `8BIM`; blend key; opacity; clipping 0 / 1;
+   flags `0x08`, plus `0x02` when hidden; filler 0; extra length; mask data (length 0, or 20: rect, default colour 255,
+   flags 0 (bit 1 for a disabled mask), 2 padding bytes); blending ranges **always in Photoshop's 40-byte form** (length
+   40, then 5 default pairs), whatever the channel count (rev 3 review; 5.2); the Pascal name
+   (Windows-1252, `?` for other characters, at most 255 bytes, padded so that length byte + name is a multiple of 4);
+   tagged blocks `luni` (count + UTF-16BE, padded to a multiple of 4) and `lyid` (4 bytes).
+   Then the channel data in the same order: compression 1 (RLE) with the 2-byte row counts first, or compression 0 with no
+   bytes for an empty rect. Mask rows use the mask rect.
+5. Global layer mask info: length 0. No further tagged blocks.
+6. Merged picture: compression 1, **all** row counts of all channels first, then the rows; 3 channels, or 4 with the
+   transparency last, colours matted on white (5.2). Always written and always real (WTE's file never depends on
+   MaxCompat).
+
+Not written, on purpose: `lsct`, effects, `iOpa`, a Background layer (every WTE layer has a transparency channel), ICC,
+XMP, thumbnails. Photoshop adds its own blocks and resources at its first save; the reader skips them.
+
+**Does Photoshop keep WTE's `lyid`s? (assumption A1).** Basis: (a) the format document defines `lyid` as the layer's id and
+resource 1044 as the "document-specific IDs seed number"; (b) in the survey every Photoshop-written layer has a `lyid`, ids
+are unique per file, are not positional (gaps where layers were deleted: 1, 2, 4 in `16bit5x5.psd`) and the seed is at
+least the largest id, which is how a per-document counter that is saved and reloaded behaves; (c) Photoshop's scripting
+exposes this id as the layer's permanent id. **Not proven here:** that CC 2019 keeps ids it reads from a file it did not
+write (nobody may run Photoshop). Hand test 19 proves or refutes it in one step (after painting and Ctrl+S, WTE's text
+layer is still a text layer only if ids **or** the ids-lost fallback matched it). The likely refuted form (ids renumbered 1..n by position) is
+caught by rule 2 of 13.2. Because of the fallback, a refuted A1
+costs nothing visible for untouched layers and, through pass 2, for layers that were only repainted; only a layer that was renamed **and** repainted in the same save could then be
+read as "deleted + new" (its WTE layer styles would be lost). The gate report states which of the two paths the user's
+real file took (the log line of 13.2).
+
+**"Opens cleanly" cannot be tested by an agent.** WTE's existing texture exporter has never been opened in Photoshop
+either (HANDOFF: PSD export is validated without an image editor). What P5 does instead:
+
+- a **strict structure walker** (`psd/strict.rs`, test-only, P5b): walks a file and fails on any overlap and on any
+  slack (section lengths, padding of resources and blocks, channel lengths vs row counts, name padding, counts), with
+  **one allowance** (rev 3 review): 0 to 3 **zero** bytes after the channel data at the end of the layer info, and again
+  at the end of the layer-and-mask section, are padding (Photoshop's own files have them); a non-zero byte there, or more
+  than 3, fails. It is first calibrated on the
+  Photoshop-written fixtures of 13.4 (it must accept all of them, which proves the walker's idea of "well-formed" is
+  Photoshop's), then run on every file `write_sticker` produces in the tests;
+- a **second, independent reader**: `tools/sticker/psd_check.py` (new; `python -E -P`, Pillow, which is already on this
+  machine) opens WTE-written PSDs, checks canvas size, layer count, names, rects and that the merged picture equals WTE's
+  own composite; the P5 checker runs it on the round-trip outputs and on the fixtures;
+- hand test 19, step 1 ("Photoshop opens the file without a warning; write down any message") is the real proof. If
+  Photoshop shows a message, the text is the bug report; the main session fixes the writer before landing.
+
+### 13.4 Fixtures
+
+Downloaded 2026-11-26 into `G:\Claude_Resources\ref\psd-samples\` (plain data; nothing from it is executed):
+`psd-tools\` = **63 files, 2.3 MB**, from `https://github.com/psd-tools/psd-tools` at commit
+`b5637927626c7e577ffb5b8925901fc9d06c69f9`, directory `tests/psd_files/` (same relative paths), with the project's
+`LICENSE` (**MIT**, "Copyright (c) 2019 Kota Yamaguchi"). `SOURCES.md` there lists every file with its writer, size and
+what it shows; `facts.txt` is the machine table; `psdinfo.py` / `psdcomp.py` are the two inspection scripts (planner's
+tools, standard library + numpy).
+
+**Licence, honestly (rev 3 review).** The MIT notice is the repository's own; it has one licence file and no separate
+notice for the test files. That the test files are under it is **inferred**, not stated by their makers, and nobody
+checked who made each file (the clone was shallow: no history). Two files look contributed by users:
+`third-party-psds\cactus_top.psd` (the folder name says so) and `2layers.psd` (unknown writer). **Those two are not copied
+into the repo**; what they showed is built by the test's byte builder (table below). The README in the fixture folder
+says in its first lines: source URL, commit, "licence: MIT, inferred from the repository's LICENSE file; the origin of the
+individual files was not checked", and that the files are test data only and are not shipped.
+
+**Who saved them (rev 3 review).** The column below is the **reader name of resource 1057** (the program that last saved
+the file), not the XMP CreatorTool (the program that first created it; rev 3 used that and was wrong for 15 files). By
+that name, of the 63: 60 were last saved by Photoshop - CS3 (4), CC (2), CC 2017 (2), CC 2018 (18), **CC 2019 (26)**,
+2020 (5), 2022 (1), 2026 (2; the newest, version 27.9) - and three have no such resource (GIMP, an old writer, a
+third-party tool). Most were saved on macOS; the byte format does not depend on the platform. **No file was saved by
+CC 2019 on Windows**, and none is a WTE-written file re-saved by Photoshop: both are hand-test ground (19).
+
+**Repo fixtures (P5a).** These **55 files (1,970,184 bytes = 2.0 MB**; the list is
+`G:\Claude_Resources\ref\psd-samples\repo_set.txt`) are copied to `crates/wte_core/tests/fixtures/psd/photoshop/` (same
+relative names) together with `LICENSE-psd-tools.txt` (the MIT text, verbatim) and the `README.md` described above (plus
+the table below). 54 of them were last saved by Photoshop (CS3 4, CC 1, CC 2017 2, CC 2018 17, **CC 2019 22**, 2020 5,
+2022 1, 2026 2), one by GIMP. They are binary: `.gitattributes` already marks `*.psd` **and `*.psb`** (nothing to add).
+The other 8 stay outside the repo for the P5a checker, who reads all of them and reports what the reader says:
+`2layers.psd`, `third-party-psds\cactus_top.psd`, `empty-layer.psd`, `blend-modes\normal.psd`,
+`colormodes\4x4_32bit_grayscale.psd`, `layers\hue-saturation.psd`, `layers-minimal\gradient-fill.psd`,
+`layers-minimal\pattern-fill.psd`.
+
+| Fixture (`PSS\...`) | Last saved by (1057) | The `k5_ps_` test asserts |
+|---|---|---|
+| `layers\pixel-layer.psd` | CC 2018 | 1 layer, RLE, `lyid` 3, rect `(1, 1, 30, 30)`; composite = un-matted merged within 1 level; Layers mode |
+| `layers-minimal\pixel-layer.psd` | CC 2019, MaxCompat off | `has_real_merged` false, `merged` None, **Layers mode still imports** the layer |
+| `layers\type-layer.psd`, `layers-minimal\type-layer.psd` | CC 2018, CC 2019 (MaxCompat off) | TEXT with pixels, not forcing, `editor_native`; imports as one picture layer in both files |
+| `layers\smartobject-layer.psd`, `layers-minimal\smartobject-layer.psd` | CC 2018, CC 2019 (MaxCompat off) | SMART **with pixels** in both (composite = merged on the first). `forcing(true)` (a Photoshop link): SMART -> Merged with "smart objects" in the sentence; the second has no real merged picture -> "needs a merged picture". `forcing(false)` (a PhotoCraft link, and the option of D3): Layers mode, one picture layer, in both files |
+| `layers\shape-layer.psd` | CC 2018 | FILL with pixels and flags bit 4: a picture layer, no VECTOR_MASK; composite = merged within 1 level |
+| `layers-minimal\shape-layer.psd` | CC 2019, MaxCompat off | NO_PIXELS -> forcing, no real merged -> state "needs a merged picture" with the Photoshop sentence |
+| `stroke.psd` | **CC 2019** | five shape layers with shape strokes, opacity 194 / 148: all picture layers; composite of the imported sticker vs merged within 2 levels (the proof that shape pixels are final); the Background (3 channels, 40-byte ranges) is not BLEND_IF |
+| `layers\solid-color-fill.psd`, `layers\gradient-fill.psd` | CC 2018, **CC 2019** | fill layer with pixels + user mask (5 channels, 40-byte ranges: not BLEND_IF): picture layer with mask; Layers mode |
+| `layers-minimal\solid-color-fill.psd` | CC 2019, MaxCompat off | NO_PIXELS, no real merged |
+| `layers\pattern-fill.psb` (rev 3 review) | 2020 | **an 8-bit PSB**: RLE layer channels and RLE merged picture with **4-byte row counts**; the global block `8B64cinf` with an **8-byte length** is stepped over exactly (the walk ends at the section end without a re-sync); one pattern-fill layer `(0, 0, 32, 32)`, flags `0x18`, with pixels and a user mask: a picture layer with mask, Layers mode. Composite vs merged: the builder measures it and writes the bound into the test (the planner's `psdcomp.py` does not read PSB row counts, so no figure is claimed here) |
+| `layers\group.psd`, `masks3.psd` | CC 2018, **CC 2019** | `lsct` 1 and 3 -> GROUP -> Merged with "groups" in the sentence; the end marker is not NO_PIXELS |
+| `gradient-sizes.psd` (rev 3 review) | **CC 2019** | three artboards: `artb` on each group-start marker -> GROUP -> Merged; the global `artd` and `cinf` blocks are skipped; the three shape layers (rects reaching 1 px outside the canvas) are FILL with pixels; negative layer count = transparent merged picture, un-matted |
+| `layers\levels.psd`, `layers\curves.psd`, `clip-adjustment.psd` | **CC 2019**, **CC 2019**, CC 2018 | ADJUSTMENT -> Merged; a clipped adjustment on a text layer |
+| `effects\effects-enabled.psd` | 2022, MaxCompat off | the walker, per parsed layer (each has `lfx2` **and** `lrFX`; only `lfx2` decides): "Layer 1" master switch on and one effect enabled -> EFFECTS; "Layer 2" master on, every effect off -> none; "Layer 3" master off -> none. The file is therefore Merged and, having no real merged picture, "needs a merged picture"; with Layer 1 hidden by the test's byte patch (flags bit 1) it imports in Layers mode |
+| `effects\outside-stroke.psd` | 2026 | an enabled stroke effect -> EFFECTS -> Merged; the merged picture differs from the layer's own pixels (224 of 1,024 pixels: the stroke) |
+| `transparency\clip-opacity.psd`, `transparency\fill-opacity.psd` | 2020 | `iOpa` 128 / 0 -> FILL_OPACITY -> Merged |
+| `mask.psd`, `mask-disabled.psd` | CS3, 2020 | user mask read (rect, default colour; 5 channels with 40-byte ranges: not BLEND_IF); flags bit 1 -> `disabled`; Layers mode |
+| `mask_parameters.psd` | CC 2018, MaxCompat off | 56-byte mask data, flags 0x18, channel -3 -> MASK_EXTRA -> Merged; MaxCompat off -> "needs a merged picture" |
+| `masks\2.psd` | **CC 2019**, MaxCompat off | vector mask on ordinary pixel layers -> VECTOR_MASK; a shape layer without pixels; opacity 128 |
+| `clipping-mask3.psd` | 2020 | clipping byte -> `clipped` (the file is Merged because of its group; the flag is asserted on the parsed layer) |
+| `hidden-layer.psd`, `semi-transparent-layers.psd` | CS3, CC | hidden flag (Layers mode: two shape layers with pixels over a Background without channel -1); a rect that reaches outside the canvas (`(50, -7, 102, 108)` on 100 x 100) is clipped (asserted on the parsed layer; that file has a group) |
+| `blend-modes\multiply.psd`, `screen.psd`, `overlay.psd`, `linear-dodge.psd`, `darken.psd`, `lighten.psd` | **CC 2019** | each key maps to WTE's mode; Layers mode |
+| `blend-modes\color-dodge.psd`, `blend-modes\pass-through.psd` | **CC 2019** | `div ` -> BLEND_OTHER -> Merged; `pass` group |
+| `layer-name-emoji.psd` | CC 2018, MaxCompat off | `luni` with a surrogate pair; raw (compression 0) channels; `lddg`, opacity 128 |
+| `transparentbg-gimp.psd` | GIMP (no 1057) | no `lyid`, no 1057 (= real merged): reads; the ids rule 1 path |
+| `16bit5x5.psd`, `16bit5x5.psb` | CS3, CC 2017 | 16-bit, main layer count 0 and three layers in `Lr16` (**not** treated as a flat file), **ZIP with prediction** (one a 3 x 1 layer inside the canvas), raw 16-bit merged; PSD and PSB give the same `PsdDoc` |
+| `colormodes\4x4_16bit_rgb.psd` | CC 2018 | 16-bit; "Layer 1" is an ordinary empty layer (an empty picture layer, not NO_PIXELS); the fill layer has **no** pixels although the merged picture is real (ZIP-prediction mask channel) -> NO_PIXELS -> Merged from the 16-bit merged picture |
+| `colormodes\4x4_16bit_grayscale.psd` (rev 3 review) | CC 2018 | 16-bit grayscale (1 colour channel, `Lr16`): the same two layers; fill layer without pixels -> Merged, the gray merged picture expanded to RGB and reduced to 8 bits; no profile note |
+| `colormodes\4x4_8bit_grayscale.psd` | CC 2018 | grayscale expanded; layers with 2 and 3 channels and 40-byte ranges are not BLEND_IF; "Layer 1" (flags `0x08`, rect `(0, 0, 0, 0)`) is an empty picture layer, the gradient fill has pixels and a mask: **Layers mode**, two layers; the gray profile gives **no** note |
+| `colorprofiles\north_america_newspaper.psd` | **CC 2019** | resource 1039 with a non-sRGB description -> the profile note; the numbers are read unchanged; the same two layers: **Layers mode** |
+| `32bit5x5.psd`, `colormodes\4x4_8bit_lab.psd`, `gradients\noise-gradient-cmyk.psd`, `colormodes\4x4_8bit_index_color.psd`, `colormodes\4x4_1bit_bitmap.psd` | CS3, CC 2018, 2026, CC 2018, CC 2018 | each refused with its own sentence (32 bits, Lab, CMYK, Indexed, Bitmap); no panic, no picture |
+| `colormodes\4x4_8bit_duotone.psd`, `colormodes\4x4_16bit_multichannel.psd` (rev 3 review) | CC 2018 | refused with the Duotone and the Multichannel sentence (decision D2 promises one each); no panic, no picture |
+| `slices.psd` | CC 2017 | 0 layers (flat): one picture from the merged data |
+| `vector-mask2.psd` | **CC 2019** | a layer rect `(0, 0, -1, 0)` is empty, not an error; ten layers parse |
+
+Every fixture also goes through the strict walker (P5b; the Photoshop-saved ones must pass it) and through the
+**truncation sweep, capped (rev 3 review):** in the ordinary (debug) test run, 2,000 evenly spaced prefixes for each file
+of at most 64 KB and 200 for the five larger ones (`stroke.psd` 254 KB, `mask-disabled.psd`, `gradient-sizes.psd`,
+`mask.psd`, `transparency\fill-opacity.psd`); the full 2,000 on those five is an ignored test `k5_ps_sweep_large`, which
+the P5a checker and the gate run with `--release`. The builder notes the sweep's wall time; over 60 s in debug, the
+2,000 drops to 500 and the ignored test takes the rest.
+
+**Cases with no file of clear origin -> built by the test's byte builder, or a hand test:**
+
+| Case | How it is covered |
+|---|---|
+| compression 2 (ZIP without prediction), 8- and 16-bit | synthetic (as rev 2); Photoshop was not seen writing it |
+| Photoshop's 40-byte blending ranges on layers with 2, 3, 4, 5 and 6 channels; a non-default pair; a length not a multiple of 8 (rev 3 review) | synthetic, besides the fixture rows above that name it |
+| the third-party shapes (rev 3 review; what `cactus_top.psd` and `2layers.psd` showed): channel order 0, 1, 2, -1; `lsct` type 0 on a plain layer (not a group); no `lyid`; no resource 1057 (= real merged); Pascal names in UTF-8 (`D0 A4 D0 BE D0 BD`) and in Windows-1252 without `luni`, decoded strings asserted | synthetic; the P5a checker reads the two real files from `PSS\` and reports |
+| an ordinary empty layer written by WTE (rect `0, 0, 0, 0`, flags `0x08`) | writer round trip (P5b): an empty picture layer, Layers mode |
+| a flat 16-bit file (main count 0, no `Lr16` layers) vs a 16-bit file with layers | synthetic + `16bit5x5.psd` |
+| `lrFX` without `lfx2` (= on); each `obj ` reference item type in a descriptor; an unreadable descriptor (= on) | synthetic |
+| a WTE-written PSD opened and re-saved by Photoshop (ids kept, pixels kept, re-trim) | **hand test 19** only; the test suite (P5c) simulates it by re-writing a WTE file with Photoshop-like changes (extra blocks and resources, re-trimmed rects, white RGB under alpha 0, a Background-less layer stack, 0 to 3 pad bytes) |
+| ids lost; ids renumbered 1..n by position after a delete; one layer re-numbered | synthetic (ids rewritten by the test, 13.2) |
+| CC 2019 on Windows as the writer | hand tests 19-22 (format is platform-independent; nothing depends on it) |
+| a profile conversion in Photoshop | not testable; Help text |
+| what Photoshop puts on the clipboard | hand test 24 |
+
+### 13.5 Drag, drop and clipboard with Photoshop
+
+**Drag out of WTE into Photoshop (6.4 unchanged in mechanism).** Photoshop takes **files** (`CF_HDROP`); WTE's data object
+already offers `CF_HDROP` first. Expected in CC 2019 (not run here; hand test 23 records it):
+
+| Dropped | On | Result |
+|---|---|---|
+| sticker thumbnail / layer row (a PNG) | an open document's picture | placed as a new layer (Place Embedded: a smart object with a transform box; Enter confirms) |
+| the same | the tab bar, or the empty workspace when no document is open | opens as its own document |
+| the **PSD handle** (the linked PSD) | the tab bar / empty workspace | opens the linked file: Ctrl+S updates WTE (this is the linked way) |
+| the PSD handle | an open document's picture | Photoshop **places a copy** inside that document: **not linked**, Ctrl+S saves the other document |
+
+Because WTE cannot see where the drop landed, after a PSD-handle drag that ended with a copy effect WTE shows one toast
+(once per session): "In Photoshop the sticker stays linked only when it opened as its own tab. Drop it on the tab bar, not
+on a picture." Help repeats it. If Photoshop runs "as administrator" and WTE does not, Windows blocks the drop (Help,
+troubleshooting line); "Edit in Photoshop" still works.
+
+**Drop from Photoshop into WTE:** none. Photoshop cannot drag a layer or a document out to another program (statement 7).
+Substitutes as for PhotoCraft: Ctrl+S on a link, copy / paste, or dragging the saved file from Explorer.
+
+**Clipboard, Photoshop -> WTE.** What CC 2019 puts on the Windows clipboard is **not known here** (it also depends on
+Photoshop's preference General > "Export Clipboard", believed on by default: assumption A7; it exports when Photoshop
+loses the focus). With Export Clipboard off nothing arrives at all; the "Nothing WTE can paste" text below then lists
+what the clipboard does offer, and Help names the preference. WTE's read
+order stays as 6.3: `WTE.Sticker.v1`, registered `PNG`, `CF_DIBV5`, `CF_DIB`, `CF_HDROP`. Rev 3 adds:
+
+- **Alpha rule for DIBs (codec, `ole/formats.rs`):** a 32-bit `CF_DIBV5` with an alpha mask, or a 32-bit `BI_RGB` `CF_DIB`,
+  whose alpha bytes are **all zero** is opaque (many programs leave the fourth byte empty); otherwise the alpha is used as
+  straight alpha. 24-bit is opaque.
+- **Seeing what is there:** `ole/clipboard.rs` gets `format_names() -> Vec<String>` (`EnumClipboardFormats` +
+  `GetClipboardFormatNameW`, standard formats by their constant names). Every Paste logs the list at info level; a paste
+  that finds nothing usable says "Nothing WTE can paste. The clipboard offers: <names>."; and Help > **Clipboard
+  contents...** shows the list on request (a plain dialog; the self-test uses the in-memory clipboard). This is what makes
+  hand test 24 recordable without extra tools.
+- Expected, to be confirmed by hand test 24: the picture arrives; **transparency may arrive as white or black** (if
+  Photoshop offers only a 24-bit DIB). Then the reliable ways for a cut-out are Ctrl+S on a link or a saved PNG.
+
+**Clipboard, WTE -> Photoshop.** WTE offers `PNG` + `CF_DIBV5` (6.3). Which one CC 2019 takes, and what it does with the
+alpha, is unknown: hand test 24 records "transparent / white / black background". No change is built on a guess; if the
+result is black, the follow-up (after the hand test, with the user's word) is a third offered format, a 24-bit `CF_DIB`
+matted on white.
+
+### 13.6 Hand tests with Photoshop CC 2019 (added to 8.7 as 19-25)
+
+19. **Round trip.** A sticker with a picture, a text and a shape layer. Edit in... > Photoshop (first time: the chooser;
+    Photoshop is found by itself). (a) The file opens as a tab in Photoshop **without a warning** (write down any message,
+    also a colour-profile question: answer "Leave as is"). (b) Paint on the picture layer, Ctrl+S (if Photoshop asks about
+    maximizing compatibility, leave it on): within about a second the model in WTE updates, **the text is still an editable
+    text layer in WTE**, the badge reads "linked". (c) Once more.
+20. **New layers.** In Photoshop add an empty layer and paint on it, add a **text layer**, rename one layer, delete one,
+    drag one to another place in the stack, Ctrl+S: WTE shows the same stack; the Photoshop text is a picture layer; WTE's
+    own untouched layers are what they were.
+21. **Merged path.** Add a layer style (Stroke or Drop Shadow) in Photoshop, Ctrl+S: WTE shows the finished picture and the
+    note that names layer effects; Undo in WTE brings the layers back. Remove the style, add a shape layer, Ctrl+S: layers
+    again, the shape is a picture layer (the document is 8-bit and Maximize Compatibility is on). Then File > Place
+    Embedded a picture (a smart object), Ctrl+S: the finished picture again, with the note that names smart objects.
+22. **Maximize Compatibility off.** (If Photoshop showed its "Maximize Compatibility" box at the saves before, write
+    down whether it came at every save or only once.) Preferences > File Handling > Maximize PSD and PSB File
+    Compatibility: Never. With a
+    layer style on, Ctrl+S: WTE does **not** update and the badge reads "needs a merged picture" with the sentence that names
+    the Photoshop preference. Set it to Always, Ctrl+S: WTE updates.
+23. **Drag into Photoshop.** Drag a sticker thumbnail from WTE onto an open Photoshop document: it becomes a layer (press
+    Enter). Onto Photoshop's tab bar: it opens as a document. Drag the **PSD handle** onto the tab bar, Ctrl+S there: WTE
+    updates. Afterwards the next mouse move in WTE drags nothing.
+24. **Copy and paste, both ways.** In Photoshop select a layer with transparent parts, Select All, Ctrl+C; in WTE Ctrl+V:
+    the sticker follows the pointer, a click places it. Note: transparent / white / black background, and what Help >
+    Clipboard contents... lists. (If nothing arrives: Photoshop > Preferences > General > Export Clipboard must be on.) Then Ctrl+C on a stamp in WTE, Ctrl+V in Photoshop: a new layer; note the background again.
+25. **The rest.** Click Edit in Photoshop twice: Photoshop shows the tab that is already open, no second copy, WTE asks
+    nothing. Change the sticker in WTE and in Photoshop, save: the conflict question. Send to Photoshop while the file is
+    open there: the warning, and the file **is** replaced (if WTE says it "could not be replaced because another program
+    has it open", write that down: assumption A8); then Ctrl+S in Photoshop: WTE asks instead of updating. Image > Mode > 16 Bits/Channel, Ctrl+S:
+    updates. Image > Mode > CMYK Color, Ctrl+S: no update, the badge says how to switch back. Edit Layer in Photoshop on a
+    texture paint layer: paint, Ctrl+S, the model updates. While Photoshop (or a full-screen game) is in front, WTE never
+    comes forward, flashes or beeps.
+
+Landing list (8.6, 11): **19, 21, 23 and 24 are added** to 1, 3, 4, 7, 8, 12, 15.
+
+### 13.7 Assumptions, risks
+
+| # | Assumption / risk | If wrong | Proved by |
+|---|---|---|---|
+| A1 | Photoshop keeps the `lyid`s WTE wrote and gives new layers ids above the seed | the three ids rules of 13.2 (no known id, renumbered, one layer re-numbered) match untouched layers by content and repainted ones by name; a renamed-and-repainted layer is read as deleted + new | hand test 19b, 20; the log line |
+| A2 | `Photoshop.exe <file>` opens the file; with Photoshop running it becomes a tab there | "Edit in Photoshop" would only start Photoshop; the user opens the file from the badge's "Show file in Explorer" | hand test 19a |
+| A3 | opening a path that is already open brings that tab forward (no second copy) | two tabs of one file could overwrite each other; then the PhotoCraft-style question is switched on for Photoshop (a one-line change in the guard table) | hand test 25 |
+| A4 | Photoshop does not reload a document whose file changed on disk | harmless: `stale_in_editor` then asks once more than needed | hand test 25 (Send while open) |
+| A5 | Photoshop opens WTE's writer output without a warning | the writer is fixed from the message before landing (13.3) | hand test 19a |
+| A6 | Ctrl+S on a PSD opened from disk saves in place, as PSD (no Save As dialog) while the document has only PSD features | if a dialog appears each time, Help says so; nothing breaks (the watcher only sees finished files) | hand test 19b |
+| A7 | Photoshop's "Export Clipboard" preference is on (its default), so Ctrl+C there reaches the Windows clipboard | Ctrl+V in WTE finds nothing; the "Nothing WTE can paste" text lists what is there and Help names the preference (13.5) | hand test 24 |
+| A8 | Photoshop does not keep the PSD locked while it is open, so "Send" can rename over it | the write fails cleanly: nothing changed, the message "could not be replaced because another program has it open" (13.1); the user closes the tab and sends again | hand test 25 (Send while open) |
+| R17 | Photoshop's default for MaxCompat is "Ask": with it the dialog (box ticked) comes at **every** save of a layered PSD until the user ticks "Don't show again" or sets the preference to Always (general knowledge of Photoshop, not observed here) | the user leaves the box ticked; Help recommends "Always", which also ends the dialog | hand tests 19, 22 |
+| R18 | a profile conversion makes every layer "changed" | Help sentence (13.2); not detectable | - |
+| R19 | the clipboard carries no alpha in one or both directions | hand test 24 records it; link and files are the reliable ways | hand test 24 |
+| R20 | the fixture collection has no CC 2019-on-Windows file and no WTE file re-saved by Photoshop | the reader is one reader for all versions and is exercised on files last saved by eight Photoshop versions (CS3 to "2026"), 22 of them by CC 2019 on macOS; the real file is hand test 19 | hand tests 19-22 |
+| R21 | P5 grows (reader details, descriptor walker, 55 fixtures, strict walker), P9 too | binding split into P5a / P5b / P5c and P9a / P9b, each with its own checker (13.9) | - |
+| R22 | the public fixtures' licence is inferred from the repository's LICENSE; who made each file was not checked | the two files of doubtful origin are not copied (13.4); the README says "inferred"; fixtures live only in the test folder and are never shipped | - |
+
+Never, in any package: start `Photoshop.exe` (or anything in its folder) from a test, a scenario or an agent; ship or draw
+an Adobe logo, icon or wordmark; write to the registry.
+
+### 13.8 Decisions (defaults taken; the user can override; repeated in section 11 as items 12-16)
+
+- **D1 - the default editor.** No default until the user picks one in the chooser ("Always use this one"); with only one
+  editor known, that one. Not "Photoshop because it is installed".
+- **D2 - colour modes.** CMYK, Lab, Indexed, Duotone, Multichannel, Bitmap and 32-bit files are **refused with a sentence
+  that says what to click in Photoshop**; grayscale and 16-bit are converted. (Converting CMYK or Lab without colour
+  profiles would show wrong colours.)
+- **D3 - smart objects (changed by the rev 3 review).** The user was told they come back merged, so that is the default
+  and what is built: **SMART is forcing** on every link but a PhotoCraft one (13.2). The sample files show Photoshop
+  always writes a smart object's current pixels (also with MaxCompat off), exactly like a text layer, so "a smart object
+  comes back as its own picture layer, the other layers survive" is possible and is the **option** (item 13 of section
+  11): one constant, `SMART_FORCES_OUTSIDE_PHOTOCRAFT`, plus the two smart rows of 13.4. Not switched without the user's
+  word; no builder waits for the answer.
+- **D4 - colour profile.** WTE reads the numbers as sRGB and writes **no** ICC profile; a non-sRGB file gets one note.
+  Follow-up only if hand test 19a shows Photoshop asking about a missing profile at every open: embed a small sRGB profile
+  generated in code (no file, no crate; about 80 lines).
+- **D5 - "Other program...".** Kept minimal: an exe the user picks, started with the file; same reader, same rules, no
+  promises. Leaving it out saves little.
+- **D6 - trademark line.** About > Licences and Help get one sentence: "Adobe and Photoshop are either registered
+  trademarks or trademarks of Adobe in the United States and/or other countries. PhotoCraft belongs to its authors.
+  Wrapped Texture Editor is not affiliated with or endorsed by either." (Rev 2 had no such line for PhotoCraft; it now
+  covers both.)
+- **D7 - landing.** Hand tests 19, 21, 23, 24 join the landing list. If the user would rather land on the Photoshop tests
+  alone (PhotoCraft tests owed), that is the user's word to give.
+
+### 13.9 Package changes (rev 3)
+
+| Package | Gains | Why this size |
+|---|---|---|
+| **P5a** (K) reader | Files: new `psd/{mod,read,descriptor}.rs`, the test byte builder (`psd/testkit.rs`, test-only), the 55 fixtures + `LICENSE-psd-tools.txt` + README under `crates/wte_core/tests/fixtures/psd/photoshop/` (`.gitattributes` needs nothing). Content: the reader of 5.2 with every rule of 13.2 (modes and depth sentences, `lsct` types, `artb`, flags bit 4, the shape / fill rule, the NO_PIXELS rule and empty layers, mask flags bits 3 and 4, empty-rect and channel-order tolerance, all-default blending ranges of any count, flat files counted after `Lr16`, UTF-8 Pascal names, ICC description with the gray exemption, the 14 long keys, re-sync on padding), the walker (`masterFXSwitch` / `enab`, `lrFX` rule, `obj ` items), `forcing(smart_forces)`, `editor_native`. Tests: `k5_ps_*`, one per row of the 13.4 table (55 files) and one per synthetic row that needs no writer; the reader tests of the P5 list (fixtures of 8.3 against PhotoCraft's PNGs, ZIP / PSB / 1057 / 16-bit / refusal synthetics); the truncation sweep (capped, 13.4) and byte flips. ARCHITECTURE new 7.9 (reader subset), 5.28 (`psd::read`, `psd::descriptor`). Checker: arithmetic on lengths, the sweep and `k5_ps_sweep_large` under `--release`, one more CLI fixture, the 8 outside samples, no `Cargo.toml` / `Cargo.lock` change | the reader is the part that meets foreign bytes; it must be green before anything writes |
+| **P5b** (K) writer | Files: `psd/write.rs`, test-only `psd/strict.rs`, `tools/sticker/psd_check.py`. Content: `write_sticker` of 5.2 with the byte rules of 13.3 (resources 1005 / 1044 / 1057, lengths rounded to 4, 40-byte ranges, normalised pixels, deterministic bytes). Tests: writer -> reader round trip (the first bullet of the P5 list, incl. the empty layer); the strict walker calibrated on the 54 Photoshop-saved fixtures (all pass, with the 0-to-3 pad allowance) and then run on every file the writer produces; the walker rejects a seeded fault of each kind (wrong length, odd padding, a non-zero pad byte, 4 pad bytes); fixture f1 rebuilt with this writer (8.3). ARCHITECTURE 7.7, 7.9 (writer rules), 5.28 (`psd::write_sticker`). Checker: runs `psd_check.py` on the round-trip outputs and on the fixtures, diffs two writes of one sticker (identical bytes), confirms `export/psd.rs` and its golden test are untouched | one writer, two independent judges of its output |
+| **P5c** (K) link | Files: new `link.rs`, `document.rs` (`links`), `doc_stickers.rs` (`apply_link_update`, `link_state`, `prepare_link_file`), `project/*` (archive entries, the save rule, `LoadReport::links`, the optional `editor` field of `LinkEntry` with a serde default; no disk write at load). Content: 5.3-5.5 (core parts), `StickerLink::editor`, `SMART_FORCES_OUTSIDE_PHOTOCRAFT`, the three ids rules and the two matching passes of 13.2, duplicate ids, messages that take the editor name, the refused-file states, the injected-rename write with the "could not be replaced" result (13.1, A8). Tests: every remaining bullet of the P5 list (comparison rule on f1, the mapping table row by row, scale, the state table, `.bak.psd`, the save rule, `LoadReport::links`), the ids tests of 13.2, the Photoshop-like re-save simulation, each forcing feature -> Merged with its sentence for a Photoshop and for a PhotoCraft link (SMART differs), every refusal sentence on the badge state, the failed rename. ARCHITECTURE 5.28 (`link`), new 6.13, 7.1, 9.1. Checker: re-derives three rows of the mapping table by hand from fixture bytes, tries one more renumbering pattern the builder did not test, confirms nothing in `psd/` changed except by a noted reason | pure logic on top of a finished reader and writer |
+| **P9a** (U) link in the app | Everything of the rev 2 P9 section (watcher, `launch.rs` with `RealLauncher` / `StubLauncher`, `LinkSession`, `io_flows` archive / Save As aliases / load / close prompt, the rev 2 dialogs, the Sticker tab badge and menu), built **with the editor's name as a parameter of every text from the start**: `link/editor.rs` with the enum, `name()`, `key()` and PhotoCraft as the only discoverable editor; `stale_in_editor`; `command_for(editor, ..)`; `RealLauncher` sets `current_dir`. Tests and scenario `sticker_link` steps 1-9 and `sticker_link_path` as rev 2 (PhotoCraft stub). Checker as rev 2 | rev 2's package, unchanged in size; nothing is written twice in P9b |
+| **P9b** (U) editors | prefs (three paths, `default_editor`, old key still read); discovery for Photoshop (two keys, both registry views, injected reader); the "Edit in" button + arrow, submenus, the chooser dialog, Help > Editor locations...; the per-editor guard table and the switch-editor question; the editor-specific MaxCompat sentence; the status lines; the "could not be replaced" message (A8). Tests: discovery from the injected reader (App Paths plain path, the quoted command, 64 / 32 view, missing, a path that does not exist); the chooser appears only without a default and with two editors; `command_for` for Photoshop (spaces in "Program Files", non-ASCII file names) spawning nothing; **a Photoshop link with a "running child" shows no already-open question, a PhotoCraft one does**; switching editor on an opened link asks; an old prefs file loads. Scenario `sticker_link`: steps 1-3 and 6 run a second time with the stub as **Photoshop** and fixture bytes from 13.4 (`layers\type-layer.psd` as the added text layer, `effects\outside-stroke.psd` for Merged, `layers\smartobject-layer.psd` for Merged with the smart-object sentence, `layers-minimal\shape-layer.psd` for "needs a merged picture" with the Photoshop sentence asserted word for word). Checker: the spawn grep covers `Photoshop`; no text names an editor in a literal where the editor is variable | the editor list is new UI with its own tests |
+| **P10b** | the all-zero-alpha rule; `format_names()`, the log line, the "Nothing WTE can paste" text, Help > Clipboard contents... (in-memory clipboard in tests). Tests: 32-bit DIB with zero alpha is opaque, with mixed alpha keeps it; the dialog lists the in-memory formats | three small items |
+| **P11** | the handle caption; the once-per-session toast after a PSD-handle drag; `StickerLink::editor` set to the default editor at the handle press. Test: the toast fires once | two strings and a flag |
+| **P12** | "Edit Layer in <name>" with the same submenu and guard table; `PaintLink::editor`; the refusal sentences (colour mode, depth) on the layer badge. Scenario `layer_link` once with the Photoshop stub | reuses P9's pieces |
+| **P13** | Help: the table "In Photoshop you... / In WTE" (13.2), MaxCompat = Always, "Leave as is" for profiles, drop on the tab bar, Export Clipboard, the administrator note, no drag from Photoshop; HOW_TO_TEST chapter "Working with Photoshop" (hand tests 19-25, each with steps and the expected result); the trademark sentence (About > Licences, Help); README; `licenses\` gets `psd-tools-MIT.txt` **only if** fixtures ship outside the repo's test folder (they do not: the test folder's own licence file is enough, and the installer ships no fixture); `sticker_flow_path` uses the default-editor wording. Checker: greps that no text says "Edit in PhotoCraft" where the editor is variable, that "Adobe" appears only in the trademark sentence (`grep -I`, the fixture folder left out: 8.6 item 7), and that no image asset was added | docs only |
+| Gate | 8.6 item 6: nothing named `Photoshop.exe` or `photocraft.exe` was started (stub log, process list before / after); item 7: no logo or wordmark asset; item 9 / 10: hand tests 19-25 listed as reported or owed; the report names every A1-A8 as "unverified until the hand test" | - |
+
+ARCHITECTURE (section 10 of this plan): 1.12 is titled "Stickers and outside editors (PhotoCraft, Photoshop)"; new 8.16 is
+"Editor link"; 7.9 lists the reader subset of 13.2 and the writer rules of 13.3; 5.28 gets `psd::descriptor` and
+`StickerLink::editor`. Packages: P5a (7.9 reader, 5.28 `psd`), P5b (7.7, 7.9 writer), P5c (5.28 `link`, 6.13, 7.1, 9.1), P9a
+(8.x of the rev 2 P9 section), P9b (8.16 editor list), P12.

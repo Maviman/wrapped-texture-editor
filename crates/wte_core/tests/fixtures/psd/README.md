@@ -37,6 +37,14 @@ All canvases are 64 x 48, RGB. For every fixture `X.psd` there are:
    Bash; it writes `./out` (never run it inside the repository). The script holds every command line below, with `PC` =
    the exe above and `OUT` = the absolute path of `./out`.
 
+3. f1w (P5b, f1 rebuilt with the sticker writer `psd::write_sticker`): `f1w_wte_in.psd` is written by the ignored test
+   `psd::write_tests::k5_write_make_f1w_input` (to `target\sticker\p5b\f1w_wte_in.psd`, or to `WTE_F1W_OUT`); the
+   ordinary test `k5_write_f1w_input_is_the_committed_fixture` checks that the writer still writes exactly these bytes
+   (SHA-256 `708962ffa756d43566ed6cbd8a5d9a3022f97f4f2a62c7f6a0d2649c2819a202`). Copy `make_f1w.sh` and that file into an
+   empty scratch folder and run `sh make_f1w.sh` there (same exe, headless); it writes `./out`. Run twice on
+   2026-11-26: `f1w_pc.psd` had the same SHA-256 both times
+   (`98d121889f5c1a3d61412b20bb558f4b6957be4d95887a0196c257d228fd652f`).
+
 ## The fixtures
 
 `tools/sticker/psd_dump.py FILE` prints the structure quoted below (rect = left, top, right, bottom).
@@ -55,6 +63,7 @@ All canvases are 64 x 48, RGB. For every fixture `X.psd` there are:
 | f10 | `f10_f1.psb` | `convert f1_pc.psd f10_f1.psb` | version 2 (PSB), same layers and `lyid`s as f1_pc | PSB lengths |
 | f11 | `f11_clipped.psd` | blue disc, new layer `clipped` (yellow band), `layer.createClippingMask` | `clipped` has clipping byte 1 | `clipped` -> `clip` |
 | f12 | `f12_lyid_reuse.psd` (added by the P0 checker) | `run f1_pc.psd --cmd layer.select {layer 3} --cmd layer.delete --cmd layer.new.layer {name "pc new"}` + a cyan rect | `photo` `lyid` 1, `shape` `lyid` 3, `pc new` (new, on top) **`lyid` 2** = the deleted `text` layer's id: PhotoCraft gives a new layer the lowest free id, not one above the largest | STICKER_PLAN 5.4 "`lyid` reuse": a deleted WTE layer plus a new PhotoCraft layer that took its id |
+| f1w | `f1w_wte_in.psd` -> `f1w_pc.psd` (added in P5b; `make_f1w.sh`) | `convert f1w_wte_in.psd f1w_pc.psd` | in: the sticker writer, the same three pictures as f1 (`photo`, `text`, `shape`, 64 x 48) with `lyid` 1, 2, 3, id seed 3, resources 1005 1044 1057, layers normalised (RGB under alpha 0 cleared, rects trimmed to alpha > 0), 40-byte blending ranges, merged RLE 4 channels, layer count -3. out: PhotoCraft keeps `lyid` 1..3, names, order, **and every layer's rect and bytes** (its own re-trim finds nothing to trim) | the comparison rule of STICKER_PLAN 5.4 (review A11) on a file the sticker writer wrote: an untouched layer reads back byte for byte |
 | f13 | `f13_check_16bit.psb` (added by the P5a checker; `make_f13_check.sh`, same exe, run the same way) | `run --new {64x48 transparent, depth 16}` cyan rect (2,2 50x40), `select.rect` ellipse (10,6 36x28, feather 3), `layer.layerMask.revealSelection`, deselect, `layer.new.layer {name "Слой ü"}`, feathered pink ellipse (30,20 30x26, feather 5), `layer.setProps {opacity 0.6, blend "Screen"}`, `--out f13_check_16bit.psb`; then `convert` to `_merged.png` and `layersToFiles` | version 2 (PSB), depth 16, layers in `Lr16` (8-byte length), PackBits rows with 4-byte counts at 16 bits, layer count -2; `Layer 1` (`lyid` 1) with a user mask [6,2,50,40] default 0; the upper layer's Pascal name is `???? ?` and only `luni` holds the Cyrillic name; opacity 153, `scrn` | the reader on a 16-bit PSB with PackBits (the builder's fixtures cover 16-bit only through PSD f7 and Photoshop's ZIP-prediction `16bit5x5.psb`), `luni` over a lossy Pascal name, a mask at 16 bits |
 
 Every fixture's layer records carry `luni`, `lyid` and `iOpa` = 255 and the default blending ranges
@@ -65,8 +74,8 @@ Every fixture's layer records carry `luni`, `lyid` and `iOpa` = 255 and the defa
 - f4: the plan names `select.subject`; an elliptical `select.rect` with feather 2 was used instead so the mask is
   exact and does not depend on PhotoCraft's subject heuristics (the command is in v0.2.0's registry, the result would
   only be less predictable).
-- f1 is made from today's texture PSD writer (no `lyid`); P5 adds a second f1 written by the new sticker writer and
-  keeps this one (plan 8.3).
+- f1 is made from today's texture PSD writer (no `lyid`); P5b added the second f1 written by the new sticker writer
+  (`f1w_*`) and keeps this one (plan 8.3).
 - Not made with the CLI (no PhotoCraft exe here can make them; built by the tests' byte builder in P5, plan 8.3):
   resource 1057 with `hasRealMergedData = 0`, ZIP / ZIP-prediction channels and a ZIP merged image, the 13 PSB long
   keys beyond what f10 uses, CMYK and 32-bit headers, truncated and corrupted files.

@@ -322,7 +322,10 @@ API and job freshness (2.1, 4.4, 5.1, 5.2, 5.12, 5.14, 5.18, 5.20 "Stickers", 5.
 the `.wtes` sticker file (7.8), tests (9.1). (P5a; plan revision 3 adds Photoshop as a second outside editor, plan
 13): the PSD / PSB reader of the editor link, one reader for every writer (`psd::read`, the effects descriptor walker
 `psd::descriptor`; 2.1, 5.28, 7.9), the 55 Photoshop-saved fixtures with their MIT licence text and the PhotoCraft
-fixtures of P0 as its tests (9.1).
+fixtures of P0 as its tests (9.1). (P5b): the sticker PSD writer `psd::write_sticker`, one writer for every editor,
+laid out the way Photoshop lays out a file (5.28, 7.7, 7.9 "Writer"), judged by the reader, by the test-only strict
+structure walker `psd/strict.rs` (calibrated on the Photoshop-saved fixtures) and by `tools/sticker/psd_check.py`
+(Pillow); fixture f1 rebuilt with it and re-saved by PhotoCraft (`f1w_*`, 9.1).
 
 ---
 
@@ -401,6 +404,8 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `psd/read.rs` | stickers P5a | `psd::read` (7.9 "Reader"): header, resources 1057 / 1039, layer info (section or `Lr16`), records and tagged blocks (re-sync), channel decoding (raw, PackBits, ZIP, ZIP with prediction; 8 and 16 bit), the merged picture un-matted from white |
 | `psd/descriptor.rs` | stickers P5a | the action-descriptor walker and `effects_enabled` (`lfx2` / `lmfx`; 7.9) |
 | `psd/testkit.rs`, `psd/read_tests.rs`, `psd/fixture_tests.rs` | stickers P5a | test-only: the PSD byte builder and the test compositor; the `k5_synth_*` / `k5_desc_*` and `k5_ps_*` / `k5_pc_*` tests (9.1) |
+| `psd/write.rs` | stickers P5b | `psd::write_sticker` (7.9 "Writer"): `StickerPsd`, `StickerPsdLayer`, `normalise`, `composite`; resources 1005 / 1044 / 1057, records with masks, clipping, `luni` / `lyid`, PackBits channels, the merged picture matted on white |
+| `psd/strict.rs`, `psd/write_tests.rs` | stickers P5b | test-only: the strict structure walker (7.9 "Strict walker") and the `k5_write_*` / `k5_strict_*` tests (9.1) |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -3565,10 +3570,10 @@ Part 4 (P3b; 5.20 "Sticker pixel edits", 5.18, 6.7). The pixel edits are `Docume
 (`PixelTarget`, `PixelData`, `StickerPatch`, `StickerBrush`, `StickerCheckpoint` re-exported at the crate root); the
 generic tile patches are `history::TilePatchOf<BPP>` over `pixel::TileBuf` (5.5, 5.18).
 
-### 5.28 `psd/` (stickers; P5a = the reader; P5b adds the writer, P5c `link.rs`)
+### 5.28 `psd/` (stickers; P5a = the reader; P5b = the writer; P5c adds `link.rs`)
 
-The PSD / PSB reader of the editor link (STICKER_PLAN 5.2, 13.2). One reader for every writer: it never branches on
-who wrote a file. Pure, headless, deterministic; never panics on any input. `export/psd.rs` (the texture exporter, 7.7)
+The PSD / PSB reader and writer of the editor link (STICKER_PLAN 5.2, 13.2, 13.3). One reader for every writer: it
+never branches on who wrote a file; one writer for every editor. Pure, headless, deterministic; never panics on any input. `export/psd.rs` (the texture exporter, 7.7)
 is a separate writer and is unchanged; the reader shares only its PackBits row decoder (`export::packbits`). Types are
 reached through the module (`wte_core::psd::PsdDoc`, ...), not re-exported at the crate root.
 
@@ -3606,7 +3611,24 @@ pub enum PsdRefusal { Bitmap, Indexed, Cmyk, Multichannel, Duotone, Lab, OtherMo
 impl PsdRefusal { pub fn sentence(&self, name: &str) -> String; }   // "<name> is in CMYK Color mode. In Photoshop
                                                                     // choose Image > Mode > RGB Color and save again."
 pub enum PsdError { Truncated /* half-written */, Corrupt(&'static str), Unsupported(PsdRefusal),
-                    TooLarge { width: u32, height: u32 } }   // thiserror, Clone + PartialEq
+                    TooLarge { width: u32, height: u32 },
+                    Invalid(&'static str) /* writer: an input a PSD cannot hold */,
+                    Io { kind: std::io::ErrorKind, message: String } /* writer: the output failed */ }
+                                                             // thiserror, Clone + PartialEq; PsdError::io(io::Error)
+
+// psd/write.rs (P5b; 7.9 "Writer")
+pub struct StickerPsdLayer { pub name: String, pub lyid: u32 /* >= 1, unique */, pub pixels: CroppedBuf /* straight
+    RGBA8 in canvas pixels, may reach outside the canvas */, pub mask: Option<PsdMask> /* canvas pixels; `rendered`
+    not written */, pub clipped: bool /* ignored on the bottom layer */, pub visible: bool, pub opacity: u8,
+    pub blend: BlendMode }
+pub struct StickerPsd { pub size: [u32; 2] /* 1..=30000 */, pub layers: Vec<StickerPsdLayer> /* bottom to top */,
+                        pub id_seed: u32 /* resource 1044 = max(id_seed, largest lyid); next_lyid - 1 */ }
+pub const MAX_SIDE: u32 = 30_000;  pub const WRITER_NAME: &str = "Wrapped Texture Editor";   // resource 1057
+pub fn write_sticker<W: Write>(w: W, psd: &StickerPsd) -> Result<(), PsdError>;   // nothing written on Invalid /
+pub fn write_sticker_to_vec(psd: &StickerPsd) -> Result<Vec<u8>, PsdError>;       // TooLarge; deterministic bytes
+pub fn normalise(pixels: &CroppedBuf) -> CroppedBuf;   // zero RGB under alpha 0, trim to alpha > 0 (empty -> empty);
+                                                       // the comparison rule of 5.4 normalises a read layer the same way
+pub fn composite(psd: &StickerPsd) -> Result<PixelBuf, PsdError>;   // the merged picture the file stores (straight)
 
 // psd/descriptor.rs
 pub enum Value { Descriptor(Descriptor), List(Vec<Value>), Bool(bool), Other }
@@ -3617,6 +3639,8 @@ pub fn parse_effects_block(data: &[u8]) -> Result<Descriptor, DescriptorError>; 
 pub fn effects_enabled(data: &[u8]) -> bool;    // master switch on and some effect without enab == false;
                                                 // unreadable = true (the safe side)
 ```
+
+`psd::strict` (test-only, P5b) is the strict structure walker of 7.9: `walk(bytes) -> Result<Walk, String>`.
 
 The link logic of P5c asks `forcing(SMART_FORCES_OUTSIDE_PHOTOCRAFT && editor != "photocraft")`: empty = the file
 comes back layer by layer; otherwise as one merged picture when `merged` is `Some`, else the state "needs a merged
@@ -5461,7 +5485,9 @@ options):
 ### 7.7 PSD writer (`export/psd.rs`) [C6]
 
 The sticker link reads PSD / PSB files with its own reader (`psd/read.rs`, 7.9; stickers P5a) and writes them with its
-own writer (`psd/write.rs`, P5b); this texture exporter and its strict test reader are not used for stickers.
+own writer (`psd/write.rs`, 7.9 "Writer"; stickers P5b); this texture exporter and its strict test reader are not used
+for stickers (the old `read_psd` refuses masks, blending ranges, clipping and non-ASCII Pascal names by design), and
+neither changes for them: the golden test of this writer stays as it is. The two writers share only `export::packbits`.
 
 All integers big-endian. 8-bit RGB, PSD version 1. Reject width or height above 30000 (`PsdDimension`). Sizes are computed in `u64`;
 if the layer section or the file would exceed `u32::MAX` return `PsdTooLarge`.
@@ -5540,7 +5566,7 @@ document's store (identical bytes are shared), maps the ids and adds the sticker
 `add_sticker` (a new id, fresh picture versions, one entry "Add Sticker"); the file's styles stay with the caller.
 `Document::sticker_wtes(id, styles)` writes the file of a sticker of the document with its finished picture as preview.
 
-### 7.9 The PSD subset of the editor link (`psd/`, stickers P5a; STICKER_PLAN 5.2, 13.2)
+### 7.9 The PSD subset of the editor link (`psd/`, stickers P5a reader, P5b writer; STICKER_PLAN 5.2, 13.2, 13.3)
 
 **Reader** (`psd::read`; P5a). All integers big-endian. The walk is one pass, front to back; running out of bytes at
 the top level is `Truncated` (a half-written file is never a picture), running out inside a part of known length is
@@ -5562,7 +5588,35 @@ the top level is `Truncated` (a half-written file is never a picture), running o
 MASK_EXTRA, FILL_OPACITY, BLEND_OTHER, BLEND_IF, NO_PIXELS of visible layers, plus SMART when asked. TEXT, FILL with
 pixels, SMART on a PhotoCraft link and empty layers do not force.
 
-**Writer**: P5b (`psd::write_sticker`, STICKER_PLAN 13.3).
+**Writer** (`psd::write_sticker`; P5b; STICKER_PLAN 5.2, 13.3). One writer for every editor; 8-bit RGB, PSD version
+1, PackBits; laid out the way Photoshop's own files are (the fixtures of 13.4 were measured). All integers big-endian.
+
+| Part | Rule |
+|---|---|
+| Input | canvas 1..=30000 a side (`Invalid` for 0, `TooLarge` above); at most 32767 layers; every `lyid` >= 1 and unique; pixels and mask values match their rectangles; a layer or mask at most 30000 wide after trimming (so a PackBits row always fits its 16-bit count). Nothing is written when a check fails |
+| Normalising | every layer: RGB of alpha-0 pixels set to 0, rectangle trimmed to alpha > 0 (`normalise`; an empty layer gets the rectangle 0, 0, 0, 0). Every mask: trimmed to the values that differ from its default (a mask of only its default has the empty rectangle). The part of a layer outside the canvas is kept. The bottom layer is written unclipped |
+| Header | `8BPS`, version 1, 6 zero bytes, channels 3 (opaque merged picture) or 4, height, width, depth 8, mode 3; colour mode data length 0 |
+| Resources | `8BIM`, id, empty Pascal name (2 zero bytes), length, data padded to even: **1005** (72 dpi both ways, pixels per inch, shown in inches: `00 48 00 00 00 01 00 01` twice), **1044** id seed = max(`id_seed`, largest `lyid`), **1057** version info (version 1, `hasRealMergedData` 1, writer and reader name "Wrapped Texture Editor" as count + UTF-16BE without terminator, file version 1; 105 bytes + 1 pad). No ICC profile, no thumbnail, no XMP |
+| Layer section | section length and layer info length both multiples of 4 (the layer info padded with 0 to 3 zero bytes after the last channel's data); the layer count **negative when the merged picture has a transparency channel**; with no layers the layer info length is 0. Global layer mask info of length 0, no global blocks |
+| Record | rect (top, left, bottom, right); 4 channels -1, 0, 1, 2 (+ -2 with a mask), each length counting the 2-byte compression word; `8BIM`, blend key (`norm`, `mul `, `scrn`, `over`, `lddg`, `dark`, `lite`), opacity, clipping 0 / 1, flags `0x08` (+ `0x02` hidden), filler 0; extra data: mask data length 0 or 20 (rect, default, flags 0 or `0x02` disabled, 2 zero bytes), blending ranges **always 40 bytes** (5 default pairs `00 00 FF FF 00 00 FF FF`), the Pascal name (Windows-1252, `?` for any other character and for control characters, at most 255 bytes, zero-padded so that length byte + name is a multiple of 4), `luni` (count + UTF-16BE, block length padded to 4) and `lyid` (4 bytes) |
+| Channel data | per record in the record's order: compression 1 with the 2-byte row counts first then the PackBits rows (`export::packbits::encode_row`), or compression 0 and no bytes for an empty rectangle; the mask channel over the trimmed mask rectangle |
+| Merged picture | `composite`: WTE's blend kernels, layer opacity, the user mask unless disabled, clipping to the nearest unclipped layer below (alpha times the base's alpha times its mask; a hidden base hides its clipped layers, as the sticker render 6.10); compression 1, every row count of every channel first, then the rows; 3 channels when every pixel is opaque, else 4 with the colours matted on white (`(c a + 255 (255 - a) + 127) / 255`) and the transparency last. Always written, always real |
+| Bytes | a pure function of the input: rows are PackBits-encoded in parallel and collected in order, no time stamps; two writes (and a write on a one-thread pool) are byte-identical |
+
+**Strict walker** (`psd/strict.rs`, test-only; 13.3). Walks a file front to back and fails on any overlap or slack:
+resource names and data padded to even with zeros and filling the resource section exactly; section and layer info
+lengths multiples of 4; per record: at most 56 channels, ids >= -3, channel lengths >= 2, clipping 0 / 1, filler 0,
+mask data 0, 20 or the long form (real flags, background and rectangle, then the parameters of flags bit 4) with at most
+3 zero pad bytes, blending ranges in whole 8-byte pairs, the Pascal name padded to 4 with zeros, layer blocks whose
+lengths are multiples of 4 filling the extra data exactly; every channel against its rectangle (the user mask's
+rectangle for -2, the real mask's for -3): raw size exact, PackBits counts adding up to the channel and each row
+decoding to exactly one row, ZIP streams inflating to exactly the channel and ending where it ends; global blocks
+(`Lr16` / `Lr32` / `Layr` walked as layer info) each followed by the zero bytes that pad its length to 4; the merged
+picture ends at the last byte of the file. **One allowance:** 0 to 3 zero bytes after the channel data at the end of the
+layer info, and again at the end of the layer-and-mask section. Calibration: all 54 Photoshop-saved fixtures pass
+(27 of them use the allowance after the layer info, none at the section end). PhotoCraft v0.2.0's own files pass only
+when their lengths happen to be multiples of 4 (it rounds neither the section nor an `lfx2` block): recorded, not a
+fault, since PhotoCraft's reader and WTE's accept them.
 
 ## 8. `wte_app` architecture
 
@@ -8689,6 +8743,28 @@ and text layers (exactly those two files, each = `dense(layer)`).
   P5a checker: `k5_check_layer_count_floor_is_the_smallest_record` (records of 43 / 44 bytes are read),
   `k5_check_pc_16bit_psb_against_photocrafts_pngs` (fixture f13, a 16-bit PSB with PackBits rows, against PhotoCraft's
   PNGs) and the ignored `k5_check_outside_samples` (the 8 samples of 13.4 outside the repository, when present).
+- Branch `stickers`, P5b (STICKER_PLAN 7 "P5", 13.3, 13.9; `psd::write_tests`, every written file also through the
+  strict walker and through `read` with no re-sync): `k5_write_roundtrip_every_layer_feature` (names non-ASCII and over
+  31 bytes, an emoji, hidden, opacity, the seven blends, a mask with default 0, a clipped layer, a layer partly outside
+  the canvas, an empty layer; read back with the normalised pixels, the full `luni` name, `lyid`s, no feature, Layers
+  mode; the reader's composite of what was read = the writer's `composite` exactly; the stored merged picture within
+  the un-matting bound), `k5_write_empty_layer_reads_as_an_empty_picture_layer_in_layers_mode`,
+  `k5_write_opaque_merged_has_three_channels_and_a_positive_count` (comes back exactly), `k5_write_scales_1_2_4`,
+  `k5_write_normalises_layer_pixels_and_masks` (RGB under alpha 0 and the rectangle do not change the bytes; masks
+  trimmed; an all-default disabled mask), `k5_write_bytes_are_deterministic` (twice, and on a one-thread pool),
+  `k5_write_byte_rules_of_13_3` (header, resources 1005 / 1044 / 1057 byte for byte, the seed raised to the largest
+  `lyid`, lengths multiples of 4, flags, filler, 40-byte ranges, channel order, no global block, RLE merged),
+  `k5_write_pascal_names_are_windows_1252`, `k5_write_clipping_and_hidden_bases`,
+  `k5_write_refuses_what_a_psd_cannot_hold_and_writes_nothing` (and `Io` keeps its kind);
+  `k5_strict_accepts_every_photoshop_fixture` (54 files; 27 use the pad allowance), `k5_strict_on_the_photocraft_fixtures`
+  (which pass, which fail and why), `k5_strict_rejects_a_seeded_fault_of_each_kind` (a wrong channel / extra length,
+  resource 1057 without its pad byte, a Pascal name padded to 2, a non-zero pad byte, 4 pad bytes, a trailing byte, a
+  truncated merged picture); fixture f1 rebuilt with this writer: `k5_write_f1w_input_is_the_committed_fixture` (the
+  writer's bytes for f1 = `f1w_wte_in.psd`), `k5_write_f1w_photocraft_resave_keeps_ids_and_normalised_pixels` (after
+  PhotoCraft v0.2.0's re-save `f1w_pc.psd`: `lyid` 1..3, names and order kept, every layer's rectangle and bytes equal
+  the written normalised ones, merged picture and PhotoCraft's PNGs within the un-matting bound); ignored:
+  `k5_write_make_f1w_input`, `k5_write_dump_for_psd_check` (inputs of `tools/sticker/psd_check.py`) and
+  `perf_psd_write_and_read_2048_five_layers` (8.4, `--release`).
 
 ### 9.2 `wte_app` tests
 
@@ -9231,3 +9307,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | P3b | pixel edits: generic `TilePatchOf` / `TileBackupOf` over `TileBuf`, `Edit::StickerPixels`, sticker strokes (picture and mask, selection, pressure), `replace_sticker_pixels`, promotion inside an edit, the one copy per stroke, limits, `convert_text_stamp`, Revert (`sticker_checkpoint`, `restore_sticker_state`), `rebake_sticker_users` | `crates/wte_core/src/{doc_sticker_edits,doc_sticker_edits_tests,history,pixel,doc_stickers,document}.rs`, `sticker/mod.rs` | the history test module unchanged; `TilePatch` read for any place that still assumes 4 bytes; scenarios `undo`, `paint2d`, `paint3d` against the P0 baseline |
 | P4 | project format 4: sticker and style entries, sticker PNGs, `required_reader` 4, load degradation (`StickerLost`, `StickerPixelsLost`, `StickerFontFallback`), save reuse by picture version, `v3_to_v4`, Extract writes sticker pictures; the `.wtes` file | `crates/wte_core/src/project/{mod,manifest,save,load,migrate,sticker_entries,sticker_tests}.rs`, `sticker/file.rs`, `doc_build.rs`, `error.rs`, `tests/project_roundtrip.rs`, `tests/fixtures/project/` | a v4 manifest with a sticker through a copy of the P0 version check ("made by a newer version"); the layer PNG entries of a re-saved v3 fixture byte for byte |
 | P5a | the PSD / PSB reader of the editor link (5.2, 13.2), the effects descriptor walker, the 55 Photoshop fixtures with their licence, the test byte builder | `crates/wte_core/src/psd/{mod,read,descriptor,testkit,read_tests,fixture_tests}.rs`, `lib.rs`, `tests/fixtures/psd/photoshop/` | arithmetic on lengths, the sweep and `k5_ps_sweep_large` under `--release`, one more CLI fixture, the 8 outside samples, no `Cargo.toml` / `Cargo.lock` change |
+| P5b | the sticker PSD writer (5.2, 13.3), the strict structure walker, the Pillow check, fixture f1 rebuilt with the writer (`f1w_*`) | `crates/wte_core/src/psd/{write,strict,write_tests,mod}.rs`, `tests/fixtures/psd/{f1w_*,make_f1w.sh,README.md}`, `tools/sticker/psd_check.py` | `psd_check.py` on the round-trip outputs and the fixtures, two writes of one sticker diffed, `export/psd.rs` and its golden test untouched |

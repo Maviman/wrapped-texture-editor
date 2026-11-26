@@ -462,12 +462,14 @@ pub fn unicode(s: &str) -> Vec<u8> {
 }
 
 /// Straight-alpha composite of the visible picture layers of `doc` on a transparent canvas: WTE's own blend kernel,
-/// layer opacity, the user mask (unless disabled) and clipping to the nearest unclipped layer below. Layers without
-/// pixels are skipped. The test oracle for "composite = merged".
+/// layer opacity, the user mask (unless disabled) and clipping to the nearest unclipped layer below; a hidden base
+/// hides the layers clipped to it (as Photoshop and the sticker render do; P5b). Layers without pixels are skipped.
+/// The test oracle for "composite = merged".
 pub fn composite(doc: &PsdDoc) -> PixelBuf {
     let [w, h] = doc.size;
     let mut out = PixelBuf::new(w, h);
     let mut base_alpha: Option<Vec<u8>> = None;
+    let mut base_visible = true;
     for layer in &doc.layers {
         let Some(px) = layer.pixels.as_ref() else {
             if !layer.clipped {
@@ -487,14 +489,18 @@ pub fn composite(doc: &PsdDoc) -> PixelBuf {
                 colour[i] = p;
             }
         }
-        if layer.clipped {
+        if layer.clipped && base_alpha.is_some() {
+            if !base_visible {
+                continue;
+            }
             if let Some(base) = &base_alpha {
                 for (c, b) in cov.iter_mut().zip(base) {
                     *c = ((*c as u32 * *b as u32 + 127) / 255) as u8;
                 }
             }
-        } else {
+        } else if !layer.clipped {
             base_alpha = Some(cov.clone());
+            base_visible = layer.visible;
         }
         if !layer.visible {
             continue;

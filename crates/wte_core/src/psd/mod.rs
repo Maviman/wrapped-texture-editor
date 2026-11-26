@@ -1,27 +1,38 @@
-//! PSD and PSB reading for the editor link (stickers P5a; STICKER_PLAN 5.2, 13.2; ARCHITECTURE 5.28, 7.9).
+//! PSD and PSB reading and writing for the editor link (stickers P5a reader, P5b writer; STICKER_PLAN 5.2, 13.2,
+//! 13.3; ARCHITECTURE 5.28, 7.9).
 //!
 //! One reader for every writer (PhotoCraft, Photoshop, GIMP, ...): it does not branch on who wrote a file. It returns
 //! the layers bottom to top as straight RGBA8, the user masks, the merged picture un-matted from white, and a set of
 //! [`PsdFeatures`] per layer that says what WTE cannot draw. The link logic (P5c) decides from
 //! [`PsdDoc::forcing`] whether a file comes back layer by layer or as one merged picture.
 //!
+//! The writer ([`write_sticker`]) writes a sticker as 8-bit RGB layers with `luni` / `lyid`, masks, clipping and a
+//! real merged picture, byte for byte the way Photoshop lays a file out (13.3); its output is checked in the tests by
+//! the reader, by a strict structure walker (`strict.rs`, test-only) and by `tools/sticker/psd_check.py` (Pillow).
+//!
 //! `export/psd.rs` (the texture exporter) is a separate writer with its own strict test reader and is not used here,
-//! except for the PackBits row decoder.
+//! except for the PackBits row coder.
 //!
 //! Nothing here panics on any input: every length is checked against the bytes that remain, a half-written file is
 //! an error (never a picture), and allocations are bounded by the bytes that could produce them.
 
 pub mod descriptor;
 pub mod read;
+pub mod write;
 
 #[cfg(test)]
 mod fixture_tests;
 #[cfg(test)]
 mod read_tests;
 #[cfg(test)]
+pub(crate) mod strict;
+#[cfg(test)]
 pub(crate) mod testkit;
+#[cfg(test)]
+mod write_tests;
 
 pub use read::read;
+pub use write::{StickerPsd, StickerPsdLayer, write_sticker, write_sticker_to_vec};
 
 use crate::layer::BlendMode;
 use crate::math::IRect;
@@ -344,7 +355,20 @@ pub enum PsdError {
     /// A well-formed file of a kind WTE does not read; [`PsdRefusal::sentence`] says what to do.
     #[error("unsupported PSD file: {0:?}")]
     Unsupported(PsdRefusal),
-    /// The canvas is larger than [`PsdLimits::max_side`].
+    /// The canvas is larger than [`PsdLimits::max_side`] (reading) or than 30000 a side (writing).
     #[error("the PSD canvas is too large ({width} x {height})")]
     TooLarge { width: u32, height: u32 },
+    /// [`write_sticker`] was given something a PSD cannot hold (the reason in plain words).
+    #[error("the sticker cannot be written as a PSD file ({0})")]
+    Invalid(&'static str),
+    /// [`write_sticker`]'s output failed.
+    #[error("the PSD file could not be written: {message}")]
+    Io { kind: std::io::ErrorKind, message: String },
+}
+
+impl PsdError {
+    /// An output error, keeping its kind.
+    pub fn io(e: std::io::Error) -> PsdError {
+        PsdError::Io { kind: e.kind(), message: e.to_string() }
+    }
 }

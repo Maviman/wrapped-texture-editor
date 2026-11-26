@@ -9,7 +9,7 @@ use super::testkit::*;
 use super::*;
 use crate::layer::BlendMode;
 
-fn fixture_dir() -> PathBuf {
+pub(super) fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/psd")
 }
 
@@ -22,7 +22,7 @@ fn ps(rel: &str) -> PsdDoc {
 }
 
 /// The 55 repository fixtures (13.4, `repo_set.txt`).
-const PS_FIXTURES: [&str; 55] = [
+pub(super) const PS_FIXTURES: [&str; 55] = [
     "layers/pixel-layer.psd",
     "layers-minimal/pixel-layer.psd",
     "layers/type-layer.psd",
@@ -532,14 +532,14 @@ fn pc(name: &str) -> PsdDoc {
     read(&bytes, &PsdLimits::default()).unwrap_or_else(|e| panic!("{name}: {e:?}"))
 }
 
-fn png(path: PathBuf) -> PixelBuf {
+pub(super) fn png(path: PathBuf) -> PixelBuf {
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
     PixelBuf::from_raw(img.width(), img.height(), img.into_raw()).unwrap()
 }
 
 /// PhotoCraft's per-layer PNGs, bottom to top (the files count from the top layer).
-fn pc_layer_pngs(stem: &str) -> Vec<(String, PixelBuf)> {
+pub(super) fn pc_layer_pngs(stem: &str) -> Vec<(String, PixelBuf)> {
     let dir = fixture_dir().join(format!("{stem}_layers"));
     let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     names.sort();

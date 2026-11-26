@@ -143,7 +143,7 @@ pub(super) fn other(n: u32) -> FileStamp {
 }
 
 pub(super) fn cx<'a>(editor: (&'a str, &'a str), blobs: &'a [(crate::ids::BlobId, [u32; 2])]) -> ImportContext<'a> {
-    ImportContext { editor_key: editor.0, editor_name: editor.1, file_name: "Logo_k1.psd", blob_sizes: blobs }
+    ImportContext { editor_key: editor.0, editor_name: editor.1, file_name: "Logo_k1.psd", blob_sizes: blobs, layer_hashes: &[] }
 }
 
 /// `import` of `psd` against the current sticker and link of `sid`.
@@ -196,7 +196,10 @@ fn k5_link_export_and_untouched_import_give_the_same_sticker() {
     let made = import_now(&doc, sid, &psd, PS).unwrap();
     assert!(all_untouched(&made.outcomes), "{:?}", made.outcomes);
     assert_eq!(made.sticker, before);
-    assert_eq!(made.layer_map, link.layer_map);
+    // `import` is pure: the sync info of each entry (`wte`) is the document's to fill (check-P5c).
+    let without_wte = |m: &[LinkLayer]| m.iter().map(|e| LinkLayer { wte: None, ..e.clone() }).collect::<Vec<_>>();
+    assert!(made.layer_map.iter().all(|e| e.wte.is_none()) && link.layer_map.iter().all(|e| e.wte.is_some()));
+    assert_eq!(made.layer_map, without_wte(&link.layer_map));
     let undo = doc.history.undo_len();
     let applied = doc.apply_link_update(sid, &psd, FileStamp::of_bytes(&bytes, None), "Photoshop", "Logo_k1.psd").unwrap();
     assert_eq!(applied, LinkApplied::Updated { mode: LinkMode::Layers, toast: None, profile_note: None, log: Vec::new() });
@@ -485,7 +488,7 @@ fn k5_link_ids_rewritten_to_unknown_values_or_missing_are_matched_by_content() {
 }
 
 /// The test sticker linked, then a layer deleted and one added in WTE and sent again: map ids 1, 2, 4, 5.
-fn renumber_doc() -> (Document, StickerId, Vec<u8>) {
+pub(super) fn renumber_doc() -> (Document, StickerId, Vec<u8>) {
     let (mut doc, sid, _) = linked_doc();
     make_link(&mut doc, sid, EDITOR_PHOTOSHOP);
     let shape = by_name(doc.sticker(sid).unwrap(), "shape").id;
@@ -636,7 +639,7 @@ fn k5_link_a_photoshop_like_resave_keeps_every_layer() {
 // ----- scale (review B4) -----
 
 /// The test sticker with a picture shown at half size: link scale 2.
-fn scaled_doc() -> (Document, StickerId) {
+pub(super) fn scaled_doc() -> (Document, StickerId) {
     let (mut doc, sid, _) = linked_doc();
     doc.set_sticker(
         StickerRef::Id(sid),
@@ -997,7 +1000,7 @@ fn archive_bytes(project: &Path, entry: &str) -> Option<Vec<u8>> {
 }
 
 /// A saved project with a link whose file is written in its links folder.
-fn saved_link_project(name: &str) -> (PathBuf, PathBuf, Document, StickerId, Vec<u8>) {
+pub(super) fn saved_link_project(name: &str) -> (PathBuf, PathBuf, Document, StickerId, Vec<u8>) {
     let dir = temp_dir(name);
     let project = dir.join("Car.wtep");
     let (mut doc, sid, _) = linked_doc();
@@ -1151,6 +1154,7 @@ fn k5_link_entries_that_cannot_be_links_are_left_out() {
                 size: [0, 0],
                 pixels_crc: 0,
                 mask_crc: None,
+                wte: None,
             })
             .collect(),
         next_lyid: 1,

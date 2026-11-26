@@ -17,6 +17,8 @@ pub mod map;
 pub mod texts;
 
 #[cfg(test)]
+mod check_tests;
+#[cfg(test)]
 mod fixture_tests;
 #[cfg(test)]
 mod tests;
@@ -131,8 +133,20 @@ pub fn unix_ns(t: std::time::SystemTime) -> Option<u64> {
     t.duration_since(std::time::UNIX_EPOCH).ok().and_then(|d| u64::try_from(d.as_nanos()).ok())
 }
 
+/// What the sticker layer of a map entry was when the link was last synced (check-P5c): the hash of what makes its
+/// pixels apart from its place (`Document::link_layer_hash`: content, mask, adjustments, scale, rotation) and its
+/// place relative to the artboard's top-left. An import compares the sticker's current layer with it, so a layer
+/// that changed in WTE since the sync (an undo of "Update Linked Sticker", or a conflict answered with "Take
+/// <editor>'s version") takes the file's pixels and place instead of keeping WTE's change under a "linked" badge.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct LinkLayerWte {
+    pub hash: u64,
+    /// `transform.translate - artboard top-left` of the layer at the sync.
+    pub at: [f32; 2],
+}
+
 /// One PSD layer id <-> sticker layer pair, with what WTE wrote or read for it (normalised as in 5.4).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LinkLayer {
     pub lyid: u32,
     /// The sticker layer; [`PLACEHOLDER_LAYER`] for the empty layer written for a sticker without layers.
@@ -147,6 +161,8 @@ pub struct LinkLayer {
     pub pixels_crc: u32,
     /// CRC-32 of the user mask over the layer's rectangle (and its disabled flag); `None` without a mask.
     pub mask_crc: Option<u32>,
+    /// The sticker layer as it was at the sync (filled by `Document`; `None` = not known, the layer is trusted).
+    pub wte: Option<LinkLayerWte>,
 }
 
 /// Why the last file could not be applied; shown on the badge while the file still has this content.

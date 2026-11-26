@@ -153,6 +153,7 @@ pub fn export(input: &StickerRenderInput, scale: u32, previous: Option<&StickerL
             size: [pixels.rect.width(), pixels.rect.height()],
             pixels_crc: crc32fast::hash(&pixels.data),
             mask_crc: mask_crc(mask.as_ref(), pixels.rect),
+            wte: None,
         });
         layers.push(StickerPsdLayer {
             name: name.to_owned(),
@@ -189,6 +190,10 @@ pub struct ImportContext<'a> {
     pub file_name: &'a str,
     /// Decoded sizes of the sticker's blob pictures (a mask change on an unedited picture keeps the picture).
     pub blob_sizes: &'a [(BlobId, [u32; 2])],
+    /// `Document::link_layer_hash` of the sticker's current layers (check-P5c): a matched layer whose hash differs
+    /// from its map entry's `wte` changed in WTE since the sync and takes the file's pixels. A layer missing here (or
+    /// an entry without `wte`) is trusted.
+    pub layer_hashes: &'a [(StickerLayerId, u64)],
 }
 
 /// Why [`import`] applied nothing.
@@ -286,6 +291,7 @@ impl Read<'_> {
             size: self.size,
             pixels_crc: self.crc,
             mask_crc: self.mask_crc,
+            wte: None,
         }
     }
 }
@@ -611,7 +617,21 @@ fn layers(psd: &PsdDoc, sticker: &StickerDoc, link: &StickerLink, cx: &ImportCon
         let layer = match old {
             Some((e, by_name, old)) => {
                 let mut l = old.clone();
-                let ch = if by_name { Change::Pixels } else { change(r, e) };
+                let mut ch = if by_name { Change::Pixels } else { change(r, e) };
+                // check-P5c: the map entry describes the layer as it was at the sync. A layer changed in WTE since
+                // then (an undo of an update, a conflict answered with "Take <editor>'s version") takes the file's
+                // pixels; one only moved in WTE goes back to the place the file has for it.
+                if ch != Change::Pixels
+                    && let Some(w) = e.wte
+                    && let Some(&(_, now)) = cx.layer_hashes.iter().find(|x| x.0 == l.id)
+                {
+                    let tl = Vec2::new(sticker.artboard.x0 as f32, sticker.artboard.y0 as f32);
+                    if now != w.hash {
+                        ch = Change::Pixels;
+                    } else if (l.transform.translate - tl).to_array() != w.at {
+                        l.transform.translate = tl + Vec2::from_array(w.at);
+                    }
+                }
                 let delta = (Vec2::new(r.origin[0] as f32, r.origin[1] as f32) - Vec2::new(e.origin[0] as f32, e.origin[1] as f32)) / s;
                 match ch {
                     Change::Untouched => outcomes.push(LayerOutcome::Untouched(l.id)),

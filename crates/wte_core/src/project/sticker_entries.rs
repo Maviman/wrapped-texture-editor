@@ -666,7 +666,7 @@ pub struct FileStampEntry {
 }
 
 /// One PSD layer id <-> sticker layer pair of a link.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LinkLayerEntry {
     pub lyid: u32,
     /// `0` for the placeholder layer of a sticker without layers.
@@ -679,6 +679,16 @@ pub struct LinkLayerEntry {
     pub pixels_crc: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_crc: Option<u32>,
+    /// The sticker layer at the sync (check-P5c, `link::LinkLayerWte`); absent = the layer is trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wte: Option<LinkLayerWteEntry>,
+}
+
+/// `link::LinkLayerWte` in the manifest.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct LinkLayerWteEntry {
+    pub hash: u64,
+    pub at: [f32; 2],
 }
 
 impl LinkEntry {
@@ -710,6 +720,7 @@ impl LinkEntry {
                     size: e.size,
                     pixels_crc: e.pixels_crc,
                     mask_crc: e.mask_crc,
+                    wte: e.wte.map(|w| LinkLayerWteEntry { hash: w.hash, at: w.at }),
                 })
                 .collect(),
             next_lyid: link.next_lyid,
@@ -764,6 +775,10 @@ impl LinkEntry {
                     size: e.size,
                     pixels_crc: e.pixels_crc,
                     mask_crc: e.mask_crc,
+                    wte: e
+                        .wte
+                        .filter(|w| w.at.iter().all(|v| v.is_finite()))
+                        .map(|w| crate::link::LinkLayerWte { hash: w.hash, at: w.at }),
                 })
                 .collect(),
             next_lyid: self.next_lyid.max(top.saturating_add(1)).max(1),

@@ -102,10 +102,12 @@ pub fn write_link_file(target: &Path, bytes: &[u8], io: &mut dyn LinkFileIo) -> 
         return Err(io_err(e));
     }
     // The old file becomes the backup only once the new one is in place: copy it aside first.
+    // An editor that holds the PSD without read sharing makes this copy fail before the rename is tried: the same
+    // "could not be replaced" result (check-P5c), not a disk error.
     let had_old = target.exists();
     if had_old && let Err(e) = std::fs::copy(target, &bak_tmp) {
         cleanup(&[&tmp, &bak_tmp]);
-        return Err(io_err(e));
+        return Err(if is_lock_error(&e) { LinkWriteError::Locked { file: file.clone() } } else { io_err(e) });
     }
     let crc = crc32fast::hash(bytes);
     io.before_rename(crc);

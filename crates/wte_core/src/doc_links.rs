@@ -20,8 +20,8 @@ use crate::error::EditError;
 use crate::ids::{BlobId, StickerId};
 use crate::link::map::import_fitted;
 use crate::link::{
-    FileStamp, ImportContext, ImportProblem, LinkFile, LinkImport, LinkMode, LinkProblem, LinkState, StickerLink, UPDATE_LABEL,
-    export, import, link_scale, link_state,
+    FileStamp, ImportContext, ImportProblem, LinkFile, LinkImport, LinkLayer, LinkLayerWte, LinkMode, LinkProblem, LinkState,
+    StickerLink, UPDATE_LABEL, export, import, link_scale, link_state,
 };
 use crate::math::fnv1a64;
 use crate::project::manifest::FileRef;
@@ -30,7 +30,7 @@ use crate::project::sticker_entries::{
 };
 use crate::psd::{PsdDoc, PsdError, write_sticker_to_vec};
 use crate::stamp::BakeQuality;
-use crate::sticker::model::{PicturePixels, StickerContent, StickerDoc};
+use crate::sticker::model::{PicturePixels, StickerContent, StickerDoc, StickerLayer};
 use crate::sticker::pipeline::sticker_scale;
 use crate::sticker::render::StickerRenderInput;
 
@@ -120,8 +120,9 @@ impl Document {
         let s = link_scale(&doc, final_scale);
         let input = self.link_render_input(&doc)?;
         let previous = self.link(id).cloned();
-        let made = export(&input, s, previous.as_ref()).map_err(psd_invalid)?;
+        let mut made = export(&input, s, previous.as_ref()).map_err(psd_invalid)?;
         let bytes = write_sticker_to_vec(&made.psd).map_err(psd_invalid)?;
+        self.fill_link_wte(&doc, &mut made.layer_map);
         let synced = FileStamp::of_bytes(&bytes, None);
         let link = StickerLink {
             file,
@@ -219,8 +220,9 @@ impl Document {
                 blob_sizes.push((*b, size));
             }
         }
+        let layer_hashes: Vec<_> = doc.layers.iter().map(|l| (l.id, self.link_layer_hash(l))).collect();
         let editor_key = link.editor.clone();
-        let cx = ImportContext { editor_key: &editor_key, editor_name, file_name, blob_sizes: &blob_sizes };
+        let cx = ImportContext { editor_key: &editor_key, editor_name, file_name, blob_sizes: &blob_sizes, layer_hashes: &layer_hashes };
         let result: Result<LinkImport, ImportProblem> =
             if fit { import_fitted(psd, &doc, &link, &cx) } else { import(psd, &doc, &link, &cx) };
         let crc32 = stamp.crc32;
@@ -236,9 +238,10 @@ impl Document {
                 return Ok(LinkApplied::Problem(self.link_state(id, Some(&stamp))?));
             }
         };
-        let LinkImport { sticker, mode, scale, layer_map, next_lyid, editor_native, toast, profile_note, log, .. } = made;
+        let LinkImport { sticker, mode, scale, mut layer_map, next_lyid, editor_native, toast, profile_note, log, .. } = made;
         self.set_sticker(crate::doc_stickers::StickerRef::Id(id), move |d| *d = sticker, UPDATE_LABEL, Commit::Final)?;
         let doc = Arc::clone(self.sticker(id).ok_or(EditError::UnknownSticker)?);
+        self.fill_link_wte(&doc, &mut layer_map);
         link.synced = stamp;
         link.synced_sticker = self.hash_of(&doc);
         link.mode = mode;
@@ -251,11 +254,13 @@ impl Document {
         Ok(LinkApplied::Updated { mode, toast, profile_note, log })
     }
 
-    /// Sets or removes a link; a change bumps the links revision (the modified flag).
+    /// Sets or removes a link; a change bumps the links revision (the modified flag). A change of `problem` alone
+    /// does not (check-P5c): problems are not saved, so a refused file must not ask to save the project.
     pub(crate) fn put_link(&mut self, id: StickerId, link: Option<StickerLink>) {
         let st = &mut self.sticker_state;
+        let saved_part = |l: &StickerLink| StickerLink { problem: None, ..l.clone() };
         let changed = match link {
-            Some(link) => st.links.insert(id, link.clone()).is_none_or(|old| old != link),
+            Some(link) => st.links.insert(id, link.clone()).is_none_or(|old| saved_part(&old) != saved_part(&link)),
             None => st.links.remove(&id).is_some(),
         };
         if changed {
@@ -306,41 +311,74 @@ impl Document {
         for v in artboard_entry(&doc.artboard) {
             h = fnv1a64(h, &v.to_le_bytes());
         }
-        let file = |w: u32, h: u32, len: usize, crc32: u32| FileRef { entry: format!("{w}x{h}"), size: len as u64, crc32 };
         for l in &doc.layers {
-            let content = match &l.content {
-                StickerContent::Picture(PicturePixels::Blob(b)) => StickerContentEntry::Picture { blob: Some(*b), file: None },
-                StickerContent::Picture(PicturePixels::Owned { pixels, version }) => {
-                    let crc = self.pixel_crc(*version, &pixels.data);
-                    StickerContentEntry::Picture { blob: None, file: Some(file(pixels.width, pixels.height, pixels.data.len(), crc)) }
-                }
-                StickerContent::Text(spec) => StickerContentEntry::Text((&**spec).into()),
-                StickerContent::Shape(shape) => StickerContentEntry::Shape(ShapeEntry::from(shape)),
-            };
-            let mask = l.mask.as_ref().map(|m| {
-                let crc = self.pixel_crc(m.version, &m.pixels.data);
-                file(m.pixels.width, m.pixels.height, m.pixels.data.len(), crc)
-            });
-            let entry = StickerLayerEntry {
-                id: l.id,
-                name: l.name.clone(),
-                visible: l.visible,
-                locked: false,
-                opacity: l.opacity,
-                blend: l.blend,
-                transform: transform_entry(&l.transform),
-                content,
-                clip: l.clip,
-                mask,
-                adjustments: l.adjustments.iter().map(AdjustmentEntry::from).collect(),
-                styles: None,
-            };
+            let entry = self.link_layer_entry(l);
             match serde_json::to_vec(&entry) {
                 Ok(bytes) => h = fnv1a64(h, &bytes),
                 Err(e) => log::warn!("sticker layer {} could not be hashed: {e}", l.id.0),
             }
         }
         h
+    }
+
+    /// The project-format entry of `l` with pictures and masks as their size and CRC-32 and no styles (the hashes).
+    fn link_layer_entry(&mut self, l: &StickerLayer) -> StickerLayerEntry {
+        let file = |w: u32, h: u32, len: usize, crc32: u32| FileRef { entry: format!("{w}x{h}"), size: len as u64, crc32 };
+        let content = match &l.content {
+            StickerContent::Picture(PicturePixels::Blob(b)) => StickerContentEntry::Picture { blob: Some(*b), file: None },
+            StickerContent::Picture(PicturePixels::Owned { pixels, version }) => {
+                let crc = self.pixel_crc(*version, &pixels.data);
+                StickerContentEntry::Picture { blob: None, file: Some(file(pixels.width, pixels.height, pixels.data.len(), crc)) }
+            }
+            StickerContent::Text(spec) => StickerContentEntry::Text((&**spec).into()),
+            StickerContent::Shape(shape) => StickerContentEntry::Shape(ShapeEntry::from(shape)),
+        };
+        let mask = l.mask.as_ref().map(|m| {
+            let crc = self.pixel_crc(m.version, &m.pixels.data);
+            file(m.pixels.width, m.pixels.height, m.pixels.data.len(), crc)
+        });
+        StickerLayerEntry {
+            id: l.id,
+            name: l.name.clone(),
+            visible: l.visible,
+            locked: false,
+            opacity: l.opacity,
+            blend: l.blend,
+            transform: transform_entry(&l.transform),
+            content,
+            clip: l.clip,
+            mask,
+            adjustments: l.adjustments.iter().map(AdjustmentEntry::from).collect(),
+            styles: None,
+        }
+    }
+
+    /// check-P5c: the hash of what makes layer `l`'s pixels in the file apart from its place (content, mask,
+    /// adjustments, scale, rotation): `LinkLayerWte::hash`. Name, visibility, opacity, blend and clip are left out
+    /// (an import takes them from the file anyway), and so are the styles (never in the file).
+    pub fn link_layer_hash(&mut self, l: &StickerLayer) -> u64 {
+        let mut entry = self.link_layer_entry(l);
+        entry.id = crate::ids::StickerLayerId(0);
+        entry.name.clear();
+        (entry.visible, entry.opacity, entry.blend, entry.clip) = (true, 1.0, crate::layer::BlendMode::Normal, false);
+        let mut t = l.transform;
+        t.translate = glam::Vec2::ZERO;
+        entry.transform = transform_entry(&t);
+        match serde_json::to_vec(&entry) {
+            Ok(bytes) => fnv1a64(fnv1a64(0xcbf2_9ce4_8422_2325, b"wte link layer hash 1"), &bytes),
+            Err(e) => {
+                log::warn!("sticker layer {} could not be hashed: {e}", l.id.0);
+                0
+            }
+        }
+    }
+
+    /// Fills `LinkLayer::wte` of every map entry from the layer of `doc` it names (check-P5c).
+    fn fill_link_wte(&mut self, doc: &StickerDoc, map: &mut [LinkLayer]) {
+        let tl = glam::Vec2::new(doc.artboard.x0 as f32, doc.artboard.y0 as f32);
+        for e in map {
+            e.wte = doc.layer(e.layer).map(|l| LinkLayerWte { hash: self.link_layer_hash(l), at: (l.transform.translate - tl).to_array() });
+        }
     }
 }
 

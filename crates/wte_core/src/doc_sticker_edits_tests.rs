@@ -769,3 +769,167 @@ fn perf_k3b_stroke_begin_and_one_dab() {
     doc.sticker_stroke_end().unwrap();
     report("one dab, size 64, 2048 x 2048 picture", dab, 2.0);
 }
+
+// ----- checker (P3b check): adversarial cases -----
+
+#[test]
+fn chk3b_trivial_styled_sticker_preview_copies_nothing_per_dab() {
+    let (mut doc, sid, stamp, lid) = owned_doc();
+    doc.set_sticker(StickerRef::Id(sid), |d| d.layers[0].opacity = 1.0, "Layer Opacity", Commit::Final).unwrap();
+    let c = Contour { on: true, width: 4.0, smooth: 0.0, fill_holes: true, color: [255; 4], opacity: 1.0 };
+    doc.set_stamp_styles(stamp, StyleStack { contour: Some(c), ..StyleStack::default() }, Commit::Final).unwrap();
+    doc.history.clear();
+    // A cached render of the value before the opacity change still holds the picture (as the history would): begin
+    // copies it at most once; no dab may copy it again.
+    let before = counters::buffer_copies();
+    doc.sticker_stroke_begin(StickerRef::Id(sid), lid, PixelTarget::Pixels, red(5.0)).unwrap();
+    let c0 = counters::buffer_copies();
+    assert!(c0 - before <= 1, "begin copies at most once");
+    for i in 0..4 {
+        line(&mut doc, Vec2::new(10.0 + i as f32 * 30.0, 10.0), Vec2::new(30.0 + i as f32 * 30.0, 80.0), 6);
+        doc.rebake_sticker_users(sid, crate::stamp::BakeQuality::Preview);
+        let _ = doc.stamp_picture(stamp, true).unwrap();
+        let _ = doc.sticker_picture(sid, None, 1.0).unwrap();
+    }
+    line(&mut doc, Vec2::new(5.0, 5.0), Vec2::new(150.0, 5.0), 6);
+    assert_eq!(counters::buffer_copies(), c0, "no dab copies the picture after a preview, a thumbnail or an export picture");
+    doc.sticker_stroke_end().unwrap();
+}
+
+#[test]
+fn chk3b_a_dab_on_a_transformed_layer_lands_at_the_inverse_point() {
+    let (mut doc, sid, _, lid) = owned_doc();
+    let t = crate::sticker::LayerTransform { translate: Vec2::new(12.0, -7.0), scale: Vec2::new(-1.5, 2.0), rotation: 0.6 };
+    for p in [Vec2::new(3.0, 4.0), Vec2::new(150.0, 90.0), Vec2::new(80.0, 48.0)] {
+        let q = t.invert([160, 96], t.apply([160, 96], p));
+        assert!(q.distance(p) < 1e-3, "{p} -> {q}");
+    }
+    doc.set_sticker(StickerRef::Id(sid), |d| d.layers[0].transform = t, "Transform", Commit::Final).unwrap();
+    let at = t.apply([160, 96], Vec2::new(40.5, 30.5));
+    doc.sticker_stroke_begin(StickerRef::Id(sid), lid, PixelTarget::Pixels, red(2.0)).unwrap();
+    doc.sticker_stroke_dab(at, 1.0).unwrap();
+    doc.sticker_stroke_end().unwrap();
+    let p = picture(&doc, sid).0;
+    assert_eq!(p.get(40, 30), [255, 0, 0, 255]);
+    assert_eq!(p.get(60, 30), opaque(160, 96, 3).get(60, 30));
+}
+
+#[test]
+fn chk3b_a_final_job_made_before_a_stroke_or_an_undo_is_stale_after_it() {
+    let (mut doc, sid, stamp, lid) = owned_doc();
+    doc.set_defer_final_bakes(true);
+    doc.set_sticker(StickerRef::Id(sid), |d| d.layers[0].opacity = 0.6, "Layer Opacity", Commit::Final).unwrap();
+    let job = doc.next_final_bake().expect("a job");
+    doc.sticker_stroke_begin(StickerRef::Id(sid), lid, PixelTarget::Pixels, red(6.0)).unwrap();
+    line(&mut doc, Vec2::new(10.0, 40.0), Vec2::new(150.0, 40.0), 10);
+    doc.sticker_stroke_end().unwrap();
+    assert!(matches!(doc.apply_final_bake(job.run()), crate::stamp_job::FinalBake::Stale));
+    while let Some(job) = doc.next_final_bake() {
+        doc.apply_final_bake(job.run());
+    }
+    let painted = cache(&doc, stamp);
+    // A second stroke leaves the user unbaked; a job made now, then an undo of the stroke (swapped in place unless the
+    // job shares the sticker).
+    doc.sticker_stroke_begin(StickerRef::Id(sid), lid, PixelTarget::Pixels, red(6.0)).unwrap();
+    line(&mut doc, Vec2::new(10.0, 70.0), Vec2::new(150.0, 70.0), 10);
+    doc.sticker_stroke_end().unwrap();
+    let job = doc.next_final_bake().expect("a job");
+    doc.undo().unwrap();
+    assert!(matches!(doc.apply_final_bake(job.run()), crate::stamp_job::FinalBake::Stale), "the job drew the painted pixels");
+    while let Some(job) = doc.next_final_bake() {
+        doc.apply_final_bake(job.run());
+    }
+    assert_eq!(cache(&doc, stamp), painted, "after the undo the user shows the first stroke");
+}
+
+#[test]
+fn chk3b_a_stroke_on_a_detached_copy_leaves_the_original_alone() {
+    let (mut doc, sid, a, lid) = owned_doc();
+    let b = doc.add_stamp("b", StampSource::Sticker { sticker: sid }, uv([60.0, 60.0], [80.0, 48.0]), TextureSetId(0)).unwrap();
+    let copy = doc.detach_sticker(b).unwrap();
+    let (orig_bytes, cache_a) = (picture(&doc, sid).0.data.clone(), cache(&doc, a));
+    doc.sticker_stroke_begin(StickerRef::OfStamp(b, ShareScope::ThisStamp), lid, PixelTarget::Pixels, red(6.0)).unwrap();
+    line(&mut doc, Vec2::new(10.0, 40.0), Vec2::new(150.0, 40.0), 10);
+    doc.sticker_stroke_end().unwrap();
+    assert_eq!(picture(&doc, sid).0.data, orig_bytes);
+    assert_eq!(cache(&doc, a), cache_a);
+    assert_ne!(picture(&doc, copy).0.data, orig_bytes);
+    doc.undo().unwrap();
+    assert_eq!(picture(&doc, copy).0.data, orig_bytes);
+    assert_eq!(picture(&doc, sid).0.data, orig_bytes);
+}
+
+#[test]
+fn chk3b_mixed_history_walks_back_and_forth_consistently() {
+    let (mut doc, sid, stamp, lid) = owned_doc();
+    let mut states = vec![(picture(&doc, sid).0.data.clone(), cache(&doc, stamp))];
+    for i in 0..3 {
+        doc.sticker_stroke_begin(StickerRef::Id(sid), lid, PixelTarget::Pixels, red(5.0)).unwrap();
+        line(&mut doc, Vec2::new(10.0, 15.0 + 25.0 * i as f32), Vec2::new(150.0, 15.0 + 25.0 * i as f32), 10);
+        doc.sticker_stroke_end().unwrap();
+        states.push((picture(&doc, sid).0.data.clone(), cache(&doc, stamp)));
+        doc.set_sticker(StickerRef::Id(sid), |d| d.name = format!("n{i}"), "Rename", Commit::Final).unwrap();
+        states.push((picture(&doc, sid).0.data.clone(), cache(&doc, stamp)));
+    }
+    for _ in 0..2 {
+        for s in states.iter().rev().skip(1) {
+            doc.undo().unwrap();
+            assert_eq!((picture(&doc, sid).0.data.clone(), cache(&doc, stamp)), *s);
+        }
+        for s in states.iter().skip(1) {
+            doc.redo().unwrap();
+            assert_eq!((picture(&doc, sid).0.data.clone(), cache(&doc, stamp)), *s);
+        }
+    }
+}
+
+#[test]
+fn chk3b_revert_of_a_stamp_promoted_inside_a_stroke_brings_the_image_back() {
+    let (mut doc, blob, a, _) = image_doc();
+    let cache_a = cache(&doc, a);
+    let cp = doc.sticker_checkpoint(&[a], &[]);
+    doc.sticker_stroke_begin(StickerRef::OfStamp(a, ShareScope::ThisStamp), StickerLayerId(1), PixelTarget::Pixels, red(5.0)).unwrap();
+    line(&mut doc, Vec2::new(5.0, 30.0), Vec2::new(60.0, 30.0), 6);
+    doc.sticker_stroke_end().unwrap();
+    assert_ne!(cache(&doc, a), cache_a);
+    doc.restore_sticker_state(&cp, REVERT_LABEL).unwrap();
+    assert_eq!(doc.stamp(a).unwrap().source, StampSource::Image { blob });
+    assert_eq!(cache(&doc, a), cache_a);
+    doc.undo().unwrap();
+    assert!(!is_image(&doc, a));
+    doc.redo().unwrap();
+    assert_eq!(cache(&doc, a), cache_a);
+}
+
+#[test]
+fn chk3b_convert_text_redo_matches() {
+    let mut doc = doc_from_raw(samples::flat_quad(), 512);
+    let spec = text(&mut doc, "Ab");
+    let id = doc.add_stamp("t", StampSource::Text(spec), uv([256.0, 256.0], [200.0, 100.0]), TextureSetId(0)).unwrap();
+    doc.convert_text_stamp(id).unwrap();
+    let (object, c) = (doc.stamp(id).unwrap().clone(), cache(&doc, id));
+    doc.undo().unwrap();
+    doc.redo().unwrap();
+    assert_eq!(*doc.stamp(id).unwrap(), object);
+    assert_eq!(cache(&doc, id), c);
+    assert!(doc.sets[0].layers.iter().any(|l| matches!(l.kind, LayerKind::Stamp { stamp, .. } if stamp == id)));
+}
+
+#[test]
+fn chk3b_convert_text_keeps_the_ink_box_within_one_texel() {
+    let mut doc = doc_from_raw(samples::flat_quad(), 1024);
+    for em in [32.0f32, 128.0, 512.0] {
+        let spec = text(&mut doc, "gH");
+        let frame = doc.stamp_source_frame(&StampSource::Text(spec.clone())).unwrap();
+        let k = em / frame.em_px;
+        let p = uv([500.0, 520.0], [frame.size[0] as f32 * k, frame.size[1] as f32 * k]);
+        let id = doc.add_stamp("gH", StampSource::Text(spec), p, TextureSetId(0)).unwrap();
+        let before = ink(&cache(&doc, id));
+        doc.convert_text_stamp(id).unwrap();
+        let after = ink(&cache(&doc, id));
+        for (a, b) in [(before.x0, after.x0), (before.y0, after.y0), (before.x1, after.x1), (before.y1, after.y1)] {
+            assert!((a - b).abs() <= 1, "em {em}: ink {before:?} -> {after:?}");
+        }
+        doc.remove_stamp(id).unwrap();
+    }
+}

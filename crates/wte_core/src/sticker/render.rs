@@ -340,10 +340,17 @@ fn text_content(
     if !adjustments.is_empty() {
         apply_adjustments(&mut pic, adjustments);
     }
-    // The picture may have fewer pixels per em than asked (engine limit, preview): scale it up to the target.
-    let em = if raster.frame.em_px > 0.0 && raster.frame.em_px.is_finite() { raster.frame.em_px } else { px };
+    // The picture may have fewer pixels per em than asked (engine limit, preview): scale it up to the target. Check
+    // P3a: a Preview picture of a large styled text is drawn smaller than its frame (FEATURE_TEXT 5.8, `full ==
+    // false`), whose em and anchor are those of the full picture: both follow the picture's own size.
+    let f = if raster.frame.size[0] > 0 && pic.width != raster.frame.size[0] {
+        Vec2::new(pic.width as f32 / raster.frame.size[0] as f32, pic.height as f32 / raster.frame.size[1].max(1) as f32)
+    } else {
+        Vec2::ONE
+    };
+    let em = if raster.frame.em_px > 0.0 && raster.frame.em_px.is_finite() { raster.frame.em_px * f.x } else { px };
     let extra = target / em;
-    let pivot_in = Vec2::from_array(raster.frame.anchor_px);
+    let pivot_in = Vec2::from_array(raster.frame.anchor_px) * f;
     let pivot_out = (t.translate - origin) * s;
     Some(place(&pic, pivot_in, pivot_out, t.scale * extra, t.rotation, clip))
 }

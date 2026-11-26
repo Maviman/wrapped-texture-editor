@@ -810,3 +810,115 @@ fn k3a_finished_pictures_paste_style_and_save_refusal() {
     assert!(matches!(doc.remove_sticker(StickerId(999_999)), Err(EditError::UnknownSticker)));
     assert!(matches!(doc.promote_stamp(ids[3], ShareScope::ThisStamp), Err(EditError::InvalidParam(_))));
 }
+
+// ----- check P3a -----
+
+/// Mean absolute difference of two equal-size pictures, all channels.
+fn mean_diff(a: &PixelBuf, b: &PixelBuf) -> f64 {
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    let sum: u64 = a.data.iter().zip(&b.data).map(|(x, y)| x.abs_diff(*y) as u64).sum();
+    sum as f64 / a.data.len() as f64
+}
+
+#[test]
+fn check_p3a_a_styled_text_preview_keeps_its_stroke_width() {
+    // A large slanted text: its Preview picture is drawn smaller than its frame (FEATURE_TEXT 5.8).
+    let mut doc = doc_from_raw(samples::flat_quad(), 2048);
+    let mut spec = text(&mut doc, "WWWWW");
+    spec.fx.slant_deg = 10.0;
+    let frame = doc.stamp_source_frame(&StampSource::Text(spec.clone())).unwrap();
+    let k = 512.0 / frame.em_px;
+    let p = uv(0, [1024.0, 1024.0], [frame.size[0] as f32 * k, frame.size[1] as f32 * k], 0.0, false);
+    let id = doc.add_stamp("W", StampSource::Text(spec), Placement::Uv(p), TextureSetId(0)).unwrap();
+    let StampSource::Text(drawn) = doc.stamp(id).unwrap().source.clone() else { panic!() };
+    assert_eq!(drawn.size_px, 512.0);
+    let full_frame = doc.stamp_text_frame(id).unwrap();
+    assert!(full_frame.size[0] as u64 * full_frame.size[1] as u64 > 1 << 20, "the text is large enough: {:?}", full_frame.size);
+    let stroke = StyleStack {
+        stroke: Some(Stroke { on: true, width: 8.0, position: StrokePos::Outside, color: [0, 0, 0, 255], opacity: 1.0 }),
+        ..StyleStack::default()
+    };
+    doc.set_stamp_styles(id, stroke, Commit::Final).unwrap();
+    let final_ink = ink(&cache(&doc, id, 0), 127);
+    // A colour change while typing: a Preview spec change draws the Preview picture.
+    let recoloured = TextSpec { color: [20, 200, 240, 255], ..drawn };
+    doc.set_stamp_source(id, StampSource::Text(recoloured), Commit::Preview).unwrap();
+    let preview_size = doc.text_mips[&id].1.size();
+    assert_ne!(preview_size, full_frame.size, "the Preview picture is the reduced one");
+    let preview_ink = ink(&cache(&doc, id, 0), 127);
+    for (a, b) in [(preview_ink.x0, final_ink.x0), (preview_ink.y0, final_ink.y0), (preview_ink.x1, final_ink.x1), (preview_ink.y1, final_ink.y1)] {
+        assert!((a - b).abs() <= 3, "the Preview's stroke has the Final's width: {preview_ink:?} vs {final_ink:?}");
+    }
+    assert!(doc.cancel_pending_edit());
+}
+
+#[test]
+fn check_p3a_a_large_styled_text_layer_renders_in_place_in_previews() {
+    let mut doc = doc_from_raw(samples::flat_quad(), 32);
+    let mut spec = text(&mut doc, "WWWWWW");
+    spec.size_px = 480.0;
+    spec.fx.slant_deg = 10.0;
+    spec.color = [200, 30, 30, 255];
+    let frame = doc.stamp_source_frame(&StampSource::Text(spec.clone())).unwrap();
+    assert!(frame.size[0] as u64 * frame.size[1] as u64 > 1 << 20, "the text is large enough: {:?}", frame.size);
+    let mut layer = StickerLayer::new(StickerLayerId(1), "text", StickerContent::Text(Box::new(spec)));
+    layer.transform.translate = Vec2::new(512.0, 512.0);
+    let sid = doc.add_sticker(StickerDoc { layers: vec![layer], next_layer: 2, ..StickerDoc::new("t", 1024, 1024) }).unwrap();
+    let sticker = Arc::clone(doc.sticker(sid).unwrap());
+    let full = doc.sticker_render(&sticker, 1.0, BakeQuality::Full).unwrap().picture;
+    let preview = doc.sticker_render(&sticker, 1.0, BakeQuality::Preview).unwrap().picture;
+    let (f, p) = (ink(&full, 127), ink(&preview, 127));
+    assert!(!f.is_empty());
+    for (a, b) in [(p.x0, f.x0), (p.y0, f.y0), (p.x1, f.x1), (p.y1, f.y1)] {
+        assert!((a - b).abs() <= 3, "the Preview text sits where the Full one does: {p:?} vs {f:?}");
+    }
+    let d = mean_diff(&full, &preview);
+    assert!(d < 12.0, "mean difference {d}");
+}
+
+#[test]
+fn check_p3a_a_promoted_photo_shares_its_pixels_in_finished_pictures() {
+    let (mut doc, blob, ids) = identity_doc();
+    let sid = doc.promote_stamp(ids[0], ShareScope::ThisStamp).unwrap();
+    let sticker = Arc::clone(doc.sticker(sid).unwrap());
+    let renders = counters::renders();
+    let entry = doc.sticker_render(&sticker, 1.0, BakeQuality::Full).unwrap();
+    assert_eq!(counters::renders(), renders, "nothing is drawn for the trivial fast path");
+    assert!(Arc::ptr_eq(&entry.picture, &doc.blob_picture(blob).unwrap()), "the decoded photo is shared, not copied");
+    assert!(Arc::ptr_eq(&entry.mips, &doc.image_source(blob).unwrap()), "the image mips are shared, not built again");
+    // The same bytes as the renderer's own fast path.
+    let input = doc.sticker_render_input(&sticker).unwrap();
+    assert_eq!(*entry.picture, render(&input, 1.0, RasterQuality::Full));
+    let img = crate::image_io::decode_image(&doc.blobs.get(blob).unwrap().bytes, None, 8192).unwrap().pixels;
+    assert_eq!(doc.stamp_picture(ids[0], true).unwrap(), img, "the finished picture of a promoted stamp is the image");
+}
+
+/// The cache hash of `identity_doc_sized(512)` on the code before P3a (9b0d9be), measured by the P3a checker with
+/// the same document and hash built on that commit.
+const P0_IDENTITY_HASH_512: u64 = 0x1d96_8db0_2d9a_6712;
+
+#[test]
+fn check_p3a_identity_at_512_with_styles_switched_off_and_promoted() {
+    let (mut doc, _, ids) = identity_doc_sized(512);
+    assert_eq!(cache_hash(&mut doc), P0_IDENTITY_HASH_512, "default styles bake exactly as the pre-P3a code");
+    // Entries kept but switched off draw nothing: the bit-identical path.
+    let mut off = StylePreset::ClassicSticker.styles([64, 64]);
+    if let Some(c) = off.contour.as_mut() {
+        c.on = false;
+    }
+    if let Some(s) = off.drop_shadow.as_mut() {
+        s.on = false;
+    }
+    off.stroke = Some(Stroke { on: false, width: 6.0, position: StrokePos::Outside, color: [0, 0, 0, 255], opacity: 1.0 });
+    assert!(!off.is_default() && !off.any_on());
+    for &id in &ids {
+        doc.set_stamp_styles(id, off.clone(), Commit::Final).unwrap();
+        assert_eq!(format!("{:?}", doc.bake_placement(id).unwrap()), format!("{:?}", doc.stamp(id).unwrap().placement));
+    }
+    assert_eq!(cache_hash(&mut doc), P0_IDENTITY_HASH_512, "styles that are all off bake exactly as none");
+    for &id in &ids[..3] {
+        doc.promote_stamp(id, ShareScope::ThisStamp).unwrap();
+        doc.rebake_stamp(id, BakeQuality::Full).unwrap();
+    }
+    assert_eq!(cache_hash(&mut doc), P0_IDENTITY_HASH_512, "promoted stamps with styles off bake exactly as before");
+}

@@ -679,7 +679,13 @@ impl Document {
                     return Ok(plain(mips, stamp.tint));
                 }
                 let identity = BaseIdentity::Text(Arc::clone(&mips));
-                (mips, identity, raster_px(spec) / STYLE_REFERENCE_EM)
+                // Check P3a: the Preview picture of a large styled text is drawn smaller than its frame (FEATURE_TEXT
+                // 5.8, `full == false`); the style lengths shrink with it, so the Preview looks like the Final.
+                let shrink = match self.cached_text_frame(id).map(|f| f.size) {
+                    Some([fw, _]) if fw > 0 && mips.size()[0] != fw => mips.size()[0] as f32 / fw as f32,
+                    _ => 1.0,
+                };
+                (mips, identity, raster_px(spec) / STYLE_REFERENCE_EM * shrink)
             }
             StampSource::Sticker { sticker } => {
                 let doc = Arc::clone(self.sticker_state.map.get(sticker).ok_or(EditError::UnknownSticker)?);
@@ -741,6 +747,31 @@ impl Document {
     pub(crate) fn sticker_render(&mut self, doc: &Arc<StickerDoc>, s: f32, quality: BakeQuality) -> Result<RenderEntry, EditError> {
         if let Some(e) = self.sticker_state.cache.find_render(doc, s, quality, true) {
             return Ok(e);
+        }
+        // Check P3a: the trivial fast path (4.1) at scale 1 shares the picture the document holds already (a promoted
+        // photo's decoded pixels and its image mips) instead of copying it and building its mips again (an 8192 px
+        // photo: about 600 MB per finished picture). Same bytes as `render_with`'s fast path.
+        if s == 1.0
+            && let Some(picture) = doc.trivial_picture()
+        {
+            let shared = match picture {
+                PicturePixels::Blob(b) => {
+                    let pixels = self.blob_picture(*b).ok();
+                    let mips = self.trivial_mips(doc);
+                    pixels.zip(mips)
+                }
+                PicturePixels::Owned { pixels, .. } if [pixels.width, pixels.height] == doc.size() => {
+                    Some((Arc::clone(pixels), Arc::new(PremulMips::build(pixels))))
+                }
+                PicturePixels::Owned { .. } => None,
+            };
+            if let Some((picture, mips)) = shared
+                && [picture.width, picture.height] == doc.size()
+            {
+                let entry = RenderEntry { doc: Arc::clone(doc), scale_bits: s.to_bits(), quality, picture, mips };
+                self.sticker_state.cache.insert_render(entry.clone());
+                return Ok(entry);
+            }
         }
         let input = self.sticker_render_input(doc)?;
         let rq = crate::doc_stamps::raster_quality(quality);

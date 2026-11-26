@@ -3932,7 +3932,9 @@ bake places:
    denser axis may stay up to 2 pixels per texel), for a `Preview` has at most 524,288 pixels with its margin. The working
    picture = mip level `L` of the base, un-premultiplied; the tint is multiplied in (so a contour keeps its colour; the
    bake then gets `[255; 4]`); `apply_styles(work, styles, ref_scale / 2^L)` with the reference scale 1 (image), `size_px
-   / 128` (text), the render scale (sticker). Frame = `{ content: level size, margin: (styled - work) / 2 }`.
+   / 128` (text), the render scale (sticker). Frame = `{ content: level size, margin: (styled - work) / 2 }`. A text's
+   Preview picture that the text engine drew smaller than its frame (FEATURE_TEXT 5.8, `full == false`) scales the
+   reference scale by the same factor, so a Preview shows the Final's stroke width (check P3a).
 4. **Two placements.** The bake uses `bake_placement_of(stored, frame)`: the stored size times `(content + 2 margin) /
    content` per axis, everything else unchanged (margin 0: the stored placement itself). Bake placement: `make_bake_job`
    (in the job, from the job's frame), `bake_and_apply`, `ensure_wrap_param`, `make_wrap_job`, `stamp_shared_texels`,
@@ -4597,6 +4599,9 @@ STICKER_PLAN 4.1 and 2.7 are the source. `render(input, s, quality)` -> `render_
 
 **Trivial fast path:** one visible layer that is a picture with identity transform, opacity 1, Normal, no clip, mask,
 adjustment or style, the artboard at the origin and of the picture's size, shape `Rect`, at `s = 1`: the picture's bytes.
+`Document::sticker_render` then shares the picture the document holds (a blob's decoded pixels and its `image_mips`, or
+the owned buffer) instead of copying it (check P3a). A text layer whose Preview picture the engine drew smaller than its
+frame places it with the frame's em and anchor scaled by the same factor (check P3a).
 **Layer cache:** `render_with(.., Some(cache))` looks every layer raster up by its `LayerKey` (the layer's whole input by
 value, pixels by version or blob id; never pixel bytes), so a style slider on one layer redraws that layer and the
 composite only. **Determinism:** layers are composited in order on the calling thread; only the resampler and

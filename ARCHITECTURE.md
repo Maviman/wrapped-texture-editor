@@ -297,6 +297,23 @@ status chip (8.7), the dialog (8.8), `Step::Until` and the scenarios `companion`
 20-22 (8.13), the design (8.14), tests (9.2). With every link off nothing is opened and `Companion::inject` / `logic`
 return at once: the app is unchanged (regression shots identical, `docs/notes/companion/d5-d11.md`).
 
+### 1.12 Stickers and PhotoCraft (branch `stickers`, `docs/plans/STICKER_PLAN.md`)
+
+Skeleton (P1); P6a completes it with the decisions of STICKER_PLAN 0 / 0.1 and the traceability of every later package.
+Goal: layered stickers (a small multi-layer picture document per sticker: picture, text and shape layers with opacity,
+blend mode, transform, mask, adjustments and layer styles), styles (die-cut contour, stroke, shadows, glows, overlays,
+bevel) on every stamp, a Sticker view in the main window with the live 3D result beside it, and working together with
+PhotoCraft (a linked PSD, drag and drop, clipboard). Notes `docs/notes/sticker/`.
+
+| # | Decision (so far) |
+|---|---|
+| S1 | All sticker maths is CPU only, deterministic, straight RGBA8, in `wte_core::sticker` (5.27, 6.11); no new crate. |
+| S2 | One style type, `StyleStack`, for sticker layers and stamps; lengths in pixels at the reference scale of what it is applied to; the margin is known from the numbers alone (6.11). |
+| S3 | Algorithms are clean reimplementations written with PhotoCraft's MIT source open; every such file starts with the notice line of STICKER_PLAN 4.0 (`licenses/photocraft-MIT.txt`). |
+
+Traceability (P1): styles, adjustments, shapes, the resampler and the limits (2.1, 5.27, 6.11), `AlphaBuf` (5.5),
+`nearest_ink` (5.13 / 6.11), pitfalls (6.9), tests (9.1).
+
 ---
 
 ## 2. Workspace layout
@@ -329,7 +346,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `error.rs` | S | every error and warning enum of the crate |
 | `math.rs` | S | `IRect`, `Aabb`, `Ray`, `DirtyRegion`, `div255`, `smoothstep`, sRGB helpers (fully implemented + tests) |
 | `progress.rs` | S | `Progress` trait, `NoProgress` |
-| `pixel.rs` | S | `PixelBuf`, `CroppedBuf`, `PixelView` and their trivial accessors (fully implemented) |
+| `pixel.rs` | S; stickers P1 | `PixelBuf`, `CroppedBuf`, `PixelView` and their trivial accessors (fully implemented); P1: `AlphaBuf` (one byte per pixel: masks, selections) |
 | `blob.rs` | S | `BlobStore`, `Blob`, `BlobKind` (fully implemented + tests; round 4 T3: allocation check before hashing) |
 | `mesh.rs` | S | `MeshData`, `MaterialSlot`, `SetInfo`, `TriFlags`, `RawMesh`, `RenderVertex`, `WireEdge`, `UvStats` + trivial accessors; objects-tabs: `ObjectInfo`, `RawObjects`, `MeshData::{tri_object, objects}` |
 | `layer.rs` | S | `Layer`, `LayerKind`, `BlendMode`, `TextureSet` struct |
@@ -351,6 +368,14 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `tip_field.rs` | S (round 4) | `TipField` (signed-distance grid of a brush shape): lookups `sample`/`thickness`/`outline`/`outline_thickness`, built-in `cube`/`cylinder`, `from_fn`/`outline_from_fn`, the lower-envelope transform, local thickness, middle slice, sections, hash; `TipReport` (complete + tests) |
 | `tip_bake.rs` | B1 (round 4) | `TipField::bake` / `bake_from_path` (model -> field, 5.26), `CloseMode`, `TipError` |
 | `stroke.rs` | C3 | `StrokeSession`, `Document::stroke_*`, `sample_color` |
+| `sticker/mod.rs` | stickers P1 | module tree, the sticker limits (`MAX_ARTBOARD` ... `MAX_STYLE_LENGTH`), `LayerTransform` (5.27) |
+| `sticker/style.rs` | stickers P1 | `StyleStack` and its entries, `Gradient`, `StrokePos`, `StylePreset`; `margin`, `sanitize`, `is_default` (5.27, 6.11) |
+| `sticker/fx.rs` | stickers P1 | `apply_styles` (6.11), the tent blur `tent` / `TentCell`, `dist_out` / `dist_in`, the style planes |
+| `sticker/fx_tests.rs` | stickers P1 | the `k1_*` tests of `fx` (test-only child of `sticker`) |
+| `sticker/adjust.rs` | stickers P1 | `Adjustment` (2.4 of the plan), its tables, `apply_adjustments` |
+| `sticker/shape.rs` | stickers P1 | `ShapeSpec`, `ShapeKind`, `Paint`, `rasterize`, `polygon_coverage`, `shape_points` |
+| `sticker/resample.rs` | stickers P1 | `transform_picture`, `transformed_bounds` (the affine resampler of 6.11) |
+| `sticker/bench.rs` | stickers P1 | the ignored `perf_k1_*` timings (test-only) |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -365,7 +390,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `text/font_catalog.rs` | C4; round 4 T3 | `FontCatalog` (fontdb; the Windows font folders, file sizes read once, faces shared per file), `FontCache` (fontdue), bundled fonts, `FaceTraits`, `face_traits`, `FontCatalog::sample` (picker samples drawn with the styled painter's outline and coverage code) |
 | `text/layout.rs` | C4; round 4 T2 | `layout_text`, `measure_text` (classic canvas); `lay_out_lines` (crate): the one layout rule of both painters (6.8 steps 2-3 with gap values and the thickening term), `Lines`, `LaidGlyph` |
 | `text/raster.rs` | C4; round 4 T2 | `rasterize_text` (classic painter); `compose` (crate: outline + fill, shared); `FaceFonts`, `TextFonts` (+ `metrics`, `faces`), `text_frame`, `render_text` (dispatch classic / styled painter) |
-| `text/edt.rs` | C4 | exact Euclidean distance transform for outlines |
+| `text/edt.rs` | C4; stickers P1 | exact Euclidean distance transform for outlines; P1: `nearest_ink` (the index of the nearest ink pixel, same two passes; `distance_to_ink` unchanged) |
 | `text/outline.rs` | T1 (round 4) | glyph outlines as polylines (`GlyphOutline`, `glyph_outline`, `char_to_glyph`, `parse_face`) |
 | `text/scan.rs` | T1 (round 4) | coverage rasterizer (`Coverage`, `fill_contours`) |
 | `text/warp.rs` | T1 (round 4) | `WarpMap` (15 styles, direction, distortions, refinement) |
@@ -1006,6 +1031,17 @@ impl SparseBuf {
 #[derive(Copy, Clone, Debug)]
 pub struct PixelView<'a> { pub rect: IRect, pub data: &'a [u8] }
 impl<'a> PixelView<'a> { pub fn row(&self, y: i32) -> Option<&'a [u8]>;  pub fn get(&self, x: i32, y: i32) -> [u8; 4]; }
+
+/// Stickers (P1): dense one-byte image (masks, selections, coverage), row 0 = top, 255 = fully on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlphaBuf { pub width: u32, pub height: u32, pub data: Vec<u8> }   // data.len() == w*h
+impl AlphaBuf {
+    pub fn new(width: u32, height: u32) -> AlphaBuf;  pub fn filled(width: u32, height: u32, value: u8) -> AlphaBuf;
+    pub fn from_raw(width: u32, height: u32, data: Vec<u8>) -> Option<AlphaBuf>;
+    pub fn from_alpha(buf: &PixelBuf) -> AlphaBuf;                    // the alpha channel of an RGBA image
+    pub fn get(&self, x: u32, y: u32) -> u8;  pub fn set(&mut self, x: u32, y: u32, value: u8);   // panic outside
+    pub fn rect(&self) -> IRect;  pub fn byte_len(&self) -> usize;
+}
 
 // pixel_ops.rs
 pub fn premultiply(p: [u8; 4]) -> [u8; 4];
@@ -3067,6 +3103,88 @@ at its next check and its result is dropped. Loads are serialised: the cancelled
 `bake_from_path` waits for it to end (answering Cancel meanwhile) before its own parse, so a quick Cancel and reload
 never runs two parses at the same time.
 
+### 5.27 `sticker/` (stickers; part 1 = P1: styles and picture maths)
+
+Every function is pure, headless and deterministic (any thread count gives the same bytes, 4.7). All colours straight
+sRGB RGBA8. Types are re-exported at the crate root; free functions are reached through their modules
+(`sticker::fx::apply_styles`, ...). P2 (selection, cut-out, filters), P3a (the sticker document, render, `Document`
+API) and P3b (pixel edits) extend this section.
+
+```rust
+// sticker/mod.rs
+pub const MAX_ARTBOARD: u32 = 4096;  pub const MAX_STICKER_LAYERS: usize = 32;  pub const MAX_PICTURE_SIDE: u32 = 8192;
+pub const MAX_CREATED_SIDE: u32 = 4096;  pub const MAX_OWNED_BYTES: u64 = 512 << 20;  pub const MAX_GRADIENT_STOPS: usize = 8;
+pub const MAX_STYLE_LENGTH: f32 = 256.0;
+/// Content pixels -> layer space. Scale and rotation (radians, clockwise as seen) about the content centre; flips =
+/// negative scale. Identity: content pixel (x, y) sits at layer-space (x, y).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct LayerTransform { pub translate: Vec2, pub scale: Vec2, pub rotation: f32 }
+impl LayerTransform {
+    pub const IDENTITY: LayerTransform;  pub fn moved(x: f32, y: f32) -> LayerTransform;  pub fn is_identity(&self) -> bool;
+    pub fn sanitize(&mut self);          // non-finite -> neutral, |scale| 1e-3..=1e3 (sign kept), |translate| <= 1e6
+    pub fn apply(&self, size: [u32; 2], p: Vec2) -> Vec2;            // content point -> layer space
+}
+
+// sticker/style.rs
+#[derive(Clone, Debug, PartialEq)] pub struct Gradient { pub stops: Vec<(f32, [u8; 4])> }   // 2..=8, ascending
+impl Gradient { pub fn two(a: [u8; 4], b: [u8; 4]) -> Gradient;  pub fn sample(&self, t: f32) -> [u8; 4];  pub fn sanitize(&mut self); }
+pub enum StrokePos { Outside, Inside, Center }
+pub struct Contour { pub on: bool, pub width: f32, pub smooth: f32, pub fill_holes: bool, pub color: [u8; 4], pub opacity: f32 }
+pub struct Stroke  { pub on: bool, pub width: f32, pub position: StrokePos, pub color: [u8; 4], pub opacity: f32 }
+pub struct Shadow  { pub on: bool, pub color: [u8; 4], pub opacity: f32, pub angle_deg: f32, pub distance: f32, pub spread: f32, pub size: f32 }
+pub struct Glow    { pub on: bool, pub color: [u8; 4], pub opacity: f32, pub spread: f32, pub size: f32 }
+pub struct ColorOverlay    { pub on: bool, pub color: [u8; 4], pub opacity: f32 }
+pub struct GradientOverlay { pub on: bool, pub gradient: Gradient, pub angle_deg: f32, pub opacity: f32 }
+pub struct Bevel   { pub on: bool, pub size: f32, pub depth: f32, pub angle_deg: f32, pub altitude_deg: f32, pub highlight: [u8; 4], pub shadow: [u8; 4], pub opacity: f32 }
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StyleStack { pub contour: Option<Contour>, pub stroke: Option<Stroke>, pub drop_shadow: Option<Shadow>,
+    pub inner_shadow: Option<Shadow>, pub outer_glow: Option<Glow>, pub inner_glow: Option<Glow>,
+    pub color_overlay: Option<ColorOverlay>, pub gradient_overlay: Option<GradientOverlay>, pub bevel: Option<Bevel> }
+impl StyleStack {
+    pub fn is_default(&self) -> bool;    // every member None (an entry with on: false counts as used)
+    pub fn any_on(&self) -> bool;
+    pub fn sanitize(&mut self);  pub fn sanitized(&self) -> StyleStack;   // lengths 0..=256, fractions 0..=1, depth 0..=10, altitude 0..=90
+    pub fn margin(&self, scale: f32) -> u32;                         // 6.11
+}
+pub enum StylePreset { ClassicSticker, Outline, Glow, Badge, ShadowOnly, Clear }
+impl StylePreset { pub const ALL: [StylePreset; 6];  pub fn name(self) -> &'static str;
+    pub fn styles(self, content: [u32; 2]) -> StyleStack; }       // lengths for 512 px, scaled by max(content) / 512
+
+// sticker/fx.rs
+pub fn apply_styles(base: &PixelBuf, styles: &StyleStack, scale: f32) -> PixelBuf;   // (w + 2m) x (h + 2m), 6.11
+pub trait TentCell: Copy + Default + Send + Sync { fn get(self) -> u32; fn put(v: u32) -> Self; }   // u8, u16
+pub fn tent<T: TentCell>(buf: &mut [T], width: u32, height: u32, b: u32);  pub fn tent_width(width: f32) -> u32;
+pub fn dist_out(alpha: &[u8], width: u32, height: u32) -> Vec<f32>;   // = text::edt::distance_to_ink
+pub fn dist_in(alpha: &[u8], width: u32, height: u32) -> Vec<f32>;    // distance_to_ink(255 - alpha)
+
+// sticker/adjust.rs
+#[derive(Clone, Debug, PartialEq)]
+pub enum Adjustment { BrightnessContrast { brightness: f32, contrast: f32 },     // -100..=100 each
+    HueSaturation { hue_deg: f32, saturation: f32, lightness: f32, colorize: bool },  // -180..=180, -1..=1, -1..=1
+    Levels { in_black: u8, in_white: u8, gamma: f32, out_black: u8, out_white: u8 }, Invert, BlackWhite,
+    Posterize { levels: u8 /* 2..=32 */ }, Threshold { level: u8 } }
+impl Adjustment { pub fn sanitize(&mut self);  pub fn is_identity(&self) -> bool;  pub fn lut(&self) -> Option<[u8; 256]>;
+    pub fn apply(&self, buf: &mut PixelBuf); }                       // alpha untouched; alpha-0 pixels keep their RGB
+pub fn apply_adjustments(buf: &mut PixelBuf, list: &[Adjustment]);
+
+// sticker/shape.rs
+pub enum ShapeKind { Rect, RoundedRect { radius: f32 }, Ellipse, Polygon { sides: u32 }, Star { points: u32, inner: f32 }, Line { width: f32 } }
+pub enum Paint { None, Solid([u8; 4]), Linear { gradient: Gradient, angle_deg: f32 } }
+pub struct ShapeSpec { pub kind: ShapeKind, pub size: Vec2, pub fill: Paint, pub outline: Option<([u8; 4], f32)> }
+impl ShapeSpec { pub fn sanitize(&mut self); }
+pub fn rasterize(spec: &ShapeSpec, scale: f32) -> CroppedBuf;        // content box [0, size * scale), grown by the outline
+pub fn polygon_coverage(points: &[Vec2], width: u32, height: u32) -> AlphaBuf;   // non-zero rule + edge distance
+pub fn shape_points(kind: &ShapeKind, size: Vec2) -> Option<Vec<Vec2>>;         // polygon / star corners
+
+// sticker/resample.rs
+pub const MAX_RESAMPLE_PIXELS: u64 = 1 << 26;
+pub fn transformed_bounds(size: [u32; 2], t: &LayerTransform, s: f32) -> IRect;
+pub fn transform_picture(src: &PixelBuf, t: &LayerTransform, s: f32, clip: Option<IRect>) -> CroppedBuf;
+
+// text/edt.rs (P1 addition; distance_to_ink is unchanged)
+pub fn nearest_ink(coverage: &[u8], width: u32, height: u32) -> Vec<u32>;     // index of the nearest pixel >= 128; u32::MAX without ink
+```
+
 ---
 
 ## 6. Algorithms
@@ -4196,6 +4314,94 @@ centred on the anchor, its top-left corner at `(-box_w / 2, -box_h / 2)`; the fi
    `backface_cull = false`, where the facing weight uses `|dot(N, out)|` (6.5, 8.6). `same_side_only` and `backface_cull`
    remain user-toggleable.
 10. Never let `HashMap` iteration order reach pixels or files.
+11. (Stickers) `distance_to_ink` of a plane without ink returns `INFINITY` everywhere: inside styles on a fully opaque
+    picture find no outside unless the alpha is padded by at least one transparent pixel (6.11, review A7). Treat any
+    non-finite distance as "farther than every length" (`clamp(w + 0.5 - INF) = 0`).
+12. (Stickers) A threshold `clamp(solid + 0.5 - d)` is 0.5, not 1, inside the shape when `solid = 0`: always take
+    `max(src, threshold)`.
+13. (Stickers) Premultiply then un-premultiply is not exact for alpha < 255: moves, flips and grid-aligned quarter turns
+    copy pixels instead of resampling them (6.11 "Resampling").
+14. (Stickers) Box sums of `u16` planes: a tent of width `b` adds up to `65535 * b`; `b` is capped at 16,384 so the
+    running sums stay in `u32`.
+
+### 6.11 Sticker styles and picture maths (`sticker/fx.rs`, `style.rs`, `adjust.rs`, `shape.rs`, `resample.rs`) [stickers P1]
+
+STICKER_PLAN 2.3, 2.4, 4.2, 4.3, 4.6, 4.7, 4.8 are the source; this section records what is built and where it differs.
+Written with PhotoCraft's MIT source open (each file starts with the notice of STICKER_PLAN 4.0).
+
+**Distances and blur.** `dist_out(a) = distance_to_ink(a)` (ink = alpha >= 128, sub-pixel edge term), `dist_in(a) =
+distance_to_ink(255 - a)`, `nearest_ink` = the same two passes keeping the site. Tent blur `tent(buf, w, h, b)`: per axis
+two box blurs of width `b`, the first over `[x - (b-1)/2, x + b-1-(b-1)/2]`, the second mirrored (an even width stays
+symmetric), outside = 0, integer running sums, rounding `(sum + b/2) / b`; rows in parallel, columns in bands of
+`max(64, b)` rows (exact integer sums: the band split and the thread count never change a value). `tent_width(len) =
+max(1, round(len))`; `b = 1` changes nothing. Spread split of a shadow / glow: `solid = round(size * spread)`, dilation
+`max(S, clamp(solid + 0.5 - dist_out(S), 0, 1))` (the distance field is computed only when `solid >= 1`), blur length
+`size - solid`.
+
+**Margin.** `StyleStack::margin(scale)` = `ceil(scale * (outline + soft)) + 2`, where `outline` = the contour's
+`width * (1 + smooth)` **plus** the outside part of the stroke (Outside: width, Center: width / 2; the stroke runs around
+the contour, so the two reaches add), `soft` = `max(shadow distance + size, glow size)`; 0 when no enabled style draws
+outside. Measured slack: over 3,000 random stacks (lengths up to 40, scales 0.3..2.3) the nearest non-zero pixel was at
+least 2 px from the output border.
+
+**`apply_styles(base, styles, scale)`** (sanitized copy, lengths times `scale`). No style on: the base is returned as it
+is (same bytes, margin 0). Empty or fully transparent base: a transparent `(w + 2m) x (h + 2m)` picture. Otherwise all
+planes are one byte per pixel on the base padded by `p = max(m, 1)` (never 0: a fully opaque picture still has an edge),
+cropped to `m` at the end:
+
+1. Contour `M`: `max(A, clamp(width + 0.5 - dist_out(A)))`; fill holes = a span flood (4-connected) from the padded
+   border through pixels below 128; every pixel not reached and not touching the reached outside becomes 255 (the
+   anti-aliased outer edge keeps its values); smooth: `r = round(smooth * width)`, if `r >= 1` a 16-bit tent of width `r`
+   then `clamp((B - 0.5) * (r + 1) + 0.5)`; finally `max(M, A)`.
+2. Stroke: `So = clamp(wo + 0.5 - dist_out(X)) * (1 - X)` with `X = M` (contour on) or `A`; `Si = clamp(wi + 0.5 -
+   dist_in(A)) * A`. A stroke of width 0 draws nothing.
+3. Outline `S = max(A, M, So)` (`M` itself when there is no outside stroke).
+4. Drop shadow: dilate `S`, move by `round(distance * (-cos a, sin a))` (y down; 0 = light from the right, 90 = from the
+   top), tent blur. 5. Outer glow: the same without the move.
+6. Inner shadow / inner glow: the same on `1 - A` (the pad and pixels moved in from outside count as 255), multiplied by
+   `A` when drawn.
+7. Bevel: `H` = 16-bit tent of `A` with width `size`; `g = (dH/dx, dH/dy) * depth * size` (central differences, `H`
+   in 0..1), `n = (-g.x, -g.y, 1) / |..|`, light `L = (cos a cos e, -sin a cos e, sin e)`, `shade = n.L - sin e`;
+   highlight `min(shade / (1 - sin e), 1)`, shadow `min(-shade / sin e, 1)`, each times `A`, opacity and colour alpha.
+8. Compose, straight-alpha source-over in `f32` per pixel, rounded half up, bottom to top: drop shadow, outer glow,
+   contour, outside stroke, the artwork (RGB mixed toward the gradient overlay, then the colour overlay, by opacity times
+   colour alpha; alpha kept; over a transparent pixel the artwork's own alpha byte is written), inner glow, inner
+   shadow, bevel highlight, bevel shadow, inside stroke. A coverage whose result alpha rounds to 0 leaves the pixel.
+   Gradient overlay: `t = 0.5 + (c . d) / (2 * half)` with `c` the pixel centre relative to the box centre, `d = (cos a,
+   -sin a)`, `half = ((w-1)|cos a| + (h-1)|sin a|) / 2`: the extreme pixel centres get exactly the end stops.
+
+Working memory: at most one `f32` field (plus `distance_to_ink`'s own `i32` column table) at a time; the alpha plane is
+dropped before the inner stage; planes are dropped as soon as they are drawn. Measured peaks: build note
+`docs/notes/sticker/build-P1.md`.
+
+Deliberate differences from PhotoCraft / Photoshop: Euclidean strokes (round corners) instead of a 5 x 5 chamfer metric;
+shadows and outer glows cast by the whole outline shape (artwork + contour + outside stroke); no per-style blend modes
+(source-over); no contour curves, noise or knockout; one smooth inner bevel; the bevel's highlight / shadow are normalised
+by `1 - sin e` / `sin e` as in the reference (the plan's `max(shade, 0)` alone gives at most 50 % at 30 degrees).
+
+**Adjustments** (`adjust.rs`, plan 4.6): per pixel on straight RGB, alpha untouched, alpha-0 pixels keep their RGB;
+identity settings return the bytes unchanged. Brightness: `s = 1.375^(b/50)`, `v' = s v + (1 - s) v^P` with `P = max(2,
+4.5 - 0.013 b)` for `b >= 0`, `5 - 0.072 b` below; contrast: cubic Hermite halves about 0.5 with end slope `max(0, 1 -
+c/128)` and centre slope `1 + c/128`; both in one 256-entry table, rounded half up. Levels `out_black + clamp((x -
+in_black) / max(1, in_white - in_black))^(1/gamma) * (out_white - out_black)`. Hue / saturation in `f32` HSL: hue
+shifted (Colorize: set to `hue_deg mod 360`, saturation `0.25 + 0.75 max(sat, 0)`), saturation `s (1 + sat)` for `sat <=
+0` else `s + (1 - s) sat`, then lightness toward black / white linearly. Invert `255 - x`; Black & White and Threshold
+use luma `round(0.299 r + 0.587 g + 0.114 b)`; Posterize `n`: `round(floor(x n / 256) * 255 / (n - 1))`.
+
+**Shapes** (`shape.rs`, plan 4.8): coverage `clamp(0.5 - sd)`; rectangle and rounded rectangle exact SDF; ellipse
+`(f - 1) / |grad f|`; polygons and stars: corners on the box's ellipse, first corner at the top, distance to the edge
+list with the non-zero winding rule (per row: crossings for the winding, exact distances only within 1.5 px of an
+edge); line = horizontal capsule through the box middle, caps inside the box. Outline `clamp(width/2 + 0.5 - |sd|)`
+centred on the edge, drawn over the fill. `Paint::Linear` uses the gradient mapping of the overlay over the content box.
+The raster is a `CroppedBuf` in content pixels at the render scale, grown by half the outline width plus one pixel.
+
+**Resampling** (`resample.rs`, plan 4.7): inverse mapping of each output pixel centre: `content = C + S^-1 R^-1 (o / s -
+t - C)`; premultiplied bilinear, transparent outside; when the larger axis scale `k` is below 0.5 the source is the
+`PremulMips` level `L` with `2^-L >= k > 2^-(L+1)`; un-premultiplied with round half up. Exact copies (bytes, RGB under
+alpha 0 kept): rotation a multiple of 90 degrees within 1e-6 rad, `|scale * s| = 1` on both axes, and source pixel
+centres landing within 1e-4 of output pixel centres (moves by whole pixels, flips, grid-aligned quarter turns). Output
+rect = `transformed_bounds` (corners snapped within 1e-6 of an integer) intersected with the clip, at most
+`MAX_RESAMPLE_PIXELS`.
 
 ---
 
@@ -7646,6 +7852,24 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `tools/sticker/compare_baseline.py` (exports byte for byte, `.wtep` entries byte for byte and the manifest equal except
   `format_version`, `app_version` and the save time, screenshots inside the central view rectangle); numbers in
   `docs/notes/sticker/baseline.md`.
+- Branch `stickers`, P1 (STICKER_PLAN 7 "P1", names `k1_*`): `sticker::fx_tests` (`contour_of_a_disc_is_a_disc_ten_pixels_wider`
+  within 0.6 px, `contour_fills_the_hole_of_a_ring`, `smoothing_closes_a_notch_and_never_lowers_alpha`,
+  `stroke_areas_on_a_square` (Outside / Inside / Center within 1 %), `an_outside_stroke_runs_around_the_contour`,
+  `drop_shadow_offset_follows_the_light` (0 / 90 / 120 / 270 degrees), `spread_one_is_hard_spread_zero_is_a_tent`,
+  `the_margin_is_enough_for_200_random_stacks`, `no_style_on_returns_the_base_unchanged` (and degenerate inputs),
+  `inside_styles_work_on_a_fully_opaque_picture` (review A7), `overlays_keep_alpha_and_gradient_endpoints_are_exact`,
+  `a_bevel_leaves_a_flat_interior_alone`, `tent_blur_keeps_the_sum_and_is_symmetric`,
+  `apply_styles_is_thread_count_independent` (local pools of 1 and 8), `half_working_scale_matches_the_reduced_full_result`
+  (mean <= 3 / 255), `dist_helpers`); `sticker::style::tests` (gradient endpoints and interpolation, sanitize, margin
+  rules, light offsets); `sticker::adjust::tests` (identity settings byte-identical, hand-computed values, sanitize,
+  parallel path); `sticker::shape::tests` (ellipse / star / hexagon / rounded rectangle / line areas within 0.5 %,
+  outline ring, gradient fill endpoints, thread independence, polygon coverage rules); `sticker::resample::tests`
+  (identity and whole-pixel moves copy bytes, flips, four quarter turns = identity, bilinear and mip paths, no edge
+  darkening, thread independence); `sticker::tests::k1_layer_transform_basics`; `pixel::tests::k1_alpha_buf_basics`;
+  `text::edt::tests::k1_nearest_ink_matches_brute_force_on_16x16` (and the parallel path). The text tests of
+  `distance_to_ink` are untouched. Ignored, release, serial: `sticker::bench::perf_k1_*` (`cargo test -p wte_core
+  --release --lib perf_k1 -- --ignored --test-threads=1 --nocapture`; STICKER_PLAN 8.4 budgets, numbers in
+  `docs/notes/sticker/build-P1.md`).
 
 ### 9.2 `wte_app` tests
 
@@ -8182,3 +8406,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | Package | Content | Main files | Check |
 |---|---|---|---|
 | P0 | baseline (tests, clippy, exe hash, the 8.5 regression outputs), `.gitattributes`, PSD fixtures f1-f12, `licenses/photocraft-MIT.txt`, the CLI-vs-GUI save comparison | `crates/wte_core/tests/fixtures/psd/`, `tools/sticker/`, `docs/notes/sticker/{baseline,pc-save-paths}.md` | only fixtures added under `crates/`, notes LF, fixtures < 400 KB, README lines reproduce them |
+| P1 | styles and picture maths: `StyleStack` (margin, sanitize, presets), `apply_styles`, tent blur, `dist_out` / `dist_in`, `nearest_ink`, adjustments, shapes and polygon coverage, the affine resampler, `AlphaBuf`, the limits; no `Document` change | `crates/wte_core/src/sticker/{mod,style,fx,fx_tests,adjust,shape,resample,bench}.rs`, `pixel.rs`, `text/edt.rs` | every formula against plan 4; `apply_styles` fuzzed with empty, 1x1, opaque and transparent inputs; licence headers; `distance_to_ink` unchanged |

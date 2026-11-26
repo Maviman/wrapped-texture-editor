@@ -1,4 +1,5 @@
-//! Pixel containers (ARCHITECTURE.md 4.2, 5.5): dense `PixelBuf`, cropped `CroppedBuf` and the borrowed `PixelView`.
+//! Pixel containers (ARCHITECTURE.md 4.2, 5.5): dense `PixelBuf`, cropped `CroppedBuf`, the borrowed `PixelView` and
+//! the one-channel `AlphaBuf` (stickers).
 //! All pixel data is RGBA8, straight alpha, sRGB-encoded, tightly packed, row 0 = top.
 
 use crate::math::IRect;
@@ -434,9 +435,77 @@ impl<'a> PixelView<'a> {
     }
 }
 
+/// Dense 8-bit single-channel image (masks, selections, coverage), row 0 = top; 255 = fully on (STICKER_PLAN 2.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlphaBuf {
+    pub width: u32,
+    pub height: u32,
+    /// `data.len() == width * height`.
+    pub data: Vec<u8>,
+}
+
+impl AlphaBuf {
+    /// All-zero image.
+    pub fn new(width: u32, height: u32) -> AlphaBuf {
+        AlphaBuf { width, height, data: vec![0; width as usize * height as usize] }
+    }
+
+    /// Image filled with one value.
+    pub fn filled(width: u32, height: u32, value: u8) -> AlphaBuf {
+        AlphaBuf { width, height, data: vec![value; width as usize * height as usize] }
+    }
+
+    /// Wraps existing bytes; `None` unless `data.len() == width * height`.
+    pub fn from_raw(width: u32, height: u32, data: Vec<u8>) -> Option<AlphaBuf> {
+        (data.len() == width as usize * height as usize).then_some(AlphaBuf { width, height, data })
+    }
+
+    /// The alpha channel of an RGBA image.
+    pub fn from_alpha(buf: &PixelBuf) -> AlphaBuf {
+        AlphaBuf { width: buf.width, height: buf.height, data: buf.data.iter().skip(3).step_by(4).copied().collect() }
+    }
+
+    /// Value at `(x, y)`; panics outside the image.
+    #[inline]
+    pub fn get(&self, x: u32, y: u32) -> u8 {
+        assert!(x < self.width && y < self.height, "pixel ({x}, {y}) outside {}x{}", self.width, self.height);
+        self.data[y as usize * self.width as usize + x as usize]
+    }
+
+    /// Writes the value at `(x, y)`; panics outside the image.
+    #[inline]
+    pub fn set(&mut self, x: u32, y: u32, value: u8) {
+        assert!(x < self.width && y < self.height, "pixel ({x}, {y}) outside {}x{}", self.width, self.height);
+        self.data[y as usize * self.width as usize + x as usize] = value;
+    }
+
+    /// The rectangle `0,0 .. width,height`.
+    pub fn rect(&self) -> IRect {
+        IRect::from_size(self.width, self.height)
+    }
+
+    /// Size of the data in bytes.
+    pub fn byte_len(&self) -> usize {
+        self.data.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn k1_alpha_buf_basics() {
+        let mut a = AlphaBuf::new(3, 2);
+        assert_eq!(a.byte_len(), 6);
+        a.set(2, 1, 77);
+        assert_eq!(a.get(2, 1), 77);
+        assert_eq!(a.rect(), IRect::new(0, 0, 3, 2));
+        assert!(AlphaBuf::from_raw(3, 2, vec![0; 5]).is_none());
+        assert_eq!(AlphaBuf::filled(2, 2, 9).data, vec![9; 4]);
+        let rgba = PixelBuf::from_raw(2, 1, vec![1, 2, 3, 40, 5, 6, 7, 80]).unwrap();
+        assert_eq!(AlphaBuf::from_alpha(&rgba).data, vec![40, 80]);
+    }
 
     #[test]
     fn pixel_buf_accessors() {

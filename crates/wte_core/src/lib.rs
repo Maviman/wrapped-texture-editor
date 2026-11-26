@@ -44,6 +44,7 @@ pub mod samples;
 pub mod stamp;
 pub mod stamp_bake;
 pub mod stamp_job;
+pub mod sticker;
 pub mod stroke;
 pub mod texel_map;
 pub mod text;
@@ -82,6 +83,15 @@ pub use progress::*;
 pub use stamp::*;
 pub use stamp_bake::*;
 pub use stamp_job::{FinalBake, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview};
+pub use sticker::adjust::Adjustment;
+pub use sticker::shape::{Paint, ShapeKind, ShapeSpec};
+pub use sticker::style::{
+    Bevel, ColorOverlay, Contour, Glow, Gradient, GradientOverlay, Shadow, Stroke, StrokePos, StylePreset, StyleStack,
+};
+pub use sticker::{
+    LayerTransform, MAX_ARTBOARD, MAX_CREATED_SIDE, MAX_GRADIENT_STOPS, MAX_OWNED_BYTES, MAX_PICTURE_SIDE,
+    MAX_STICKER_LAYERS, MAX_STYLE_LENGTH,
+};
 pub use stroke::*;
 pub use texel_map::*;
 pub use tip_bake::*;

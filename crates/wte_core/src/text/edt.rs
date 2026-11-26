@@ -127,6 +127,105 @@ pub fn distance_to_ink(coverage: &[u8], width: u32, height: u32) -> Vec<f32> {
     out
 }
 
+/// Index (`y * width + x`) of the nearest pixel with coverage >= 128 (centre to centre, Euclidean) for every pixel;
+/// an ink pixel is its own nearest. The same two passes as [`distance_to_ink`], keeping the site instead of the
+/// distance (STICKER_PLAN 4.2, used by defringe). Among equally near sites the one the transform finds is used.
+/// Without any ink every entry is `u32::MAX`; so is the whole result when `coverage` is shorter than
+/// `width * height`.
+pub fn nearest_ink(coverage: &[u8], width: u32, height: u32) -> Vec<u32> {
+    let (w, h) = (width as usize, height as usize);
+    let n = w * h;
+    if n == 0 {
+        return Vec::new();
+    }
+    if coverage.len() < n {
+        return vec![u32::MAX; n];
+    }
+    // Column pass, as in `distance_to_ink`.
+    let mut dy = vec![NONE; n];
+    for y in 0..h {
+        let (done, row) = dy.split_at_mut(y * w);
+        let above = if y > 0 { Some(&done[(y - 1) * w..]) } else { None };
+        for x in 0..w {
+            if coverage[y * w + x] >= INK {
+                row[x] = 0;
+            } else if let Some(above) = above
+                && above[x] != NONE
+            {
+                row[x] = above[x] - 1;
+            }
+        }
+    }
+    let mut below = vec![NONE; w];
+    for y in (0..h).rev() {
+        let row = &mut dy[y * w..(y + 1) * w];
+        for x in 0..w {
+            below[x] = if coverage[y * w + x] >= INK {
+                0
+            } else if below[x] == NONE {
+                NONE
+            } else {
+                below[x] + 1
+            };
+            if below[x] != NONE && (row[x] == NONE || below[x] < -row[x]) {
+                row[x] = below[x];
+            }
+        }
+    }
+    // Row pass: lower envelope of the parabolas, storing the site of the winning parabola.
+    let mut out = vec![u32::MAX; n];
+    let dy = &dy;
+    let do_row = |(hull, starts): &mut (Vec<usize>, Vec<f64>), (y, row): (usize, &mut [u32])| {
+        let d = &dy[y * w..(y + 1) * w];
+        hull.clear();
+        starts.clear();
+        let height_at = |q: usize| -> f64 {
+            let v = d[q] as f64;
+            v * v + (q * q) as f64
+        };
+        for (q, &dq) in d.iter().enumerate() {
+            if dq == NONE {
+                continue;
+            }
+            let fq = height_at(q);
+            loop {
+                let Some(&p) = hull.last() else {
+                    hull.push(q);
+                    starts.push(f64::NEG_INFINITY);
+                    break;
+                };
+                let s = (fq - height_at(p)) / (2.0 * (q - p) as f64);
+                if s <= starts[starts.len() - 1] {
+                    hull.pop();
+                    starts.pop();
+                } else {
+                    hull.push(q);
+                    starts.push(s);
+                    break;
+                }
+            }
+        }
+        if hull.is_empty() {
+            return;
+        }
+        let mut k = 0;
+        for (x, value) in row.iter_mut().enumerate() {
+            while k + 1 < hull.len() && starts[k + 1] < x as f64 {
+                k += 1;
+            }
+            let q = hull[k];
+            *value = ((y as i64 + d[q] as i64) as usize * w + q) as u32;
+        }
+    };
+    if n >= PAR_PIXELS {
+        out.par_chunks_mut(w).enumerate().for_each_init(|| (Vec::new(), Vec::new()), do_row);
+    } else {
+        let mut scratch = (Vec::new(), Vec::new());
+        out.chunks_mut(w).enumerate().for_each(|item| do_row(&mut scratch, item));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +338,62 @@ mod tests {
         let d = distance_to_ink(&cov, w as u32, h as u32);
         assert!((d[3 * w + 6] - (2.0 + 0.5 - 128.0 / 255.0)).abs() < 1e-5);
         assert_eq!(d[3 * w + 4], 0.0);
+    }
+
+    /// Squared centre distance between pixel indices `a` and `b` of a `w`-wide image.
+    fn d2_of(a: usize, b: usize, w: usize) -> i64 {
+        ((a % w) as i64 - (b % w) as i64).pow(2) + ((a / w) as i64 - (b / w) as i64).pow(2)
+    }
+
+    #[test]
+    fn k1_nearest_ink_matches_brute_force_on_16x16() {
+        let (w, h) = (16usize, 16usize);
+        for (seed, density) in [0.01f32, 0.05, 0.2, 0.5, 0.9, 0.03].into_iter().enumerate() {
+            let mut rng = XorShift::new(500 + seed as u64);
+            let cov: Vec<u8> = (0..w * h)
+                .map(|_| {
+                    let v = (rng.next_u32() % 256) as u8;
+                    if rng.next_f32() < density { v.max(128) } else { v.min(127) }
+                })
+                .collect();
+            let got = nearest_ink(&cov, w as u32, h as u32);
+            assert_eq!(got.len(), w * h);
+            let ink: Vec<usize> = (0..w * h).filter(|&s| cov[s] >= INK).collect();
+            for i in 0..w * h {
+                if ink.is_empty() {
+                    assert_eq!(got[i], u32::MAX);
+                    continue;
+                }
+                let best = ink.iter().map(|&s| d2_of(s, i, w)).min().unwrap();
+                let s = got[i] as usize;
+                assert!(cov[s] >= INK, "pixel {i} -> {s} is not ink");
+                assert_eq!(d2_of(s, i, w), best, "pixel {i}: site {s}, nearest d2 {best}");
+                if cov[i] >= INK {
+                    assert_eq!(s, i);
+                }
+            }
+        }
+        assert!(nearest_ink(&[], 0, 3).is_empty());
+        assert!(nearest_ink(&[0, 0, 0, 0], 2, 2).iter().all(|&s| s == u32::MAX));
+        assert!(nearest_ink(&[255], 2, 2).iter().all(|&s| s == u32::MAX));
+        // The parallel path (above PAR_PIXELS) finds sites at the true nearest distance too.
+        let (w, h) = (300usize, 300usize);
+        let mut cov = vec![0u8; w * h];
+        let mut rng = XorShift::new(77);
+        let mut sites = Vec::new();
+        for _ in 0..30 {
+            let (x, y) = ((rng.next_u32() % 300) as usize, (rng.next_u32() % 300) as usize);
+            cov[y * w + x] = 255;
+            sites.push(y * w + x);
+        }
+        let got = nearest_ink(&cov, w as u32, h as u32);
+        for y in (0..h).step_by(11) {
+            for x in (0..w).step_by(7) {
+                let i = y * w + x;
+                let best = sites.iter().map(|&s| d2_of(s, i, w)).min().unwrap();
+                assert_eq!(d2_of(got[i] as usize, i, w), best);
+            }
+        }
     }
 
     #[test]

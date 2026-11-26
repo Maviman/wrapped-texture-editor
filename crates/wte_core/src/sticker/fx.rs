@@ -172,7 +172,7 @@ pub fn dist_in(alpha: &[u8], width: u32, height: u32) -> Vec<f32> {
 
 /// `clamp(v, 0, 1)` as a byte, rounded half up; NaN and `-inf` give 0.
 #[inline]
-fn cov(v: f32) -> u8 {
+pub(crate) fn cov(v: f32) -> u8 {
     if v >= 1.0 {
         255
     } else if v > 0.0 {
@@ -455,7 +455,7 @@ pub(crate) fn inner_shadow_plane(inv: &Plane, d_in: Option<&[f32]>, sh: &Shadow)
 /// Straight-alpha source-over of colour `rgb` (0..=255) with coverage `sa` (0..=1) onto pixel `d`. A result whose
 /// alpha rounds to 0 leaves the pixel as it was.
 #[inline]
-fn over(d: &mut [u8], rgb: [f32; 3], sa: f32) {
+pub(crate) fn over(d: &mut [u8], rgb: [f32; 3], sa: f32) {
     if sa.is_nan() || sa <= 0.0 {
         return;
     }

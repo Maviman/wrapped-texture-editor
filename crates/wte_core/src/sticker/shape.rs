@@ -79,13 +79,13 @@ impl ShapeSpec {
 }
 
 /// Exact signed distance to the box `[0, size]` (centre `c`, half extents `b`), rounded by `r`.
-fn sd_round_box(p: Vec2, c: Vec2, b: Vec2, r: f32) -> f32 {
+pub(crate) fn sd_round_box(p: Vec2, c: Vec2, b: Vec2, r: f32) -> f32 {
     let q = (p - c).abs() - b + Vec2::splat(r);
     q.max(Vec2::ZERO).length() + q.x.max(q.y).min(0.0) - r
 }
 
 /// First-order signed distance to the ellipse with centre `c` and semi-axes `ab`.
-fn sd_ellipse(p: Vec2, c: Vec2, ab: Vec2) -> f32 {
+pub(crate) fn sd_ellipse(p: Vec2, c: Vec2, ab: Vec2) -> f32 {
     let d = p - c;
     let f = ((d.x / ab.x).powi(2) + (d.y / ab.y).powi(2)).sqrt();
     if f <= 1.0e-6 {

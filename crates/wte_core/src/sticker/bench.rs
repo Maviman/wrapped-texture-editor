@@ -136,3 +136,110 @@ fn perf_k1_edt_2048() {
     });
     report("distance_to_ink 2048 x 2048", ms, 80.0);
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Package P2 (`perf_k2_*`): `cargo test -p wte_core --release --lib perf_k2 -- --ignored --test-threads=1 --nocapture`
+// ---------------------------------------------------------------------------------------------------------------
+
+/// An object on a white background with an anti-aliased edge (the usual "remove the background" picture): a disc and
+/// a bar in a dark red, a little noise in the background.
+fn object_on_white(side: u32) -> PixelBuf {
+    use crate::sticker::select::Selection;
+    use glam::Vec2;
+    let s = side as f32;
+    let disc = Selection::ellipse(side, side, Vec2::splat(s * 0.15), Vec2::splat(s * 0.7)).mask;
+    let bar = Selection::rect(side, side, Vec2::new(s * 0.5, s * 0.55), Vec2::new(s * 0.9, s * 0.85)).mask;
+    let mut rng = XorShift::new(side as u64 + 1);
+    let mut b = PixelBuf::new(side, side);
+    for (i, p) in b.data.chunks_mut(4).enumerate() {
+        let k = disc.data[i].max(bar.data[i]) as u32;
+        let n = rng.next_u32() % 6;
+        let bg = 250 + n;
+        let mix = |o: u32| ((bg * (255 - k) + o * k + 127) / 255) as u8;
+        p.copy_from_slice(&[mix(170), mix(30), mix(40), 255]);
+    }
+    b
+}
+
+#[test]
+#[ignore = "perf: run serially in release (cargo test -p wte_core --release --lib perf_k2 -- --ignored --test-threads=1)"]
+fn perf_k2_wand_magic_eraser_remove_background_2048() {
+    use crate::sticker::cutout::{RemoveBgOptions, remove_background};
+    use crate::sticker::select::{RegionOptions, erase, region};
+    let img = object_on_white(2048);
+    let opts = RegionOptions { tolerance: 32, contiguous: true, anti_alias: true };
+    let ms = median_ms(|| {
+        std::hint::black_box(region(&img, (0, 0), opts));
+    });
+    report("wand (contiguous, anti-alias) 2048 x 2048", ms, 60.0);
+    let ms = median_ms(|| {
+        let mut p = img.clone();
+        let r = region(&p, (0, 0), opts);
+        erase(&mut p, &r);
+        std::hint::black_box(p);
+    });
+    report("magic eraser 2048 x 2048 (picture copy included)", ms, 60.0);
+    let ms = median_ms(|| {
+        let mut p = img.clone();
+        let cut = remove_background(&p, RemoveBgOptions::default()).unwrap();
+        cut.apply(&mut p, None);
+        std::hint::black_box(p);
+    });
+    report("remove background 2048 x 2048 (found and applied)", ms, 150.0);
+    let opts = RemoveBgOptions { follow_gradients: true, enclosed: true, ..RemoveBgOptions::default() };
+    let ms = median_ms(|| {
+        let mut p = img.clone();
+        let cut = remove_background(&p, opts).unwrap();
+        cut.apply(&mut p, None);
+        std::hint::black_box(p);
+    });
+    eprintln!("remove background 2048 x 2048 with Follow gradients and Also enclosed areas: {ms:.1} ms (reported only)");
+}
+
+#[test]
+#[ignore = "perf: run serially in release (cargo test -p wte_core --release --lib perf_k2 -- --ignored --test-threads=1)"]
+fn perf_k2_gaussian_blur_radius_16_2048() {
+    use crate::sticker::filter::{blur, sharpen};
+    let img = photo(2048);
+    let ms = median_ms(|| {
+        std::hint::black_box(blur(&img, 16.0, None));
+    });
+    report("Gaussian blur radius 16, 2048 x 2048", ms, 150.0);
+    let ms = median_ms(|| {
+        std::hint::black_box(blur(&img, 64.0, None));
+    });
+    eprintln!("Gaussian blur radius 64, 2048 x 2048: {ms:.1} ms (reported only)");
+    let ms = median_ms(|| {
+        std::hint::black_box(sharpen(&img, 1.0, 4.0, None));
+    });
+    eprintln!("sharpen amount 100 % radius 4, 2048 x 2048: {ms:.1} ms (reported only)");
+}
+
+#[test]
+#[ignore = "perf: run serially in release (cargo test -p wte_core --release --lib perf_k2 -- --ignored --test-threads=1)"]
+fn perf_k2_flood_fill_worst_case_4096() {
+    use crate::sticker::select::{RegionOptions, region};
+    // One colour everywhere: the flood reaches every pixel (the stack holds one entry per run).
+    let img = PixelBuf::filled(4096, 4096, [10, 200, 30, 255]);
+    for aa in [false, true] {
+        let opts = RegionOptions { tolerance: 0, contiguous: true, anti_alias: aa };
+        let mut r = None;
+        let ms = median_ms(|| {
+            r = Some(region(&img, (2048, 2048), opts));
+        });
+        assert!(r.is_some_and(|r| r.data.iter().all(|&v| v == 255)));
+        report(&format!("flood fill 4096 x 4096 one colour (anti-alias {aa})"), ms, 400.0);
+    }
+    // A worst case for the span stack: one-pixel vertical stripes joined at the bottom (a comb).
+    let mut comb = PixelBuf::filled(4096, 4096, [0, 0, 0, 255]);
+    for y in 0..4095 {
+        for x in (1..4096).step_by(2) {
+            comb.set(x, y, [255, 255, 255, 255]);
+        }
+    }
+    let opts = RegionOptions { tolerance: 0, contiguous: true, anti_alias: false };
+    let ms = median_ms(|| {
+        std::hint::black_box(region(&comb, (0, 0), opts));
+    });
+    report("flood fill 4096 x 4096 comb (2,048 one-pixel teeth)", ms, 400.0);
+}

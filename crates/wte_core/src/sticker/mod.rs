@@ -2,16 +2,20 @@
 //! stamps, and the picture maths they need. Headless, deterministic, CPU only; all pixels straight sRGB RGBA8
 //! (ARCHITECTURE 4.2).
 //!
-//! Package P1 (this state): the layer styles ([`style`], drawn by [`fx::apply_styles`]), adjustments ([`adjust`]),
-//! vector shapes and polygon coverage ([`shape`]), the affine resampler ([`resample`]) and the limits below. The
-//! sticker document itself, its rendering and its place in `Document` follow in P3a.
+//! Package P1: the layer styles ([`style`], drawn by [`fx::apply_styles`]), adjustments ([`adjust`]), vector shapes
+//! and polygon coverage ([`shape`]), the affine resampler ([`resample`]) and the limits below. Package P2:
+//! selections and colour-tolerance regions ([`select`]), the cut-out helpers ([`cutout`]) and blur, sharpen and the
+//! gradient tool ([`filter`]). The sticker document itself, its rendering and its place in `Document` follow in P3a.
 //!
 //! Determinism (ARCHITECTURE 4.7): integer or fixed-order `f32` arithmetic; rayon only over independent rows,
 //! columns or bands; results identical for any thread count (tested with local pools of 1 and 8 threads).
 
 pub mod adjust;
+pub mod cutout;
+pub mod filter;
 pub mod fx;
 pub mod resample;
+pub mod select;
 pub mod shape;
 pub mod style;
 

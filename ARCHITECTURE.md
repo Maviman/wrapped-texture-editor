@@ -62,8 +62,9 @@ egui shows as an image. Picking is a CPU BVH raycast.
 
 ### 1.3 Non-goals for v1
 
-UDIM, skinning/animation, changing a set's resolution after creation, colour-tolerance flood fill, selections, autosave/crash recovery,
-incremental save, PSB (PSD > 4 GiB), HDR/16-bit textures, any AI or network feature, automatic UVs for models where only *some*
+UDIM, skinning/animation, changing a set's resolution after creation, colour-tolerance flood fill and selections **for
+texture layers** (the texture Fill tool keeps its island flood, `fill.rs`; stickers have both since branch `stickers` P2:
+`sticker::select`, 6.12), autosave/crash recovery, incremental save, PSB (PSD > 4 GiB), HDR/16-bit textures, any AI or network feature, automatic UVs for models where only *some*
 materials lack UVs (those materials are listed as "not paintable" in the import dialog).
 
 OS clipboard integration is unavailable in v1: eframe's `clipboard` feature needs the `arboard` crate, which is not downloaded, so
@@ -312,7 +313,8 @@ PhotoCraft (a linked PSD, drag and drop, clipboard). Notes `docs/notes/sticker/`
 | S3 | Algorithms are clean reimplementations written with PhotoCraft's MIT source open; every such file starts with the notice line of STICKER_PLAN 4.0 (`licenses/photocraft-MIT.txt`). |
 
 Traceability (P1): styles, adjustments, shapes, the resampler and the limits (2.1, 5.27, 6.11), `AlphaBuf` (5.5),
-`nearest_ink` (5.13 / 6.11), pitfalls (6.9), tests (9.1).
+`nearest_ink` (5.13 / 6.11), pitfalls (6.9), tests (9.1). (P2): selections, colour-tolerance regions, cut-out helpers,
+blur, sharpen and the gradient tool (2.1, 5.27, 6.12, 9.1); 1.3's non-goal now names texture layers only.
 
 ---
 
@@ -375,7 +377,10 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `sticker/adjust.rs` | stickers P1 | `Adjustment` (2.4 of the plan), its tables, `apply_adjustments` |
 | `sticker/shape.rs` | stickers P1 | `ShapeSpec`, `ShapeKind`, `Paint`, `rasterize`, `polygon_coverage`, `shape_points` |
 | `sticker/resample.rs` | stickers P1 | `transform_picture`, `transformed_bounds` (the affine resampler of 6.11) |
-| `sticker/bench.rs` | stickers P1 | the ignored `perf_k1_*` timings (test-only) |
+| `sticker/select.rs` | stickers P2 | `Selection` (marquee, lasso, combine, invert, grow / shrink / feather, limit), `SelectMode`, colour-tolerance regions (`region`, `color_range`, `color_diff`), `erase` / `fill` (and their mask forms), `extract`, `mix_px` / `mix_selected` (5.27, 6.12) |
+| `sticker/cutout.rs` | stickers P2 | colour to alpha (`unmix_pixel`, `color_to_alpha`), `remove_matte`, `defringe`, `remove_background` / `BackgroundCut` (5.27, 6.12) |
+| `sticker/filter.rs` | stickers P2 | Gaussian `blur` / `blur_mask` (three boxes), `sharpen`, `draw_gradient` / `draw_gradient_mask` (5.27, 6.12) |
+| `sticker/bench.rs` | stickers P1, P2 | the ignored `perf_k1_*` and `perf_k2_*` timings (test-only) |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -3103,7 +3108,7 @@ at its next check and its result is dropped. Loads are serialised: the cancelled
 `bake_from_path` waits for it to end (answering Cancel meanwhile) before its own parse, so a quick Cancel and reload
 never runs two parses at the same time.
 
-### 5.27 `sticker/` (stickers; part 1 = P1: styles and picture maths)
+### 5.27 `sticker/` (stickers; part 1 = P1: styles and picture maths; part 2 = P2: selection, cut-out, filters)
 
 Every function is pure, headless and deterministic (any thread count gives the same bytes, 4.7). All colours straight
 sRGB RGBA8. Types are re-exported at the crate root; free functions are reached through their modules
@@ -3184,6 +3189,75 @@ pub fn transform_picture(src: &PixelBuf, t: &LayerTransform, s: f32, clip: Optio
 // text/edt.rs (P1 addition; distance_to_ink is unchanged)
 pub fn nearest_ink(coverage: &[u8], width: u32, height: u32) -> Vec<u32>;     // index of the nearest pixel >= 128; u32::MAX without ink
 ```
+
+Part 2 (P2; 6.12). All buffers handed to one call have the same size; a selection / coverage of another size counts
+as **empty** (nothing changes). `sel: Option<&AlphaBuf>` = "limit to this selection" (`None` = everything); the result
+is mixed with the original by `sel / 255` (premultiplied `mix_px`). `Selection`, `SelectMode`, `RegionOptions`,
+`Matte`, `RemoveBgOptions`, `RemoveBgRefusal`, `BackgroundCut` are re-exported at the crate root.
+
+```rust
+// sticker/select.rs
+pub const DEFAULT_TOLERANCE: u8 = 32;  pub const MAX_MODIFY: f32 = 512.0;
+pub enum SelectMode { Replace, Add /* max */, Subtract /* old * (255 - new) / 255 */, Intersect /* min */ }
+#[derive(Clone, Debug, PartialEq)]
+pub struct Selection { pub mask: AlphaBuf /* artboard size */, pub bounds: IRect /* non-zero pixels; EMPTY = none */ }
+impl Selection {
+    pub fn from_mask(mask: AlphaBuf) -> Selection;  pub fn none(w: u32, h: u32) -> Selection;  pub fn all(w: u32, h: u32) -> Selection;
+    pub fn rect(w: u32, h: u32, a: Vec2, b: Vec2) -> Selection;      // marquee, corners in pixels, coverage clamp(0.5 - sd)
+    pub fn ellipse(w: u32, h: u32, a: Vec2, b: Vec2) -> Selection;   // inscribed in the corners' box
+    pub fn polygon(w: u32, h: u32, points: &[Vec2]) -> Selection;   // lasso (polygon_coverage)
+    pub fn from_alpha(picture: &PixelBuf) -> Selection;             // "Selection from layer alpha"
+    pub fn size(&self) -> [u32; 2];  pub fn is_empty(&self) -> bool;  pub fn at(&self, x: i32, y: i32) -> u8;
+    pub fn combine(&mut self, new: &AlphaBuf, mode: SelectMode);  pub fn invert(&mut self);
+    pub fn grow(&mut self, n: f32);  pub fn shrink(&mut self, n: f32);  pub fn feather(&mut self, n: f32);   // 0..=512 px
+    pub fn limit(&self, coverage: &mut AlphaBuf);                    // coverage *= mask / 255
+}
+pub fn mask_bounds(mask: &AlphaBuf) -> IRect;
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RegionOptions { pub tolerance: u8, pub contiguous: bool, pub anti_alias: bool }   // default 32, true, true
+pub fn color_diff(p: [u8; 4], q: [u8; 4]) -> u8;                     // max channel diff; the colour of alpha 0 ignored
+pub fn fringe_value(diff: u8, tolerance: u8) -> u8;                  // the anti-alias value of a pixel next to a region
+pub fn region(src: &PixelBuf, seed: (u32, u32), opts: RegionOptions) -> AlphaBuf;          // wand / Fill / Magic Eraser
+pub fn color_range(src: &PixelBuf, color: [u8; 4], tolerance: u8, anti_alias: bool) -> AlphaBuf;
+pub fn erase(pixels: &mut PixelBuf, coverage: &AlphaBuf);            // alpha *= (255 - c) / 255 (Magic Eraser, Delete)
+pub fn erase_mask(mask: &mut AlphaBuf, coverage: &AlphaBuf);
+pub fn fill(pixels: &mut PixelBuf, coverage: &AlphaBuf, color: [u8; 4]);   // source-over, strength c / 255
+pub fn fill_mask(mask: &mut AlphaBuf, coverage: &AlphaBuf, value: u8);
+pub fn extract(src: &PixelBuf, sel: &AlphaBuf) -> PixelBuf;          // "Layer via Copy": alpha *= sel / 255
+pub fn mix_px(before: [u8; 4], after: [u8; 4], k: u8) -> [u8; 4];   // premultiplied; k 0 / 255 exact
+pub fn mix_selected(before: &PixelBuf, after: &mut PixelBuf, sel: &AlphaBuf);
+pub fn mix_selected_mask(before: &AlphaBuf, after: &mut AlphaBuf, sel: &AlphaBuf);
+
+// sticker/cutout.rs
+pub const MAX_DEFRINGE: u32 = 10;  pub const DEFAULT_BG_TOLERANCE: u8 = 40;  pub const BG_SOFT_BAND: f32 = 2.0;
+pub fn unmix_pixel(p: [u8; 4], key: [u8; 3], t0: f32, t1: f32) -> ([u8; 4], u8);   // colour to alpha of one pixel, and a' as a byte
+pub fn color_to_alpha(pixels: &mut PixelBuf, key: [u8; 3], t0: f32, t1: f32, sel: Option<&AlphaBuf>);
+pub enum Matte { White, Black }
+pub fn remove_matte(pixels: &mut PixelBuf, matte: Matte, sel: Option<&AlphaBuf>);
+pub fn defringe(pixels: &mut PixelBuf, width: u32, sel: Option<&AlphaBuf>) -> u64;   // pixels recoloured
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RemoveBgOptions { pub tolerance: u8, pub follow_gradients: bool, pub enclosed: bool }   // default 40, false, false
+pub enum RemoveBgRefusal { Empty, AlreadyTransparent, NoPlainBackground }   // .message(): the UI note
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundCut { pub keep: AlphaBuf, pub colors: Vec<[u8; 3]>, pub region_pixels: u64, pub recolor: Vec<(u32, [u8; 3])> }
+impl BackgroundCut {
+    pub fn apply(&self, pixels: &mut PixelBuf, sel: Option<&AlphaBuf>);        // alpha *= keep, soft edge recoloured
+    pub fn apply_to_mask(&self, mask: &mut AlphaBuf, sel: Option<&AlphaBuf>);  // "Into mask (keep pixels)"
+}
+pub fn remove_background(src: &PixelBuf, opts: RemoveBgOptions) -> Result<BackgroundCut, RemoveBgRefusal>;
+
+// sticker/filter.rs
+pub const MAX_BLUR_RADIUS: f32 = 64.0;  pub const MAX_SHARPEN_AMOUNT: f32 = 3.0;  pub const MAX_SHARPEN_RADIUS: f32 = 16.0;
+pub fn gaussian_boxes(sigma: f32) -> [u32; 3];                       // odd widths, ascending
+pub fn blur(src: &PixelBuf, radius: f32, sel: Option<&AlphaBuf>) -> PixelBuf;
+pub fn blur_mask(src: &AlphaBuf, radius: f32, sel: Option<&AlphaBuf>) -> AlphaBuf;
+pub fn sharpen(src: &PixelBuf, amount: f32, radius: f32, sel: Option<&AlphaBuf>) -> PixelBuf;   // amount 0 = identity
+pub fn draw_gradient(pixels: &mut PixelBuf, from: Vec2, to: Vec2, gradient: &Gradient, opacity: f32, sel: Option<&AlphaBuf>);
+pub fn draw_gradient_mask(mask: &mut AlphaBuf, from: Vec2, to: Vec2, gradient: &Gradient, opacity: f32, sel: Option<&AlphaBuf>);
+```
+
+Crate-internal for P2 (no public API change of P1): `fx::cov`, `fx::over`, `shape::sd_round_box`, `shape::sd_ellipse`
+are now `pub(crate)`; `select::flood_plane`, `select::sel_at`, `select::mix_u8` are shared by `cutout` and `filter`.
 
 ---
 
@@ -4409,6 +4483,75 @@ alpha 0 kept): rotation a multiple of 90 degrees within 1e-6 rad, `|scale * s| =
 centres landing within 1e-4 of output pixel centres (moves by whole pixels, flips, grid-aligned quarter turns). Output
 rect = `transformed_bounds` (corners snapped within 1e-6 of an integer) intersected with the clip, at most
 `MAX_RESAMPLE_PIXELS`.
+
+### 6.12 Sticker selection, cut-out and filters (`sticker/select.rs`, `cutout.rs`, `filter.rs`) [stickers P2]
+
+STICKER_PLAN 3.4, 4.4, 4.5 (not GrabCut), 4.9 are the source; this section records what is built and where it differs.
+Written with PhotoCraft's MIT source open (notice line of STICKER_PLAN 4.0). Every buffer of one call has the same size;
+a selection or coverage of another size counts as empty. "No AI": classic image maths only, deterministic for any
+thread count (byte planes or per-pixel `f32` expressions; rayon over rows only).
+
+**Selection.** `Selection { mask, bounds }`, `bounds` = bounding box of the non-zero pixels, kept right by every method.
+Marquee rectangle / ellipse: coverage `clamp(0.5 - sd)` of 6.11's shape distances (whole-pixel corners give a hard
+edge); lasso = `polygon_coverage`. Combine: Replace, Add `max`, Subtract `old * (255 - new) / 255`, Intersect `min`.
+Grow `n`: `max(m, clamp(n + 0.5 - dist_out(m)))` (the contour threshold); shrink `n`: `min(m, 255 - clamp(n + 0.5 -
+dist_in(m)))` (the artboard border is not an edge: Select All stays all); feather `n`: tent blur of box width `round(n)`
+on the mask **extended by its own border values** (deviation from the plan's plain tent: with "outside = 0" a selection
+touching the artboard border would fade there and Select All + Feather would no longer select the border). Lengths
+0..=512, non-finite = 0. `limit(coverage)` multiplies a tool's coverage by the mask.
+
+**Regions** (wand, Color Range, Fill, Magic Eraser). `color_diff(p, q) = max(|dr|, |dg|, |db|, |da|)`; when either
+pixel has alpha 0 only `|da|` counts (two transparent pixels match). Match: `diff <= tolerance`. Contiguous: the test is
+evaluated once per pixel into a byte plane (parallel rows), then a scanline flood (4-connected, a stack of runs) compares
+bytes only; non-contiguous: the plane itself. Anti-alias: a pixel not in the region with an 8-neighbour in it gets
+`round(255 * clamp(1 - (diff - tol) / max(tol, 16)))` (a diagonal-only matching neighbour therefore gets 255). Magic
+Eraser / Delete: `alpha' = alpha * (255 - c) / 255` (exact rounding, `mul_u8`), RGB kept; Fill: straight source-over
+(`fx::over`) with strength `c / 255`; on a mask `erase_mask` / `fill_mask` (`m + (v - m) c / 255`). Limiting a finished
+edit to a selection mixes **premultiplied** (`mix_px`: a transparent side lends no colour; `k = 0` / `255` are exact).
+
+**Colour to alpha** (`unmix_pixel`, on bytes / 255): `a_i = (P_i - C_i) / (1 - C_i)` above the key, `(C_i - P_i) / C_i`
+below, 0 equal (a key channel of 1 / 0 with `P` beyond it gives 1); `a = max a_i`; thresholds `t0 < t1` remap linearly
+(a bad pair = `0, 1`); `a' >= 1` keeps the pixel, `a' = 0` gives the key at alpha 0, else `P' = (P - C) / a' + C`,
+alpha `round(a' * alpha)`. A transparent pixel is left. Matte: white `C = (P - (1 - a)) / a`, black `C = P / a`, alpha
+0 and 255 left. **Defringe** `n` (1..=10): `dist_in` of the alpha **without a pad** (the picture's border is not an
+edge, so an opaque photo has no fringe); edge = alpha > 0 and `dist_in <= n`; interior = alpha >= 250 and `dist_in >
+n`; each edge pixel takes the RGB of `nearest_ink(interior)`; alpha kept; no interior = no change.
+
+**Remove Background.** 1. The 1-px frame; if at least half of it has alpha < 128: `AlreadyTransparent` ("This picture
+already has a transparent background"). 2. Background colours (deviation): the plan's "cells of 4 bits holding 15 %"
+breaks on mid-grey noise that straddles a cell boundary, so the most frequent 4-bit cell (ties: lower index) only
+**seeds** a cluster: every not yet taken opaque frame pixel within `tolerance` of the cell's mean; the cluster's mean is a
+colour when it holds >= 15 % of the frame; up to three; none = `NoPlainBackground`
+(`k2_remove_background_on_a_noisy_grey_background`). 3. Region: the match plane
+(`diff <= tol` to any colour, parallel) flooded from every matching frame pixel (`flood_plane`); with Follow gradients a
+per-pixel flood that also accepts a visible pixel within `tol / 4` of an accepted neighbour (only accepted pixels are
+marked, so the result is the smallest closed set whatever the order); Also enclosed areas adds every pixel within
+`tol / 2` of a colour. 4. Soft edge (deviation, refines the plan's "colour to alpha against the nearest background
+colour"): band = not region and `distance_to_ink(region) <= 2`; key = the background colour nearest to the closest
+region pixel (Follow gradients: that pixel's colour), closest = first hit in a fixed disc of radius 4 ordered by
+distance, row, column; the band pixel's colour-to-alpha opacity is **divided by the opacity of the closest "inside"
+pixel** (outside region and band) against the same key, so `k O + (1 - k) C` gives back `O` at alpha `k` and the
+object's own opaque pixels along the edge stay opaque (plain colour to alpha made a 2-px rim about 12 % transparent and
+shifted its colour; `k2_remove_background_on_three_synthetic_pictures` fails without it); no inside pixel nearby (or its
+opacity < 0.05) = plain colour to alpha. 5. `BackgroundCut { keep, colors, region_pixels, recolor }`; `apply` (alpha
+times `keep`, soft edge recoloured, mixed by a selection) or `apply_to_mask` ("Into mask": the mask times `keep`, pixels
+untouched).
+
+**Blur** (Gaussian, `sigma = radius`, 0.5..=64): `gaussian_boxes` = the standard three-box rule (`w = sqrt(12 s^2 / 3 +
+1)`, odd `wl <= w`, `wu = wl + 2`, `m = round((12 s^2 - 3 wl^2 - 12 wl - 9) / (-4 wl - 4))` boxes of `wl`); values
+premultiplied in units of `1 / 255^2` (`c * a`, alpha `a * 255`, both <= 65,025 in `u16`); three box passes along rows
+(replicated ends, integer running sums, `(sum + b/2) / b`), blocked transpose, the same, transpose back;
+un-premultiplied `round(c * 255 / A)`, alpha `round(A / 255)`; a pixel whose alpha rounds to 0 keeps the source RGB at
+alpha 0. Exactly the same values for a constant picture; no colour bleeds from transparent pixels (premultiplied).
+`blur_mask`: one channel, the same rule. **Sharpen**: `round(src + amount * (src - blur(src, radius)))` per colour
+channel of pixels with alpha > 0, alpha kept, amount 0..=3 (0 = identity), radius 0.5..=16. **Gradient**: `t =
+clamp((p - from) . (to - from) / |to - from|^2)` at pixel centres (a zero-length line = 1 everywhere), colour =
+`Gradient::sample(t)`, source-over with `opacity * colour alpha * sel / 255`; on a mask the colour's luma
+`round(0.299 r + 0.587 g + 0.114 b)` is mixed in by the same strength. Endpoint pixel centres get the end stops exactly.
+
+Measured (release, this machine, plan 8.4 budgets in brackets; build note `docs/notes/sticker/build-P2.md`): wand 2048^2
+10.8 ms (60), magic eraser 15.5 ms (60), remove background 46.5 ms (150), Gaussian blur radius 16 at 2048^2 51 ms (150),
+flood 4096^2 one colour 38 ms (400).
 
 ---
 
@@ -7880,6 +8023,26 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `distance_to_ink` are untouched. Ignored, release, serial: `sticker::bench::perf_k1_*` (`cargo test -p wte_core
   --release --lib perf_k1 -- --ignored --test-threads=1 --nocapture`; STICKER_PLAN 8.4 budgets, numbers in
   `docs/notes/sticker/build-P1.md`).
+- Branch `stickers`, P2 (STICKER_PLAN 7 "P2", names `k2_*`): `sticker::select::tests`
+  (`wand_selects_one_side_of_a_two_colour_image_at_tolerance_0`, `tolerance_edges_and_contiguity` (a difference equal to
+  the tolerance is in; contiguous vs not; diagonals are not 4-connected), `anti_alias_values_on_a_known_ramp`,
+  `transparent_pixels_match_each_other`, `magic_eraser_on_white_background_and_fill_honours_a_selection`,
+  `marquee_shapes_and_combine_modes`, `grow_then_shrink_of_a_disc_returns_it_and_feather_keeps_the_sum` (within 1 px,
+  sum within 1 %, Select All stays all), `mixing_by_a_selection`, `regions_and_modifiers_are_thread_count_independent`);
+  `sticker::cutout::tests` (`color_to_alpha_rules` (pure key -> 0; 50 % red over white -> red at 128 +- 1; opaque
+  black stays; re-compositing reproduces the pixel), `remove_matte_inverts_a_matte` (alpha >= 32: Q within the
+  rounding of P, re-matting within 1 level), `defringe_replaces_a_white_halo`,
+  `remove_background_on_three_synthetic_pictures` (flat white, two-colour border, vertical gradient with Follow
+  gradients: IoU >= 0.98; opaque object pixels stay >= 250; Into mask; selection),
+  `remove_background_refusals_and_enclosed_areas`, `remove_background_on_a_noisy_grey_background` (no 4-bit cell
+  holds 15 % of the border, the cluster finds the grey), `cutout_is_thread_count_independent`); `sticker::filter::tests`
+  (`three_box_widths`, `blur_of_a_constant_picture_is_the_same_picture`,
+  `blur_keeps_the_premultiplied_sum_and_bleeds_no_colour`, `blur_inside_a_selection_and_on_a_mask`, `sharpen_rules`
+  (amount 0 = identity), `gradient_endpoints_are_exact_and_a_selection_limits_it`,
+  `filters_are_thread_count_independent`). Ignored, release, serial: `sticker::bench::perf_k2_*` (wand / magic eraser /
+  remove background 2048^2, blur radius 16 at 2048^2, flood 4096^2 one colour and a 2,048-tooth comb; `cargo test -p
+  wte_core --release --lib perf_k2 -- --ignored --test-threads=1 --nocapture`; numbers in
+  `docs/notes/sticker/build-P2.md`).
 
 ### 9.2 `wte_app` tests
 
@@ -8417,3 +8580,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 |---|---|---|---|
 | P0 | baseline (tests, clippy, exe hash, the 8.5 regression outputs), `.gitattributes`, PSD fixtures f1-f12, `licenses/photocraft-MIT.txt`, the CLI-vs-GUI save comparison | `crates/wte_core/tests/fixtures/psd/`, `tools/sticker/`, `docs/notes/sticker/{baseline,pc-save-paths}.md` | only fixtures added under `crates/`, notes LF, fixtures < 400 KB, README lines reproduce them |
 | P1 | styles and picture maths: `StyleStack` (margin, sanitize, presets), `apply_styles`, tent blur, `dist_out` / `dist_in`, `nearest_ink`, adjustments, shapes and polygon coverage, the affine resampler, `AlphaBuf`, the limits; no `Document` change | `crates/wte_core/src/sticker/{mod,style,fx,fx_tests,adjust,shape,resample,bench}.rs`, `pixel.rs`, `text/edt.rs` | every formula against plan 4; `apply_styles` fuzzed with empty, 1x1, opaque and transparent inputs; licence headers; `distance_to_ink` unchanged |
+| P2 | selection, cut-out and filter maths: `Selection` (marquee, lasso, combine, grow / shrink / feather), colour-tolerance regions (wand, colour range, flood fill), magic eraser, fill, colour to alpha, mattes, defringe, remove background, Gaussian blur, sharpen, gradient; no `Document` change | `crates/wte_core/src/sticker/{select,cutout,filter,bench}.rs` | the checker's own pictures (a noisy white background), a 4096 x 4096 single-colour flood (perf), determinism |

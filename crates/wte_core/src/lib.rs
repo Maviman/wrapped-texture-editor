@@ -84,6 +84,8 @@ pub use stamp::*;
 pub use stamp_bake::*;
 pub use stamp_job::{FinalBake, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview};
 pub use sticker::adjust::Adjustment;
+pub use sticker::cutout::{BackgroundCut, Matte, RemoveBgOptions, RemoveBgRefusal};
+pub use sticker::select::{RegionOptions, SelectMode, Selection};
 pub use sticker::shape::{Paint, ShapeKind, ShapeSpec};
 pub use sticker::style::{
     Bevel, ColorOverlay, Contour, Glow, Gradient, GradientOverlay, Shadow, Stroke, StrokePos, StylePreset, StyleStack,

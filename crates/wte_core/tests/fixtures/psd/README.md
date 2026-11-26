@@ -8,7 +8,8 @@ Made in package P0 (2026-11-25) with the user's **PhotoCraft v0.2.0** console ex
   tag v0.2.0's `apps/photocraft-cli/src/lib.rs`).
 - scratch folder: `G:\Claude_Resources\ref\scratch\stickerfix\` (outputs in `out\`, then copied here unchanged).
 - everything is reproducible byte for byte: `make_fixtures.sh` was run twice and all 52 output files had the same
-  SHA-256 both times.
+  SHA-256 both times (the P0 checker ran it twice again from another folder, with f12 added: 57 / 57 equal, and equal
+  to the files here).
 
 All canvases are 64 x 48, RGB. For every fixture `X.psd` there are:
 
@@ -32,8 +33,9 @@ All canvases are 64 x 48, RGB. For every fixture `X.psd` there are:
    ```
 
    `f1_wte_in.psd` SHA-256 `86edd6847bd556afa11febe6554641f8b7f696533aa9fdc80febdc4de128235e`.
-2. In the scratch folder, from Git Bash: `sh make_fixtures.sh` (the copy in this folder is the script that made
-   them; it holds every command line below, with `PC` = the exe above and `OUT` = the scratch `out` folder).
+2. Copy `make_fixtures.sh` and `f1_wte_in.psd` into an empty scratch folder and run `sh make_fixtures.sh` there from Git
+   Bash; it writes `./out` (never run it inside the repository). The script holds every command line below, with `PC` =
+   the exe above and `OUT` = the absolute path of `./out`.
 
 ## The fixtures
 
@@ -52,6 +54,7 @@ All canvases are 64 x 48, RGB. For every fixture `X.psd` there are:
 | f9 | `f9_alpha_channel.psd` | feathered purple disc; `select.rect` (0,0 32x24); `select.saveSelection {name "Alpha 1"}` | header channels 5; layer count -1; merged = R G B, transparency, `Alpha 1`; resources also 1006 1045 1077 | channel order (critic R1): the 4th merged channel is transparency, the 5th a saved alpha |
 | f10 | `f10_f1.psb` | `convert f1_pc.psd f10_f1.psb` | version 2 (PSB), same layers and `lyid`s as f1_pc | PSB lengths |
 | f11 | `f11_clipped.psd` | blue disc, new layer `clipped` (yellow band), `layer.createClippingMask` | `clipped` has clipping byte 1 | `clipped` -> `clip` |
+| f12 | `f12_lyid_reuse.psd` (added by the P0 checker) | `run f1_pc.psd --cmd layer.select {layer 3} --cmd layer.delete --cmd layer.new.layer {name "pc new"}` + a cyan rect | `photo` `lyid` 1, `shape` `lyid` 3, `pc new` (new, on top) **`lyid` 2** = the deleted `text` layer's id: PhotoCraft gives a new layer the lowest free id, not one above the largest | STICKER_PLAN 5.4 "`lyid` reuse": a deleted WTE layer plus a new PhotoCraft layer that took its id |
 
 Every fixture's layer records carry `luni`, `lyid` and `iOpa` = 255 and the default blending ranges
 (`(channels + 1) x 00 00 FF FF 00 00 FF FF`), all channels PackBits (RLE); none uses ZIP.

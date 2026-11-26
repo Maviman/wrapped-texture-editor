@@ -1176,10 +1176,13 @@ pub(crate) mod tests {
     }
 
     /// A code attempt's PBKDF2 runs without `hub.auth` held (checker finding: the UI thread waited for it every frame).
+    /// 50,000 iterations: still a PBKDF2 of over a second in a debug build (far above the 30 ms limit), but well inside
+    /// the 10 s handshake deadline the client's own PBKDF2 must meet. 300,000 took about 5-7 s per side in a debug
+    /// build and failed with os error 10053 under load (STICKER_PLAN P0 check).
     #[test]
     fn a_code_attempt_does_not_hold_the_auth_lock() {
         let code = "K7QF3M9T".to_owned();
-        let f = Fixture::with_cfg(PairingWindow::fixed(code), Vec::new(), false, |c| c.iters = 300_000);
+        let f = Fixture::with_cfg(PairingWindow::fixed(code), Vec::new(), false, |c| c.iters = 50_000);
         let addr = f.addr;
         let t = std::thread::spawn(move || {
             let mut c = TestClient::connect(addr).unwrap();

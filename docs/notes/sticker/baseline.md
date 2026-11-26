@@ -17,6 +17,11 @@ the user's desktop (NVIDIA RTX 5070, Vulkan), toolchain rustc 1.99.1 `x86_64-pc-
 
 The numbers equal the plan's expectation (section 1: "near 1,411 / 1 WA20 / 48").
 
+**The exe hash is not reproducible (P0 check).** Two release builds of the same source gave different SHA-256s
+(`3004da74...` and `0cfd37bb...`, both 28,050,944 bytes; the unchanged 7969fcb source rebuilt gave `f9a8abee...`).
+The hash only names the exe that made the baseline; "same behaviour" is proved by the identity sweep below, never by
+comparing exe hashes.
+
 ## Identity baseline (plan 8.5)
 
 - Jobs: `tools/sticker/jobs_identity.txt` = `smoke default paint3d paint2d stamp text preview export export_run roundtrip

@@ -69,7 +69,7 @@ Saving:
 | Between read and write | nothing | Colour Settings open policy (may add an ICC profile to an untagged file when the working space is not the default; resource only), the user's edits | pixels, `lyid`, merged: yes for an unedited file |
 | Exporter | `photocraft_io::export(doc, "psd", ExportOptions::default())` | `photocraft_io::export(doc, path, ExportOptions::default())` | yes (`ext` from the name either way) |
 | PSD options | `force_psb = false` | `force_psb = false` | yes |
-| Layer ids | `psd_export.rs:577-590`: stored `psd_id` kept when unique, new layers numbered after the largest | same function | yes |
+| Layer ids | `psd_export.rs:577-590`: stored `psd_id` kept when unique; a layer without one gets the **lowest free** id counting from 1 (dividers come after all, `fresh_id` `:141-144`) | same function | yes |
 | Trim / RGB under alpha 0 | `Surface::content_bounds` trim (`psd_export.rs:87, 107`) | same | yes |
 | Merged image | built inside `document_to_psd_with` (matted on white, 3 channels when opaque) | same | yes |
 | Compression | RLE for 8 / 16 bit | same | yes |
@@ -78,8 +78,11 @@ Saving:
 
 Layer ids through editing (supports hand test 1, not a proof): `psd_id` is a field of the document's `Layer`
 (`crates/doc/src/lib.rs:424`), set on import and cleared only when a layer is duplicated (`:512`, test `:882`). Painting
-or adjusting a layer keeps the layer and its id; a new layer (also a new text layer) gets `psd_id = None` and is numbered
-above the largest id at save (f5 shows this: the type layer got `lyid` 4, the three WTE layers kept 1..3).
+or adjusting a layer keeps the layer and its id; a new layer (also a new text layer) gets `psd_id = None` and at save the
+**lowest id no other layer uses** (f5: the type layer got `lyid` 4 because 1..3 were taken). This is not "above the
+largest": a WTE layer deleted in PhotoCraft frees its id, and a layer added in the same edit takes it (fixture f12:
+`text` = `lyid` 2 deleted, the new `pc new` layer is `lyid` 2). HEAD does the same (`crates/io/src/psd_export/document.rs`
+`index_layer_ids_and_text`). STICKER_PLAN 5.4 "`lyid` reuse" says what P5 does with it. (Corrected by the P0 check.)
 
 ## 4. Latest PhotoCraft (HEAD), for P9 (read only, not compared in full)
 

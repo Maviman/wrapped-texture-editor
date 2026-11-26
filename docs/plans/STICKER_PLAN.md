@@ -136,7 +136,9 @@ the saved file from Explorer.
   `wte_core` (FBX inflate), so ZIP-compressed PSD channels can be read without a new crate.
 - EDT: `text/edt.rs` `distance_to_ink(coverage, w, h)` (exact Felzenszwalb-Huttenlocher with the sub-pixel edge term).
 - PhotoCraft keeps PSD layer ids: import `pc020\crates\io\src\psd_import.rs:190` (`l.psd_id = rec.layer_id()`), export
-  `psd_export.rs:146-151` (the stored id is written again, new layers get ids above the largest). Its merged image is matted on
+  `psd_export.rs:146-151` (the stored id is written again; **corrected by the P0 check:** a layer without a stored id gets the
+  **lowest free** id from 1 up, `psd_export.rs:577-590`, the same at HEAD, so a new PhotoCraft layer can take the id of a layer
+  deleted in PhotoCraft in the same edit: fixture f12, 5.4). Its merged image is matted on
   white and written with 3 channels when everything is opaque (`psd_export.rs:602-612`); layer channels are RLE for 8 and 16
   bit, ZIP with prediction only for 32-bit float (`:65-67`); 16-bit layer info sits in the `Lr16` block (`:755`).
 - App: `ViewMode { View3D, View2D, Split, Preview }` (`state.rs:33`, serialized), `ViewId` (`state.rs:44`), central area
@@ -1220,6 +1222,13 @@ top.
 - **`lyid` is stable (review A11):** a layer that is already in `layer_map` keeps its `lyid` for ever; a new layer gets
   `next_lyid` (then incremented). The first write therefore gives `lyid = 1, 2, ...` bottom to top, and later writes never
   renumber. Layers PhotoCraft created keep the id PhotoCraft gave them.
+- **`lyid` reuse by PhotoCraft (P0 check, fixture f12).** PhotoCraft (v0.2.0 and HEAD) numbers a layer without a stored id
+  with the **lowest free** id, not one above the largest. Deleting the WTE layer `lyid 2` in PhotoCraft and adding a layer in
+  the same edit gives the new layer `lyid 2`. Read by the table below alone, that is "`lyid` in `layer_map`, the pixels
+  differ": the deleted WTE layer would be replaced by the new picture and keep its WTE layer styles (a text's stroke drawn
+  around the new PhotoCraft picture). P5 must not map such a layer onto the old one; suggested rule (P5 decides and
+  records it): a known `lyid` whose pixels differ **and** whose name differs from the name WTE wrote is treated as "a mapped
+  WTE layer no longer in the PSD" plus "unknown `lyid`" (deleted + new). A k5 test on f12 proves the chosen rule.
 - The stamp's styles and the layer styles are not part of the file.
 
 What PhotoCraft therefore shows: the artwork without WTE's styles. This is deliberate: a style baked into pixels could not be
@@ -1802,6 +1811,7 @@ P12; no package should now need more than one builder.
   - **the mapping table of 5.4 row by row (review B3):** unchanged; moved; mask added to a plain picture layer; mask added
     to a text layer; pixels changed; a new PhotoCraft layer; a PhotoCraft TEXT layer with pixels (fixture f5) -> one new
     picture layer **and every WTE layer kept**, `pc_native` set; a clipped layer (fixture f11) -> `clip`; a deleted layer;
+    a WTE layer deleted in PhotoCraft and a new layer that took its `lyid` (fixture f12, 5.4 "`lyid` reuse");
     a disabled mask; each forcing feature alone -> Merged with the right sentence; Merged replaces the layers and undo
     restores them;
   - scale (review B4): a text layer exported at scale 2 and re-saved untouched comes back as the same text layer; a
@@ -2113,6 +2123,7 @@ PNGs from `file.export.layersToFiles` (the expected layer pixels), and the comma
 | f9 | transparency plus a saved alpha channel | channel order (critic R1) |
 | f10 | a PSB of f1 (if the CLI writes `.psb`) | PSB lengths |
 | f11 | a layer clipped to the layer below (if the v0.2.0 command registry has a clipping command) | `clipped` -> `clip` |
+| f12 | (added by the P0 check) f1 with the WTE layer `text` deleted and a new layer added in PhotoCraft | the new layer takes the freed `lyid` 2 (5.4 "`lyid` reuse") |
 
 (f1 needs the P5 writer: P0 makes f1 from a PSD written by today's `export/psd.rs`, with a soft-edged layer; P5 replaces it
 with one from the new writer and keeps both.) f1 is made with the CLI; whether that equals a GUI Ctrl+S is what P0's
@@ -2410,6 +2421,10 @@ Reviewer B (user fit):
 
 Rejected: none. Two findings were taken with a change, both named above (A25: stated and budgeted instead of tile sharing;
 B14: no context-menu "Paste Here").
+
+P0 check (2026-11-25): the `lyid` claim of section 1 was wrong against the code (PhotoCraft gives a new layer the lowest free
+id, not one above the largest); corrected in section 1, a "`lyid` reuse" rule added to 5.4 and a test to P5; fixture f12
+shows it. Details: `docs/notes/sticker/check-P0.md`.
 
 Defaults of revision 1 that changed, for the main session to tell the user: a link needs a saved project; no PSD write at
 project save; the PSD handle replaces Alt+drag; linked paint layers are now in scope (P12); two rows of upper tabs; the

@@ -8,9 +8,10 @@ Rules (one line per file that is not identical, then a summary; exit code 1 when
   1. Exports (every file inside a sub-folder of a job, and every file that is not a screenshot, a .wtep or a log):
      byte for byte.
   2. .wtep: every ZIP entry except manifest.json byte for byte (layer PNGs, blobs, source files, flattened and thumbnail
-     pictures); manifest.json equal after removing "format_version", "min_reader_version", "app_version" and
-     "saved_unix" (the save time; it differs between any two runs). A difference in "stamps" or "sets" (layers) FAILs;
-     any other manifest difference is listed as NOTE.
+     pictures); manifest.json equal after removing "format_version", "app_version" and "saved_unix" (the save time; it
+     differs between any two runs). Plan 8.5: the manifest may differ only in the format version and the app version,
+     so every other difference FAILs. "min_reader_version" is compared on purpose: plan 2.11 says a project that uses
+     no new feature keeps exactly the reader version it has today (an old build must still open it).
   3. Screenshots (*.png directly in a job folder): 1280x800 pictures are compared inside the central view rectangle
      x 44..980, y 51..775 (right of the tool strip, below the menu bar and the mode strip, left of the side panel, above
      the status bar), pixel for pixel. Excluded on purpose (the sticker work changes them): the mode strip (a new button),
@@ -30,12 +31,14 @@ from PIL import Image
 
 VIEW_BOX = (44, 51, 980, 775)
 SKIP_EXT = {'.json', '.log', '.txt'}
-MANIFEST_IGNORED = ('format_version', 'min_reader_version', 'app_version', 'saved_unix')
+MANIFEST_IGNORED = ('format_version', 'app_version', 'saved_unix')
 # Screenshot areas (x0, y0, x1, y1 in window pixels at 1280x800) that change between two runs of the same exe:
 # the companion dialog's random test port, random pairing code and "since <today>" date; the export dialog's folder
-# field, which shows the sweep's own output path.
+# field, which shows the sweep's own output path; the companion scenario's last toast ("Undo: Erase"), which fades after
+# 4 s of wall-clock time and so is still visible in the final shot on a slower run (seen by the P0 checker).
 VOLATILE = {
     'companion/shot_companion_dialog.png': [(500, 428, 625, 446), (545, 474, 670, 502), (520, 528, 640, 547)],
+    'companion/shot.png': [(760, 725, 980, 775)],
     'export/shot.png': [(320, 148, 505, 170)],
 }
 
@@ -97,8 +100,10 @@ def compare_wtep(rel, pa, pb):
             mb = json.loads(zb.read(n))
             ca, cb = manifest_core(ma), manifest_core(mb)
             for k in sorted(set(ca) | set(cb)):
-                if ca.get(k) != cb.get(k):
-                    (bad if k in ('stamps', 'sets') else notes).append(f'manifest "{k}" differs')
+                if k not in ca or k not in cb:
+                    bad.append(f'manifest key "{k}" only in {"new" if k in cb else "base"}')
+                elif ca[k] != cb[k]:
+                    bad.append(f'manifest "{k}" differs')
             continue
         if za.read(n) != zb.read(n):
             bad.append(f'entry {n} differs')

@@ -1,9 +1,10 @@
 #!/bin/sh
 # Makes the STICKER_PLAN 8.3 PSD fixtures with PhotoCraft v0.2.0's console exe (headless, no window).
-# Usage: sh make_fixtures.sh   (from this folder; f1_wte_in.psd must exist, made by gen_f1)
+# Usage: sh make_fixtures.sh   (from a scratch folder that holds f1_wte_in.psd, made by gen_f1; writes ./out)
 set -e
 PC=/g/Self-made_products/photocraft-0.2.0-windows-x86-portable/photocraft-cli.exe
-OUT=G:/Claude_Resources/ref/scratch/stickerfix/out
+# Absolute Windows-style path of ./out (the per-layer export needs an absolute folder; it must be the same ./out).
+OUT="$(pwd -W 2>/dev/null || pwd)/out"
 rm -rf out && mkdir -p out
 NEW8='{"width":64,"height":48,"background":"transparent","name":"fx"}'
 NEW16='{"width":64,"height":48,"background":"transparent","depth":16,"name":"fx"}'
@@ -111,4 +112,11 @@ expect f10_f1.psb
   --cmd select.deselect --cmd layer.createClippingMask \
   --out out/f11_clipped.psd < /dev/null
 expect f11_clipped.psd
+# f12: f1 with the WTE layer "text" (lyid 2) deleted and a new layer added in PhotoCraft: PhotoCraft gives the new
+# layer the lowest free id, 2, the deleted layer's id (not an id above the largest). Runtime layer 3 = "text" here.
+"$PC" run out/f1_pc.psd --cmd layer.select --params '{"layer":3}' --cmd layer.delete \
+  --cmd layer.new.layer --params '{"name":"pc new"}' \
+  --cmd select.rect --params '{"x":2,"y":30,"width":20,"height":14}' --cmd edit.fill --params '{"color":"#20c0c0"}' \
+  --cmd select.deselect --out out/f12_lyid_reuse.psd < /dev/null
+expect f12_lyid_reuse.psd
 echo done

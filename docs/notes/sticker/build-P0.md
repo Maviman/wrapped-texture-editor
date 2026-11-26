@@ -22,7 +22,8 @@ ones are P6b / P6a).
 ## Fixture facts later packages need (all measured with `psd_dump.py`)
 
 - PhotoCraft v0.2.0 assigns `lyid` 1..n bottom to top to a file without ids and keeps them on re-save; a layer it adds
-  gets the next id (f5: the type layer is `lyid` 4, WTE's three keep 1..3). It keeps names, order and layer rects.
+  gets the next id (f5: the type layer is `lyid` 4, WTE's three keep 1..3). **Corrected by the P0 check:** it gets the
+  lowest *free* id, which can be a deleted layer's id (fixture f12); see `check-P0.md`. It keeps names, order and layer rects.
 - Every PhotoCraft layer record has `luni`, `lyid`, `iOpa = 255` and the default blending ranges
   (`(channels + 1) x 00 00 FF FF 00 00 FF FF`, 32 bytes for 3 colour channels). A group divider has no `iOpa`. A
   `Background` layer has flags 0x01 and `lspf`. All channels and merged images are RLE (no ZIP from v0.2.0's CLI).

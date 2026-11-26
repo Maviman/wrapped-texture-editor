@@ -26,7 +26,7 @@ app-level check; no new scenario (plan 8.2 lists none for P3a).
 | ARCHITECTURE | 1.12, 2.1, 4.4, 5.1, 5.2, 5.12, 5.14, 5.18, 5.20 "Stickers", 5.27 part 3, 6.5 (invariants and "Stickers"), new 6.10, 9.1, 10 | |
 
 HANDOFF.md and `dist/HOW_TO_TEST.txt`: no change (plan section 10 gives P3a none; nothing is user-visible).
-No new crate; `Cargo.lock` unchanged. No ArtCraft name. New files are LF; the four CRLF files this package edits
+No new crate; `Cargo.lock` unchanged. Names and marks as plan 0.4 rule 9 (checked with grep). New files are LF; the four CRLF files this package edits
 (`error.rs`, `project/manifest.rs`, `project/save.rs`, `text/frame.rs`) keep CRLF (baseline note: no whole-file switch).
 
 The P0 identity hash of test k3a-1 (`0x63d26d88cd3f46ee`) was recorded with the code before any P3a change (also with a

@@ -838,3 +838,93 @@ fn k4_extract_writes_the_finished_picture_of_every_saved_sticker() {
     assert_eq!(back, pictures[1].1);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// ----- check-P4 (the P4 checker's tests) -----
+
+#[test]
+fn k4_check_a_sticker_lost_after_queuing_its_pictures_leaves_the_next_sticker_alone() {
+    // The shared sticker's last layer gets the id of its first one: the entry is invalid as a whole, but only at its
+    // last layer, after its mask and its owned picture were queued for reading. Those queued PNGs must not land in the
+    // next sticker of the file (the tray, which has one layer: before the fix the load panicked on a layer index).
+    let Fixture { mut doc, shared, tray, a, b, .. } = fixture();
+    let dir = temp_dir("k4_check_dup_layer");
+    let path = dir.join("p.wtep");
+    save_doc(&mut doc, &path);
+    edit_manifest(&path, |m| {
+        for s in m["stickers"].as_array_mut().unwrap() {
+            if s["id"] == json!(shared.0) {
+                let layers = s["layers"].as_array_mut().unwrap();
+                let first = layers[0]["id"].clone();
+                let last = layers.len() - 1;
+                layers[last]["id"] = first;
+            }
+        }
+    });
+    let report = load(&path, &NoProgress).unwrap();
+    assert!(
+        matches!(report.warnings.as_slice(), [LoadWarning::StickerLost { sticker, used_by, .. }] if *sticker == shared && *used_by == [a, b]),
+        "{:?}",
+        report.warnings
+    );
+    let loaded = report.document;
+    assert!(loaded.sticker(shared).is_none());
+    let (before, after) = (doc.sticker(tray).unwrap(), loaded.sticker(tray).unwrap());
+    assert_eq!(after.layers.len(), 1);
+    let pixels = |s: &StickerDoc| match &s.layers[0].content {
+        StickerContent::Picture(PicturePixels::Owned { pixels, .. }) => Arc::clone(pixels),
+        other => panic!("{other:?}"),
+    };
+    assert!(*pixels(after) == *pixels(before), "the tray picture is its own");
+    assert!(after.layers[0].mask.as_ref().unwrap().pixels.data == before.layers[0].mask.as_ref().unwrap().pixels.data, "and so is its mask");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The version check of the P0 build (`project::migrate::parse_manifest` at b2fb8f5, format 3), copied verbatim apart
+/// from the constant: `Ok(newer)` when the build opens the file, `Err` otherwise.
+fn p0_version_check(bytes: &[u8]) -> Result<bool, ProjectError> {
+    const FORMAT_VERSION: u32 = 3;
+    fn version_field(value: &Value, name: &str) -> Result<u32, ProjectError> {
+        value
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| ProjectError::ManifestInvalid(format!("\"{name}\" is missing or not a version number")))
+    }
+    let value: Value = serde_json::from_slice(bytes).map_err(|e| ProjectError::ManifestInvalid(e.to_string()))?;
+    if value.get("format").and_then(Value::as_str) != Some("wtep") {
+        return Err(ProjectError::ManifestInvalid("\"format\" is not \"wtep\"".to_owned()));
+    }
+    let found_version = version_field(&value, "format_version")?;
+    let min_reader_version = version_field(&value, "min_reader_version")?;
+    if min_reader_version > FORMAT_VERSION {
+        return Err(ProjectError::TooNew { found: found_version.max(min_reader_version), supported: FORMAT_VERSION });
+    }
+    Ok(found_version > FORMAT_VERSION)
+}
+
+#[test]
+fn k4_check_the_p0_version_check_refuses_a_sticker_project_and_opens_a_plain_one() {
+    let dir = temp_dir("k4_check_p0");
+    // With a sticker stamp: "saved by a newer version".
+    let (mut doc, ..) = reuse_doc();
+    let with = dir.join("with.wtep");
+    save_doc(&mut doc, &with);
+    let result = p0_version_check(&entry(&with, MANIFEST_ENTRY));
+    assert!(matches!(result, Err(ProjectError::TooNew { found: 4, supported: 3 })), "{result:?}");
+    assert!(result.unwrap_err().to_string().contains("saved by a newer version"));
+    // Only a kept tray sticker: refused as well (an old build would drop it on its next save).
+    let (mut doc, _, stamp, _) = reuse_doc();
+    doc.remove_stamp(stamp).unwrap();
+    let tray_only = dir.join("tray.wtep");
+    save_doc(&mut doc, &tray_only);
+    assert!(matches!(p0_version_check(&entry(&tray_only, MANIFEST_ENTRY)), Err(ProjectError::TooNew { .. })));
+    // Without a new feature: the P0 build opens it (as a newer format it can read) and the manifest has no new key.
+    let mut plain = base_doc();
+    let plain_path = dir.join("plain.wtep");
+    save_doc(&mut plain, &plain_path);
+    let manifest = entry(&plain_path, MANIFEST_ENTRY);
+    assert!(matches!(p0_version_check(&manifest), Ok(true)));
+    let raw: Value = serde_json::from_slice(&manifest).unwrap();
+    assert!(raw.get("stickers").is_none() && raw.get("links").is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

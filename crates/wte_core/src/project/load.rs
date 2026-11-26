@@ -416,9 +416,14 @@ pub(crate) fn load_stickers<R: Read + Seek>(
             log::warn!("sticker id {} occurs twice in the project; the second one is ignored", entry.id.0);
             continue;
         }
+        let (queued, warned) = (pngs.len(), warnings.len());
         match sticker_doc(entry, blobs, font_floor, docs.len(), &mut pngs, warnings) {
             Ok(doc) => docs.push((entry.id, doc)),
             Err(reason) => {
+                // The PNGs this entry queued before it failed carry the index the next good sticker will get, and its
+                // layer warnings are covered by `StickerLost`: both are taken back (check-P4).
+                pngs.truncate(queued);
+                warnings.truncate(warned);
                 out.lost.insert(entry.id, reason);
             }
         }
@@ -434,6 +439,8 @@ pub(crate) fn load_stickers<R: Read + Seek>(
     let mut indices: Vec<usize> = (0..pngs.len()).collect();
     indices.sort_by_key(|&i| order(&pngs[i]));
     let mut decoded: Vec<Option<Result<PixelBuf, String>>> = decoded.into_iter().map(Some).collect();
+    // Decoded sizes of the image blobs that carry a mask, each decoded once however many layers show it (check-P4).
+    let mut blob_sizes: BTreeMap<BlobId, [u32; 2]> = BTreeMap::new();
     for i in indices {
         let (k, l, mask, entry, _) = &pngs[i];
         let result = decoded[i].take().expect("decoded once");
@@ -458,7 +465,9 @@ pub(crate) fn load_stickers<R: Read + Seek>(
         }
         let size = match &layer.content {
             StickerContent::Picture(PicturePixels::Owned { pixels, .. }) => [pixels.width, pixels.height],
-            StickerContent::Picture(PicturePixels::Blob(b)) => blob_picture_size(blobs, *b).unwrap_or([1, 1]),
+            StickerContent::Picture(PicturePixels::Blob(b)) => {
+                *blob_sizes.entry(*b).or_insert_with(|| blob_picture_size(blobs, *b).unwrap_or([1, 1]))
+            }
             _ => [1, 1],
         };
         let mask_of = |pixels: &PixelBuf| AlphaBuf { width: pixels.width, height: pixels.height, data: pixels.data.iter().step_by(4).copied().collect() };

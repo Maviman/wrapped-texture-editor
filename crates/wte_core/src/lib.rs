@@ -42,6 +42,7 @@ pub mod pixel;
 pub mod pixel_ops;
 pub mod progress;
 pub mod project;
+pub mod psd;
 pub mod samples;
 pub mod stamp;
 pub mod stamp_bake;

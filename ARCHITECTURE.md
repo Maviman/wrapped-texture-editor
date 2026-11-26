@@ -558,11 +558,11 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `selftest/scenarios/companion.rs` | companion | the scenarios `companion` and `companion_host` (8.11) |
 | `docs/protocol/` (repo root) | companion | the wire spec v1 and its golden fixtures (also in the tablet repo's `protocol/`) |
 | `tools/companion/` (repo root) | companion | `check_handshake.py` (fixture crypto cross-check), `regress.sh` + `compare_regress.py` (companion off = unchanged), `host_probe.py` (a Python tablet for `companion_host`) |
-| `sticker/mod.rs` | stickers P6a | the Sticker view (8.15): `StickerAction` and `run` / `run_in`, `enter` / `leave` / `validate`, `StickerUi` (`AppState::sticker_ui`), `Shown` (what the canvas shows: a sticker, an image stamp's virtual sticker, a text stamp), `edit_ref`, `differs_from_entry` (Revert), `cancel_drag` |
+| `sticker/mod.rs` | stickers P6a | the Sticker view (8.15): `StickerAction` and `run` / `run_in`, `enter` / `leave` / `validate`, `StickerUi` (`AppState::sticker_ui`; leaving frees its canvas texture and thumbnails), `Shown` (what the canvas shows: a sticker, an image stamp's virtual sticker, a text stamp), `edit_ref`, `differs_from_entry` (Revert), `cancel_drag` / `finish_drag` / `drag_moved` |
 | `sticker/canvas.rs` | stickers P6a | the central area of the Sticker view: header, canvas (texture keyed by `CanvasKey`, checkerboard, artboard outline, pixel grid, active layer outline), `handle_input` (Move, pans, zoom), `Geom`, `Hit` |
 | `sticker/layers_ui.rs` | stickers P6a | the Layers tab in the Sticker view (rows, thumbnails, drag reorder, footer) and the Tool tab's sticker page (`tool_page`) |
 | `sticker/tests.rs` | stickers P6a | the Sticker view's unit tests and test helpers (`image_stamp_state`, `canvas_state`, `canvas_pass`) |
-| `selftest/scenarios/sticker.rs` | stickers P6a | the scenario `sticker_view` (8.11) |
+| `selftest/scenarios/sticker.rs` | stickers P6a | the scenarios `sticker_view` and (P6a check) `sticker_keys` (8.11) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
 | `selftest/scenarios.rs` | A6 | canned scenarios (the scaffold stub already contains the action-only smoke scenarios of section 8.11) |
 
@@ -6511,9 +6511,15 @@ after `start_fonts`; `brush_flows::sync_prefs(&mut state)` runs directly before 
 
 **Stickers P6a.** `logic`: in the Sticker view the pen's eraser end runs `pen::sticker_eraser_override` (the sticker
 Eraser and back through `SetStickerTool`; busy also while a canvas drag runs) instead of the paint tools' override.
-`dispatch`: a guarded action ends a canvas drag first (`sticker::cancel_drag`: the moved layer goes back); in the
-Sticker view `run` maps `DeleteSelection` / `DuplicateActiveLayer` / `MergeActiveDown` / `MoveActiveLayer` to the
-sticker's commands (`in_sticker_view`: never a texture layer, never the stamp); `SetViewMode(Sticker)` opens the view on
+`dispatch`: a guarded action ends a canvas drag first, like the tools' interactions: Save / Export finish it
+(`sticker::finish_drag`: the layer stays where it is shown, one entry), every other command cancels it
+(`sticker::cancel_drag`: the moved layer goes back), and an Undo during a drag that moved something undoes only that
+drag (P6a check: it used to undo the entry before it too); in the Sticker view `run` maps `DeleteSelection`,
+`DeleteLayer(_)` / `DeleteLayers(_)` (the Layer menu's Delete: entering the view makes the stamp's own layer the active
+texture layer, so unmapped it deleted the stamp; P6a check), `DuplicateActiveLayer` / `DuplicateLayer(_)` /
+`DuplicateLayers(_)`, `MergeActiveDown` / `MergeDown(_)`, `MoveActiveLayer`, `AddPaintLayer` (a new picture layer) and
+`RasterizeActiveLayer` (a status line until P8) to the sticker's commands (`in_sticker_view`: never a texture layer,
+never the stamp); `SetViewMode(Sticker)` opens the view on
 the selected stamp (`sticker::enter`), another mode leaves it first (`sticker::leave`, flushing a pending edit);
 `SetStickerTool` and `Sticker(..)` run in `sticker::run`; `validate` also runs `sticker::validate` (the view closes when
 its stamp is gone or the mode was changed under it; the active layer follows undo). `io_flows::install_document` leaves
@@ -8100,7 +8106,9 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
    (`REG\egui-0.37.0\src\memory\mod.rs:598-601`), before `handle` runs, so `typing` is already false in the frame of the key
    press. `handle` therefore stores `state.typing_prev = ctx.text_edit_focused()` at its end and skips the Esc entry when
    `typing || state.typing_prev`: the first Esc only leaves the text field (which commits its edit through `lost_focus()`),
-   a second Esc is `Cancel`.
+   a second Esc is `Cancel`. Enter (stickers P6a check) is skipped the same way when `state.typing_prev`: a one-line field
+   drops the focus on Enter inside the pass (`TextEdit` calls `surrender_focus`), before `handle` runs, so without this
+   rule renaming a stamp or a layer with Enter also ran "Edit Sticker" and opened the Sticker view.
    **Popups** (review round 2, finding esc-in-popup-cancels): while `egui::Popup::is_any_open(ctx)` (a combo box, a colour popup,
    a menu; read at the start of the pass, i.e. the popup the user sees; tooltips do not count) the Esc and Delete entries are
    skipped *without consuming*: the popup closes itself on that Esc (`Popup` checks `key_pressed(Escape)` later in the pass,
@@ -8388,6 +8396,7 @@ counted down) instead of failing (`export_errors`).
 | `pen` | Branch pen-input (`selftest/scenarios/pen.rs`; recorded pen samples through `Step::Pen`, never OS input). The Sphere sample; the brush at 40 texels, hardness 1, flow 1, pressure Size on (min 0), Flow off; in 2D a pen stroke along the row v = 0.5 from u 0.15 to 0.85 with pressure 0.1 -> 1.0 (`Shot("pen_ramp")`); undo; the same path as a mouse `Pointer` and as a pen at pressure 1.0; Size off, Flow on (min 0), flow 0.5: pen strokes at constant 0.2 (v 0.3) and 1.0 (v 0.7); in 3D pen strokes at 0.25 and 1.0, the mouse stroke of the same path, a light stroke beside it (`Shot("pen_3d")`); in 2D a mouse patch, then the inverted pen (two hover samples, a stroke across the patch); a barrel drag in 3D; a pen tap on the name of the Base row; a 3D pen ramp 0.05 -> 1.0 for the final shot; Help > Tablet setup opened (`Shot("tablet_help")`) and closed | no readout before the pen; the 2D column near 20 % of the ramp is less than half as tall as near 90 % and the end column is 40 +- 3 texels; "Pen N %" was the readout in a contact frame; after the Leave no readout, the pen seen; 2D and 3D: pen at 1.0 == mouse (paint hash); the 0.2 row is fainter than the 1.0 row and not empty; 3D: 0 < texels(0.25) < texels(1.0) / 2; the eraser end: the patch centre has alpha 0, the tool was the Eraser in every contact frame, the history label is "Erase", one frame after the step the Brush is back; the barrel drag turned the camera and painted nothing; the tap selected Base; the dialog opens and closes |
 | `companion` | Branch companion (`selftest/scenarios/companion.rs`; loopback only, no Android). Sphere, 2D, brush as `pen`. `CompanionAction::StartTest` (127.0.0.1:0, auto-allow); a `TestClient` thread ("Galaxy Tab S8 Ultra (test)", USB, confirm mode) gets the KEY frame (= the window's surface size); shot `companion_dialog`; a 2D pen ramp 0.1 -> 1.0 (`assert_ramp`, contact frames); an eraser-flag stroke (centre erased, Eraser in every contact frame, Brush back); ACTION Undo (ramp whole); 3D barrel drag (camera turned, no paint); two-finger pinch (camera distance smaller); KEY H + TEXT "h", TEXT "i", Backspace into the Text tool's content field after TEXT_WANTED (content "h"); half a stroke and the cable pulled (no button down, no contact, one undo step, chip "Tablet: waiting"). Each input step waits with `Step::Until` until a FRAME's `last_input_seq` confirms it. Final screenshot: the ramp and the cut-off stroke. |
 | `sticker_view` | Stickers P6a (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; the key 4 opens the Sticker view (shot `sticker_enter`); a second picture layer (a red disc) added; the disc dragged on the canvas (`Step::Pointer` on `Target::StickerCanvas`, shot `sticker_moved`); its opacity 50 %; the Layers tab's Down button (shot `sticker_reordered`); Delete; 900x600 (shot `sticker_small`) and back; four undos and four redos; Revert (button) and its undo; Esc (shot `sticker_left`); four undos | opening changes nothing (image stamp, no entry, composite); the add promotes in one entry and changes the model; the drag moves the disc by the drag (+-1 px) in one entry; opacity and reorder one entry each, each changing the model; Delete leaves stamp and sticker with the status line; at 900x600 canvas, divider and 3D half are laid out and the 14 tool buttons fit; each undo restores the composite of the step before (one undo per step), the redos the last state; Revert gives the image stamp and the start picture in one entry "Revert Sticker", its undo the edited state; Esc returns to the 3D view with the Transform tool; undoing everything gives the start (history length, stamps, composite) |
+| `sticker_keys` | Stickers P6a check (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; outside the Sticker view B E G I X S V Shift+E Shift+G R, W twice, M L C U H; Enter opens the view; inside M L W C B E Shift+E G Shift+G I X U V H, S and R, V, F (after a 3x zoom), Delete Backspace Enter, Ctrl+J, Ctrl+[, Ctrl+] (shot `keys_inside`), Ctrl+M, the eight arrows, Shift+X twice, T twice, Shift+F, Ctrl+Z, Esc; then 4 + 1 / 2 / 3 / F5 and 3 | outside: each key's paint tool (Shift+E / Shift+G as E / G), W toggles the wireframe, M L C U H change no tool, view or document; Enter opens the view on the stamp without an entry; inside: each key's sticker tool with the paint tool and the wireframe untouched; S and R do nothing; F refits the camera; Delete / Backspace leave the stamp with the status line, Enter does nothing; Ctrl+J duplicates the sticker layer (promotion, one entry), Ctrl+[ / Ctrl+] move it (one entry each), Ctrl+M only says it is not available; Right / Shift+Down move the active layer by 1 / 10 and all eight arrows back to the start (one entry each); Shift+X and T run their global actions; Ctrl+Z undoes the last nudge; Esc and 1 / 2 / 3 / F5 leave to their mode with the paint tool kept, 4 opens the view again |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
 
 Branch `companion`: `Step::Until(label, fn(&AppState, &Scratch) -> Result<bool, String>)` waits, one check per frame
@@ -8470,7 +8479,9 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
 23. Stickers P6a: the UI never keeps an `Arc<StickerDoc>` or a picture `Arc` across frames (a stroke's `Arc::make_mut`
     would then copy the whole picture at every dab): caches compare by value (`LayerKey`) or by blob id; `Shown` holds
     the `Arc` only within a frame. A canvas drag is not a `ToolController` interaction: everything that ends
-    interactions must also end it (`sticker::cancel_drag`, dispatch's guard). Key handling stays in `shortcuts::handle`
+    interactions must also end it (`sticker::cancel_drag` / `finish_drag`, dispatch's guard). The canvas and thumbnail
+    keys hold picture versions, which `Document::next_pixel_version` numbers per document: the caches are dropped when
+    the view is left (`sticker::leave_in`), so they never outlive the document they were made from. Key handling stays in `shortcuts::handle`
     (the sticker table there); the side panel's clear of `panel_rects` keeps the tool strip's `StickerToolButton`
     entries (the strip is drawn first).
 
@@ -8589,7 +8600,7 @@ stamp, a text stamp read-only and converted, the canvas's Move drag one entry, p
 locked layer and an unbuilt tool, Auto-select), `shortcuts.rs` (the sticker table and every colliding chord in both
 modes), `pen/mod.rs` (the eraser end in the view), `companion/input.rs` (fingers over the canvas), `io_flows.rs` (never
 in `ui_state`), `dispatch.rs` (the menu commands in the view), `selftest/mod.rs` (`Target`, `WaitMs`, shots), the
-scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1).
+scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P6a check: scenario `sticker_keys` (8.11).
 
 ---
 
@@ -9196,6 +9207,10 @@ and text layers (exactly those two files, each = `dense(layer)`).
 - Branch `stickers`, P6a (`doc_stickers_tests.rs`): `k6a_layer_at_and_layer_thumbnail` (the top visible layer under a
   point, hidden layers skipped, a masked pixel not hit, NaN and outside points none; a layer's thumbnail alone at half
   scale; no history entry). The app-side tests of the Sticker view are listed in 8.15.
+- Branch `stickers`, P6a check (app): `shortcuts::tests::enter_that_ends_typing_in_a_field_does_not_open_the_sticker_view`,
+  `sticker::tests::{an_unchanged_layer_name_is_no_edit_and_does_not_promote, a_drag_is_finished_by_save_and_undone_alone_by_undo,
+  leaving_the_view_frees_the_canvas_and_thumbnail_caches}`, and the Layer-menu mapping in
+  `dispatch::tests::the_sticker_view_maps_the_layer_commands_to_the_sticker` (Delete in the view leaves the stamp).
 
 ### 9.2 `wte_app` tests
 

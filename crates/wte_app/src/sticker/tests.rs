@@ -415,3 +415,69 @@ fn guarded_commands_are_the_document_changes() {
     assert!(!StickerAction::Fit.changes_document());
     assert!(!StickerAction::Escape.changes_document());
 }
+
+// ---- P6a check ----
+
+/// P6a check: the Name field sends its text whenever it loses the focus. An unchanged name is no edit: on an image
+/// stamp it promoted the stamp and added an empty "Rename Sticker Layer" entry (Revert enabled for nothing).
+#[test]
+fn an_unchanged_layer_name_is_no_edit_and_does_not_promote() {
+    let (mut state, stamp, _) = image_stamp_state(ViewMode::View3D);
+    enter_in(&mut state, Some(stamp));
+    let undo = undo_len(&state);
+    let edit = edit_of(&state).unwrap().clone();
+    let name = shown(&mut state.session.as_mut().unwrap().doc, &edit).and_then(|s| s.layers().map(|d| d.layers[0].name.clone())).unwrap();
+    run_in(&mut state, StickerAction::RenameLayer(StickerLayerId(1), format!(" {name} ")));
+    assert!(matches!(doc(&state).stamp(stamp).unwrap().source, StampSource::Image { .. }), "no promotion");
+    assert_eq!(undo_len(&state), undo, "no entry");
+    assert!(!differs_from_entry(doc(&state), edit_of(&state).unwrap()), "Revert stays disabled");
+    // A real rename still is one entry (and promotes).
+    run_in(&mut state, StickerAction::RenameLayer(StickerLayerId(1), "Badge".into()));
+    assert_eq!((undo_len(&state), sticker_of(&state, stamp).layers[0].name.as_str()), (undo + 1, "Badge"));
+}
+
+/// P6a check: Save / Export during a Move drag keep the layer where it is shown (one entry); an Undo during a drag
+/// that moved undoes only the drag (the dispatch guard's two helpers).
+#[test]
+fn a_drag_is_finished_by_save_and_undone_alone_by_undo() {
+    let (mut state, stamp, geom) = canvas_state();
+    let ctx = egui::Context::default();
+    let cam = edit_of(&state).unwrap().camera;
+    let start = geom.to_screen(&cam, CANVAS, Vec2::new(32.0, 32.0));
+    let to = geom.to_screen(&cam, CANVAS, Vec2::new(40.0, 32.0));
+    let press = |state: &mut AppState| {
+        canvas_pass(&ctx, state, geom, Hit::Image, vec![egui::Event::PointerMoved(start), button(start, egui::PointerButton::Primary, true)]);
+        assert!(!drag_moved(state), "a press alone has moved nothing");
+        canvas_pass(&ctx, state, geom, Hit::Image, vec![egui::Event::PointerMoved(to)]);
+        assert!(drag_moved(state) && doc(state).has_pending_edit());
+    };
+    let undo = undo_len(&state);
+    press(&mut state);
+    finish_drag(&mut state);
+    assert!(state.sticker_ui.drag.is_none() && !doc(&state).has_pending_edit());
+    assert_eq!((undo_len(&state), doc(&state).undo_label()), (undo + 1, Some(MOVE_LABEL)));
+    assert_eq!(sticker_of(&state, stamp).layers[0].transform.translate, Vec2::new(8.0, 0.0), "kept where it was shown");
+    // The release that follows changes nothing more (the drag is over).
+    let hit = Hit::Sticker(sticker_id(&state, stamp));
+    canvas_pass(&ctx, &mut state, geom, hit, vec![button(to, egui::PointerButton::Primary, false)]);
+    assert_eq!(undo_len(&state), undo + 1);
+    // Cancel (what the guard does for Undo, before it returns): the layer goes back, the entry before stays.
+    press(&mut state);
+    cancel_drag(&mut state);
+    assert_eq!(undo_len(&state), undo + 1);
+    assert_eq!(sticker_of(&state, stamp).layers[0].transform.translate, Vec2::new(8.0, 0.0));
+}
+
+/// P6a check: leaving the view frees the canvas texture and the layer thumbnails (their keys hold per-document
+/// picture versions; the texture can be a whole large sticker).
+#[test]
+fn leaving_the_view_frees_the_canvas_and_thumbnail_caches() {
+    let (mut state, _, _) = image_stamp_state(ViewMode::View3D);
+    let ctx = egui::Context::default();
+    enter_in(&mut state, None);
+    let tex = ctx.load_texture("t", egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]), egui::TextureOptions::default());
+    state.sticker_ui.canvas = Some(CanvasTex { key: canvas::CanvasKey::Image(BlobId(1)), tex: tex.clone(), size: [1, 1] });
+    state.sticker_ui.thumbs.insert(1, ThumbTex { key: layers_ui::ThumbKey::Blob(BlobId(1)), tex: Some(tex) });
+    leave_in(&mut state, None);
+    assert!(state.sticker_ui.canvas.is_none() && state.sticker_ui.thumbs.is_empty());
+}

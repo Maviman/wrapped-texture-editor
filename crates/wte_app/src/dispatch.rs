@@ -34,8 +34,20 @@ pub fn dispatch(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
     // being painted, FEATURE_BRUSH 5.10); every other command cancels it, which completes such a finishing stroke.
     // Stickers P6a: a drag on the sticker canvas is no `ToolController` interaction; a document command ends it the
     // same way (the moved layer goes back; its own Final at the release comes after the drag has ended).
+    // P6a check: like the tools' interactions, Save and Export finish a moved layer where it is shown, and an Undo
+    // pressed during a drag that moved something undoes that drag only (it was cancelled and undid the entry before
+    // it as well).
     if needs_interaction_guard(&action) && app.state.sticker_ui.busy() {
-        crate::sticker::cancel_drag(&mut app.state);
+        let moved = crate::sticker::drag_moved(&app.state);
+        if finishes_interaction(&action) {
+            crate::sticker::finish_drag(&mut app.state);
+        } else {
+            crate::sticker::cancel_drag(&mut app.state);
+        }
+        if moved && matches!(action, AppAction::Undo) {
+            validate(app);
+            return;
+        }
     }
     if needs_interaction_guard(&action) && app.tools.is_busy() {
         if finishes_interaction(&action) {
@@ -286,9 +298,17 @@ fn in_sticker_view(action: AppAction) -> AppAction {
     use crate::sticker::StickerAction as S;
     match action {
         AppAction::DeleteSelection => AppAction::Sticker(S::DeleteKey),
-        AppAction::DuplicateActiveLayer => AppAction::Sticker(S::DuplicateLayer(None)),
-        AppAction::MergeActiveDown => AppAction::Sticker(S::MergeDown(None)),
+        // P6a check: the Layer menu's Delete names the active texture layer, which entering the view made the edited
+        // stamp's own layer: run there it deleted the stamp. The menu's other texture-layer commands are mapped too.
+        AppAction::DeleteLayer(_) | AppAction::DeleteLayers(_) => AppAction::Sticker(S::DeleteLayer(None)),
+        AppAction::DuplicateActiveLayer | AppAction::DuplicateLayer(_) | AppAction::DuplicateLayers(_) => {
+            AppAction::Sticker(S::DuplicateLayer(None))
+        }
+        AppAction::MergeActiveDown | AppAction::MergeDown(_) => AppAction::Sticker(S::MergeDown(None)),
         AppAction::MoveActiveLayer(delta) => AppAction::Sticker(S::MoveLayer(None, delta)),
+        AppAction::AddPaintLayer => AppAction::Sticker(S::AddPictureLayer(None)),
+        // Rasterize of sticker layers comes with P8 (it says so); the stamp's layer is never rasterized from here.
+        AppAction::RasterizeActiveLayer => AppAction::Sticker(S::Rasterize),
         other => other,
     }
 }
@@ -1177,6 +1197,27 @@ mod tests {
         assert_eq!(text(AppAction::MergeActiveDown), format!("{:?}", AppAction::Sticker(S::MergeDown(None))));
         assert_eq!(text(AppAction::MoveActiveLayer(-1)), format!("{:?}", AppAction::Sticker(S::MoveLayer(None, -1))));
         assert_eq!(text(AppAction::Undo), "Undo");
+        // P6a check: the Layer menu's Delete / Rasterize / New and the texture-layer forms never reach a texture layer
+        // (entering the view made the stamp's own layer the active one: Delete removed the stamp).
+        let l = wte_core::LayerId(7);
+        assert_eq!(text(AppAction::DeleteLayer(l)), format!("{:?}", AppAction::Sticker(S::DeleteLayer(None))));
+        assert_eq!(text(AppAction::DeleteLayers(vec![l])), format!("{:?}", AppAction::Sticker(S::DeleteLayer(None))));
+        assert_eq!(text(AppAction::DuplicateLayer(l)), format!("{:?}", AppAction::Sticker(S::DuplicateLayer(None))));
+        assert_eq!(text(AppAction::DuplicateLayers(vec![l])), format!("{:?}", AppAction::Sticker(S::DuplicateLayer(None))));
+        assert_eq!(text(AppAction::MergeDown(l)), format!("{:?}", AppAction::Sticker(S::MergeDown(None))));
+        assert_eq!(text(AppAction::AddPaintLayer), format!("{:?}", AppAction::Sticker(S::AddPictureLayer(None))));
+        assert_eq!(text(AppAction::RasterizeActiveLayer), format!("{:?}", AppAction::Sticker(S::Rasterize)));
+        // ... and the mapped Delete leaves the stamp, its layer and the sticker's last layer.
+        let (mut state, stamp, _) = crate::sticker::tests::image_stamp_state(ViewMode::View3D);
+        crate::sticker::enter_in(&mut state, None);
+        let set = state.session.as_ref().unwrap().active_set;
+        let active = state.doc().unwrap().set(set).unwrap().active_layer().unwrap().id;
+        assert_eq!(state.doc().unwrap().layer(active).unwrap().stamp_id(), Some(stamp), "the stamp's layer is active");
+        let AppAction::Sticker(mapped) = in_sticker_view(AppAction::DeleteLayer(active)) else { panic!() };
+        let layers = state.doc().unwrap().set(set).unwrap().layers.len();
+        crate::sticker::run_in(&mut state, mapped);
+        assert!(state.doc().unwrap().stamp(stamp).is_some());
+        assert_eq!(state.doc().unwrap().set(set).unwrap().layers.len(), layers);
         assert!(needs_interaction_guard(&AppAction::Sticker(S::AddPictureLayer(None))));
         assert!(!needs_interaction_guard(&AppAction::Sticker(S::SelectLayer(wte_core::StickerLayerId(1)))));
         assert!(!needs_interaction_guard(&AppAction::SetStickerTool(crate::state::StickerTool::Hand)));

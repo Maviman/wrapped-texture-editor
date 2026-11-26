@@ -236,6 +236,12 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) -> Vec<AppAction> {
             if is_esc && state.typing_prev {
                 continue; // the first Esc only left the text field (egui cleared the focus before this pass)
             }
+            // P6a check: Enter in a one-line field ends the typing and drops the focus in this very pass, so `typing`
+            // is already false here; the key belongs to the field ("Edit Sticker" would open the Sticker view after a
+            // stamp or layer was renamed with Enter).
+            if def.shortcut.logical_key == Key::Enter && state.typing_prev {
+                continue;
+            }
             if popup_open && (is_esc || matches!(def.shortcut.logical_key, Key::Delete | Key::Backspace)) {
                 continue; // not consumed: the popup closes on this Esc
             }
@@ -550,6 +556,40 @@ mod tests {
         let a = frame(vec![key_event(Key::O, CMD)], CMD, &mut state, &mut text);
         assert!(matches!(a[..], [AppAction::OpenProject(None)]), "{a:?}");
         assert!(!ctx.memory(|m| m.has_focus(field_id)));
+    }
+
+    /// P6a check: Enter that ends the typing in a one-line field (the stamp's Name, a layer rename) stays the field's:
+    /// with a stamp selected it does not open the Sticker view ("Edit Sticker"), in the order of the real frame (the
+    /// panels with their fields first, `handle` after them); the next Enter, with nothing focused, does.
+    #[test]
+    fn enter_that_ends_typing_in_a_field_does_not_open_the_sticker_view() {
+        let ctx = egui::Context::default();
+        let (mut state, _, _) = crate::sticker::tests::image_stamp_state(ViewMode::View3D);
+        let mut text = String::from("Logo");
+        let field_id = egui::Id::unique("stamp_name_field");
+        let frame = |events: Vec<egui::Event>, state: &mut AppState, text: &mut String| {
+            let events: Vec<egui::Event> = std::iter::once(egui::Event::ModifiersChanged(NONE)).chain(events).collect();
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut actions = Vec::new();
+            crate::theme::run_test_pass(&ctx, input, |ui| {
+                ui.add(egui::TextEdit::singleline(text).id(field_id));
+                actions = handle(ui.ctx(), state);
+            });
+            actions
+        };
+        let _ = frame(vec![], &mut state, &mut text);
+        ctx.memory_mut(|m| m.request_focus(field_id));
+        let _ = frame(vec![], &mut state, &mut text);
+        let a = frame(vec![key_event(Key::Num2, NONE), egui::Event::Text("2".into())], &mut state, &mut text);
+        assert!(a.is_empty(), "{a:?}");
+        assert_eq!(text, "Logo2");
+        // Enter ends the typing: the field loses the focus in this pass, and no shortcut runs.
+        let a = frame(vec![key_event(Key::Enter, NONE)], &mut state, &mut text);
+        assert!(!ctx.memory(|m| m.has_focus(field_id)), "Enter ended the typing");
+        assert!(a.is_empty(), "{a:?}");
+        // The next Enter (nothing focused) is "Edit Sticker".
+        let a = frame(vec![key_event(Key::Enter, NONE)], &mut state, &mut text);
+        assert!(matches!(a[..], [AppAction::Sticker(crate::sticker::StickerAction::Enter(None))]), "{a:?}");
     }
 
     #[test]

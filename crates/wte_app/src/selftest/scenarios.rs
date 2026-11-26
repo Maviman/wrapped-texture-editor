@@ -92,6 +92,7 @@ const NAMES: &[&str] = &[
     "companion",
     "companion_host",
     "sticker_view",
+    "sticker_keys",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -172,6 +173,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "companion" => companion::companion(),
         "companion_host" => companion::companion_host(),
         "sticker_view" => sticker::sticker_view(),
+        "sticker_keys" => sticker::sticker_keys(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -9290,7 +9292,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 55);
+        assert_eq!(scenario_names().len(), 56);
         // Stickers P6a (review B15): every shot of a sticker scenario says what it must show.
         for name in scenario_names().iter().filter(|n| n.starts_with("sticker")) {
             let steps = scenario(name, &args).unwrap();

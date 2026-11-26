@@ -342,3 +342,288 @@ fn disc_png() -> Result<Vec<u8>, String> {
     }
     wte_core::encode_png(img.width, img.height, &img.data, PngLevel::Fast).map_err(|e| e.to_string())
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// sticker_keys (P6a check, STICKER_PLAN 7 "P6a" checker task): the key table of 3.3 pressed in the real window
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// `sticker_keys`: the sample logo placed as an image stamp; the colliding keys of STICKER_PLAN 3.3 pressed outside the
+/// Sticker view (the paint tools, the wireframe; S / R / M / L / C / U / H), Enter opens the view; every key of
+/// `STICKER_SHORTCUTS` and the global keys that fall through pressed inside it, each followed by an assert of what it
+/// did (or did not do); Esc and the view-mode keys leave it and 4 opens it again.
+pub(super) fn sticker_keys() -> Vec<Step> {
+    use crate::state::StickerTool as T;
+    use egui::Key as K;
+    const N: egui::Modifiers = egui::Modifiers::NONE;
+    const SH: egui::Modifiers = egui::Modifiers::SHIFT;
+    const CMD: egui::Modifiers = egui::Modifiers::COMMAND;
+    let key = |mods: egui::Modifiers, k: egui::Key| [Step::Key(mods, k), Step::WaitIdle];
+    let mut steps = vec![
+        Step::Do(AppAction::OpenSample(SampleKind::Sphere)),
+        Step::WaitIdle,
+        Step::Do(AppAction::SetViewMode(ViewMode::View3D)),
+        Step::Setup("register the sample stamp image", setup_stamp_image),
+        Step::Do(AppAction::SetTool(ToolKind::Stamp)),
+        Step::Dyn("place the image stamp on the sphere", |s, _| model_click(s, ViewId::Main3D, [0.0, -0.05])),
+        Step::WaitIdle,
+        Step::Assert("the image stamp was placed and selected", |s, _| placed_stamp(s, false).map(|_| ())),
+        Step::Setup("remember the start", |s, sc| {
+            remember_undo(s, sc)?;
+            sc.values.insert("wire", u64::from(s.flags.wireframe));
+            Ok(())
+        }),
+    ];
+    // Outside the Sticker view: the global table, as before P6a.
+    let outside: [(egui::Modifiers, egui::Key, ToolKind); 10] = [
+        (N, K::B, ToolKind::Brush),
+        (N, K::E, ToolKind::Eraser),
+        (N, K::G, ToolKind::Fill),
+        (N, K::I, ToolKind::Eyedropper),
+        (N, K::X, ToolKind::Text),
+        (N, K::S, ToolKind::Stamp),
+        (N, K::V, ToolKind::Navigate),
+        (SH, K::E, ToolKind::Eraser),
+        (SH, K::G, ToolKind::Fill),
+        (N, K::R, ToolKind::Transform),
+    ];
+    for (mods, k, tool) in outside {
+        steps.extend(key(mods, k));
+        steps.push(match tool {
+            ToolKind::Brush => Step::Assert("outside: B = Brush", |s, _| tool_is(s, ToolKind::Brush)),
+            ToolKind::Eraser => Step::Assert("outside: E / Shift+E = Eraser", |s, _| tool_is(s, ToolKind::Eraser)),
+            ToolKind::Fill => Step::Assert("outside: G / Shift+G = Fill", |s, _| tool_is(s, ToolKind::Fill)),
+            ToolKind::Eyedropper => Step::Assert("outside: I = Eyedropper", |s, _| tool_is(s, ToolKind::Eyedropper)),
+            ToolKind::Text => Step::Assert("outside: X = Text", |s, _| tool_is(s, ToolKind::Text)),
+            ToolKind::Stamp => Step::Assert("outside: S = Stamp", |s, _| tool_is(s, ToolKind::Stamp)),
+            ToolKind::Navigate => Step::Assert("outside: V = Navigate", |s, _| tool_is(s, ToolKind::Navigate)),
+            _ => Step::Assert("outside: R = Transform", |s, _| tool_is(s, ToolKind::Transform)),
+        });
+    }
+    steps.extend(key(N, K::W));
+    steps.push(Step::Assert("outside: W toggles the wireframe", |s, sc| {
+        if u64::from(s.flags.wireframe) == remembered(sc, "wire")? { Err("the wireframe did not toggle".into()) } else { Ok(()) }
+    }));
+    steps.extend(key(N, K::W));
+    for k in [K::M, K::L, K::C, K::U, K::H] {
+        steps.extend(key(N, k));
+    }
+    steps.push(Step::Assert("outside: M L C U (unbound) and H change no tool, no view, no document", |s, sc| {
+        if s.view_mode != ViewMode::View3D || u64::from(s.flags.wireframe) != remembered(sc, "wire")? {
+            return Err(format!("view {:?}", s.view_mode));
+        }
+        tool_is(s, ToolKind::Transform)?;
+        undo_since(s, sc, 0)
+    }));
+    // Enter with the stamp selected opens the Sticker view.
+    steps.extend(key(N, K::Enter));
+    steps.push(Step::WaitFrames(3));
+    steps.push(Step::Assert("Enter opened the Sticker view on the stamp; nothing changed", |s, sc| {
+        let e = edit(s)?;
+        if s.view_mode != ViewMode::Sticker || e.return_mode != ViewMode::View3D {
+            return Err(format!("view {:?}", s.view_mode));
+        }
+        undo_since(s, sc, 0)
+    }));
+    // Inside: the sticker tools.
+    let tools: [(egui::Modifiers, egui::Key, T); 14] = [
+        (N, K::M, T::Marquee),
+        (N, K::L, T::Lasso),
+        (N, K::W, T::Wand),
+        (N, K::C, T::Crop),
+        (N, K::B, T::Brush),
+        (N, K::E, T::Eraser),
+        (SH, K::E, T::MagicEraser),
+        (N, K::G, T::Fill),
+        (SH, K::G, T::Gradient),
+        (N, K::I, T::Eyedropper),
+        (N, K::X, T::Text),
+        (N, K::U, T::Shape),
+        (N, K::V, T::Move),
+        (N, K::H, T::Hand),
+    ];
+    for (mods, k, t) in tools {
+        steps.extend(key(mods, k));
+        steps.push(match t {
+            T::Marquee => Step::Assert("inside: M = Marquee", |s, _| sticker_tool_is(s, T::Marquee)),
+            T::Lasso => Step::Assert("inside: L = Lasso", |s, _| sticker_tool_is(s, T::Lasso)),
+            T::Wand => Step::Assert("inside: W = Magic Wand, the wireframe unchanged", |s, sc| {
+                if u64::from(s.flags.wireframe) != remembered(sc, "wire")? {
+                    return Err("W toggled the wireframe".into());
+                }
+                sticker_tool_is(s, T::Wand)
+            }),
+            T::Crop => Step::Assert("inside: C = Crop", |s, _| sticker_tool_is(s, T::Crop)),
+            T::Brush => Step::Assert("inside: B = sticker Brush, the paint tool kept", |s, _| {
+                tool_is(s, ToolKind::Transform)?;
+                sticker_tool_is(s, T::Brush)
+            }),
+            T::Eraser => Step::Assert("inside: E = sticker Eraser", |s, _| sticker_tool_is(s, T::Eraser)),
+            T::MagicEraser => Step::Assert("inside: Shift+E = Magic Eraser", |s, _| sticker_tool_is(s, T::MagicEraser)),
+            T::Fill => Step::Assert("inside: G = sticker Fill", |s, _| sticker_tool_is(s, T::Fill)),
+            T::Gradient => Step::Assert("inside: Shift+G = Gradient", |s, _| sticker_tool_is(s, T::Gradient)),
+            T::Eyedropper => Step::Assert("inside: I = sticker Eyedropper", |s, _| sticker_tool_is(s, T::Eyedropper)),
+            T::Text => Step::Assert("inside: X = sticker Text", |s, _| sticker_tool_is(s, T::Text)),
+            T::Shape => Step::Assert("inside: U = Shape", |s, _| sticker_tool_is(s, T::Shape)),
+            T::Move => Step::Assert("inside: V = Move", |s, _| sticker_tool_is(s, T::Move)),
+            T::Hand => Step::Assert("inside: H = Hand", |s, _| sticker_tool_is(s, T::Hand)),
+        });
+    }
+    // S and R are blocked: no paint tool becomes active, the sticker tool stays.
+    steps.extend(key(N, K::S));
+    steps.extend(key(N, K::R));
+    steps.push(Step::Assert("inside: S and R do nothing", |s, sc| {
+        if s.view_mode != ViewMode::Sticker {
+            return Err(format!("view {:?}", s.view_mode));
+        }
+        tool_is(s, ToolKind::Transform)?;
+        sticker_tool_is(s, T::Hand)?;
+        undo_since(s, sc, 0)
+    }));
+    steps.extend(key(N, K::V));
+    // F fits the sticker in the canvas.
+    steps.push(Step::Setup("remember the fitted zoom, then zoom in", |s, sc| {
+        let zoom = edit(s)?.camera.zoom;
+        sc.values.insert("fit_zoom", u64::from(zoom.to_bits()));
+        let session = s.session.as_mut().ok_or("no document")?;
+        let e = session.sticker_edit.as_mut().ok_or("no editor")?;
+        e.camera.zoom *= 3.0;
+        Ok(())
+    }));
+    steps.extend(key(N, K::F));
+    steps.push(Step::WaitFrames(2));
+    steps.push(Step::Assert("inside: F fits the sticker again", |s, sc| {
+        let want = f32::from_bits(remembered(sc, "fit_zoom")? as u32);
+        let zoom = edit(s)?.camera.zoom;
+        if (zoom - want).abs() > want * 1e-3 { Err(format!("zoom {zoom}, fitted {want}")) } else { Ok(()) }
+    }));
+    // Delete / Backspace / Enter: nothing in the document.
+    for k in [K::Delete, K::Backspace, K::Enter] {
+        steps.extend(key(N, k));
+    }
+    steps.push(Step::Assert("inside: Delete / Backspace leave the stamp (status line); Enter does nothing", |s, sc| {
+        stamp(s)?;
+        if s.view_mode != ViewMode::Sticker || s.status_hint != crate::sticker::DELETE_HINT {
+            return Err(format!("view {:?}, status \"{}\"", s.view_mode, s.status_hint));
+        }
+        undo_since(s, sc, 0)
+    }));
+    // The layer keys act on the sticker.
+    steps.extend(key(CMD, K::J));
+    steps.push(Step::Assert("inside: Ctrl+J duplicates the sticker layer (one entry; the stamp promoted)", |s, sc| {
+        let doc = sticker_doc(s)?;
+        if doc.layers.len() != 2 || edit(s)?.active_layer != Some(doc.layers[1].id) {
+            return Err(format!("{} layers", doc.layers.len()));
+        }
+        undo_since(s, sc, 1)
+    }));
+    steps.extend(key(CMD, K::OpenBracket));
+    steps.push(Step::Assert("inside: Ctrl+[ moves the active sticker layer down", |s, sc| {
+        let doc = sticker_doc(s)?;
+        if edit(s)?.active_layer != Some(doc.layers[0].id) {
+            return Err("the active layer is not at the bottom".into());
+        }
+        undo_since(s, sc, 2)
+    }));
+    steps.extend(key(CMD, K::CloseBracket));
+    steps.push(Step::Assert("inside: Ctrl+] moves it up again", |s, sc| {
+        let doc = sticker_doc(s)?;
+        if edit(s)?.active_layer != Some(doc.layers[1].id) {
+            return Err("the active layer is not on top".into());
+        }
+        undo_since(s, sc, 3)
+    }));
+    steps.extend(key(CMD, K::M));
+    steps.push(Step::Assert("inside: Ctrl+M merges no texture layer (not available yet)", |s, sc| {
+        if sticker_doc(s)?.layers.len() != 2 || !s.status_hint.contains("Merge Down") {
+            return Err(format!("status \"{}\"", s.status_hint));
+        }
+        undo_since(s, sc, 3)
+    }));
+    steps.push(Step::Shot {
+        name: "keys_inside",
+        expect: "the Sticker view after the layer keys: the logo on the canvas (the copy exactly over the original), Move \
+                 highlighted in the sticker tool strip, the Layers tab with two rows (the copy on top, highlighted), the \
+                 status line \"Merge Down of sticker layers is not available yet\"",
+    });
+    // The arrows nudge the active layer.
+    steps.push(Step::Setup("remember the active layer's position", |s, sc| {
+        let id = edit(s)?.active_layer.ok_or("no active layer")?;
+        let t = sticker_doc(s)?.layer(id).ok_or("no layer")?.transform.translate;
+        sc.values.insert("nx", u64::from(t.x.to_bits()));
+        sc.values.insert("ny", u64::from(t.y.to_bits()));
+        remember_undo(s, sc)
+    }));
+    steps.extend(key(N, K::ArrowRight));
+    steps.extend(key(SH, K::ArrowDown));
+    steps.push(Step::Assert("inside: Right = +1 x, Shift+Down = +10 y", |s, sc| nudged(s, sc, [1.0, 10.0], 2)));
+    for (mods, k) in [(N, K::ArrowLeft), (N, K::ArrowUp), (SH, K::ArrowLeft), (SH, K::ArrowUp), (SH, K::ArrowRight), (N, K::ArrowDown)] {
+        steps.extend(key(mods, k));
+    }
+    steps.push(Step::Assert("inside: the eight arrows, one entry each, back where it was", |s, sc| nudged(s, sc, [0.0, 0.0], 8)));
+    // Global keys that fall through.
+    steps.push(Step::Setup("remember the colours and the shading", |s, sc| {
+        sc.values.insert("primary", u64::from(u32::from_le_bytes(s.colors.primary)));
+        sc.values.insert("shading", s.flags.shading as u64);
+        Ok(())
+    }));
+    steps.extend(key(SH, K::X));
+    steps.push(Step::Assert("inside: Shift+X swaps the colours (global)", |s, sc| {
+        if u64::from(u32::from_le_bytes(s.colors.primary)) == remembered(sc, "primary")? { Err("not swapped".into()) } else { Ok(()) }
+    }));
+    steps.extend(key(SH, K::X));
+    steps.extend(key(N, K::T));
+    steps.push(Step::Assert("inside: T toggles the texture on the model (global)", |s, sc| {
+        if s.flags.shading as u64 == remembered(sc, "shading")? { Err("T did nothing".into()) } else { Ok(()) }
+    }));
+    steps.extend(key(N, K::T));
+    steps.extend(key(SH, K::F));
+    steps.push(Step::Assert("inside: Shift+F (Frame Selection) keeps the view; nothing changed", |s, sc| {
+        if s.view_mode != ViewMode::Sticker { Err(format!("view {:?}", s.view_mode)) } else { undo_since(s, sc, 8) }
+    }));
+    steps.extend(key(CMD, K::Z));
+    steps.push(Step::Assert("inside: Ctrl+Z undoes the last nudge", |s, sc| nudged(s, sc, [0.0, -1.0], 7)));
+    // Esc leaves; the view-mode keys leave; 4 opens it again.
+    steps.extend(key(N, K::Escape));
+    steps.push(Step::Assert("Esc left the Sticker view, the paint tool kept", |s, _| left_to(s, ViewMode::View3D)));
+    for (k, mode) in [(K::Num1, ViewMode::View3D), (K::Num2, ViewMode::View2D), (K::Num3, ViewMode::Split), (K::F5, ViewMode::Preview)] {
+        steps.extend(key(N, K::Num4));
+        steps.push(Step::Assert("4 opens the Sticker view", |s, _| {
+            if s.view_mode == ViewMode::Sticker && edit(s).is_ok() { Ok(()) } else { Err(format!("view {:?}", s.view_mode)) }
+        }));
+        steps.extend(key(N, k));
+        steps.push(match mode {
+            ViewMode::View3D => Step::Assert("1 leaves to 3D", |s, _| left_to(s, ViewMode::View3D)),
+            ViewMode::View2D => Step::Assert("2 leaves to 2D", |s, _| left_to(s, ViewMode::View2D)),
+            ViewMode::Split => Step::Assert("3 leaves to Split", |s, _| left_to(s, ViewMode::Split)),
+            _ => Step::Assert("F5 leaves to Preview", |s, _| left_to(s, ViewMode::Preview)),
+        });
+    }
+    steps.extend(key(N, K::Num3));
+    steps.push(Step::Assert("3 goes from Preview to Split", |s, _| left_to(s, ViewMode::Split)));
+    steps
+}
+
+/// The open Sticker view's tool is `tool`.
+fn sticker_tool_is(s: &AppState, tool: crate::state::StickerTool) -> Result<(), String> {
+    let now = edit(s)?.tool;
+    if now == tool && s.view_mode == ViewMode::Sticker { Ok(()) } else { Err(format!("sticker tool {now:?}, expected {tool:?}")) }
+}
+
+/// The active sticker layer sits at the remembered position plus `by`, with `entries` more undo entries.
+fn nudged(s: &AppState, sc: &Scratch, by: [f32; 2], entries: u64) -> Result<(), String> {
+    let id = edit(s)?.active_layer.ok_or("no active layer")?;
+    let t = sticker_doc(s)?.layer(id).ok_or("no layer")?.transform.translate;
+    let from = Vec2::new(f32::from_bits(remembered(sc, "nx")? as u32), f32::from_bits(remembered(sc, "ny")? as u32));
+    if t - from != Vec2::from_array(by) {
+        return Err(format!("moved by {:?}, expected {by:?}", t - from));
+    }
+    undo_since(s, sc, entries)
+}
+
+/// The Sticker view is closed and the view mode is `mode`; the paint tool is the one before.
+fn left_to(s: &AppState, mode: ViewMode) -> Result<(), String> {
+    if s.view_mode != mode || session_of(s)?.sticker_edit.is_some() {
+        return Err(format!("view {:?}, expected {mode:?}", s.view_mode));
+    }
+    tool_is(s, ToolKind::Transform)
+}

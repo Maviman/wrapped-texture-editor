@@ -65,6 +65,9 @@ pub enum StickerAction {
     MoveLayerTo(StickerLayerId, usize),
     /// Ctrl+M on the active sticker layer (never on a texture layer). Merging comes with the layer commands of P8.
     MergeDown(Option<StickerLayerId>),
+    /// The Layer menu's Rasterize in the view (P6a check): rasterizing text / shape layers comes with P8; never the
+    /// stamp's texture layer.
+    Rasterize,
     SetLayerVisible(StickerLayerId, bool),
     SetLayerLocked(StickerLayerId, bool),
     SetLayerOpacity(StickerLayerId, f32, Commit),
@@ -347,6 +350,11 @@ pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
     state.sticker_canvas_rect = None;
     state.sticker_ui.name_edit = None;
     state.sticker_ui.layer_name_edit = None;
+    // P6a check: the canvas texture (a whole sticker at scale 1, up to the artboard limit) and the layer thumbnails
+    // are freed with the view. Their keys hold picture versions, which are numbered per document
+    // (`Document::next_pixel_version`): kept across a document change they could match another document's sticker.
+    state.sticker_ui.canvas = None;
+    state.sticker_ui.thumbs.clear();
     // The editor's status lines (Delete without a selection, a tool that is not built) end with it.
     state.status_hint.clear();
 }
@@ -401,6 +409,20 @@ pub(crate) fn cancel_drag(state: &mut AppState) {
     {
         doc.cancel_pending_edit();
     }
+}
+
+/// P6a check: ends a drag on the canvas keeping what the user sees: a moved layer stays where the last Preview put
+/// it, as one entry (the dispatch guard for Save / Export, like `ToolController::finish`).
+pub(crate) fn finish_drag(state: &mut AppState) {
+    if let Some(CanvasDrag::Move { layer, sent: Some(to), .. }) = state.sticker_ui.drag.take() {
+        run_in(state, StickerAction::SetLayerPosition(layer, to.to_array(), Commit::Final));
+    }
+}
+
+/// P6a check: true while a Move drag on the canvas has changed the document (a Preview is pending): an Undo pressed
+/// then undoes the drag itself, as for the tools' interactions.
+pub(crate) fn drag_moved(state: &AppState) -> bool {
+    matches!(state.sticker_ui.drag, Some(CanvasDrag::Move { sent: Some(_), .. }))
 }
 
 /// Runs a structural edit of the edited sticker (`Document::set_sticker`; an image stamp is promoted inside it). An
@@ -536,6 +558,11 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
                 app_state.status_hint = "Merge Down of sticker layers is not available yet".to_owned();
             }
         }
+        S::Rasterize => {
+            if layered(app_state, None).is_some() {
+                app_state.status_hint = "Rasterize of sticker layers is not available yet".to_owned();
+            }
+        }
         S::SetLayerVisible(id, on) => {
             let label = if on { "Show Sticker Layer" } else { "Hide Sticker Layer" };
             layer_edit(app_state, id, label, Commit::Final, move |l| l.visible = on);
@@ -550,7 +577,10 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
         S::SetLayerBlend(id, blend) => layer_edit(app_state, id, BLEND_LABEL, Commit::Final, move |l| l.blend = blend),
         S::RenameLayer(id, name) => {
             let name = name.trim().to_owned();
-            if !name.is_empty() {
+            // P6a check: the Name field sends its text whenever it loses the focus; an unchanged name is no edit (on an
+            // image stamp it would promote the stamp and add an empty "Rename Sticker Layer" entry).
+            let same = layered(app_state, Some(id)).is_some_and(|(d, _)| d.layer(id).is_some_and(|l| l.name == name));
+            if !name.is_empty() && !same {
                 layer_edit(app_state, id, RENAME_LABEL, Commit::Final, move |l| l.name = name);
             }
         }

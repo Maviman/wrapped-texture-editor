@@ -10,7 +10,6 @@ use rayon::prelude::*;
 
 use crate::math::mul_u8;
 use crate::pixel::{AlphaBuf, PixelBuf};
-use crate::sticker::fx::dist_in;
 use crate::sticker::select::{color_diff, flood_plane, mix_px, mix_u8, sel_at};
 use crate::text::edt::{distance_to_ink, nearest_ink};
 
@@ -125,9 +124,16 @@ pub fn remove_matte(pixels: &mut PixelBuf, matte: Matte, sel: Option<&AlphaBuf>)
     });
 }
 
-/// Defringe (4.5): the edge pixels (alpha > 0 and `dist_in <= width`) take the RGB of their nearest interior pixel
-/// (alpha >= 250 and `dist_in > width`); alpha unchanged. The picture's own border is not an edge (an opaque photo
-/// has no fringe). Without any interior pixel nothing changes. Returns the number of pixels whose RGB changed.
+/// Defringe (4.5, as corrected by the P2 check): the edge pixels (alpha > 0 and within `width` of a fully transparent
+/// pixel, `d0 <= width` with `d0 = distance_to_ink(alpha == 0)`) take the RGB of their nearest interior pixel (alpha >
+/// 0 and `d0 > width`), when that pixel is at most `width + 2` px away (centre to centre); alpha unchanged. The
+/// picture's own border is not an edge (an opaque photo has no fringe). Without any transparent or interior pixel
+/// nothing changes. Returns the number of pixels whose RGB changed.
+///
+/// The plan's literal rule (edge = `dist_in <= width` on the 128 threshold, interior = alpha >= 250) made every pixel
+/// with alpha < 128 an edge pixel at any depth, so a soft shadow or glow anywhere in the picture took the colour of the
+/// nearest opaque object (check P2). Measuring the depth from the fully transparent pixels (as PhotoCraft's defringe
+/// does) and keeping the source near the pixel leaves shadows, glows and isolated faint strokes alone.
 pub fn defringe(pixels: &mut PixelBuf, width: u32, sel: Option<&AlphaBuf>) -> u64 {
     let (w, h) = (pixels.width, pixels.height);
     let n = (w as usize) * (h as usize);
@@ -136,21 +142,32 @@ pub fn defringe(pixels: &mut PixelBuf, width: u32, sel: Option<&AlphaBuf>) -> u6
     }
     let width = width.min(MAX_DEFRINGE) as f32;
     let alpha: Vec<u8> = pixels.data.iter().skip(3).step_by(4).copied().collect();
-    let d = dist_in(&alpha, w, h);
-    let interior: Vec<u8> = alpha.iter().zip(&d).map(|(&a, &di)| if a >= 250 && di > width { 255 } else { 0 }).collect();
+    let outside: Vec<u8> = alpha.iter().map(|&a| if a == 0 { 255 } else { 0 }).collect();
+    if !outside.contains(&255) {
+        return 0;
+    }
+    let d = distance_to_ink(&outside, w, h);
+    drop(outside);
+    let interior: Vec<u8> = alpha.iter().zip(&d).map(|(&a, &d0)| if a > 0 && d0 > width { 255 } else { 0 }).collect();
     if !interior.contains(&255) {
         return 0;
     }
     let near = nearest_ink(&interior, w, h);
     drop(interior);
+    let reach2 = (width + 2.0) * (width + 2.0);
     let src = pixels.clone();
     let before = pixels.clone();
+    let wu = w as usize;
     per_pixel(pixels, sel, |i, p| {
         if alpha[i] == 0 || d[i] > width {
             return p;
         }
         let s = near[i] as usize;
         if s >= n {
+            return p;
+        }
+        let (dx, dy) = ((s % wu) as f32 - (i % wu) as f32, (s / wu) as f32 - (i / wu) as f32);
+        if dx * dx + dy * dy > reach2 {
             return p;
         }
         let c = &src.data[s * 4..s * 4 + 3];
@@ -766,6 +783,87 @@ mod tests {
         cut.apply(&mut out, None);
         let s = iou(&out, &obj);
         assert!(s >= 0.98, "noisy grey IoU {s}");
+    }
+
+    #[test]
+    fn k2c_defringe_leaves_shadows_glows_and_faint_strokes_alone() {
+        // Check P2: a red square, a soft black shadow apart from it, a soft glow touching it, a faint isolated stroke.
+        let (w, h) = (140u32, 70u32);
+        let mut img = PixelBuf::new(w, h);
+        for y in 10..50 {
+            for x in 10..40 {
+                img.set(x, y, [220, 10, 10, 255]);
+            }
+            // Glow right of the square, touching it (alpha 90, cyan).
+            for x in 40..52 {
+                img.set(x, y, [0, 200, 200, 90]);
+            }
+            // Shadow apart (alpha 100, black).
+            for x in 70..110 {
+                img.set(x, y, [0, 0, 0, 100]);
+            }
+        }
+        // Faint stroke, 2 px wide, alone.
+        for y in 10..60 {
+            for x in 125..127 {
+                img.set(x, y, [0, 0, 255, 60]);
+            }
+        }
+        let before = img.clone();
+        defringe(&mut img, 2, None);
+        for y in 0..h {
+            for x in 0..w {
+                let (a, b) = (img.get(x, y), before.get(x, y));
+                if x >= 52 {
+                    assert_eq!(a, b, "({x}, {y}): shadow / stroke recoloured");
+                }
+                if (44..52).contains(&x) && (14..46).contains(&y) {
+                    // Glow pixels away from the square (more than width + 2 from any red pixel) stay cyan.
+                    assert_eq!(a, b, "({x}, {y}): glow recoloured");
+                }
+                assert_eq!(a[3], b[3]);
+            }
+        }
+        // The square's own rim next to transparency still takes the inside colour (it already has it: no change),
+        // and a white rim on it is replaced.
+        let mut img = PixelBuf::new(40, 40);
+        for y in 5..35 {
+            for x in 5..35 {
+                let rim = !(7..33).contains(&x) || !(7..33).contains(&y);
+                img.set(x, y, if rim { [255, 255, 255, 160] } else { [220, 10, 10, 255] });
+            }
+        }
+        assert!(defringe(&mut img, 2, None) > 0);
+        assert!(img.data.chunks(4).filter(|p| p[3] > 0).all(|p| p[..3] == [220, 10, 10]));
+    }
+
+    #[test]
+    fn k2c_remove_background_on_a_noisy_white_background() {
+        // Check P2 (plan 7 "P2", checker): an object on white with per-channel noise 236..=255, for a light, a dark
+        // and a grey object; the background goes, the object stays whole.
+        let (w, h) = (256u32, 200u32);
+        let obj = object(w, h);
+        let mut rng = XorShift::new(99);
+        for (color, tol) in [([250u8, 225, 90], 40u8), ([40, 60, 160], 40), ([200, 200, 200], 30)] {
+            let img = composite(&obj, color, |_, _| {
+                let n = |r: &mut XorShift| 255 - (r.next_u32() % 20) as u8;
+                [n(&mut rng), n(&mut rng), n(&mut rng)]
+            });
+            let cut = remove_background(&img, RemoveBgOptions { tolerance: tol, ..RemoveBgOptions::default() }).unwrap();
+            assert_eq!(cut.colors.len(), 1, "{:?}", cut.colors);
+            let mut out = img.clone();
+            cut.apply(&mut out, None);
+            let s = iou(&out, &obj);
+            assert!(s >= 0.98, "{color:?}: IoU {s}");
+            for (p, &o) in out.data.chunks(4).zip(&obj.data) {
+                if o == 0 {
+                    assert_eq!(p[3], 0, "{color:?}: background speck {p:?}");
+                }
+                if o == 255 {
+                    assert!(p[3] >= 250, "{color:?}: object pixel {p:?}");
+                }
+            }
+        }
     }
 
     #[test]

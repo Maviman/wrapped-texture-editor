@@ -15,7 +15,6 @@ use rayon::prelude::*;
 
 use crate::math::{IRect, mul_u8};
 use crate::pixel::{AlphaBuf, PixelBuf};
-use crate::pixel_ops::{premultiply, unpremultiply};
 use crate::sticker::fx::{cov, dist_in, dist_out, over, tent, tent_width};
 use crate::sticker::shape::{polygon_coverage, sd_ellipse, sd_round_box};
 
@@ -364,8 +363,11 @@ fn finish_region(src: &PixelBuf, marks: Vec<u8>, opts: RegionOptions, diff: impl
             let (x0, x1) = (x.saturating_sub(1), (x + 1).min(w - 1));
             let (y0, y1) = (y.saturating_sub(1), (y + 1).min(h - 1));
             let touches = (y0..=y1).any(|yy| marks[yy * w + x0..=yy * w + x1].iter().any(|&m| m != 0));
-            if touches {
-                *o = fringe_value(diff(px(src, i)), opts.tolerance);
+            // Only pixels that do NOT match get the partial value (4.4); a matching pixel the contiguous flood did
+            // not reach (it touches the region only diagonally) stays out (check P2: it used to get 255).
+            let d = diff(px(src, i));
+            if touches && d > opts.tolerance {
+                *o = fringe_value(d, opts.tolerance);
             }
         }
     };
@@ -530,21 +532,27 @@ pub fn extract(src: &PixelBuf, sel: &AlphaBuf) -> PixelBuf {
 }
 
 /// One pixel of `before` mixed toward `after` by `k / 255`, premultiplied (so a transparent side lends no colour);
-/// `k = 0` is `before` and `k = 255` is `after`, byte for byte.
+/// `k = 0` is `before` and `k = 255` is `after`, byte for byte, and an unchanged pixel (`before == after`) stays the
+/// same bytes for every `k`. The premultiplied values are kept exact (`c * a`, no 8-bit rounding): alpha
+/// `round((a_b (255 - k) + a_a k) / 255)`, colour `round((c_b a_b (255 - k) + c_a a_a k) / (a_b (255 - k) + a_a k))`
+/// (check P2: an 8-bit premultiplied round trip moved the colour of faint pixels by up to 12 levels).
 #[inline]
 pub fn mix_px(before: [u8; 4], after: [u8; 4], k: u8) -> [u8; 4] {
-    match k {
-        0 => before,
-        255 => after,
-        _ => {
-            let (b, a) = (premultiply(before), premultiply(after));
-            let m: [u8; 4] = std::array::from_fn(|c| mix_u8(b[c], a[c], k));
-            if m[3] == 0 {
-                return [before[0], before[1], before[2], 0];
-            }
-            unpremultiply(m)
-        }
+    if k == 0 || before == after {
+        return before;
     }
+    if k == 255 {
+        return after;
+    }
+    let (kb, ka) = (255 - k as u32, k as u32);
+    let (ab, aa) = (before[3] as u32 * kb, after[3] as u32 * ka);
+    let wsum = ab + aa; // <= 65,025
+    let alpha = ((wsum + 127) / 255) as u8;
+    if alpha == 0 {
+        return [before[0], before[1], before[2], 0];
+    }
+    let c = |i: usize| ((before[i] as u32 * ab + after[i] as u32 * aa + wsum / 2) / wsum).min(255) as u8;
+    [c(0), c(1), c(2), alpha]
 }
 
 /// Limits a finished edit to a selection: every pixel of `after` becomes `mix_px(before, after, sel)`. All three
@@ -886,6 +894,44 @@ mod tests {
         let src = PixelBuf::filled(2, 1, [9, 9, 9, 200]);
         let e = extract(&src, &AlphaBuf::from_raw(2, 1, vec![255, 0]).unwrap());
         assert_eq!(e.data, vec![9, 9, 9, 200, 9, 9, 9, 0]);
+    }
+
+    #[test]
+    fn k2c_mix_px_keeps_unchanged_pixels_and_faint_colours() {
+        // Check P2: an unchanged pixel stays the same bytes under any partial selection value (an 8-bit premultiplied
+        // round trip used to move faint colours by up to 12 levels).
+        for a in 0..=255u8 {
+            for c in [0u8, 3, 77, 200, 255] {
+                let p = [c, 255 - c, c / 2, a];
+                for k in 0..=255u8 {
+                    assert_eq!(mix_px(p, p, k), p, "{p:?} k {k}");
+                }
+            }
+        }
+        // Two faint pixels of one colour and different alpha keep that colour.
+        assert_eq!(mix_px([200, 100, 50, 10], [200, 100, 50, 30], 128), [200, 100, 50, 20]);
+        // A blur limited by a feathered selection leaves a constant faint picture as it is.
+        let img = PixelBuf::filled(40, 30, [201, 99, 13, 9]);
+        let mut sel = Selection::rect(40, 30, Vec2::new(10.0, 8.0), Vec2::new(30.0, 22.0));
+        sel.feather(6.0);
+        assert_eq!(crate::sticker::filter::blur(&img, 4.0, Some(&sel.mask)), img);
+    }
+
+    #[test]
+    fn k2c_wand_anti_alias_gives_no_value_to_unreached_matching_pixels() {
+        // Check P2: 4.4 gives the partial value to pixels that do NOT match; a matching pixel that touches the
+        // contiguous region only diagonally is not part of it (it used to get 255 with anti-alias on).
+        let mut img = PixelBuf::filled(3, 3, [0, 0, 0, 255]);
+        img.set(0, 0, [255, 255, 255, 255]);
+        img.set(1, 1, [255, 255, 255, 255]);
+        img.set(2, 2, [250, 250, 250, 255]);
+        let r = region(&img, (0, 0), RegionOptions { tolerance: 10, contiguous: true, anti_alias: true });
+        assert_eq!(r.data, vec![255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // A non-matching neighbour still gets its fringe value.
+        let mut img = PixelBuf::filled(3, 1, [100, 100, 100, 255]);
+        img.set(1, 0, [124, 124, 124, 255]);
+        let r = region(&img, (0, 0), RegionOptions { tolerance: 16, contiguous: true, anti_alias: true });
+        assert_eq!(r.data, vec![255, 128, 0]);
     }
 
     #[test]

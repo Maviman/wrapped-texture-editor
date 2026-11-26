@@ -3224,7 +3224,7 @@ pub fn erase_mask(mask: &mut AlphaBuf, coverage: &AlphaBuf);
 pub fn fill(pixels: &mut PixelBuf, coverage: &AlphaBuf, color: [u8; 4]);   // source-over, strength c / 255
 pub fn fill_mask(mask: &mut AlphaBuf, coverage: &AlphaBuf, value: u8);
 pub fn extract(src: &PixelBuf, sel: &AlphaBuf) -> PixelBuf;          // "Layer via Copy": alpha *= sel / 255
-pub fn mix_px(before: [u8; 4], after: [u8; 4], k: u8) -> [u8; 4];   // premultiplied; k 0 / 255 exact
+pub fn mix_px(before: [u8; 4], after: [u8; 4], k: u8) -> [u8; 4];   // premultiplied (exact c * a); k 0 / 255 and before == after exact
 pub fn mix_selected(before: &PixelBuf, after: &mut PixelBuf, sel: &AlphaBuf);
 pub fn mix_selected_mask(before: &AlphaBuf, after: &mut AlphaBuf, sel: &AlphaBuf);
 
@@ -4504,18 +4504,24 @@ touching the artboard border would fade there and Select All + Feather would no 
 pixel has alpha 0 only `|da|` counts (two transparent pixels match). Match: `diff <= tolerance`. Contiguous: the test is
 evaluated once per pixel into a byte plane (parallel rows), then a scanline flood (4-connected, a stack of runs) compares
 bytes only; non-contiguous: the plane itself. Anti-alias: a pixel not in the region with an 8-neighbour in it gets
-`round(255 * clamp(1 - (diff - tol) / max(tol, 16)))` (a diagonal-only matching neighbour therefore gets 255). Magic
+`round(255 * clamp(1 - (diff - tol) / max(tol, 16)))` when it does **not** match (check P2: a matching pixel the
+contiguous flood did not reach, touching the region only diagonally, stays 0; it used to get 255). Magic
 Eraser / Delete: `alpha' = alpha * (255 - c) / 255` (exact rounding, `mul_u8`), RGB kept; Fill: straight source-over
 (`fx::over`) with strength `c / 255`; on a mask `erase_mask` / `fill_mask` (`m + (v - m) c / 255`). Limiting a finished
-edit to a selection mixes **premultiplied** (`mix_px`: a transparent side lends no colour; `k = 0` / `255` are exact).
+edit to a selection mixes **premultiplied** (`mix_px`: a transparent side lends no colour; `k = 0` / `255` are exact;
+the premultiplied values stay exact, `c * a` in `u32`, so an unchanged pixel keeps its bytes for any `k`; check P2).
 
 **Colour to alpha** (`unmix_pixel`, on bytes / 255): `a_i = (P_i - C_i) / (1 - C_i)` above the key, `(C_i - P_i) / C_i`
 below, 0 equal (a key channel of 1 / 0 with `P` beyond it gives 1); `a = max a_i`; thresholds `t0 < t1` remap linearly
 (a bad pair = `0, 1`); `a' >= 1` keeps the pixel, `a' = 0` gives the key at alpha 0, else `P' = (P - C) / a' + C`,
 alpha `round(a' * alpha)`. A transparent pixel is left. Matte: white `C = (P - (1 - a)) / a`, black `C = P / a`, alpha
-0 and 255 left. **Defringe** `n` (1..=10): `dist_in` of the alpha **without a pad** (the picture's border is not an
-edge, so an opaque photo has no fringe); edge = alpha > 0 and `dist_in <= n`; interior = alpha >= 250 and `dist_in >
-n`; each edge pixel takes the RGB of `nearest_ink(interior)`; alpha kept; no interior = no change.
+0 and 255 left. **Defringe** `n` (1..=10; deviation from the plan, check P2): `d0 = distance_to_ink(alpha == 0)`, the
+distance to a **fully transparent** pixel, **without a pad** (the picture's border is not an edge, so an opaque photo
+has no fringe); edge = alpha > 0 and `d0 <= n`; interior = alpha > 0 and `d0 > n`; each edge pixel takes the RGB of
+`nearest_ink(interior)` when that pixel is at most `n + 2` px away (centre to centre); alpha kept; no transparent or no
+interior pixel = no change. The plan's rule (edge = `dist_in <= n` on the 128 threshold, interior = alpha >= 250)
+made every pixel with alpha < 128 an edge pixel at any depth, so a soft shadow or glow anywhere took the colour of the
+nearest opaque object (`k2c_defringe_leaves_shadows_glows_and_faint_strokes_alone`).
 
 **Remove Background.** 1. The 1-px frame; if at least half of it has alpha < 128: `AlreadyTransparent` ("This picture
 already has a transparent background"). 2. Background colours (deviation): the plan's "cells of 4 bits holding 15 %"
@@ -8042,7 +8048,10 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `filters_are_thread_count_independent`). Ignored, release, serial: `sticker::bench::perf_k2_*` (wand / magic eraser /
   remove background 2048^2, blur radius 16 at 2048^2, flood 4096^2 one colour and a 2,048-tooth comb; `cargo test -p
   wte_core --release --lib perf_k2 -- --ignored --test-threads=1 --nocapture`; numbers in
-  `docs/notes/sticker/build-P2.md`).
+  `docs/notes/sticker/build-P2.md`). Check P2 (`k2c_*`, note `docs/notes/sticker/check-P2.md`): `sticker::select::tests`
+  (`mix_px_keeps_unchanged_pixels_and_faint_colours`, `wand_anti_alias_gives_no_value_to_unreached_matching_pixels`),
+  `sticker::cutout::tests` (`defringe_leaves_shadows_glows_and_faint_strokes_alone`,
+  `remove_background_on_a_noisy_white_background`).
 
 ### 9.2 `wte_app` tests
 

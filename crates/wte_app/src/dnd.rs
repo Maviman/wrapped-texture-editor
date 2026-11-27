@@ -29,7 +29,7 @@ pub fn handle(ctx: &egui::Context, state: &mut AppState) {
         let text = if blocked { "Please wait for the running operation to finish" } else { "Drop to open" };
         painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(28.0), egui::Color32::WHITE);
         if !blocked {
-            let hint = "Models (.obj, .gltf, .glb, .fbx), projects (.wtep) or images (stamp)";
+            let hint = "Models (.obj, .gltf, .glb, .fbx), projects (.wtep), images (stamp) or PSD files (sticker)";
             let pos = rect.center() + egui::vec2(0.0, 32.0);
             painter.text(pos, egui::Align2::CENTER_CENTER, hint, egui::FontId::proportional(15.0), egui::Color32::LIGHT_GRAY);
         }
@@ -80,7 +80,7 @@ pub(crate) fn plan_drop(paths: &[std::path::PathBuf]) -> DropPlan {
         if plan.document.as_ref() == Some(path) {
             continue;
         }
-        if is_image_path(path) && plan.document.is_none() {
+        if (is_image_path(path) || is_psd_path(path)) && plan.document.is_none() {
             plan.stamps.push(path.clone());
         } else {
             plan.ignored.push(path.clone());
@@ -88,7 +88,7 @@ pub(crate) fn plan_drop(paths: &[std::path::PathBuf]) -> DropPlan {
     }
     plan.reason = match &plan.document {
         Some(_) => "one project or model is opened per drop; a model finds its textures and material files itself",
-        None => "not a model, project or image",
+        None => "not a model, project, image or PSD file",
     };
     plan
 }
@@ -105,6 +105,11 @@ pub const MODEL_EXTENSIONS: [&str; 4] = ["obj", "gltf", "glb", "fbx"];
 /// Lower-case extension of a path ("" without one).
 pub fn extension_of(path: &std::path::Path) -> String {
     path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+}
+
+/// Stickers P9a (STICKER_PLAN 5.8): a PSD / PSB file, imported as a sticker.
+pub fn is_psd_path(path: &std::path::Path) -> bool {
+    matches!(extension_of(path).as_str(), "psd" | "psb")
 }
 
 /// True for the image extensions of `IMAGE_EXTENSIONS`.
@@ -178,7 +183,13 @@ mod tests {
         let plan = plan_drop(&[p("x.bin"), p("x.gltf"), p("y.glb")]);
         assert_eq!(plan.document, Some(p("x.gltf")));
         assert_eq!(plan.ignored, [p("x.bin"), p("y.glb")]);
-        assert_eq!(plan_drop(&[]), DropPlan { reason: "not a model, project or image", ..DropPlan::default() });
+        assert_eq!(plan_drop(&[]), DropPlan { reason: "not a model, project, image or PSD file", ..DropPlan::default() });
+        // Stickers P9a (5.8): a PSD file without a model or project is opened as a sticker, in order with the images.
+        let plan = plan_drop(&[p(r"E:\img.png"), p(r"E:\img\Logo.PSD"), p(r"E:\imgig.psb")]);
+        assert_eq!(plan.stamps, [p(r"E:\img.png"), p(r"E:\img\Logo.PSD"), p(r"E:\imgig.psb")]);
+        let plan = plan_drop(&[p(r"E:\m\model.obj"), p(r"E:\img\Logo.psd")]);
+        assert_eq!(plan.ignored, [p(r"E:\img\Logo.psd")]);
+        assert!(is_psd_path(Path::new("x.PSD")) && is_psd_path(Path::new("x.psb")) && !is_psd_path(Path::new("x.png")));
     }
 
     #[test]

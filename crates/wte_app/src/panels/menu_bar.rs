@@ -45,6 +45,11 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             if item(ui, "Tablet companion...", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::Companion));
             }
+            // Stickers P9a (STICKER_PLAN 5.7): where the outside editor's program is.
+            let editor = crate::link::default_editor().name();
+            if item(ui, &format!("{editor} location..."), "", true, false) {
+                actions.push(AppAction::Link(crate::link::LinkAction::LocateEditor(None)));
+            }
             if item(ui, "About", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::About));
             }
@@ -84,6 +89,13 @@ fn file_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
     ui.separator();
     if item(ui, "Import Image as Stamp...", "", has_doc, false) {
         actions.push(AppAction::ImportStampImage(None));
+    }
+    // Stickers P9a (STICKER_PLAN 5.8): a PSD file as a layered tray sticker, optionally kept linked to the file.
+    if item(ui, "Import Sticker from PSD...", "", has_doc, false) {
+        actions.push(AppAction::Link(crate::link::LinkAction::ImportPsd { path: None, keep_linked: false }));
+    }
+    if item(ui, "Import Sticker from PSD, Keep Linked...", "", has_doc, false) {
+        actions.push(AppAction::Link(crate::link::LinkAction::ImportPsd { path: None, keep_linked: true }));
     }
     if item(ui, "Export...", "Export...", has_doc, false) {
         actions.push(AppAction::ShowExport);
@@ -289,6 +301,17 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     let stamp_selected = session.is_some_and(|s| s.selected_stamp.is_some_and(|id| s.doc.stamp(id).is_some()));
     if item(ui, "Edit Sticker", "Edit Sticker", stamp_selected && state.view_mode != ViewMode::Sticker, false) {
         actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(None)));
+    }
+    // Stickers P9a (STICKER_PLAN 5.1): the selected stamp's sticker in the outside editor.
+    let selected = session.and_then(|s| s.selected_stamp.filter(|id| s.doc.stamp(*id).is_some()));
+    let edit_in_label = wte_core::link::texts::edit_in(&selected.and_then(|id| crate::link::sticker_of_stamp(state, id)).map_or_else(
+        || crate::link::default_editor().name(),
+        |id| crate::link::editor_name(state, id),
+    ));
+    if item(ui, &edit_in_label, "", selected.is_some(), false)
+        && let Some(id) = selected
+    {
+        actions.push(AppAction::Link(crate::link::LinkAction::EditIn(crate::link::EditRequest::new(crate::link::LinkTarget::Stamp(id)))));
     }
     ui.separator();
     if item(ui, "New Paint Layer", "New Paint Layer", has_doc, false) {

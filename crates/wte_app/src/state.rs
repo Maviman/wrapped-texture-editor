@@ -211,6 +211,21 @@ pub enum PanelHit {
     StickerTabConvertText,
     /// The content field of a text layer (Text block in the Sticker view).
     StickerTextField,
+    // ---- stickers P9a: the editor link ----
+    /// "Edit in <editor>" of the Sticker tab.
+    LinkEditIn,
+    LinkUpdateNow,
+    LinkSend,
+    LinkShowFile,
+    LinkUnlink,
+    LinkRestore,
+    LinkConvert,
+    /// "Edit in <editor>" in the canvas header.
+    StickerHeaderEditIn,
+    /// The sticker's name field in the canvas header.
+    StickerNameField,
+    /// A button of a link question (`Dialog::Link`), left to right.
+    LinkDialogButton(u8),
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
@@ -320,7 +335,6 @@ pub struct StickerEdit {
     /// The stamp(s) and sticker as they were when the editor opened (`Arc` clones), for Revert.
     pub entry: StickerCheckpoint,
     /// A link update waits for the stroke or drag to end (5.6; stickers P9a).
-    #[allow(dead_code, reason = "stickers P9a: the link watcher")]
     pub held_update: bool,
 }
 
@@ -1413,6 +1427,8 @@ pub enum Dialog {
     /// Stickers P6b (STICKER_PLAN 3.1, E6): "This picture is used by N stickers." Edit all / Only this one / Cancel,
     /// before the first content edit of a shared sticker or picture in the Sticker view (`dialogs/sticker_shared.rs`).
     StickerShared { users: usize },
+    /// Stickers P9a (STICKER_PLAN 5.1, 5.5, 5.7): an in-window question of the editor link (`dialogs/link.rs`).
+    Link(Box<crate::link::LinkQuestion>),
 }
 
 /// User preferences, stored as JSON by `prefs.rs`. Every field falls back to its default when missing.
@@ -1472,6 +1488,10 @@ pub struct Prefs {
     /// (never used by a self-test or a unit test, `sticker::library::folder`). Not written when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sticker_library_dir: Option<PathBuf>,
+    /// Stickers P9a (STICKER_PLAN 5.7): PhotoCraft's exe, found in the registry or chosen by the user ("Where is
+    /// photocraft.exe?", Help > PhotoCraft location...). Not written when `None`; never set by a self-test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub photocraft_exe: Option<PathBuf>,
 }
 
 impl Default for Prefs {
@@ -1497,6 +1517,7 @@ impl Default for Prefs {
             companion: CompanionPrefs::default(),
             sticker_split: STICKER_SPLIT_DEFAULT,
             sticker_library_dir: None,
+            photocraft_exe: None,
         }
     }
 }
@@ -1614,6 +1635,9 @@ pub struct AppState {
     pub sticker_ui: crate::sticker::StickerUi,
     /// Stickers P6b (STICKER_PLAN 3.7): the styles of Copy Style (app state, never the OS clipboard).
     pub style_clipboard: Option<StyleStack>,
+    /// Stickers P9a (STICKER_PLAN 5.3, 5.6, 5.7): the editor link's sessions, watcher, launcher (the stub in a self-test
+    /// run) and questions (`link/mod.rs`).
+    pub link_ui: crate::link::LinkUi,
 }
 
 /// When the deferred stamp Preview bakes (`Document::bake_stale_previews`) may run next: after a bake that took `t`,
@@ -1713,6 +1737,7 @@ impl AppState {
             sticker_canvas_rect: None,
             sticker_ui: crate::sticker::StickerUi::default(),
             style_clipboard: None,
+            link_ui: crate::link::LinkUi::new(selftest),
         }
     }
 

@@ -82,7 +82,7 @@ brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_wa
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
 companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen
-sticker_cutout sticker_text sticker_layout sticker_library` (65; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
+sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path` (67; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -100,7 +100,14 @@ P8: `sticker_text` (a text layer by a click, a star behind it, a stroke, a strip
 changed and warped, a text stamp converted; shots `text_clipped`, `text_warped`, `text_converted`), `sticker_layout`
 (crop to an ellipse, trim, padding, rotate 90 and back, resize 200 %, flatten: a green mark stays on its texel; shots
 `layout_crop_box`, `layout_rotated`, `layout_done`), `sticker_library` (save to a library folder inside the run's
-folder, a new document, add from the library, place; shots `library_saved`, `library_placed`).
+folder, a new document, add from the library, place; shots `library_saved`, `library_placed`); P9a: `sticker_link`
+(the editor link with the stub launcher on a project saved into the run folder: Edit in PhotoCraft with the
+shared-picture question, the editor's saves written by the scenario, undo and the 3 s idle check, a save that leaves the
+PSD alone, an update held by a focused text field in the Sticker view, PhotoCraft's own text layer and a layer effect
+from the core's fixtures, the conflict with both answers, a send while open and the "saved over" question, reopen with
+the file present, deleted and changed; shots `link_shared`, `link_made`, `link_updated`, `link_held_applied`,
+`link_merged`, `link_conflict`, `link_saved_over`, `link_changed_closed`), `sticker_link_path` (PATH = a `.psd`: a tray
+sticker layer by layer, placed; shot `psd_placed`).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
@@ -168,7 +175,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
-| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P8 built and checked (P8 check: Merge Down of two clipped layers, hidden layers, the library's memory); P9a-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
+| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P8 built and checked (P8 check: Merge Down of two clipped layers, hidden layers, the library's memory); P9a built (the editor link in the app, PhotoCraft); P9b-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
 | companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -229,17 +236,21 @@ Grow / Shrink / Feather / Color Range, Remove Background, Color to Alpha, Defrin
 preview in small popovers, the Sticker menu in the Sticker view), **P8** layout, text, shapes and the library (the Move
 tool's transform handles and W / H / Angle / Flip / Reset, the Crop tool with Rectangle / Rounded / Ellipse, Text and
 Shape layers, Trim / Add Padding / Canvas Size / Resize / Rotate / Flip / Flatten, Merge Down, Clip to Layer Below,
-adjustments, the sticker library in the Sticker tab, Save to Library, Export as PSD).
-Next: P9a / P9b the editor link in the
-app, P10a / P10b / P11 drop, clipboard, drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if
-everything is green; then the gate.
+adjustments, the sticker library in the Sticker tab, Save to Library, Export as PSD), **P9a** the editor link in the
+app with PhotoCraft (Edit in PhotoCraft with the save-first, shared-picture, send-first and already-open questions, the
+watcher that applies a Ctrl+S in PhotoCraft in place, held while the Sticker view is busy, the badge and Update now /
+Send to / Show file / Unlink / Restore, conflicts and "saved over", the save / Save As / load / close rules, Import
+Sticker from PSD, the command-line conversion; the stub launcher in every self-test and test).
+Next: P9b the editor list (Photoshop, PhotoCraft, Other) and the default editor, P10a / P10b / P11 drop, clipboard,
+drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if everything is green; then the gate.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open
-ones listed here. **Owed so far:** all of them (none can be run yet: the link, drop and clipboard come with P9-P11);
-the "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b, P7a, P7b and P8 parts) can be tried now: styles, tray, Edit
+ones listed here. **Owed so far:** all of them (drop and clipboard come with P10-P11; Photoshop with P9b); the
+"Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b, P7a, P7b and P8 parts) can be tried now: styles, tray, Edit
 before placing, the shared-picture question, Export Picture, the five tabs; painting with the mouse and a pen (part 2);
-selections and cut-out (part 3); layout, text, shapes, adjustments and the library (part 4).
+selections and cut-out (part 3); layout, text, shapes, adjustments and the library (part 4); and the chapter "Working
+with PhotoCraft" (P9a: hand tests 1-6 and 14 of plan 8.7 with the real PhotoCraft).
 
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 

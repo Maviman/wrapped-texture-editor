@@ -124,6 +124,8 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
         | A::UpdateStampTint(_, _, commit) => *commit == Commit::Final,
         // Stickers P6a: the editor's document commands.
         A::Sticker(s) => s.changes_document(),
+        // Stickers P9a: the link commands that change the document (an update, a promotion, a send).
+        A::Link(l) => l.changes_document(),
         _ => false,
     }
 }
@@ -132,6 +134,10 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
 /// Save, Save As and Export write what is on screen at that moment; showing or hiding objects (objects-tabs) is view
 /// state and never throws away what the user painted.
 fn finishes_interaction(action: &AppAction) -> bool {
+    // Stickers P9a: "Edit in" and "Send to" write the file from what is on screen, like Save.
+    if let AppAction::Link(l) = action {
+        return l.finishes_interaction();
+    }
     matches!(
         action,
         AppAction::Save
@@ -463,6 +469,20 @@ fn close_dialog(app: &mut WteApp) {
         crate::brush_flows::answer_openings(app, None);
         return;
     }
+    // Stickers P9a: Esc or a click outside a link question is its cancel: "Decide later" for a conflict, "Ignore"
+    // for a change while the project was closed, nothing else for the others.
+    if let Dialog::Link(q) = &app.state.dialog {
+        let follow = match (q.kind, q.sticker) {
+            (crate::link::QuestionKind::Conflict { .. }, Some(id)) => Some(crate::link::LinkAction::Later(id)),
+            (crate::link::QuestionKind::ChangedWhileClosed, Some(id)) => Some(crate::link::LinkAction::IgnoreClosed(id)),
+            _ => None,
+        };
+        app.state.dialog = Dialog::None;
+        if let Some(a) = follow {
+            crate::link::flows::run_in(&mut app.state, a);
+        }
+        return;
+    }
     // Stickers P6b (E6): Cancel of the shared-picture question drops the edit that waited for it.
     if matches!(app.state.dialog, Dialog::StickerShared { .. }) {
         crate::sticker::run_in(&mut app.state, crate::sticker::StickerAction::AnswerShared(None));
@@ -667,6 +687,9 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
                 run(app, A::NewFromModel(Some(path)), frame);
             } else if is_image_path(&path) {
                 run(app, A::ImportStampImage(Some(path)), frame);
+            } else if crate::dnd::is_psd_path(&path) {
+                // Stickers P9a (STICKER_PLAN 5.8): a PSD becomes a tray sticker, the Stamp tool's source.
+                crate::link::flows::run(app, crate::link::LinkAction::ImportPsd { path: Some(path), keep_linked: false }, frame);
             } else {
                 app.state.toasts.warn(format!("Cannot open {}: unsupported file type", file_name_of(&path)));
             }
@@ -1051,6 +1074,8 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         // ---- ui ----
         A::ShowDialog(dialog) => app.state.dialog = dialog,
         A::CloseDialog => close_dialog(app),
+        // ---- stickers P9a: the editor link ----
+        A::Link(l) => crate::link::flows::run(app, l, frame),
         A::CancelJob => app.jobs.cancel_modal(),
         A::Toast(level, text) => app.state.toasts.push(level, text),
         A::Companion(c) => companion_command(app, c, frame),

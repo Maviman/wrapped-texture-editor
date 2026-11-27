@@ -2,8 +2,8 @@
 // panel's upper group, always available (also outside the Sticker view). Top to bottom: (1) the selected stamp
 // (thumbnail, name, kind, Edit Sticker, Export Picture...), (2) Sticker style: the preset row, Copy / Paste / Clear and
 // the stamp-level style editor for image, text and sticker stamps without opening the editor (E3); with several stamp
-// layers selected it edits all of them (3.7), (3) the tray (`tray.rs`). The library (P8) and the PhotoCraft link
-// (P9) come later. Every command is an `AppAction`; every control has a button (tablet rule of 3.10) and a rect in
+// layers selected it edits all of them (3.7), (3) the tray (`tray.rs`), (4) the library (P8). Stickers P9a: the
+// editor link's block under the selected stamp (`link/ui.rs`). Every command is an `AppAction`; every control has a button (tablet rule of 3.10) and a rect in
 // `state.panel_rects`.
 
 use eframe::egui;
@@ -123,6 +123,9 @@ fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, 
             }
         }
     });
+
+    // Stickers P9a (STICKER_PLAN 3.9, 5.1, 5.5): Edit in <editor> and the link's badge and commands.
+    crate::link::ui::tab_block(ui, state, crate::link::LinkTarget::Stamp(first), actions, hits);
 
     heading(ui, "Sticker style");
     if locked {

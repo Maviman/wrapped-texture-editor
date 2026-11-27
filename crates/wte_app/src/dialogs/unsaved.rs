@@ -26,6 +26,10 @@ pub(super) fn show(ctx: &egui::Context, cx: &mut ViewCx<'_>, then: &Pending) {
         ui.add_space(4.0);
         ui.add(egui::Label::new(format!("Save the changes to {name} before {}?", operation_text(then))).wrap());
         ui.weak("Your changes are lost if you don't save them.");
+        // Stickers P9a (STICKER_PLAN 5.3, review B8): stickers linked since the last save are forgotten without one.
+        if let Some(line) = crate::link::unsaved_line(cx.state) {
+            ui.add(egui::Label::new(egui::RichText::new(line).color(super::warn_color(ui))).wrap());
+        }
         ui.add_space(8.0);
         let mut answer = None;
         super::button_row(ui, |ui| {

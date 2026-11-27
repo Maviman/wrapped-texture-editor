@@ -296,6 +296,7 @@ fn header_bar(ui: &mut egui::Ui, state: &mut AppState, header: Rect, shown: &Sho
                 let mut text = state.sticker_ui.name_edit.clone().unwrap_or_else(|| doc.name.clone());
                 let width = if narrow { 80.0 } else { 130.0 };
                 let resp = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width)).on_hover_text("The sticker's name");
+                hits.push((PanelHit::StickerNameField, resp.rect));
                 if resp.lost_focus() {
                     actions.push(crate::action::AppAction::Sticker(StickerAction::Rename(text)));
                     state.sticker_ui.name_edit = None;
@@ -338,6 +339,12 @@ fn header_bar(ui: &mut egui::Ui, state: &mut AppState, header: Rect, shown: &Sho
                 actions.push(crate::action::AppAction::Sticker(StickerAction::ConvertText));
             }
         }
+        // Stickers P9a (STICKER_PLAN 3.2): the link badge and "Edit in <editor>".
+        let target = match edit.target {
+            StickerTarget::Stamp(id) => crate::link::LinkTarget::Stamp(id),
+            StickerTarget::Tray(id) => crate::link::LinkTarget::Sticker(id),
+        };
+        crate::link::ui::header(ui, state, target, narrow, &mut actions, &mut hits);
         // Stickers P7a: stroke mode (3.5) and the Rasterize offer of the paint tools (3.3 "Layer-kind rules").
         if state.sticker_ui.live.as_ref().is_some_and(|l| l.stroke_mode()) {
             ui.colored_label(crate::theme::ACCENT, crate::sticker::live::STROKE_MODE_NOTE);

@@ -23,6 +23,7 @@ mod gpu;
 mod gpu_check;
 mod io_flows;
 mod jobs;
+mod link;
 mod object_ops;
 mod panels;
 mod pen;

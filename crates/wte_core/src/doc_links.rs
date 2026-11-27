@@ -46,6 +46,19 @@ pub struct PreparedLink {
     pub link: StickerLink,
 }
 
+/// What [`Document::add_sticker_from_psd`] made (stickers P9a, 5.8).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PsdSticker {
+    /// The new tray sticker.
+    pub id: StickerId,
+    /// Layer by layer, or one merged picture.
+    pub mode: LinkMode,
+    /// The merged toast (5.4) when the file came back as one picture for a reason.
+    pub toast: Option<String>,
+    /// The sticker got an `External` link to the file.
+    pub linked: bool,
+}
+
 /// What [`Document::apply_link_update`] did.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinkApplied {
@@ -205,6 +218,66 @@ impl Document {
         };
         self.put_link(id, Some(link));
         self.link_state(id, Some(&stamp))
+    }
+
+    /// "Import PSD as sticker" (5.8; stickers P9a): a new tray sticker from `psd` by the rules of 5.4 with an empty map
+    /// (layer by layer, or one merged picture when something forces it), `keep` set, named `name`. One entry "Add
+    /// Sticker". `keep_linked`: the file at this path becomes the sticker's `External` link (editor `editor_key`, in
+    /// sync with `stamp`). `Err` = the sentence the user sees (needs a merged picture, too large, a limit).
+    #[expect(clippy::too_many_arguments, reason = "the file, its stamp, the link's editor and the texts")]
+    pub fn add_sticker_from_psd(
+        &mut self,
+        psd: &PsdDoc,
+        name: &str,
+        stamp: FileStamp,
+        keep_linked: Option<std::path::PathBuf>,
+        editor_key: &str,
+        editor_name: &str,
+        file_name: &str,
+    ) -> Result<PsdSticker, String> {
+        let [w, h] = psd.size;
+        let empty = StickerDoc::new(name, w.max(1), h.max(1));
+        let start = StickerLink {
+            file: LinkFile::External(keep_linked.clone().unwrap_or_default()),
+            editor: editor_key.to_owned(),
+            mode: LinkMode::Layers,
+            scale: 1.0,
+            synced: stamp,
+            synced_sticker: 0,
+            layer_map: Vec::new(),
+            next_lyid: 1,
+            editor_native: false,
+            problem: None,
+        };
+        let cx = ImportContext { editor_key, editor_name, file_name, blob_sizes: &[], layer_hashes: &[] };
+        let made = import(psd, &empty, &start, &cx).map_err(|p| match p {
+            ImportProblem::NeedsMerged => crate::link::texts::needs_merged(editor_key, editor_name),
+            ImportProblem::CanvasTooLarge { width, height } => {
+                crate::link::texts::canvas_too_large(name, width, height, editor_name)
+            }
+            ImportProblem::TooLarge { width, height } => crate::link::texts::too_large(file_name, width, height),
+        })?;
+        let LinkImport { mut sticker, mode, scale, mut layer_map, next_lyid, editor_native, toast, .. } = made;
+        sticker.name = name.to_owned();
+        sticker.keep = true;
+        let id = self.add_sticker(sticker).map_err(|e| e.to_string())?;
+        let linked = keep_linked.is_some();
+        if let Some(path) = keep_linked {
+            let doc = Arc::clone(self.sticker(id).ok_or("the sticker is gone")?);
+            self.fill_link_wte(&doc, &mut layer_map);
+            let link = StickerLink {
+                file: LinkFile::External(path),
+                mode,
+                scale,
+                synced_sticker: self.hash_of(&doc),
+                layer_map,
+                next_lyid,
+                editor_native,
+                ..start
+            };
+            self.put_link(id, Some(link));
+        }
+        Ok(PsdSticker { id, mode, toast, linked })
     }
 
     // ----- internals -----

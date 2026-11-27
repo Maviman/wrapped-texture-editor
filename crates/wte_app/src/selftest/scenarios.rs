@@ -36,6 +36,7 @@ mod side_tabs;
 mod sticker;
 mod sticker_cutout;
 mod sticker_layout;
+mod sticker_link;
 mod sticker_paint;
 mod sticker_tab;
 
@@ -106,6 +107,8 @@ const NAMES: &[&str] = &[
     "sticker_text",
     "sticker_layout",
     "sticker_library",
+    "sticker_link",
+    "sticker_link_path",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -196,6 +199,8 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "sticker_text" => sticker_layout::sticker_text(),
         "sticker_layout" => sticker_layout::sticker_layout(),
         "sticker_library" => sticker_layout::sticker_library(),
+        "sticker_link" => sticker_link::sticker_link(),
+        "sticker_link_path" => sticker_link::sticker_link_path(args.path.clone()),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -3918,6 +3923,7 @@ fn dialog_name(dialog: &Dialog) -> &'static str {
         Dialog::Companion => "Companion",
         Dialog::CloseOpenings(_) => "CloseOpenings",
         Dialog::StickerShared { .. } => "StickerShared",
+        Dialog::Link(_) => "Link",
     }
 }
 
@@ -4293,7 +4299,7 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)> {
     match name {
         "workflow_path" | "fuzz_path" | "brush_types_path" | "text_preview_path" | "final_bake_async" | "wrap_surface"
-        | "export_flow" | "export_unsettled" | "save_unsettled" | "objects_path" | "objects_flow_path" => {
+        | "export_flow" | "export_unsettled" | "save_unsettled" | "objects_path" | "objects_flow_path" | "sticker_link" => {
             Some((Duration::from_secs(300), Duration::from_secs(3600)))
         }
         // Branch `companion`: the Android end-to-end run waits up to 300 s for the tablet.
@@ -9315,10 +9321,12 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 65);
+        assert_eq!(scenario_names().len(), 67);
         // Stickers P6a (review B15): every shot of a sticker scenario says what it must show.
         for name in scenario_names().iter().filter(|n| n.starts_with("sticker")) {
-            let steps = scenario(name, &args).unwrap();
+            // Stickers P9a: a `*_path` scenario has its steps only with a PATH (`sticker_link_path`: a PSD file).
+            let with_path = CliArgs { path: Some(PathBuf::from("x.psd")), screenshot: None, scenario: String::new(), size: [1280, 800], log: None };
+            let steps = scenario(name, if name.ends_with("_path") { &with_path } else { &args }).unwrap();
             let shots: Vec<&str> = steps.iter().filter_map(|s| if let Step::Shot { expect, .. } = s { Some(*expect) } else { None }).collect();
             assert!(!shots.is_empty(), "{name} takes no named shot");
             assert!(shots.iter().all(|e| e.trim().len() > 20), "{name}: a shot without its expected content: {shots:?}");

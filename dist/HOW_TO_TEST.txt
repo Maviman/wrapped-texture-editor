@@ -231,6 +231,80 @@ and Layer; the Tool tab has the same buttons at its end.
  11. A text stamp: the Sticker tab's "Convert to layered sticker" turns it
      into a sticker whose text stays editable.
 
+Working with PhotoCraft (new in this build)
+-------------------------------------------
+A sticker can be edited in PhotoCraft (v0.2.0 portable or the installed
+latest) through a linked PSD file next to your project. WTE never starts
+PhotoCraft by itself: only your click on "Edit in PhotoCraft" does, and
+WTE never comes to the front, flashes or beeps when PhotoCraft saves.
+  1. Select a sticker stamp (or an image stamp) and click "Edit in
+     PhotoCraft" (Sticker tab; also the Sticker view's header, the Layer
+     menu and a stamp layer's right-click menu).
+     - A project that was never saved asks "Save the project first, so the
+       linked file has a place next to it." Save..., then it goes on.
+     - The first time WTE asks "Where is photocraft.exe?" (the portable
+       copy leaves no trace WTE can find); Help > PhotoCraft location...
+       changes it later.
+     - A picture several stamps show asks "Edit all" / "Only this one"
+       first. With "Only this one" the other stamps stay as they are.
+     - The file is <project>_links\<sticker>_k<number>.psd; the Sticker tab
+       shows "Link: linked", "Editor: PhotoCraft" and the file name.
+  2. In PhotoCraft paint on a layer, add a layer, a text or a layer mask,
+     move layers, and press Ctrl+S. Within about a second the sticker on
+     the model updates (one Undo step "Update Linked Sticker"); its
+     placement and its styles in WTE stay. WTE's own text and shape layers
+     you did not touch in PhotoCraft are still text and shapes in WTE; a
+     PhotoCraft text comes back as a picture layer. Do it again: it updates
+     again.
+  3. Add a layer effect (stroke, shadow) in PhotoCraft and save: WTE shows
+     the finished picture as one layer and a note names the effect; Undo
+     brings the layers back.
+  4. Ctrl+Z in WTE after an update: the badge says "changed in WTE" and the
+     file is not applied again by itself; "Update now" takes it again.
+  5. Change the sticker in WTE and also in PhotoCraft (save there): the
+     question "Both WTE and PhotoCraft changed <name>." with "Take
+     PhotoCraft's version" / "Keep WTE's version" / "Decide later". Keep
+     WTE's version (or "Send to PhotoCraft") while PhotoCraft has the file
+     open warns first; if PhotoCraft then saves its old picture again, WTE
+     asks ("PhotoCraft saved over the changes WTE sent to <name>.") instead
+     of updating silently.
+  6. Click "Edit in PhotoCraft" twice with the v0.2.0 / portable copy: the
+     second time asks "This sticker is already open in PhotoCraft...".
+     With the installed build: note whether a second tab opens or the
+     first one comes forward.
+  7. While a stroke, a drag or a text field in the Sticker view is busy,
+     a save in PhotoCraft waits and lands when you let go (the selection
+     is dropped, "Updated from PhotoCraft").
+  8. Save the project: the PSD file is not rewritten (its date stays); the
+     project keeps a copy of it. Close WTE, change the PSD in PhotoCraft,
+     open the project again: "Linked sticker <name> changed while the
+     project was closed." Update / Ignore. Delete the PSD and open the
+     project: WTE puts it back from its copy.
+  9. Link a sticker and close WTE without saving: the question names the
+     sticker ("Stickers linked to PhotoCraft since the last save: ...").
+     Saving in PhotoCraft afterwards breaks nothing; the PSD stays in the
+     links folder.
+ 10. Save As to another folder while PhotoCraft has the file open: the
+     link files are copied along and a note says WTE keeps following the
+     old file until you close WTE; a Ctrl+S in PhotoCraft still updates.
+ 11. File > Import Sticker from PSD... (or drop a .psd on the window): the
+     file becomes a sticker in the tray, layer by layer; "Import Sticker
+     from PSD, Keep Linked..." also follows that file when it changes.
+ 12. Stay in PhotoCraft (or in a full-screen game) and press Ctrl+S: WTE
+     does not come to the front, its taskbar button does not flash and no
+     sound plays; a question waits inside WTE's window.
+ 13. Latest PhotoCraft with "Maximize PSD and PSB File Compatibility" off
+     and a layer effect: the badge reads "needs a merged picture" with what
+     to turn on; "Convert with PhotoCraft's command-line tool" (when
+     photocraft-cli.exe is next to photocraft.exe) is the fallback.
+What does not come across: WTE's layer styles and stamp styles are not
+in the file (WTE adds them again to what comes back); a WTE text or shape
+layer you change in PhotoCraft comes back as pixels; PhotoCraft's text,
+smart and fill layers come back as pictures; effects, adjustment layers,
+groups and other blend modes make the sticker one finished picture; 16-bit
+files come back as 8-bit; parts outside the canvas are cut off. There is
+no drag from PhotoCraft into WTE: use Ctrl+S on a linked sticker.
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

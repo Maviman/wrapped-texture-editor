@@ -177,6 +177,8 @@ pub enum AppAction {
     SetStickerTool(StickerTool),
     /// Every other command of the Sticker view.
     Sticker(crate::sticker::StickerAction),
+    /// Stickers P9a (STICKER_PLAN 5): the editor link (logic in `link/flows.rs`).
+    Link(crate::link::LinkAction),
 }
 
 /// Severity of a toast.

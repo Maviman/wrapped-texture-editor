@@ -71,9 +71,16 @@ pub enum JobOutput {
     /// `uv_thumbs` / `uv_stats`: one entry per set (`uv_layout_image(.., 256)` and
     /// `TexelMap::build(.., 256, 256, 0).stats`), empty on `Err`.
     Imported { path: PathBuf, result: Result<ImportedModel, String>, uv_thumbs: Vec<PixelBuf>, uv_stats: Vec<UvStats> },
-    Built { result: Result<Document, String>, path: Option<PathBuf>, warnings: Vec<String>, force_save_as: bool },
-    /// `result` = (path, `DocumentSnapshot::history_state` of the saved snapshot, images to reuse); `scene_generation` = `Session::scene_generation` at the moment the save started.
-    Saved { result: Result<(PathBuf, u64, Option<wte_core::project::PngReuse>), String>, scene_generation: u64, then: Option<Pending> },
+    /// Stickers P9a: `links` = what `project::load` found for each editor link (empty for a new document).
+    Built {
+        result: Result<Document, String>,
+        path: Option<PathBuf>,
+        warnings: Vec<String>,
+        force_save_as: bool,
+        links: Vec<wte_core::project::LinkAtLoad>,
+    },
+    /// `result` = what was saved; `scene_generation` = `Session::scene_generation` at the moment the save started.
+    Saved { result: Result<Saved, String>, scene_generation: u64, then: Option<Pending> },
     Exported { result: Result<ExportReport, String>, dir: PathBuf },
     Extracted { result: Result<Vec<PathBuf>, String>, dir: PathBuf },
     Fonts(FontCatalog),
@@ -94,6 +101,20 @@ pub enum JobOutput {
     WrapPreview { generation: u64, output: Box<StampBakeOutput> },
     /// Round 8 (R8-2): the parameterization of a wrapped stamp only (after an open or an undo; a silent job).
     WrapParam { generation: u64, output: Box<StampBakeOutput> },
+}
+
+/// A successful save (`JobOutput::Saved`).
+#[derive(Debug)]
+pub struct Saved {
+    pub path: PathBuf,
+    /// `DocumentSnapshot::history_state` of the saved snapshot.
+    pub history_state: u64,
+    /// The images a later save may copy from this file.
+    pub reuse: Option<wte_core::project::PngReuse>,
+    /// Stickers P9a: `DocumentSnapshot::links_revision` of the saved snapshot (`Document::mark_links_saved`).
+    pub links_revision: u64,
+    /// Stickers P9a: the save's notes (a linked file that was being written: the project keeps the earlier copy).
+    pub warnings: Vec<String>,
 }
 
 /// The sample of one font family: "Abc 123" in its own face as a coverage bitmap (`FontCatalog::sample`).

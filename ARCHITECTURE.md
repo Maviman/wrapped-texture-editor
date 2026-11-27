@@ -364,9 +364,14 @@ block and Text tab, `TextTarget::Layer`), the Sticker and Layer commands (Trim, 
 90 / 180 / any angle, Flip, Flatten, Merge Down, Clip to Layer Below) in the Sticker menu, the Tool tab and popovers,
 the Adjustments block, the sticker library of the Sticker tab (`Prefs::sticker_library_dir`), Export as PSD and Save to
 Library; core `sticker/layout.rs` and `doc_sticker_layout.rs` (5.20, 5.27, 8.6, 8.7, 8.9, 8.10, 8.11, 8.15, 9.1, 9.2).
-Still to come, each documented by its package: the
-editor link in the app (P9a, P9b: 8.16), drop target, clipboard and drag out (P10a, P10b, P11: 8.17), linked paint layers
-(P12: 8.16), docs and the version (P13).
+(P9a): the editor link in the app with PhotoCraft as the discoverable editor and the editor's name a parameter of every
+text: the watcher thread, the launcher (stub in every self-test and test) and the registry discovery, "Edit in" with
+save-first, the shared-picture question, send-first and the two-copies guard, Send with its warning and
+`stale_in_editor`, the conflict and "changed while closed" questions, held updates in a busy Sticker view, the badge and
+the Sticker tab's link block, the save / Save As (aliases) / load / close-prompt rules, Import PSD as sticker, the
+command-line conversion; core `Document::add_sticker_from_psd` (2.2, 3.3, 4.6, 5.28, 8.2, 8.3, 8.8, 8.9, 8.11, 8.13,
+8.16, 9.2). Still to come, each documented by its package: the editor list (P9b: 8.16), drop target, clipboard and
+drag out (P10a, P10b, P11: 8.17), linked paint layers (P12: 8.16), docs and the version (P13).
 
 ---
 
@@ -460,7 +465,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `link/file.rs` | stickers P5c | `write_link_file` (temp file, `.bak.psd`, own-write registration before the rename, retries, "could not be replaced"), `LinkFileIo`, `LinkWriteError` |
 | `link/texts.rs` | stickers P5c | every sentence about a link, each taking the editor's name |
 | `link/tests.rs`, `link/fixture_tests.rs` | stickers P5c | test-only: the `k5_link_*` tests (9.1) |
-| `doc_links.rs` | stickers P5c | the links of `Document` (5.28 "link"): `link`, `links`, `links_revision`, `mark_links_saved`, `sticker_link_hash`, `link_state`, `prepare_link_file`, `finish_link_write`, `unlink`, `set_link_file_and_editor`, `apply_link_update`, `apply_link_fit`, `link_file_refused`; `PreparedLink`, `LinkApplied` |
+| `doc_links.rs` | stickers P5c | the links of `Document` (5.28 "link"): `link`, `links`, `links_revision`, `mark_links_saved`, `sticker_link_hash`, `link_state`, `prepare_link_file`, `finish_link_write`, `unlink`, `set_link_file_and_editor`, `apply_link_update`, `apply_link_fit`, `link_file_refused`; `PreparedLink`, `LinkApplied`; P9a: `add_sticker_from_psd`, `PsdSticker` (5.8 Import PSD as sticker) |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
 | `wrap_param.rs` | round 6 A | `WrapParam`, `WrapStats`, `wrap_param` (the parameterization of 6.5a: weld, spine, front, halo, tears, Jump small gaps, Overlap turns), `local_of` / `surface_of` / `outline`, the constants of 6.5a; round 9 B: `wrap_param_in` (with the mesh graph), `collect_grown`, `Patch::from_graph`, `phase_times` |
@@ -602,6 +607,14 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `sticker/popover.rs` | stickers P7b | the small non-modal window of a command with numbers (`PopKind`, `Popover`): its live preview (the canvas texture or the selection outline), the canvas click that picks its colour, Apply / Cancel |
 | `sticker/outline.rs` | stickers P7b | the selection's outline: merged edge runs at 128 (`Outline`, `outline_of`), cached per selection (`OutlineCache`), drawn as a static two-colour dashed line |
 | `dialogs/sticker_shared.rs` | stickers P6b | the shared-picture question (E6): Edit all / Only this one / Cancel |
+| `dialogs/link.rs` | stickers P9a | `Dialog::Link`: the editor link's in-window questions (8.16); a button closes it and queues its actions |
+| `link/mod.rs` | stickers P9a | the editor link in the app (8.16): `LinkUi` (`AppState::link_ui`), `LinkSession`, `LinkAction`, `EditRequest`, `SendRequest`, `LinkTarget`, `LinkQuestion` / `QuestionKind`, `pump` (every frame), `on_event`, `busy_for`, `badge`, `ask`, `press`, `unsaved_line` |
+| `link/flows.rs` | stickers P9a | Edit in, Send, Update now, the answers, Restore, Unlink, Show file, the command-line conversion, Import PSD as sticker; the save / Save As / load hooks (`before_save`, `after_save`, `save_failed`, `after_load`) |
+| `link/watch.rs` | stickers P9a | the watcher thread (`LinkWatcher`, `WatchEntry`, `LinkEvent`, `WatchTimes`), `OwnWrites`, `OwnWritesIo` |
+| `link/launch.rs` | stickers P9a | `command_for`, `convert_command`, `Launcher` / `ChildProc`, `StubLauncher`, the real launcher (not in a test build), `launcher_for`, `RegistryReader` (`WindowsRegistry` through `raw-dylib` `advapi32`, `NoRegistry`), `discover`, `exe_of_command` |
+| `link/editor.rs` | stickers P9a | `ExternalEditor { PhotoCraft, Photoshop, Other(PathBuf) }`, `name()`, `key()`, `from_key`, `name_of_key` |
+| `link/ui.rs` | stickers P9a | the Sticker tab's link block and the canvas header's badge with Edit in |
+| `link/testkit.rs` | stickers P9a | files "as the editor saved them" (the sticker writer, temp file + rename) for the tests and scenarios |
 | `selftest/scenarios/sticker_tab.rs` | stickers P6b | the scenarios `sticker_styles`, `sticker_tray`, `sticker_controls` (8.11) |
 | `selftest/scenarios/sticker_paint.rs` | stickers P7a | the scenarios `sticker_edit` and `sticker_pen` (8.11) |
 | `selftest/scenarios/sticker_cutout.rs` | stickers P7b | the scenario `sticker_cutout` (8.11) |
@@ -609,6 +622,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `sticker/{layout,adjust_ui,library}.rs` | stickers P8 | the Sticker and Layer commands (`Layout`, `merge_down`, `toggle_clip`, `layer_transform`, `export_psd` / `write_psd`), the Adjustments block, the sticker library (`LibraryState`, the listing job, `save`, `add`) |
 | `sticker/tests_p8.rs` | stickers P8 | the unit tests of P8 (8.15) |
 | `selftest/scenarios/sticker_layout.rs` | stickers P8 | the scenarios `sticker_text`, `sticker_layout`, `sticker_library` (8.11) |
+| `selftest/scenarios/sticker_link.rs` | stickers P9a | the scenarios `sticker_link`, `sticker_link_path` (8.11) |
 | `tools/sticker/frame_spans.py` (repo root) | stickers P7a | the worst `sticker.*` / `link.*` / `ole.*` frame spans of a scenario's frame log (STICKER_PLAN 8.4; exit 1 over the limit) |
 | `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
@@ -757,6 +771,10 @@ Branch `pen-input`: no new dependency. The window handle comes through `eframe::
 trait re-exported by wgpu (`eframe::wgpu::rwh`, raw-window-handle 0.6.2, the one version in `Cargo.lock`); the Windows
 calls of `pen/win.rs` are `#[link(name = "user32", kind = "raw-dylib")]` imports, as in `gpu_check.rs` / `main.rs`.
 
+Stickers P9a: no new dependency. The registry is read (never written) through `#[link(name = "advapi32", kind =
+"raw-dylib")]` `RegGetValueW` (`link/launch.rs`, only in an interactive run of a non-test build); processes are started
+with `std::process::Command` and `CREATE_NO_WINDOW` (`std::os::windows::process::CommandExt`).
+
 Branch `companion`: no new dependency (`Cargo.lock` unchanged). JPEG goes through `wte_core::encode_jpeg` (the `image`
 crate's "jpeg" feature, already a `wte_core` dependency); crypto is local code; the OS random generator
 (`BCryptGenRandom`) and Winsock RFCOMM (`ws2_32`) are `raw-dylib` imports; adb is a separate program found at run time.
@@ -849,6 +867,11 @@ No `build.rs`, no resource file: the window icon is set at runtime (`ViewportBui
 - The UI thread never blocks on a worker, with one exception: `stamp_bakes::settle` waits for the stamp bake in flight and
   bakes the other waiting stamps itself before save, export, the export dialog, merge down and rasterize, because these keep
   final stamp pixels. Workers never touch egui except `Context::request_repaint()`.
+- Stickers P9a: the editor link's watcher is one `std::thread` ("wte-link-watcher", `wte_app::link::watch`), started
+  with the first link and ended when the app drops it with the last one (its channel closes). It only reads files
+  (`metadata`, the bytes of a settled change, `psd::read`) and copies an alias over a link file; it reports through an
+  `mpsc` queue and one `Context::request_repaint()` per round that sent events. The document is never touched off the UI
+  thread.
 - GPU objects are created and used on the UI thread only.
 
 ### 4.7 Determinism
@@ -3966,6 +3989,11 @@ pub fn set_link_file_and_editor(&mut self, id: StickerId, file: Option<LinkFile>
 pub fn apply_link_update(&mut self, id, psd: &PsdDoc, stamp: FileStamp, editor_name: &str, file_name: &str) -> Result<LinkApplied, EditError>;
 pub fn apply_link_fit(..same..) -> Result<LinkApplied, EditError>;
 pub fn link_file_refused(&mut self, id, err: &PsdError, stamp: FileStamp, file_name: &str) -> Result<LinkState, EditError>;
+// P9a (5.8 Import PSD as sticker): a new kept tray sticker by the rules of 5.4 with an empty map ("Add Sticker");
+// `keep_linked` makes it an `External` link in sync with `stamp`. `Err` = the user's sentence.
+pub fn add_sticker_from_psd(&mut self, psd: &PsdDoc, name: &str, stamp: FileStamp, keep_linked: Option<PathBuf>,
+    editor_key: &str, editor_name: &str, file_name: &str) -> Result<PsdSticker, String>;
+pub struct PsdSticker { pub id: StickerId, pub mode: LinkMode, pub toast: Option<String>, pub linked: bool }
 pub struct PreparedLink { pub sticker: StickerId, pub bytes: Vec<u8>, pub crc32: u32, pub link: StickerLink }
 pub enum LinkApplied { Updated { mode, toast, profile_note, log }, Problem(LinkState) }
 ```
@@ -6437,7 +6465,12 @@ Stamp tool get; default none); both `#[serde(skip)]` (session state bound to the
 source). `StickerTarget { Stamp(StampId), Tray(StickerId) }` (the plan's `ToolSource` is not built: "Edit before
 placing" makes the tool's picture a tray sticker first, so the tool's unplaced sticker is a `Tray` target).
 `Dialog::StickerShared { users }`. `AppState::style_clipboard: Option<StyleStack>` (Copy Style; app state, never the OS
-clipboard). `PanelHit` gains `StickerTabEdit`, `StickerTabExport`, `StylePresetButton(u8)`, `StyleCopy`, `StylePaste`,
+clipboard). Stickers P9a: `AppState::link_ui: link::LinkUi` (8.16; the stub launcher and an empty registry in a self-test),
+`Dialog::Link(Box<link::LinkQuestion>)`, `AppAction::Link(link::LinkAction)`, `Prefs::photocraft_exe`,
+`StickerEdit::held_update` in use, `PanelHit` gains `LinkEditIn`, `LinkUpdateNow`, `LinkSend`, `LinkShowFile`,
+`LinkUnlink`, `LinkRestore`, `LinkConvert`, `StickerHeaderEditIn`, `StickerNameField`, `LinkDialogButton(u8)`;
+`jobs::JobOutput::Built` gains `links` (what `project::load` found) and `Saved` carries `jobs::Saved` (path, history
+state, reuse, `links_revision`, the save's warnings). `PanelHit` gains `StickerTabEdit`, `StickerTabExport`, `StylePresetButton(u8)`, `StyleCopy`, `StylePaste`,
 `StyleClear`, `StyleBlockToggle(u8)`, `StyleEditor`, `TrayItem(u64)`, `TrayNew`, `TrayNewFromPicture`, `TrayEdit`,
 `TrayDuplicate`, `TrayDelete`, `TrayExport`, `StampEditBeforePlacing`, `StampToolStyle`, `SharedEditAll`,
 `SharedOnlyThis`, `SharedCancel`, `StickerLayerStyles`. `StickerAction` gains `EnterTray`, `EditBeforePlacing`,
@@ -6744,6 +6777,13 @@ the selected stamp (`sticker::enter`), another mode leaves it first (`sticker::l
 `SetStickerTool` and `Sticker(..)` run in `sticker::run`; `validate` also runs `sticker::validate` (the view closes when
 its stamp is gone or the mode was changed under it; the active layer follows undo). `io_flows::install_document` leaves
 the view before a new document comes in.
+
+**Stickers P9a.** `App::logic` calls `link::pump(state, ctx, tools_busy)` after `feed_waiting_snapshot` (the watcher's
+list, its events, held updates, a queued question; 8.16). `AppAction::Link` runs `link::flows::run` (the file dialogs of
+"Where is photocraft.exe?" and Import Sticker from PSD; everything else `run_in`); `LinkAction::changes_document` passes
+the interaction guard, and "Edit in" / "Send to" finish a running stroke like Save (the file gets what is on screen).
+`close_dialog` on a `Dialog::Link` is its cancel: Decide later for a conflict, Ignore for a change while closed, nothing
+for the others. `OpenPath` of a `.psd` / `.psb` imports it as a tray sticker (`LinkAction::ImportPsd`).
 
 **Stickers P6b.** `close_dialog` (Esc, a click outside, Cancel) on `Dialog::StickerShared` runs
 `sticker::run_in(AnswerShared(None))`: the edit waiting for the answer is dropped. The P6b document commands
@@ -7988,6 +8028,13 @@ picture" / "This picture is used by N stickers." / Edit all, Only this one, Canc
 `Sticker(AnswerShared(Some(AllUsers | ThisStamp)))` or `CloseDialog`; Esc and a click outside are Cancel
 (`dispatch::close_dialog` runs `AnswerShared(None)`). It records `SharedEditAll` / `SharedOnlyThis` / `SharedCancel`.
 
+**Stickers P9a.** `Dialog::Link(Box<LinkQuestion>)` (`dialogs/link.rs`, 8.16): a title, the question (first line) and
+weak lines, buttons left to right (the last is the default), each with the actions it queues; a click pushes
+`ShowDialog(Dialog::None)` and then those actions (not `CloseDialog`, whose cancel meaning would run too); Esc and a
+click outside are `CloseDialog`. The buttons record `LinkDialogButton(i)`. Questions that come while another dialog is
+open wait in `LinkUi::questions` and are shown by `link::pump` when the slot is free. `Dialog::Unsaved` adds the line
+of `link::unsaved_line` (stickers linked since the last save) in the warning colour.
+
 ```rust
 pub struct DialogsState { /* import: egui textures of the UV thumbnails; export: cached plan + the options it was built from */ }
 impl DialogsState { pub fn new() -> DialogsState; }
@@ -8372,6 +8419,14 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
   this per-user file), `allow_resize` (true), `fingers` (`"navigate"` | `"mouse"`). Never read or written in self-test
   runs. A pairing is saved at once; link switches and the port are saved when changed. The wire protocol is
   `docs/protocol/COMPANION_PROTOCOL.md`.
+
+Stickers P9a: `prefs.json` has `photocraft_exe` (written only when set; found in the registry or chosen with "Where is
+photocraft.exe?" / Help > PhotoCraft location...; never set by a self-test, whose prefs are not loaded or saved).
+`io_flows`: `install_document` resets `link_ui`; `start_save` calls `link::flows::before_save` (Save As copies the link
+files and notes the aliases) and the job returns `jobs::Saved`; a successful `Saved` calls `after_save`
+(`mark_links_saved`, aliases, the warnings as toasts, an "Edit in" that waited), a failed one `save_failed`; `Built`
+with a path calls `after_load` with `LoadReport::links`; `pick_program` and `pick_psd` are the new dialogs. `dnd`: a
+dropped `.psd` / `.psb` (without a model or project in the drop) goes through `OpenPath` like an image.
 
 Stickers P8: `prefs.json` has `sticker_library_dir` (the sticker library folder; written only when set: `None` means
 `%APPDATA%\WrappedTextureEditor\stickers`, never used by a self-test or a unit test, which have no library folder unless
@@ -8771,6 +8826,8 @@ counted down) instead of failing (`export_errors`).
 | `sticker_edit` | Stickers P7a (`selftest/scenarios/sticker_paint.rs`). Sphere, 3D; the sample logo placed as an image stamp; 4; a new empty picture layer; the sticker Brush (16 px, hard, red) dragged along y = 60 (shot `edit_brush`), undo, redo; the sticker Eraser (24 px) across it, undo, redo; ClassicSticker on the layer; a brush stroke along y = 180 (shot `edit_styled`); the logo layer selected, the Fill tool clicked at its corner (yellow); a new layer, `SelectRect` 40..216 x 204..240, the Gradient tool dragged across it (red to blue; shot `edit_final`); undo every step; Esc. Every stroke is a `Step::Pointer` on `Target::StickerCanvas` | each stroke one entry ("Sticker Brush" / "Sticker Eraser") with the paint where it went and the model changed; undo / redo give the composite of the step before / after; on the styled layer the header's "styles update when you lift" was drawn during the stroke (`LiveCounters::note_frames`) and is gone after it, one full recomposite entered stroke mode and the restyle job landed; the finished sticker has an opaque white contour pixel just below the new paint where the layer itself is transparent; Fill one entry, the logo's outside yellow and its inside kept; the new layer plus the gradient two entries, red at the start, blue at the end, nothing outside the selection; undoing everything gives the start (document state, the image stamp, composite) |
 | `sticker_text` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; a generated 512 x 256 picture (transparent with a light grey 4-px frame) placed as an image stamp; 4; X and a click at (256, 150) (the Text tool's text "H I", letter spacing 0.3, navy); Esc (leaves the content field); U (a yellow star) and a canvas drag (20, 40)-(130, 150); Ctrl+[; the text layer selected and `SetLayerStyles` (a 2-px white outside stroke); a 512 x 256 striped picture (magenta / cyan, 16-px stripes) as a layer above the text; the Layers footer's Clip clicked (shot `text_clipped`); `SetLayerText` Preview ("H I !") and Final (warped: Arc, bend 0.5) (shot `text_warped`); Done; a text stamp "WTE" placed with the Text tool; the Sticker tab's Convert to layered sticker clicked (shot `text_converted`); undo every step | the text layer one entry (promotion inside), "H I" in navy at the click, active, its content field focused; the star one entry and the reorder one: picture, shape, text from the bottom; Clip one entry, the top layer clipped; pattern inside text: on the text's fullest row the pixel in the middle of the widest gap between letters is transparent in the finished picture, and a pixel with a 3 x 3 neighbourhood of full ink has a stripe colour (within 4); the text edit one entry with the new content, a warp and the layer's name following, still clipped; the conversion one entry, a sticker stamp with one text layer "WTE"; undoing everything gives the start |
 | `sticker_layout` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; a generated 200 x 120 picture (an orange box (20, 20)-(180, 100), a 12 x 12 green mark at (124, 52), transparent margin) placed as an image stamp; 4; C, the Ellipse shape (shot `layout_crop_box`), Enter; `Layout(Trim(0))`; the Add Padding popover (10 px) and its Apply; `Layout(Rotate(90))` (shot `layout_rotated`) and `Layout(Rotate(-90))`; the Resize popover at 200 % and its Apply; `Layout(Flatten)` (shot `layout_done`); undo every step; Esc twice | the green mark's texel centroid in the stamp's texture layers: within 1.5 texels of the start after the crop (one "Crop Sticker" entry with the promotion, an ellipse), the trim (one entry, 160 x 80), the padding (one entry, 180 x 100), the turn back (one entry each; after the CW turn the sides swap and the mark is at least 4 texels away), the resize (one entry, 360 x 200, the placement kept) and the flatten (one entry, one layer); undoing everything gives the start |
+| `sticker_link` | Stickers P9a (`selftest/scenarios/sticker_link.rs`). Sphere, 3D; a stub `photocraft.exe` (empty file) in `<out_stem>_stub` set in the prefs; the sample logo placed twice; Save As `<out_stem>.wtep`; (1) the first logo selected, the Sticker tab's Edit in PhotoCraft clicked (shot `link_shared`), Only this one (shot `link_made`); (2) the scenario saves the PSD with a red layer added (`link::testkit`, temp file + rename) (shot `link_updated`); (3) Undo, `WaitMs(3000)`, Update now; (4) Save; (5) the Sticker view, `SelectRect`, the bottom layer active, a click into the name field, the PSD saved without the bottom layer, `WaitMs(2500)`, a click in the 3D half (shot `link_held_applied`), Done; (6) Import Sticker from PSD of fixture `f1w_pc.psd`, Edit in on that tray sticker, fixture `f5_f1_plus_text.psd` copied over its PSD, then `f4_mask_stroke.psd` (shot `link_merged`), Undo; (7) the Sticker view, opacity 50 %, the PSD saved with a new layer (shot `link_conflict`), Take PhotoCraft's version; again, Keep WTE's version, Send anyway; (8) Send to PhotoCraft, Send anyway, the PSD saved again (shot `link_saved_over`), Take; Done; (9) Save, reopen; the PSD deleted, reopen; the PSD changed, reopen (shot `link_changed_closed`), Update | (1) the shared-picture question and no links folder, no stub call before the answer; after it the PSD in `<out_stem>_links\` reads back with one layer, the stub saw exactly (photocraft, the exe, that path), the other stamp is still an image stamp, one entry, the badge "linked"; (2) one more applied update (`Until`), one entry "Update Linked Sticker", two layers, the model changed; (3) 3 s after the undo: no update, the same composite, `LinkUi::repaints` unchanged (the idle check), the badge exactly "changed in WTE"; Update now applies it again, "linked"; (4) the PSD's CRC and time unchanged, the archive entry readable; (5) while the field has the focus nothing is applied (`held_update`, the selection still there); after the click one update: one layer "red bar", no selection, the top layer active, the toast "Updated from PhotoCraft", one entry; (6) three layers photo / text / shape, linked at scale 1 with a three-entry map; after f5 the three layer ids unchanged and a fourth picture layer "pc text", `editor_native`; after f4 one layer "PhotoCraft picture", mode Merged, the toast "This sticker now uses layer effects, which only PhotoCraft can show. ..."; undo gives the four layers; (7) the question "Both WTE and PhotoCraft changed Logo." with nothing applied; Take: the file's two layers, opacity 1, one entry, "linked"; Keep: the warning "PhotoCraft may still have this file open. ...", then the file with opacity 128 and a `.bak.psd`, "linked"; (8) the warning again; the editor's save is never applied: "PhotoCraft saved over the changes WTE sent to Logo."; (9) the link (editor photocraft) and "linked" after the reopen; the deleted PSD restored with the same CRC; "Linked sticker Logo changed while the project was closed.", Update: the layer "while closed" on top, one entry |
+| `sticker_link_path` | Stickers P9a. PATH = a `.psd` / `.psb` file (gate: `crates/wte_core/tests/fixtures/psd/f1w_pc.psd`); Sphere, 3D; `OpenPath(PATH)`; a click on the model (shot `psd_placed`) | one "Add Sticker" entry: a kept tray sticker from the file layer by layer, the Stamp tool's source and tool; the placed stamp is a sticker stamp with layers |
 | `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
 | `sticker_pen` | Stickers P7a (`sticker_paint.rs`). The same start; the sticker Brush 24 px with pressure driving the size from 0; a pen stroke at pressure 0.2 along y = 70 and one at 1.0 along y = 170 (`Step::Pen` on the canvas); the inverted pen (eraser end) across both at x = 128 (shot `pen_canvas`); a barrel drag; Fit; undo every step; Esc | two "Sticker Brush" entries, the full stroke at least three times as wide as the light one in column 128 (and at least 20 px); the eraser end: one "Sticker Eraser" entry, both lines cut, the sticker Eraser in every contact frame (`pen_eraser_frames` counts the sticker tool in the view), the Brush back after the pen left; the barrel drag pans the canvas camera and changes nothing; undoing everything gives the start |
@@ -8861,6 +8918,12 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
     the view is left (`sticker::leave_in`), so they never outlive the document they were made from. Key handling stays in `shortcuts::handle`
     (the sticker table there); the side panel's clear of `panel_rects` keeps the tool strip's `StickerToolButton`
     entries (the strip is drawn first).
+24. Stickers P9a (8.16): never the real launcher in a self-test or a test (`launcher_for` gives the stub; the real one is
+    not compiled into a test build); never start `photocraft.exe`, `photocraft-cli.exe` or `Photoshop.exe` from a test, a
+    scenario or an agent. Never write a link file at project save (the save code has no writer for them). Never ask for
+    a repaint from the watcher without an event. Nothing in `link/` raises, focuses or flashes the window or plays a
+    sound: questions are `Dialog::Link`s that wait in the window. A link question's button must not push
+    `CloseDialog` (its cancel meaning would run). The registry is read only, through the injected reader.
 
 ### 8.14 Tablet companion (`companion/*`, branch `companion`)
 
@@ -9264,6 +9327,115 @@ Shape; the Sticker and Layer commands; 3.2; 3.8).**
   `sticker::tests::layer_commands_are_one_entry_each_and_keep_their_rules` (Ctrl+M merges the sticker layers) and
   `a_locked_layer_and_an_unbuilt_tool_do_nothing` (every tool is built; the Crop starts its box); scenarios
   `sticker_text`, `sticker_layout`, `sticker_library` and the updated `sticker_keys` (8.11); core `k8_*` (9.1).
+
+### 8.16 Editor link (`link/*`, stickers P9a; STICKER_PLAN 5.1, 5.3 app parts, 5.5-5.8, 13.1)
+
+The app side of the editor link of 5.28 / 6.13: a sticker's PSD that WTE and an outside editor both use. P9a builds it
+with the editor's name a parameter of every text and PhotoCraft as the only discoverable editor (and the default for a
+new link); P9b adds Photoshop, the editor list and the default editor (plan 13.1). The user's rule: placement and style
+work in WTE never touches the link (stamps, placements, styles are not in the PSD), and an editor's Ctrl+S updates the
+sticker in place on the model, keeping every stamp's placement.
+
+- **Files.** `link/mod.rs` (`LinkUi` = `AppState::link_ui`, `LinkSession`, `LinkAction`, `EditRequest`,
+  `SendRequest`, `LinkTarget`, `LinkQuestion` / `QuestionKind`, `pump`, `on_event`, `busy_for`, `badge`, `ask`,
+  `press`, `unsaved_line`), `link/flows.rs` (the commands and the save / Save As / load hooks), `link/watch.rs` (the
+  watcher thread, `OwnWrites`, `OwnWritesIo`), `link/launch.rs` (`command_for`, `convert_command`, `Launcher`,
+  `StubLauncher`, the real launcher, `RegistryReader`, `discover`, `exe_of_command`), `link/editor.rs`
+  (`ExternalEditor { PhotoCraft, Photoshop, Other(PathBuf) }`, `name()`, `key()`, `name_of_key`), `link/ui.rs` (the
+  Sticker tab's link block, the canvas header's badge), `link/testkit.rs` (files "as the editor saved them" for the tests
+  and scenarios), `dialogs/link.rs` (`Dialog::Link`).
+- **State outside the document** (not saved, reset with the document, `LinkUi::reset`): per link a `LinkSession` (the
+  launched child if one was kept, `opened` / `opened_editor`, `stale_in_editor`, the Save As `alias`, a `held` change,
+  the `observed` file stamp, `closed_change`, `conflict_open`, `ignore_crc`, `unreadable`, `profile_noted`); the
+  watcher; the question queue; `made_since_save` (the close prompt's line); `after_save` (an "Edit in" waiting for
+  "Save..."); `pending_aliases` (a Save As in flight); a running command-line conversion; counters (`applied`, `held`,
+  `conflicts`, `writes`) and `repaints` (every watcher repaint request, the idle check of 8.11).
+- **Launcher (5.7).** `command_for(editor, exe, file)`: program = the exe, one argument = the file, working folder =
+  the exe's folder; never a shell, `ShellExecute` or the file association. The real launcher (only in a non-test build,
+  only from `launcher_for(false)`) spawns with stdio null and `CREATE_NO_WINDOW` and keeps the child (`ChildProc::state`:
+  Running / Exited / Unknown); "Show file in Explorer" runs `explorer.exe /select,"<file>"`. **A self-test run and every
+  test build construct only `StubLauncher`** (records `(editor key, exe, file)`, starts nothing; a test can give it a fake
+  running child or a PNG for the conversion). `LinkUi::new` logs which one it has.
+- **Discovery (5.7, review A19).** `Prefs::photocraft_exe` (written only when set), else the registry through the
+  injected `RegistryReader` (`WindowsRegistry`: `advapi32` `RegGetValueW` through `raw-dylib`, read only; `NoRegistry` in
+  a self-test and in tests): `HKCU` then `HKLM`, `Software\Classes\Photocraft.PhotoshopDocument\shell\open\command` then
+  `Software\Classes\Applications\photocraft.exe\shell\open\command`; the quoted (or up-to-".exe") path must exist. Else
+  the file dialog "Where is photocraft.exe?" once (a name other than `photocraft.exe` is taken with a warning), also
+  Help > "PhotoCraft location...". No guessed folders.
+- **Edit in (`flows::edit_in`, 5.1, 5.5).** In order, each question re-entering with its answer: a saved project (an
+  external link needs none: else "Save the project first..." **Save...** / Cancel; Save... saves and continues); the
+  editor's exe; a text stamp is converted after "Convert and edit"; the shared-picture question (Only this one / Edit
+  all / Cancel) **before any file is written** (an image stamp is promoted, alone or with every stamp of its picture; a
+  shared sticker stamp gets its own copy); no link yet: the PSD is written into `<project>_links\<name>_k<id>.psd`
+  (`prepare_link_file` + `write_link_file` registering `own_writes` before the rename + `finish_link_write`) with a
+  one-time note that styles are not in the file; a link whose file is missing: written again; a sticker changed in WTE
+  since the sync: "Send WTE's changes to the file first?" (**Send and open** / **Open the file as it is** / Cancel); the
+  two-copies guard (a kept child that still runs: "This sticker is already open in <editor>..." **Open anyway** / **Show
+  file** / Cancel; never for Photoshop); `stale_in_editor` cleared when the previous child exited; the launcher.
+- **Send (5.5).** A link opened in this session gets the warning first (`rewrite_warning`: child running or unknown;
+  **Send anyway** / Cancel); then the atomic write (`.bak.psd` kept), `stale_in_editor` set when it was opened. "Keep
+  WTE's version" of a conflict is a send that answers it. A failed write is an OK message with the core's sentence
+  ("could not be replaced", nothing changed).
+- **The watcher (5.6; `watch.rs`).** One thread (`wte-link-watcher`), started by `pump` for the first link and dropped
+  with the last (its channel closes, the thread ends). The list `(sticker, path, alias, synced stamp)` is rebuilt every
+  frame from the document's links and the project path and sent only when it changed. Poll every 1 s, at once on a
+  `Poke` (the window gained focus, "Update now"), every 250 ms while a change settles: two polls must agree and
+  `psd::read` must accept the bytes (`Truncated` waits; after 30 s one `Unreadable`); a settled content whose CRC is the
+  synced one or in `own_writes` (at most 64, oldest dropped) only updates "last seen". Events `Changed { psd, stamp,
+  from_alias }`, `Refused`, `Unreadable`, `Missing`; one repaint request per poll round that sent events, counted in
+  `LinkUi::repaints`. An alias change is first copied over the link's file (temp + rename), then reported. Parsing and
+  CRC happen on the thread; the UI thread only drains.
+- **`pump` (every frame in `App::logic`, after the jobs and the bakes).** List, focus poke, events, held changes, aliases
+  of exited children dropped, the conversion polled, a queued question shown when no dialog is open. An event: the
+  observed stamp; an ignored content (`ignore_crc`) or a pending "changed while closed" / conflict answer keeps it
+  held; **busy** (`busy_for`: a 3D tool interaction, a pending Preview edit or an open sticker stroke anywhere; in the
+  Sticker view on that sticker a canvas drag or a focused text field) holds it (`StickerEdit::held_update`) until the
+  first idle frame; otherwise the table of 5.5 (`sync_action` with `stale_in_editor`): apply, or the conflict question
+  ("Both WTE and <editor> changed <name>." / "<editor> saved over the changes WTE sent to <name>."; **Take <editor>'s
+  version** / **Keep WTE's version** / Decide later). Applying = `apply_link_update` (one entry "Update Linked
+  Sticker"; none when nothing changed), the toast "Updated from <editor>", the merged reason, the colour-profile note
+  once; in the Sticker view on that sticker the selection, crop box, popover and lasso go and the active layer is
+  re-picked (`sticker::validate_in`). A canvas too large: "Fit it into the sticker" / Ignore. A refused file: its
+  sentence on the badge (`link_file_refused`).
+- **Badge (5.5).** `link::badge` = the core's `link_state` for the observed stamp (not looked at yet = the synced one):
+  "linked", "changed in WTE", "changed in <editor>", "conflict", "file missing", "needs a merged picture", or a refused /
+  too-large / unreadable sentence. The Sticker tab's block under the selected stamp: "Link: <badge>", "Editor: <name>",
+  the file name, an unreadable line, the MaxCompat sentence for "needs a merged picture"; buttons **Edit in <editor>**,
+  **Update now**, **Send to <editor>**, **Show file in Explorer**, **Unlink**, **Restore from project** (missing, in
+  the links folder, the project saved), **Convert with <editor>'s command-line tool** (needs a merged picture,
+  PhotoCraft link, `photocraft-cli.exe` beside `photocraft.exe`; `photocraft-cli convert <psd> <png>` headless, 30 s,
+  the PNG becomes a merged update). Canvas header: the badge and **Edit in <editor>**. Layer menu and the row menu of a
+  stamp layer: **Edit in <editor>**. File > **Import Sticker from PSD...** and **Import Sticker from PSD, Keep
+  Linked...**; a dropped or opened `.psd` / `.psb` is imported as a tray sticker (5.8, `Document::add_sticker_from_psd`).
+- **Project flows (5.3; `io_flows`).** Save: the core archives the link files (it never writes one); the job returns the
+  snapshot's `links_revision` and the save's warnings (`jobs::Saved`): `mark_links_saved`, `made_since_save` cleared,
+  the warnings as toasts. Save As (`before_save`, the path changes): every `InFolder` file is copied into the new links
+  folder before the save job starts, and the links opened in this session keep their old file as an alias (set after
+  the save succeeded; one toast "<names> may still be open in <editor> from the old folder..."); dropped when the
+  launched child exited. Load (`after_load`, from `JobOutput::Built::links`): Present = in sync; Missing in the links
+  folder with an archived copy = restored (registered in `own_writes`); Changed = "Linked sticker <name> changed while
+  the project was closed." **Update** / **Ignore** (the watcher's event waits for the answer; Ignore keeps the file
+  from being applied by itself); a missing external file = "file missing". Close / New / Open with unsaved changes: the
+  prompt adds "Stickers linked to <editor> since the last save: <names>. If you do not save, WTE will not follow them any
+  more; the PSD files stay in <folder>." WTE never deletes a file in the links folder.
+- **Never** (8.13): the real launcher in a self-test or a test; a link write at project save; a repaint from the watcher
+  without a change; raising, focusing or flashing the window or a sound from `link/` (the questions are in-window
+  `Dialog::Link`s that wait; Esc = Decide later for a conflict, Ignore for a change while closed).
+- **Tests.** `link::tests` (23): `command_for` with spaces, non-ASCII, UNC, `&` / `%` paths and `convert_command`,
+  spawning nothing; the stub in self-test and test builds; discovery from an injected registry (key 1, key 2, `HKCU`
+  first, a missing exe skipped, neither, Photoshop not discovered in P9a) and `exe_of_command`; the watcher: a change
+  reported once, a half-written file waits, no repaint over many idle polls, given up after the timeout, a deleted file
+  once, a refused file, WTE's own write with the old list, an alias change copied and reported once, the thread ends
+  when dropped, `pump` starts and stops it; Edit in: the save-first question writes nothing and "Save..." continues
+  after the save, promotion + file + stub + badge + the close prompt's line, the shared-picture question before any
+  file, a text stamp converted after its question, the two-copies guard and the stale flag cleared by an exited child;
+  an update applied once, an undo not re-triggered, Update now; an update held while the view is busy (a canvas drag, a
+  tool interaction) and applied after (selection gone, top layer active); a conflict with Take and Keep (the warning,
+  `.bak.psd`, stale) and the "saved over" question, Decide later; send-first with both answers; a save writes no link
+  file and archives it, Save As copies the files with aliases; after a load a missing file restored, a changed one asked
+  about (held until the answer; Ignore keeps it from applying); Import PSD as sticker (layers, keep linked, refused);
+  the command-line conversion as a merged update. Also `link::editor::tests`, `dnd::tests` (a `.psd` drop), the
+  scenarios `sticker_link` and `sticker_link_path` (8.11).
 
 ---
 
@@ -9940,7 +10112,9 @@ tests of 8.15 (`sticker/tools/tests.rs`) and the scenario count (61: `sticker_ed
 selection and cut-out tests of 8.15 (`sticker/tools/tests_p7b.rs`), Ctrl+A / Ctrl+D / Ctrl+Shift+I in
 `shortcuts::tests::colliding_chords_run_the_action_of_their_mode`, and the scenario count (62: `sticker_cutout`).
 Stickers P8: the tests of 8.15 "Layout, text, shapes" (`sticker/tests_p8.rs` and the modules' own tests) and the
-scenario count (65: `sticker_text`, `sticker_layout`, `sticker_library`).
+scenario count (65: `sticker_text`, `sticker_layout`, `sticker_library`). Stickers P9a: `link::tests` and
+`link::editor::tests` (8.16 "Tests"), `dnd::tests` (a `.psd` / `.psb` drop) and the scenario count (67: `sticker_link`,
+`sticker_link_path`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

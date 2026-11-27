@@ -48,6 +48,7 @@ fn row_menu(
     selection: &[LayerId],
     layer: LayerId,
     stamp: Option<StampId>,
+    editor: &str,
     actions: &mut Vec<AppAction>,
     hits: &mut Vec<(PanelHit, Rect)>,
 ) {
@@ -55,6 +56,12 @@ fn row_menu(
     if let Some(stamp) = stamp {
         if ui.button("Edit Sticker").clicked() {
             actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(Some(stamp))));
+            ui.close();
+        }
+        // Stickers P9a (STICKER_PLAN 5.1): the stamp's sticker in the outside editor (its link's editor).
+        if ui.button(wte_core::link::texts::edit_in(editor)).clicked() {
+            let req = crate::link::EditRequest::new(crate::link::LinkTarget::Stamp(stamp));
+            actions.push(AppAction::Link(crate::link::LinkAction::EditIn(req)));
             ui.close();
         }
         ui.separator();
@@ -72,6 +79,14 @@ fn row_menu(
     if resp.clicked() {
         actions.push(AppAction::ShowExportLayers(vec![layer]));
         ui.close();
+    }
+}
+
+/// Stickers P9a: the name of the editor a stamp's sticker opens in (its link's editor, else the default one).
+fn link_editor(state: &AppState, stamp: Option<StampId>) -> String {
+    match stamp.and_then(|s| crate::link::sticker_of_stamp(state, s)) {
+        Some(id) => crate::link::editor_name(state, id),
+        None => crate::link::default_editor().name(),
     }
 }
 
@@ -320,7 +335,7 @@ fn drag_row(
     {
         actions.push(action);
     }
-    row_resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), actions, hits));
+    row_resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), &link_editor(state, layer.stamp_id()), actions, hits));
     hits.push((PanelHit::LayerRow(layer.id), rect));
     rect
 }
@@ -381,7 +396,7 @@ fn row(
         {
             actions.push(action);
         }
-        resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), actions, hits));
+        resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), &link_editor(state, layer.stamp_id()), actions, hits));
 
         // Badge + name (or the rename field).
         let right_width = 2.0 * ICON_SIDE + 8.0;
@@ -404,7 +419,7 @@ fn row(
                 {
                     actions.push(action);
                 }
-                resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), actions, hits));
+                resp.context_menu(|ui| row_menu(ui, selection, layer.id, layer.stamp_id(), &link_editor(state, layer.stamp_id()), actions, hits));
                 resp.on_hover_text(
                     "Click: select  |  Ctrl / Shift-click: select more  |  Right-click: export  |  Double-click: rename  |  Drag: reorder",
                 );

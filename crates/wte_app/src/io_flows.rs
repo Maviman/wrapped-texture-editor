@@ -159,7 +159,7 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                 report_failure(&mut app.state, cancel_requested, "Import cancelled", toast, "Import failed", lines);
             }
         },
-        JobOutput::Built { result, path, warnings, force_save_as } => match result {
+        JobOutput::Built { result, path, warnings, force_save_as, links } => match result {
             Ok(doc) => {
                 // Refused before it replaces anything: buffers above the device limits would end in a wgpu
                 // validation panic when the views build the scene.
@@ -175,11 +175,17 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                 if let Some(p) = &path {
                     remember_recent(app, p);
                 }
-                install_document(app, doc, path, force_save_as);
+                install_document(app, doc, path.clone(), force_save_as);
                 // Load warnings (missing blobs, font fallbacks) are shown nowhere else. Import warnings were already
                 // listed in the import dialog: `start_build` passes none.
                 if !warnings.is_empty() {
                     app.state.dialog = Dialog::Message { title: "Warnings".to_owned(), lines: warnings };
+                }
+                // Stickers P9a (STICKER_PLAN 5.3 "At load"): restore missing link files, ask about changed ones.
+                if let Some(p) = &path
+                    && !links.is_empty()
+                {
+                    crate::link::flows::after_load(&mut app.state, p, &links);
                 }
             }
             Err(e) => {
@@ -198,10 +204,11 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                 return;
             };
             match result {
-                Ok((path, saved_state, reuse)) => {
+                Ok(saved) => {
+                    let crate::jobs::Saved { path, history_state, reuse, links_revision, warnings } = saved;
                     // The state the snapshot was taken in: an edit made while the save ran keeps the document
                     // modified, undoing it again makes it unmodified.
-                    session.doc.mark_saved(saved_state);
+                    session.doc.mark_saved(history_state);
                     // The next save copies the images that do not change until then from this file.
                     session.doc.set_png_reuse(reuse);
                     session.path = Some(path.clone());
@@ -209,11 +216,14 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                     remember_recent(app, &path);
                     app.state.toasts.info(format!("Saved {name}"));
+                    // Stickers P9a: the links of the snapshot are saved; aliases of a Save As; a waiting "Edit in".
+                    crate::link::flows::after_save(&mut app.state, links_revision, &warnings);
                     if let Some(pending) = then {
                         app.state.push(crate::action::AppAction::ConfirmPending(pending));
                     }
                 }
                 Err(e) => {
+                    crate::link::flows::save_failed(&mut app.state);
                     // The document stays modified and `then` does not run.
                     let lines = vec!["The project was not saved.".to_owned(), e.clone()];
                     let toast = format!("Save failed: {e}");
@@ -410,7 +420,7 @@ pub fn start_build(app: &mut WteApp, model: ImportedModel, choices: Vec<TextureC
     // The import warnings were listed in the import dialog already; they are not shown a second time.
     app.jobs.spawn(&app.ctx, "Creating document", true, move |p| {
         let result = Document::from_import(model, choices, p).map_err(|e| e.to_string());
-        JobOutput::Built { result, path: None, warnings: Vec::new(), force_save_as: false }
+        JobOutput::Built { result, path: None, warnings: Vec::new(), force_save_as: false, links: Vec::new() }
     });
 }
 
@@ -426,10 +436,11 @@ pub fn start_open_project(app: &mut WteApp, path: PathBuf) {
             warnings: report.warnings.iter().map(|w| w.to_string()).collect(),
             force_save_as: report.force_save_as,
             path: Some(path),
+            links: report.links,
         },
         Err(e) => {
             let text = cannot_open_text(&path).unwrap_or_else(|| e.to_string());
-            JobOutput::Built { result: Err(text), path: Some(path), warnings: Vec::new(), force_save_as: false }
+            JobOutput::Built { result: Err(text), path: Some(path), warnings: Vec::new(), force_save_as: false, links: Vec::new() }
         }
     });
 }
@@ -498,6 +509,9 @@ pub fn start_save(app: &mut WteApp, path: PathBuf, then: Option<Pending>) {
     session.doc.ui_state = ui_state;
     session.doc.flush_pending_edit();
     let scene_generation = session.scene_generation;
+    // Stickers P9a (STICKER_PLAN 5.3 "At Save As"): a moved project takes its link files along (the save archives
+    // them from the new links folder); the links opened in this session keep their old file as an alias.
+    crate::link::flows::before_save(&mut app.state, &path);
     // Round 5: a saved project never holds the cache of a stamp whose Full bake is still due. Polish item 2: as for
     // export (fix_export item 6), no `settle` on the UI thread: while Final bakes are due (a wrapped stamp placed or
     // edited a moment ago: 3-4 s on ABeautifulGame) the job starts at once behind the progress dialog ("Finishing
@@ -523,9 +537,16 @@ pub fn start_save(app: &mut WteApp, path: PathBuf, then: Option<Pending>) {
             Ok(snapshot) => snapshot,
             Err(e) => return JobOutput::Saved { result: Err(e), scene_generation, then },
         };
-        let saved_state = snapshot.history_state;
-        let result =
-            wte_core::project::save(&snapshot, &path, &opts, p).map(|stats| (path, saved_state, stats.reuse)).map_err(|e| e.to_string());
+        let (history_state, links_revision) = (snapshot.history_state, snapshot.links_revision);
+        let result = wte_core::project::save(&snapshot, &path, &opts, p)
+            .map(|stats| crate::jobs::Saved {
+                path,
+                history_state,
+                reuse: stats.reuse,
+                links_revision,
+                warnings: stats.warnings.iter().map(|w| w.to_string()).collect(),
+            })
+            .map_err(|e| e.to_string());
         JobOutput::Saved { result, scene_generation, then }
     });
     if waiting {
@@ -703,6 +724,8 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
     if app.tools.is_busy() {
         app.tools.cancel(&mut app.state);
     }
+    // Stickers P9a: the link sessions, the watcher and the questions belong to the old document.
+    app.state.link_ui.reset();
     // Stickers P6a: the Sticker view belongs to the document it was opened on.
     if app.state.view_mode == ViewMode::Sticker {
         crate::sticker::leave(app, None);
@@ -896,6 +919,27 @@ pub fn pick_save_psd(frame: &eframe::Frame, prefs: &Prefs, default_name: &str) -
         dialog = dialog.set_directory(dir);
     }
     dialog.save_file().map(|p| if crate::dnd::extension_of(&p) == "psd" { p } else { p.with_extension("psd") })
+}
+
+/// Stickers P9a: native "choose program" dialog ("Where is photocraft.exe?", Help > PhotoCraft location...).
+pub fn pick_program(frame: &eframe::Frame, prefs: &Prefs, title: &str) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title).add_filter("Programs", &["exe"]).set_parent(frame);
+    if let Some(dir) = prefs.photocraft_exe.as_deref().and_then(Path::parent).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
+}
+
+/// Stickers P9a: native "open PSD" dialog (File > Import > Sticker from PSD...).
+pub fn pick_psd(frame: &eframe::Frame, prefs: &Prefs) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Import Sticker from PSD")
+        .add_filter("Photoshop document", &["psd", "psb"])
+        .set_parent(frame);
+    if let Some(dir) = dialog_dir(prefs) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
 }
 
 /// Native "choose folder" dialog.

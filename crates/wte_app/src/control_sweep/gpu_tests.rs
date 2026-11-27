@@ -103,6 +103,7 @@ impl FullApp {
             Dialog::Companion => "Companion",
             Dialog::CloseOpenings(_) => "CloseOpenings",
             Dialog::StickerShared { .. } => "StickerShared",
+            Dialog::Link(_) => "Link",
         }
     }
 

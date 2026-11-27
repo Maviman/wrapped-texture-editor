@@ -349,6 +349,8 @@ impl eframe::App for WteApp {
         // fix_export item 6: an export (polish item 2: or a save) that waits for the Final bakes gets its snapshot once
         // they have landed.
         io_flows::feed_waiting_snapshot(self);
+        // Stickers P9a (STICKER_PLAN 5.6): the editor link's watcher events, held updates and questions.
+        crate::link::pump(&mut self.state, ctx, self.tools.is_busy());
         self.state.busy = self.jobs.busy();
         drop(jobs);
         // Branch `companion`: events, STATE, the capture of this frame, undo / redo from the tablet.

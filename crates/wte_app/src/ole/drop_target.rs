@@ -293,7 +293,9 @@ unsafe fn get_bytes(data: *mut c_void, format: u16, lindex: i32, cap: usize) -> 
     let mut medium = StgMedium::default();
     // SAFETY: see above; `medium` is ours to release after a success.
     unsafe {
-        if ((*vtbl(data)).get_data)(data, &f, &mut medium) != S_OK {
+        // Any success code means the medium was filled and is ours to release (check P10a: a source answering with a
+        // success code other than S_OK would have leaked it); a failure leaves it untouched.
+        if ((*vtbl(data)).get_data)(data, &f, &mut medium) < 0 {
             return Read::Missing;
         }
         let read = match medium.tymed {
@@ -461,7 +463,14 @@ unsafe fn read_payload(data: *mut c_void, f: &Formats, caps: &Caps) -> (Vec<Drop
                 return (Vec::new(), 1);
             }
             match get_bytes(data, f.file_contents, index as i32, cap) {
-                Read::Bytes(bytes) => return (vec![DropItem::Data { name: d.name, kind: DataKind::File, bytes }], 0),
+                Read::Bytes(mut bytes) => {
+                    // Check P10a: an `HGLOBAL` may be larger than the file (`GlobalSize` can round up); the descriptor's
+                    // size, when given, is the file's.
+                    if let Some(size) = d.size.and_then(|s| usize::try_from(s).ok()) {
+                        bytes.truncate(size);
+                    }
+                    return (vec![DropItem::Data { name: d.name, kind: DataKind::File, bytes }], 0);
+                }
                 Read::TooLarge => return (Vec::new(), 1),
                 Read::Missing => {}
             }
@@ -573,6 +582,19 @@ mod tests {
             assert!(handed >= 1);
             assert_eq!(counters.released.load(Ordering::SeqCst), handed, "ReleaseStgMedium on every path");
         }
+    }
+
+    /// Check P10a: a virtual file handed out as an `HGLOBAL` larger than the file keeps only the descriptor's size.
+    #[test]
+    fn check_p10a_a_virtual_file_in_a_larger_hglobal_is_cut_to_its_size() {
+        let f = Formats::get();
+        let group = formats::build_file_group(&[formats::FileDescriptor { name: "pic.png".to_owned(), size: Some(5) }]);
+        let contents = Entry { lindex: 0, ..Entry::global(f.file_contents, b"12345\0\0\0".to_vec()) };
+        let (_, events, counters) = drag_and_drop(vec![Entry::global(f.file_group, group), contents], CAPS);
+        let (items, skipped, _) = dropped(&events);
+        assert_eq!(items, [DropItem::Data { name: "pic.png".to_owned(), kind: DataKind::File, bytes: b"12345".to_vec() }]);
+        assert_eq!(skipped, 0);
+        assert_eq!(counters.released.load(Ordering::SeqCst), counters.handed.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -89,7 +89,10 @@ impl Channel {
     }
 
     fn get(self, v: u32) -> u8 {
-        let raw = (v & self.mask) >> self.shift;
+        // Only the mask's lowest run of bits is the value (check P10a: a mask with gaps gave values above the
+        // run's maximum, and `raw * 255` overflowed).
+        let run = if self.bits >= 32 { u32::MAX } else { (1u32 << self.bits) - 1 };
+        let raw = ((v & self.mask) >> self.shift) & run;
         match self.bits {
             0 => 0,
             8 => raw as u8,
@@ -497,6 +500,28 @@ mod tests {
             let at = seed as usize % b.len();
             b[at] ^= (seed >> 24) as u8 | 1;
             let _ = dib_to_pixels(&b);
+        }
+    }
+
+    /// Check P10a: masks with gaps (another program's bytes) never overflow or panic: only the mask's lowest run of
+    /// bits is a channel's value, so a low-bit channel never multiplies a value larger than its maximum.
+    #[test]
+    fn check_p10a_masks_with_gaps_never_overflow() {
+        // Red 0xFF00FF01 (lowest run: 1 bit), green 0x0000_00F0 (4 bits), blue 0x0F00_0000 (4 bits), no alpha.
+        let masks = [0xFF00_FF01, 0x0000_00F0, 0x0F00_0000, 0];
+        let rows = vec![u32::MAX.to_le_bytes().to_vec(), 0xFF00_FF00u32.to_le_bytes().to_vec()];
+        let p = dib_to_pixels(&dib(40, 1, -2, 32, BI_BITFIELDS, Some(masks), &rows)).unwrap();
+        // First pixel: every bit set -> each channel at its maximum; second (0xFF00FF00): red's run (bit 0) and
+        // green's bits are clear, blue's are set; the bits of red's mask outside its run do not count.
+        assert_eq!(p.data, vec![255, 255, 255, 255, 0, 0, 255, 255]);
+        // Every single-run and gapped mask over every bit position.
+        for shift in 0..32u32 {
+            for mask in [1u32 << shift, u32::MAX << shift, (0x0101_0101u32).rotate_left(shift), (0x8000_0001u32).rotate_left(shift)] {
+                let c = Channel::of(mask).unwrap();
+                for v in [0, u32::MAX, mask, !mask, 0x5555_5555, 0xAAAA_AAAA] {
+                    let _ = c.get(v);
+                }
+            }
         }
     }
 

@@ -311,10 +311,11 @@ fn start_drop(ctx: &egui::Context, state: &mut AppState, pos: egui::Pos2, items:
         return;
     }
     let spot = spot_at(state, pos);
+    let generation = state.session.as_ref().map(|s| s.scene_generation);
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let prepared = prepare(spot, items);
+        let prepared = Prepared { generation, ..prepare(spot, items) };
         let _ = tx.send(prepared);
         ctx.request_repaint();
     });
@@ -351,6 +352,10 @@ pub(crate) enum Ready {
 /// read.
 pub struct Prepared {
     pub(crate) spot: Spot,
+    /// Check P10a: the `Session::scene_generation` the spot was found in (`None`: not checked, the tests). A drop
+    /// prepared while another document was opened is not placed: its spot (a stamp id, a canvas point) belongs to
+    /// the old one.
+    pub(crate) generation: Option<u64>,
     pub(crate) ready: Vec<Ready>,
     pub(crate) failed: Vec<String>,
 }
@@ -373,27 +378,31 @@ impl std::fmt::Debug for Prepared {
 /// Reads and converts the items (on the worker): files by extension, picture data as is or (a DIB) made a PNG,
 /// sticker data and PSDs parsed.
 pub(crate) fn prepare(spot: Spot, items: Vec<DropItem>) -> Prepared {
-    let mut out = Prepared { spot, ready: Vec::new(), failed: Vec::new() };
+    let mut out = Prepared { spot, generation: None, ready: Vec::new(), failed: Vec::new() };
     for item in items {
-        let made = match item {
-            DropItem::File(path) => {
-                let name = file_name(&path);
-                let modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-                std::fs::read(&path).map_err(|e| format!("Cannot open {name}: {e}")).and_then(|bytes| ready_of(&name, bytes, Some(path), modified))
-            }
-            DropItem::Data { name, kind: DataKind::Png | DataKind::File, bytes } => ready_of(&name, bytes, None, None),
-            DropItem::Data { name, kind: DataKind::Dib, bytes } => crate::ole::formats::dib_to_pixels(&bytes)
-                .and_then(|p| wte_core::encode_png(p.width, p.height, &p.data, wte_core::PngLevel::Fast).map_err(|e| e.to_string()))
-                .map(|png| Ready::Picture { name, bytes: png.into(), path: None })
-                .map_err(|e| format!("Cannot use the dropped picture: {e}")),
-            DropItem::Data { name, kind: DataKind::Sticker, bytes } => sticker_of(&name, &bytes),
-        };
-        match made {
+        match prepare_item(item) {
             Ok(r) => out.ready.push(r),
             Err(text) => out.failed.push(text),
         }
     }
     out
+}
+
+/// One item of `prepare`.
+fn prepare_item(item: DropItem) -> Result<Ready, String> {
+    match item {
+        DropItem::File(path) => {
+            let name = file_name(&path);
+            let modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            std::fs::read(&path).map_err(|e| format!("Cannot open {name}: {e}")).and_then(|bytes| ready_of(&name, bytes, Some(path), modified))
+        }
+        DropItem::Data { name, kind: DataKind::Png | DataKind::File, bytes } => ready_of(&name, bytes, None, None),
+        DropItem::Data { name, kind: DataKind::Dib, bytes } => crate::ole::formats::dib_to_pixels(&bytes)
+            .and_then(|p| wte_core::encode_png(p.width, p.height, &p.data, wte_core::PngLevel::Fast).map_err(|e| e.to_string()))
+            .map(|png| Ready::Picture { name, bytes: png.into(), path: None })
+            .map_err(|e| format!("Cannot use the dropped picture: {e}")),
+        DropItem::Data { name, kind: DataKind::Sticker, bytes } => sticker_of(&name, &bytes),
+    }
 }
 
 /// A file's (or a virtual file's) bytes by its extension.
@@ -433,6 +442,11 @@ pub(crate) fn apply(state: &mut AppState, p: &Prepared) {
         state.toasts.warn(text.clone());
     }
     let Some((first, rest)) = p.ready.split_first() else { return };
+    let current = state.session.as_ref().map(|s| s.scene_generation);
+    if current.is_some() && p.generation.is_some_and(|g| Some(g) != current) {
+        state.toasts.warn("The drop was not placed: another document was opened meanwhile");
+        return;
+    }
     let Some(doc) = state.doc_mut() else {
         state.toasts.warn("Open a model first");
         return;

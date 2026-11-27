@@ -328,8 +328,16 @@ pub fn kinds_of(items: &[DropItem]) -> DragKinds {
 mod tests {
     use super::*;
 
+    /// Check P10a: the tests of the process-wide queue run one at a time (one test's `drain` took the other's events,
+    /// and its 266 pushes could push them out of the capped queue).
+    fn queue_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[test]
     fn the_queue_is_capped_and_drained_in_order() {
+        let _one_at_a_time = queue_lock();
         // Other tests may use the queue at the same time: only this test's own events are looked at.
         let mine = |e: &OleEvent| matches!(e, OleEvent::Hover { pos: [x, _], .. } if *x == -77.0);
         for i in 0..QUEUE_CAP + 10 {
@@ -345,6 +353,7 @@ mod tests {
     /// The runner's drag (through the real drop target and data object on Windows) queues what a real drop would.
     #[test]
     fn a_test_drag_queues_hover_and_drop() {
+        let _one_at_a_time = queue_lock();
         let items = vec![
             DropItem::Data { name: "Dropped picture.png".to_owned(), kind: DataKind::Png, bytes: b"\x89PNG-test-drag".to_vec() },
         ];

@@ -9578,7 +9578,10 @@ succeeded and queues `Drop { pos, items, skipped }`, all before it returns. Caps
 64 items; an `HGLOBAL` larger than the cap is not copied, an `IStream` is read in 1-MiB chunks and stops past the cap;
 an item over a cap counts in `skipped` (toast "N dropped item(s) ... too large (more than 64 MB) and not taken").
 Positions are client pixels (`ScreenToClient`). Every callback body is inside `catch_unwind` (a panic is
-`E_UNEXPECTED`, effect none); `QueryInterface` answers `IUnknown` and `IDropTarget`, `E_NOINTERFACE` otherwise.
+`E_UNEXPECTED`, effect none; in the app the panic hook of `main.rs` ends the process with the error box before any
+unwinding, so the catch matters in the tests and the hook makes sure nothing unwinds into OLE); `QueryInterface`
+answers `IUnknown` and `IDropTarget`, `E_NOINTERFACE` otherwise. A virtual file in an `HGLOBAL` is cut to the size its
+descriptor gives (`GlobalSize` may round up; check P10a).
 
 **The queue (`ole/mod.rs`).** `Mutex<VecDeque<OleEvent>>` (at most 256 events, the oldest dropped); each push asks the
 `egui::Context` for a repaint. `dnd::handle` drains it in `ui` after the dialogs; in a self-test run `raw_input_hook`
@@ -9594,7 +9597,9 @@ modal job: "Please wait...". A `Drop`: a project or model among its files opens 
 opened" toast); without a project "Open a model first"; otherwise the spot under the point is found now (`spot_at`)
 and a worker thread prepares the items (`prepare`: files read; PNG data as is; a DIB through `formats::dib_to_pixels`
 and `encode_png(Fast)`; `.wtes` parsed by `read_wtes`; `.psd` / `.psb` by `link::flows::parse_psd`);
-`AppAction::DropReady` hands the result to `dnd::apply`, which places it as **one undo step**
+`AppAction::DropReady` hands the result to `dnd::apply` (check P10a: a drop prepared while another document was
+opened, `Prepared::generation` != `Session::scene_generation`, is not placed: "The drop was not placed: another
+document was opened meanwhile"), which places it as **one undo step**
 (`Document::begin_edit_group` / `end_edit_group`, label "Drop" when several entries merge):
 
 | Spot (`spot_at`) | The first picture | The first `.wtes` / `.psd` |
@@ -9616,7 +9621,8 @@ flat picture.
 drop target object with WTE's own `DataObject` (`ole::TestDrag`). `is_idle` waits for the queue and the drop worker.
 
 **Tests** (9.2): `ole::formats::tests` (DIB 24 / 32, DIBV5 with masks and the repeated-masks quirk, top-down and
-bottom-up, with and without alpha (all-zero alpha is opaque), masks narrower than 8 bits; `DROPFILES` wide and ANSI
+bottom-up, with and without alpha (all-zero alpha is opaque), masks narrower than 8 bits, masks with gaps (only the
+lowest run of bits counts: no overflow); `DROPFILES` wide and ANSI
 with spaces and non-ASCII; file group descriptors (sizes, a lying count, a 400-character name); a truncation and
 byte-flip sweep: nothing panics), `ole::com::tests` (the x64 sizes and offsets of `FORMATETC`, `STGMEDIUM`, `POINTL`
 and the five vtables; interface ids; registered formats), `ole::data_object::tests` (`GetData` on both media,
@@ -9625,10 +9631,12 @@ through `DragEnter` / `DragOver` / `Drop` with the poisoning data object: the pa
 and poisoned its memory, and media released = media handed out on every path; the hover kinds; the WTE-origin marker
 ignored even beside `CF_HDROP`; text-only and picture-less groups refused; a 65-MiB item skipped, an endless
 `IStream` stopped, 70 files cut to 64 with 6 skipped; `DragLeave`, `QueryInterface`, a source that allows only a move,
-a panic caught, a drop without an accepted enter, reference counts back at their start), `ole::tests` (the queue cap
-and order; `TestDrag` through the real objects), `dnd::tests` (egui's lists as before; the overlay the same from both
+a panic caught, a drop without an accepted enter, reference counts back at their start; a virtual file in a larger
+`HGLOBAL` cut to its size), `ole::tests` (the queue cap and order; `TestDrag` through the real objects; the two run
+one at a time on the process-wide queue), `dnd::tests` (egui's lists as before; the overlay the same from both
 sources; `spot_at`; the table above row by row through `prepare` + `apply`, one undo step each; several pictures;
-picture data on the worker; the drop target's drops start a job or open a document) and core
+picture data on the worker; the drop target's drops start a job or open a document; a drop prepared for another
+document is not placed) and core
 `k10a_an_edit_group_is_one_undo_step` (9.1).
 
 ---

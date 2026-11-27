@@ -449,3 +449,21 @@ fn the_hover_sentences() {
     assert_eq!(hover_text(&state, Spot::View(ViewId::Main3D, at(&xf, 0.01, 0.01)), &picture), "Drop to use the picture with the Stamp tool");
     assert_eq!(hover_text(&AppState::new(Prefs::default(), true), Spot::Elsewhere, &picture), "Open a model first");
 }
+
+/// Check P10a: a drop prepared while another document was opened is not placed in the new one (its spot - a stamp
+/// id, a point - belongs to the old document); a drop of the same document is.
+#[test]
+fn check_p10a_a_drop_prepared_for_another_document_is_not_placed() {
+    let mut state = state_with(SampleKind::Sphere);
+    let xf = xf_3d(&mut state);
+    let spot = Spot::View(ViewId::Main3D, at(&xf, 0.5, 0.5));
+    let generation = state.session.as_ref().unwrap().scene_generation;
+    let stale = Prepared { generation: Some(generation.wrapping_add(1)), ..prepare(spot, vec![png_item("old.png")]) };
+    apply(&mut state, &stale);
+    assert!(state.doc().unwrap().stamps.is_empty(), "nothing placed");
+    assert_eq!(undo_len(&state), 0);
+    assert!(state.toasts.visible_texts().iter().any(|t| t.starts_with("The drop was not placed")), "{:?}", state.toasts.visible_texts());
+    let fresh = Prepared { generation: Some(generation), ..prepare(spot, vec![png_item("new.png")]) };
+    apply(&mut state, &fresh);
+    assert_eq!(state.doc().unwrap().stamps.len(), 1);
+}

@@ -171,6 +171,8 @@ impl WteApp {
             crate::ole::install(cc);
             log::info!("drop target: {}", if crate::ole::installed() { "WTE's (OLE)" } else { "winit's (file paths only)" });
         }
+        // Stickers P10b: a self-test run never touches the Windows clipboard.
+        log::info!("clipboard: {}", if state.clipboard.is_memory() { "in memory (nothing reaches Windows)" } else { "the Windows clipboard" });
         let runner = selftest::Runner::new(&args, Arc::clone(&exit_code));
         if let Some(path) = args.path.clone() {
             state.push(AppAction::OpenPath(path));
@@ -311,10 +313,16 @@ impl eframe::App for WteApp {
             crate::pen::discard_window_records();
             // Stickers P10a: nor a real drag (`WTE_OLE=1`); the runner's `Step::Drop` queues its events later in the
             // frame (`Runner::tick`), and `dnd::handle` takes them in this frame's `ui`.
+            // Stickers P10b: nor a real key chord; the runner's `Step::Chord(Paste)` is queued after the discard.
             crate::ole::discard();
+            for chord in runner.take_chords() {
+                crate::ole::push(crate::ole::OleEvent::Chord(chord));
+            }
         } else {
             crate::pen::drain_window_records(&mut self.state.pen.feed);
         }
+        // Stickers P10b (STICKER_PLAN 6.3): Copy / Cut events without a text field, and the paste chord.
+        crate::clip::input_hook(ctx, raw_input, &mut self.state);
         // Branch `companion` (ARCHITECTURE 8.14): the tablet's input, in-process; nothing without a connected tablet.
         self.companion.inject(ctx, raw_input, &mut self.state);
         self.state.pen.route(&mut raw_input.events);
@@ -407,6 +415,8 @@ impl eframe::App for WteApp {
         // Toasts sit in the central view area's corner, never over the side panel or the status bar (8.9).
         self.state.toasts.show(ui.ctx(), central);
         dnd::handle(ui.ctx(), &mut self.state);
+        // Stickers P10b: copies whose encoding is done go to the clipboard.
+        crate::clip::poll(&mut self.state);
         drop(p);
         // Shortcut actions go last: a text field that lost focus because of the shortcut (8.10) has by now queued its
         // Commit::Final action, which must be dispatched before e.g. Save.
@@ -417,6 +427,8 @@ impl eframe::App for WteApp {
         }
         // Round 5 (R5-1): a Final of this frame gets its bake started in the next one, even without input.
         crate::stamp_bakes::after_dispatch(&mut self.state, ui.ctx());
+        // Stickers P10b (6.3 item 4): text an egui field copied goes to the clipboard as well.
+        crate::clip::after_ui(ui.ctx(), &mut self.state);
         drop(p);
         frame_profile::frame_end();
         self.state.frame_work.end();

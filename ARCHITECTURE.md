@@ -67,10 +67,12 @@ texture layers** (the texture Fill tool keeps its island flood, `fill.rs`; stick
 `sticker::select`, 6.12), autosave/crash recovery, incremental save, PSB (PSD > 4 GiB), HDR/16-bit textures, any AI or network feature, automatic UVs for models where only *some*
 materials lack UVs (those materials are listed as "not paintable" in the import dialog).
 
-OS clipboard integration is unavailable in v1: eframe's `clipboard` feature needs the `arboard` crate, which is not downloaded, so
-egui-winit falls back to an in-app clipboard (`REG\egui-winit-0.37.0\src\clipboard.rs:6, :27`). Copy/paste works inside the app only
-(text cannot be pasted from other programs into the text-stamp content field). If OS paste is wanted later, add `arboard` with
-`default-features = false` and the eframe feature `clipboard`; no API in this document changes.
+The OS clipboard (stickers P10b, replacing the v1 paragraph that said copy / paste works inside the app only): eframe's
+`clipboard` feature stays off (`arboard` is not in the registry; egui-winit keeps its in-app string,
+`REG\egui-winit-0.37.0\src\clipboard.rs`), and WTE talks to the Windows clipboard itself through hand-written `raw-dylib`
+user32 calls (`ole/clipboard.rs`, 8.17 "Clipboard"): pictures (PNG, `CF_DIBV5`, `CF_DIB`, `WTE.Sticker.v1`, picture files
+of `CF_HDROP`) both ways, and text both ways in egui's text fields. Only Windows has the real clipboard; elsewhere, in
+every self-test run and in every test build the clipboard is an in-memory one (`MemClipboard`).
 
 ### 1.4 Round 4 (brush types, text effects)
 
@@ -371,7 +373,9 @@ save-first, the shared-picture question, send-first and the two-copies guard, Se
 the Sticker tab's link block, the save / Save As (aliases) / load / close-prompt rules, Import PSD as sticker, the
 command-line conversion; core `Document::add_sticker_from_psd` (2.2, 3.3, 4.6, 5.28, 8.2, 8.3, 8.8, 8.9, 8.11, 8.13,
 8.16, 9.2). Still to come, each documented by its package: the editor list (P9b: 8.16), drop target, clipboard and
-drag out (P10a, P10b, P11: 8.17), linked paint layers (P12: 8.16), docs and the version (P13).
+drag out (P10a, P10b, P11: 8.17), linked paint layers (P12: 8.16), docs and the version (P13). (P10b, done: the
+clipboard - Copy / Cut / Paste / Paste at View Centre in the Edit menu and with the keys, text in egui's fields both
+ways, Help > Clipboard contents...: 1.3, 2.2, 8.1, 8.2, 8.3, 8.7, 8.10, 8.11, 8.13, 8.17, 9.2.)
 
 ---
 
@@ -536,7 +540,8 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `prefs.rs` | A1; round 4 B5 | `Prefs` load/save (`%APPDATA%\WrappedTextureEditor\prefs.json`); the closing choice per shape file (`stored_close`, `remember_close`, `forget_close`, at most `MAX_SHAPE_CLOSE` = 32 files) |
 | `toasts.rs` | A1 | `Toasts` queue (`push`, `error_count`) and drawing |
 | `theme.rs` | A1 | visuals, runtime window icon, vector tool icons |
-| `dnd.rs` | A1 | file drag-and-drop routing; stickers P10a: both sources of hovers and drops (the OLE queue and egui's file lists), the overlay (`Overlay`, `overlay_of`, the drop marker and `hover_text`), `Spot` / `spot_at`, the worker that prepares a drop (`prepare`, `Ready`, `Prepared`) and `apply` (the table of 8.17), `DropUi` (`AppState::drop_ui`) |
+| `clip.rs` | stickers P10b | Copy, Cut, Paste, Paste at View Centre, Help > Clipboard contents... (8.17 "Clipboard"): `ClipAction`, `ClipUi` (`AppState::clip_ui`: the copies being encoded), `input_hook` / `route` (the chords in `raw_input_hook`), `after_ui` (`OutputCommand::CopyText`), `poll` / `finish_copies`, `run` / `run_with`, `layer_pixels`, `paste_spot`, `nothing_text`; tests in `clip/tests.rs` |
+| `dnd.rs` | A1 | file drag-and-drop routing; stickers P10a: both sources of hovers and drops (the OLE queue and egui's file lists), the overlay (`Overlay`, `overlay_of`, the drop marker and `hover_text`), `Spot` / `spot_at`, the worker that prepares a drop (`prepare`, `Ready`, `Prepared`) and `apply` (the table of 8.17), `DropUi` (`AppState::drop_ui`); P10b: `start_items` (a paste through the same worker), `is_placeable_path` |
 | `dnd/tests.rs` | stickers P10a | test-only: `dnd::tests` (9.2) |
 | `object_ops.rs` | objects-tabs WP3a | the object commands as plain functions (8.3 "Objects"): select / toggle / range / all / none on `Session`; `set_hidden`, `set_visible`, `hide_selected`, `isolate_selected`, `show_all`, `frame_selection` on `AppState`; `hidden_names` / `hidden_from_names` / `restored_hidden_text` for `UiState` (8.9) |
 | `brush_flows.rs` | B5 (round 4) | the brush shape loaded from a model file: Load / quiet reload / Remove, the bake job and its request numbers, the event table of FEATURE_BRUSH 4.4, the closing-openings question (`Dialog::CloseOpenings`, `AnswerOpenings`, the choice per file), `startup`, `sync_prefs` |
@@ -617,7 +622,9 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `link/ui.rs` | stickers P9a | the Sticker tab's link block and the canvas header's badge with Edit in; P9b: the "Edit in..." list button, `editor_list`, `listed_editors` |
 | `link/testkit.rs` | stickers P9a | files "as the editor saved them" (the sticker writer, temp file + rename) for the tests and scenarios; P9b: `with_foreign_layer` (an editor's own layer record and channel data spliced into a file WTE wrote) |
 | `link/editor_tests.rs` | stickers P9b | test-only: the editor list's tests (8.16 "Tests") |
-| `ole/mod.rs` | stickers P10a | OLE drag and drop (8.17): `OleEvent`, `DragKinds`, `DropItem`, `DataKind`, the queue (`push`, `drain`, `pending`, `discard`), `install` / `installed` / `take_registration_lost`, `TestDrag` (the self-test's drags through a drop target object), `kinds_of` |
+| `ole/mod.rs` | stickers P10a | OLE drag and drop (8.17): `OleEvent`, `DragKinds`, `DropItem`, `DataKind`, the queue (`push`, `drain`, `pending`, `discard`), `install` / `installed` / `take_registration_lost`, `TestDrag` (the self-test's drags through a drop target object), `kinds_of`; P10b: `Chord`, `OleEvent::Chord`, `take_chords`, `window` (the clipboard's owner), the key subclass installed by `install` |
+| `ole/clipboard.rs` | stickers P10b | the clipboard (8.17 "Clipboard"): `ClipFormat`, `PASTE_ORDER`, `trait Clipboard` (`write`, `read`, `format_names`, `is_memory`), `MemClipboard` (self-tests, tests), `clipboard_for`, the real Windows clipboard (`real::RealClipboard`, not compiled into a test build), `standard_format_name` / `unnamed_format`, `paste_item`, `read_text` / `write_text`, `picture_entries` |
+| `ole/subclass.rs` | stickers P10b | Windows only: WTE's key subclass above the pen subclass: `chord_of` / `route` (Ctrl+V and Shift+Insert queue `Chord::Paste`; every message forwarded unchanged), `install` |
 | `ole/formats.rs` | stickers P10a | pure codecs: `dib_to_pixels` (`CF_DIB` / `CF_DIBV5`, the all-zero-alpha rule), `pixels_to_dibv5`, `build_dropfiles` / `parse_dropfiles`, `build_file_group` / `parse_file_group`, `text_from_unicode` / `text_to_unicode`, `wrap_sticker` / `unwrap_sticker` (`WTE.Sticker.v1`), the format numbers and names |
 | `ole/com.rs` | stickers P10a | Windows only: `raw-dylib` imports (`ole32`, `shell32`, `user32`, `kernel32`), `#[repr(C)]` `FormatEtc`, `StgMedium`, `PointL`, `Guid`, the vtables of `IUnknown`, `IDataObject`, `IDropTarget`, `IEnumFORMATETC`, `IStream`; `global_from`, `register_format`, `add_ref` / `release` |
 | `ole/drop_target.rs` | stickers P10a | Windows only: WTE's `IDropTarget` (`DropTarget`, `Formats`, `Caps` / `CAPS`, `Sink`), `inspect` (the hover's kinds, the WTE-origin marker) and `read_payload` (the copy inside `Drop`) |
@@ -632,6 +639,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `selftest/scenarios/sticker_layout.rs` | stickers P8 | the scenarios `sticker_text`, `sticker_layout`, `sticker_library` (8.11) |
 | `selftest/scenarios/sticker_link.rs` | stickers P9a | the scenarios `sticker_link`, `sticker_link_path` (8.11) |
 | `selftest/scenarios/sticker_drop.rs` | stickers P10a | the scenario `sticker_drop` (8.11) |
+| `selftest/scenarios/sticker_clip.rs` | stickers P10b | the scenario `sticker_clip` (8.11) |
 | `tools/sticker/frame_spans.py` (repo root) | stickers P7a | the worst `sticker.*` / `link.*` / `ole.*` frame spans of a scenario's frame log (STICKER_PLAN 8.4; exit 1 over the limit) |
 | `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
@@ -710,7 +718,8 @@ Notes:
   no feature enables `KHR_mesh_quantization`, so `import/gltf.rs` `validate` lets that one name through itself). The gltf `import` feature stays off: wte_core never lets gltf touch the filesystem.
 - `fontdb` without `fontconfig` (unix-only parser crate that is not downloaded). `memmap2` is present.
 - eframe feature `wgpu` = `wgpu_no_default_features` + `egui-wgpu/default` (which enables `wgpu/default`): DX12/Vulkan/GL backends, WGSL.
-- eframe feature `clipboard` is deliberately off (`arboard` is not in the registry): in-app clipboard only, see section 1.3.
+- eframe feature `clipboard` is deliberately off (`arboard` is not in the registry); stickers P10b: WTE reaches the Windows
+  clipboard through its own `raw-dylib` user32 calls instead (section 1.3, 8.17).
 - `egui` 0.37.0, `egui-wgpu` 0.37.0 and `wgpu` 30.0.1 are **not** listed as direct dependencies. wte_app reaches them only through
   eframe's re-exports (`use eframe::{egui, egui_wgpu, wgpu};`, `REG\eframe-0.37.0\src\lib.rs:156-162`), so versions and feature sets
   can never diverge from the ones eframe was built with. `winit` is not used directly at all.
@@ -789,7 +798,11 @@ dependency.
 Stickers P10a: no new dependency. The OLE drop target (`ole/com.rs`) imports `RegisterDragDrop`, `RevokeDragDrop`,
 `ReleaseStgMedium` from `ole32`, `SHCreateStdEnumFmtEtc` from `shell32`, `RegisterClipboardFormatW` and `ScreenToClient`
 from `user32` and `GlobalAlloc` / `GlobalLock` / `GlobalUnlock` / `GlobalSize` / `GlobalFree` from `kernel32`, all
-`#[link(.., kind = "raw-dylib")]`; the COM interfaces are hand-written `#[repr(C)]` vtables.
+`#[link(.., kind = "raw-dylib")]`; the COM interfaces are hand-written `#[repr(C)]` vtables. Stickers P10b: no new
+dependency; `ole/clipboard.rs` imports `OpenClipboard`, `CloseClipboard`, `EmptyClipboard`, `GetClipboardData`,
+`SetClipboardData`, `EnumClipboardFormats` and `GetClipboardFormatNameW` (only in a non-test Windows build), and
+`ole/subclass.rs` `GetWindowLongPtrW`, `SetWindowLongPtrW`, `CallWindowProcW`, `DefWindowProcW` and `GetKeyState`, from
+`user32` with `raw-dylib`.
 
 Branch `companion`: no new dependency (`Cargo.lock` unchanged). JPEG goes through `wte_core::encode_jpeg` (the `image`
 crate's "jpeg" feature, already a `wte_core` dependency); crypto is local code; the OS random generator
@@ -6142,6 +6155,7 @@ Imports: `use eframe::{egui, egui_wgpu, wgpu};` everywhere (never a separately v
 | `egui::Sense::DRAG` (bitflag constant: drag starts on press, **not focusable**) vs `Sense::drag()` (= `DRAG \| FOCUSABLE`: joins Tab navigation) vs `click_and_drag()` (waits for the click/drag decision); `ui.allocate_rect(rect, sense) -> Response`; `Response::{contains_pointer, hover_pos, interact_pointer_pos, dragged_by}` | `sense.rs:15, 68-81`, `ui.rs:1382`, `response.rs:346-651` |
 | `RawInput { time: Option<f64>, predicted_dt: f32, events: Vec<Event>, hovered_files: Vec<HoveredFile>, dropped_files: Vec<DroppedFileHandle>, .. }` — there is **no** `modifiers` field: the modifier state arrives as `Event::ModifiersChanged(Modifiers)`; `egui::Id::new` is deprecated (use `Id::unique`); `trait DroppedFile { fn path(&self) -> &Path; fn bytes(&self) -> Result<Vec<u8>, String>; .. }` | `data\input\raw_input.rs:48-81`, `dropped_file.rs` |
 | Stickers P10a, drops: winit 0.30.13 registers its own `IDropTarget` when `with_drag_and_drop(true)` (after `OleInitialize` on the window thread) and revokes it at `WM_DESTROY`; it asks only for `CF_HDROP`, ignores the point and the key state, answers `DROPEFFECT_COPY` whenever there is a `CF_HDROP`, and its `QueryInterface` is `unimplemented!()`. egui-winit turns its events into `RawInput::hovered_files` (`HoveredFile { path: Option<PathBuf>, mime: String }`, no point) and `dropped_files`. A window has one registered target: `RevokeDragDrop(hwnd)` then `RegisterDragDrop(hwnd, ours)` replaces it (winit's object cannot be put back: it is not reachable). The target's callbacks run on the UI thread inside winit's message dispatch, outside eframe's frame; the point is screen pixels (`ScreenToClient`, then divide by `pixels_per_point`) | `REG\winit-0.30.13\src\platform_impl\windows\window.rs:1166-1197`, `drop_handler.rs`, `event_loop.rs:1260`; `REG\egui-winit-0.37.0\src\lib.rs:513-535`; `docs/notes/sticker/win-dnd.md` 2 |
+| Stickers P10b, clipboard (eframe without its `clipboard` feature, `NativeOptions::clipboard_shortcuts` left `true`): egui-winit turns Ctrl+X / Shift+Delete into `Event::Cut` and Ctrl+C / Ctrl+Insert into `Event::Copy` and returns: **no `Event::Key`** for them (a shortcut entry would never fire). Ctrl+V / Shift+Insert: `Event::Paste(text)` with its in-app string (`\r\n` as `\n`) **only when that string is not empty**, else nothing (its `get_image` needs `arboard`: no `PasteImage`), never a key event. "Ctrl" means `Modifiers::command_only()` (Shift and Alt up); the logical key, or the physical one for non-Latin layouts. Text an egui field copies is `OutputCommand::CopyText(String)` in `PlatformOutput::commands` (egui 0.37 has no `copied_text` field any more); egui-winit stores it as its in-app string after the pass, so `ctx.output(|o| ..)` at the end of `App::ui` still sees it. `Context::text_edit_focused()` is true while a `TextEdit` has the focus; a selected label text is `egui::text_selection::LabelSelectionState::has_selection` (a plugin: `ctx.with_plugin`) | `REG\egui-winit-0.37.0\src\lib.rs:1129-1151, 1538-1554`, `clipboard.rs:67-110, 152`; `REG\egui-0.37.0\src\data\output.rs:121-141`, `context.rs:3485-3497, 2408`, `text_selection\label_text_selection.rs:194`; `REG\eframe-0.37.0\src\epi.rs:405-421` |
 | Event shapes: `Event::PointerMoved(Pos2)`; `Event::PointerButton { pos, button, pressed, modifiers }`; `Event::Key { key: Key, physical_key: Option<Key>, pressed: bool, repeat: bool, modifiers: Modifiers }`; `Event::MouseWheel { unit: MouseWheelUnit /* Point, Line, Page */, delta: Vec2, phase: TouchPhase, source: MouseWheelSource /* Unknown, Wheel, Trackpad, Momentum */, modifiers: Modifiers }`; also `MouseMoved(Vec2)`, `PointerGone`, `WindowFocused(bool)`, `Text(String)`, `Zoom(f32)` | `data\input\event.rs:97-202`, `mouse_wheel_unit.rs`, `mouse_wheel_source.rs` |
 | Wheel input is **not** available as a vertical scroll delta when a modifier is held: with Ctrl the wheel feeds `zoom_delta` and `smooth_scroll_delta` stays zero; with Shift it becomes horizontal scroll; the smoothed delta also spreads one notch over several frames; `InputState` has no `raw_scroll_delta`. Views read the raw `Event::MouseWheel` events from `i.events` (section 8.6) | `input_state\mod.rs:456-470`, `input_state\wheel_state.rs:149-160` |
 | `InputState::consume_shortcut(&KeyboardShortcut) -> bool` matches the **logical** key; `Modifiers::matches_logically` ignores extra Shift/Alt. Shift+`[` arrives as `Key::OpenCurlyBracket` (`"{"`), Shift+`]` as `Key::CloseCurlyBracket` | `input_state\mod.rs:743-761`, `data\input\modifiers.rs:211-220`, `data\key.rs:539-542`, `REG\egui-winit-0.37.0\src\lib.rs:1567-1571` |
@@ -6438,6 +6452,9 @@ Branch `pen-input`:
   never reaches a scenario); the runner's `Step::Drop` queues its events in `logic`, `dnd::handle` (in `ui`, after the
   dialogs) drains them in the same frame. A prepared drop comes back as `AppAction::DropReady` (guarded like the other
   document commands) and `dispatch` hands it to `dnd::apply`.
+- Stickers P10b: `ole::install` also installs WTE's key subclass (`ole/subclass.rs`) on top of the pen subclass, which
+  `WteApp::new` installed first; `WM_NCDESTROY` puts each previous procedure back in turn. The clipboard of the run is
+  logged at start ("clipboard: in memory (nothing reaches Windows)" in a self-test run).
 - `WteApp::new` (part D) calls `pen::install(cc)` in interactive runs (in a self-test run only with `WTE_PEN_SUBCLASS=1`):
   the HWND from `cc.window_handle()` (`RawWindowHandle::Win32`), then `pen::win::install`: `SetWindowFeedbackSetting(hwnd,
   kind, 0, 4, &FALSE)` for `FEEDBACK_PEN_BARRELVISUALIZATION` (2), `_TAP` (3), `_DOUBLETAP` (4), `_PRESSANDHOLD` (5),
@@ -6495,7 +6512,10 @@ Stamp tool get; default none); both `#[serde(skip)]` (session state bound to the
 source). `StickerTarget { Stamp(StampId), Tray(StickerId) }` (the plan's `ToolSource` is not built: "Edit before
 placing" makes the tool's picture a tray sticker first, so the tool's unplaced sticker is a `Tray` target).
 `Dialog::StickerShared { users }`. `AppState::style_clipboard: Option<StyleStack>` (Copy Style; app state, never the OS
-clipboard). Stickers P9a: `AppState::link_ui: link::LinkUi` (8.16; the stub launcher and an empty registry in a self-test),
+clipboard). Stickers P10b: `AppState::clipboard: Box<dyn ole::clipboard::Clipboard>` (`clipboard_for(selftest)`: the
+in-memory one in a self-test run and in every test build), `AppState::clip_ui: clip::ClipUi`,
+`AppAction::Clip(clip::ClipAction { Copy, Cut, Paste, PasteAtViewCentre, ShowContents })` (not guarded: a Cut's
+deletion is its own guarded `StickerAction::DeleteSelected`, a paste's change its `DropReady`). Stickers P9a: `AppState::link_ui: link::LinkUi` (8.16; the stub launcher and an empty registry in a self-test),
 `Dialog::Link(Box<link::LinkQuestion>)`, `AppAction::Link(link::LinkAction)`, `Prefs::photocraft_exe`,
 `StickerEdit::held_update` in use, `PanelHit` gains `LinkEditIn`, `LinkUpdateNow`, `LinkSend`, `LinkShowFile`,
 `LinkUnlink`, `LinkRestore`, `LinkConvert`, `StickerHeaderEditIn`, `StickerNameField`, `LinkDialogButton(u8)`;
@@ -6534,6 +6554,10 @@ impl eframe::App for WteApp {
         //     PointerMoved restarts egui's tooltip delay; contact moves are never dropped)
         if let Some(r) = &mut self.selftest { let records = r.raw_input_hook(ctx, raw); self.state.pen.feed.extend(records) }
         pen::drain_window_records(&mut self.state.pen.feed);
+        // stickers P10b (8.17): a self-test run drops the real OLE events (ole::discard) and queues its Step::Chord's
+        // paste chord (r.take_chords); then clip::input_hook: Event::Copy / Event::Cut without a text field become
+        // ClipAction::Copy / Cut, the paste chord becomes the clipboard's text in a text field or ClipAction::Paste
+        clip::input_hook(ctx, raw, &mut self.state);
         self.state.pen.route(&mut raw.events);
     }
     // branch companion (8.14), between the records and the router: self.companion.inject(ctx, raw, &mut self.state)
@@ -6565,10 +6589,12 @@ impl eframe::App for WteApp {
         dialogs::show(ui.ctx(), &mut cx, &mut self.dialogs);
         self.state.toasts.show(ui.ctx(), central);        // anchored in the central area's corner (8.9)
         dnd::handle(ui.ctx(), &mut self.state);
+        clip::poll(&mut self.state);                      // stickers P10b: copies whose encoding is done -> clipboard
         // Shortcut actions go LAST: a text field that lost focus because of the shortcut (8.10) has by now queued its
         // Commit::Final action, which must be dispatched before e.g. Save.
         self.state.actions.extend(late);
         for a in std::mem::take(&mut self.state.actions) { dispatch::dispatch(self, a, frame) }
+        clip::after_ui(ui.ctx(), &mut self.state);        // stickers P10b: OutputCommand::CopyText -> clipboard too
     }
 }
 // dispatch.rs
@@ -7512,7 +7538,11 @@ carries a catalog face).
   document) / Deselect All (with a selection); below a separator "Objects Panel" (always enabled, checked while shown):
   sets `state.upper_tab = Objects` (a setting, like the Background entries; WP4). Help: Shortcuts,
   Tablet setup (branch `pen-input`, `Dialog::TabletHelp`), Tablet companion... (branch `companion`), Editor locations...
-  (stickers P9b, `LinkAction::ShowEditorLocations`), About. Stickers P9a / P9b: the Layer menu also has "Edit in <editor>"
+  (stickers P9b, `LinkAction::ShowEditorLocations`), Clipboard contents... (stickers P10b, `ClipAction::ShowContents`: a
+  `Dialog::Message` "Clipboard contents" listing what the clipboard offers), About. Stickers P10b: the Edit menu has,
+  after Delete and a separator, Cut (Ctrl+X; only in the Sticker view with an open editor), Copy (Ctrl+C), Paste (Ctrl+V)
+  and Paste at View Centre (each with a document; the key texts are given as they are, the chords are no table entries:
+  8.10), `AppAction::Clip(ClipAction::..)`; Copy Style / Paste Style / Clear Style follow after another separator. Stickers P9a / P9b: the Layer menu also has "Edit in <editor>"
   (the selected stamp's sticker; "Edit in..." while the chooser has to ask) and the submenu "Edit in" with the editor list
   (8.16). Shortcut texts come from `shortcuts::shortcut_text`. Entries are enabled exactly when they can act (review round 2,
   finding merge-down-enabled-onto-locked-base): Merge Down (menu and Layers footer alike) = `panels::layers::can_merge_down`
@@ -8610,6 +8640,11 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
    Shift+X (Swap Colors) the sticker X. Rules 2-4 apply unchanged (a dialog lets only Esc through; typing skips the
    keys; Esc and Delete / Backspace stay with an open popup). Outside the view only `table()` is used, exactly as before.
    Tests: no chord twice, no entry of the routed order shadowed, and one test of every colliding chord in both modes.
+8. **Stickers P10b: the clipboard chords are in neither table.** egui-winit turns Ctrl+C / Ctrl+Insert, Ctrl+X /
+   Shift+Delete and Ctrl+V / Shift+Insert into `Event::Copy` / `Event::Cut` / `Event::Paste` (8.1), never into key events,
+   so such an entry would never fire. Copy and Cut come from those events and Paste from WTE's key subclass, in
+   `raw_input_hook` (`clip::input_hook`, 8.17 "Clipboard"); a text field keeps all three. The test
+   `neither_table_binds_the_clipboard_chords` checks both tables.
 
 | Keys (Sticker view) | Action | Keys (Sticker view) | Action |
 |---|---|---|---|
@@ -8716,6 +8751,12 @@ pub enum Step {
     /// The drag hovering (`DragEnter`, `DragOver`) until `DragLeave`: the overlay's shots.
     DragHover { payload: Vec<DropItem>, target: Target, at: [f32; 2] },
     DragLeave,
+    /// Stickers P10b: a clipboard chord as real use produces it, in one frame with Ctrl held: Copy / Cut as the
+    /// `Event::Copy` / `Event::Cut` egui-winit makes (no key event), Paste as the key subclass's `OleEvent::Chord(Paste)`
+    /// (the runner hands it over with that frame, `take_chords`; `WteApp::raw_input_hook` queues it after
+    /// `ole::discard`). `Step::Key` is never used for these chords (such a key event never happens). The clipboard of a
+    /// self-test run is always the in-memory one; `is_idle` waits for copies being encoded (`ClipUi::busy`).
+    Chord(ole::Chord),
     /// Direct state preparation or bookkeeping: register the sample stamp image as a blob, write asset files, remember a
     /// hash in `Scratch`.
     Setup(&'static str, fn(&mut AppState, &mut Scratch) -> Result<(), String>),
@@ -8893,6 +8934,7 @@ counted down) instead of failing (`export_errors`).
 | `sticker_layout` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; a generated 200 x 120 picture (an orange box (20, 20)-(180, 100), a 12 x 12 green mark at (124, 52), transparent margin) placed as an image stamp; 4; C, the Ellipse shape (shot `layout_crop_box`), Enter; `Layout(Trim(0))`; the Add Padding popover (10 px) and its Apply; `Layout(Rotate(90))` (shot `layout_rotated`) and `Layout(Rotate(-90))`; the Resize popover at 200 % and its Apply; `Layout(Flatten)` (shot `layout_done`); undo every step; Esc twice | the green mark's texel centroid in the stamp's texture layers: within 1.5 texels of the start after the crop (one "Crop Sticker" entry with the promotion, an ellipse), the trim (one entry, 160 x 80), the padding (one entry, 180 x 100), the turn back (one entry each; after the CW turn the sides swap and the mark is at least 4 texels away), the resize (one entry, 360 x 200, the placement kept) and the flatten (one entry, one layer); undoing everything gives the start |
 | `sticker_link` | Stickers P9a (`selftest/scenarios/sticker_link.rs`). Sphere, 3D; a stub `photocraft.exe` (empty file) in `<out_stem>_stub` set in the prefs; the sample logo placed twice; Save As `<out_stem>.wtep`; (1) the first logo selected, the Sticker tab's Edit in PhotoCraft clicked (shot `link_shared`), Only this one (shot `link_made`); (2) the scenario saves the PSD with a red layer added (`link::testkit`, temp file + rename) (shot `link_updated`); (3) Undo, `WaitMs(3000)`, Update now; (4) Save; then (check-P9a) the whole `<out_stem>_links\` folder deleted, `Until` the watcher reports it missing, Restore from project clicked, `WaitMs(1500)`; (5) the Sticker view, `SelectRect`, the bottom layer active, a click into the name field, the PSD saved without the bottom layer, `WaitMs(2500)`, a click in the 3D half (shot `link_held_applied`), Done; (6) Import Sticker from PSD of fixture `f1w_pc.psd`, Edit in on that tray sticker, fixture `f5_f1_plus_text.psd` copied over its PSD, then `f4_mask_stroke.psd` (shot `link_merged`), Undo; (7) the Sticker view, opacity 50 %, the PSD saved with a new layer (shot `link_conflict`), Take PhotoCraft's version; again, Keep WTE's version, Send anyway; (8) Send to PhotoCraft, Send anyway, the PSD saved again (shot `link_saved_over`), Take; Done; (9) Save, reopen; the PSD deleted, reopen; the PSD changed, reopen (shot `link_changed_closed`), Update | (1) the shared-picture question and no links folder, no stub call before the answer; after it the PSD in `<out_stem>_links\` reads back with one layer, the stub saw exactly (photocraft, the exe, that path), the other stamp is still an image stamp, one entry, the badge "linked"; (2) one more applied update (`Until`), one entry "Update Linked Sticker", two layers, the model changed; (3) 3 s after the undo: no update, the same composite, `LinkUi::repaints` unchanged (the idle check), the badge exactly "changed in WTE"; Update now applies it again, "linked"; (4) the PSD's CRC and time unchanged, the archive entry readable; the deleted folder: the badge "file missing", after Restore the same CRC, no update applied, no question, no entry, "linked"; (5) while the field has the focus nothing is applied (`held_update`, the selection still there); after the click one update: one layer "red bar", no selection, the top layer active, the toast "Updated from PhotoCraft", one entry; (6) three layers photo / text / shape, linked at scale 1 with a three-entry map; after f5 the three layer ids unchanged and a fourth picture layer "pc text", `editor_native`; after f4 one layer "PhotoCraft picture", mode Merged, the toast "This sticker now uses layer effects, which only PhotoCraft can show. ..."; undo gives the four layers; (7) the question "Both WTE and PhotoCraft changed Logo." with nothing applied; Take: the file's two layers, opacity 1, one entry, "linked"; Keep: the warning "PhotoCraft may still have this file open. ...", then the file with opacity 128 and a `.bak.psd`, "linked"; (8) the warning again; the editor's save is never applied: "PhotoCraft saved over the changes WTE sent to Logo."; (9) the link (editor photocraft) and "linked" after the reopen; the deleted PSD restored with the same CRC; "Linked sticker Logo changed while the project was closed.", Update: the layer "while closed" on top, one entry. Shot `link_pc_done`. **Stickers P9b, the Photoshop pass** (steps 1-3 and 6 again): an injected registry whose App Paths key names a stub `Photoshop.exe` in `<out_stem>_stub`, a fresh stub log, no default editor; two more logos; (1) Photoshop found, two editors known, the main button "Edit in..."; its click opens the chooser (shot `link_chooser`; buttons Cancel / Other program... / Photoshop / PhotoCraft, the box ticked, nothing started), Photoshop: the shared-picture question, Only this one: the default is Photoshop, the link's editor `photoshop`, the stub saw (photoshop, the stub exe, the PSD), the other logo still an image, one entry, "linked" (shot `link_made_ps`); the editor list opened from Edit in... (five items, shot `link_editor_list`), Default: Photoshop clicked; (2) the editor's save: one entry, two layers, "Updated from Photoshop"; (3) undo, 3 s idle check, "changed in WTE", Update now; (6) Import Sticker from PSD of `photoshop\layers\shape-layer.psd` (one layer, 32 x 32), placed, Edit in (no question: the default), linked at scale 1 with a one-entry map; Photoshop's own type layer added to the linked file (`testkit::with_foreign_layer` with the layer of `photoshop\layers\type-layer.psd`, id above the seed): the WTE layer kept (same id), a picture layer "A" on top, `editor_native`, one entry; `photoshop\effects\outside-stroke.psd`: one layer "Photoshop picture", Merged, "This sticker now uses layer effects, which only Photoshop can show."; `photoshop\layers\smartobject-layer.psd`: merged with "This sticker now uses smart objects, which only Photoshop can show. ..." (shot `link_merged_ps`); `photoshop\layers-minimal\shape-layer.psd`: nothing applied, the problem NeedsMerged, the badge "needs a merged picture", Photoshop's sentence word for word in the Sticker tab (shot `link_needs_merged_ps`); two undos: the WTE layer and "A" again |
 | `sticker_drop` | Stickers P10a (`selftest/scenarios/sticker_drop.rs`). Sphere, Split; files written to `<out_stem>_assets` (three PNGs, `Badge.wtes`); (1) a PNG hovered over the model (`DragHover`, shot `drop_hover_picture`) and let go there (shot `drop_model`); (2) a PNG on the 2D view; (3) a PNG on the corner of the 3D view (a miss); (4) `Badge.wtes` as a file on the model; (5) the three PNG files at once on the model (shot `drop_three`); (6) a DIB on the first stamp's Layers row (`Target::Screen`); that stamp selected, 4, (7) a virtual `badge.png` (`FileGroupDescriptorW` + `FileContents`) on the sticker canvas (shot `drop_canvas`), Esc; (8) a `.wtep` hovered (shot `drop_hover_project`), `DragLeave`; undo everything. Run again with `WTE_OLE=1` (the window's own target installed too): the same result | (1) the hover is known with its point, the overlay `Place`; a stamp "Dropped picture" centred at the drop point's hit (1e-3 of the diagonal; its texel logged), the Stamp tool's size, the Transform tool, no hover left, one entry; (2) a UV stamp "Dropped picture" (picture data has no name: the drop target calls it "Dropped picture.png") centred at the drop texel (+-2), one entry; (3) nothing placed, no entry, the picture "Dropped picture.png" is the Stamp tool's source and the tool the Stamp tool; (4) a sticker stamp "Badge" showing a one-layer sticker, one entry labelled "Drop"; (5) a stamp "one", "two" and "three" kept tray stickers, the toast "2 more added to the tray", one entry; (6) the first stamp's picture is the 30 x 30 DIB, one entry; (7) the image stamp promoted with a second layer "badge" centred at the point (+-1.5 px), one entry; (8) the overlay `Open`; after `DragLeave` no hover and nothing opened; six entries in all, undoing them gives the start's document hash and no stamp |
+| `sticker_clip` | Stickers P10b (`selftest/scenarios/sticker_clip.rs`). Sphere, 3D; only `Step::Chord` for the chords, the in-memory clipboard. (1) a 64-px sticker with the Outline stamp styles dropped on the model as `WTE.Sticker.v1` data; (2) Ctrl+C on it; (3) Ctrl+V (after the Stamp tool's styles were reset), a hover (shot `clip_paste_source`), a click on the model; (4) Edit > Paste at View Centre (`Do`, shot `clip_view_centre`); (5) the first stamp selected, 4, M, a Marquee over the disc's middle, Ctrl+C, Ctrl+X, Ctrl+V (shot `clip_sticker_layer`), Done; (6) the Text tool, text put on the clipboard, the content field emptied and focused, Ctrl+V; new text in the field, Ctrl+A, Ctrl+C (shot `clip_text`), Esc; undo everything | the clipboard empty at the start and in memory; (1) a styled sticker stamp "Badge"; (2) exactly PNG, CF_DIBV5, WTE.Sticker.v1, the DIB's pixels = the PNG's, transparent and opaque pixels, the sticker block of this process with the sticker and its styles, no entry; (3) the Stamp tool with the tray sticker "Badge" (kept) as its source and the copied stamp's styles, no stamp placed, one entry; the click places a sticker stamp with those styles (one more); (4) one more stamp centred where the view's centre meets the model (1e-3 of the diagonal), one entry; (5) Copy: exactly PNG + CF_DIBV5 of the selection's size in the disc's orange, no entry; Cut: the same picture, the selected pixels gone from the disc layer, "Delete Selected Pixels", one entry; Paste: a top layer "Pasted picture" of that size centred at the visible canvas's centre (+-1.5), one entry; (6) the field holds the clipboard's text, no paste of WTE's, no entry; then the clipboard holds only CF_UNICODETEXT with the field's text; six entries in all, undoing them gives the start's document hash, no stamp and no tray sticker |
 | `sticker_link_path` | Stickers P9a. PATH = a `.psd` / `.psb` file (gate: `crates/wte_core/tests/fixtures/psd/f1w_pc.psd`); Sphere, 3D; `OpenPath(PATH)`; a click on the model (shot `psd_placed`) | one "Add Sticker" entry: a kept tray sticker from the file layer by layer, the Stamp tool's source and tool; the placed stamp is a sticker stamp with layers |
 | `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
@@ -8996,6 +9038,12 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
     index). The callbacks run outside eframe's frame: they only queue events and ask for a repaint. The window's target
     object is never freed (Windows may hold it). Tests never register a target on a window; the self-test drives an
     unregistered object (`TestDrag`).
+26. Stickers P10b (8.17): never the real clipboard in a self-test or a test (`clipboard_for` gives `MemClipboard`; the real
+    one is not compiled into a test build), and never `Step::Key` for Ctrl+C / X / V (`Step::Chord`). Never bind the
+    clipboard chords in a shortcut table (8.10 rule 8). The key subclass never eats a message: it forwards every one
+    unchanged and returns the previous procedure's result. `OpenClipboard` needs the app window as owner for a write
+    (with no owner `SetClipboardData` fails); the clipboard owns what `GetClipboardData` returns (never freed) and what
+    `SetClipboardData` took (freed by WTE only when it refused it).
 
 ### 8.14 Tablet companion (`companion/*`, branch `companion`)
 
@@ -9555,11 +9603,11 @@ sticker in place on the model, keeping every stamp's placement.
   object is merged whatever the default; `testkit::with_foreign_layer` reads back with the type layer's `TySh`. The
   menu sweep: Help > Editor locations....
 
-### 8.17 OLE drag and drop (`ole/*`, `dnd.rs`; stickers P10a, STICKER_PLAN 6.1, 6.2)
+### 8.17 OLE drag and drop and the clipboard (`ole/*`, `dnd.rs`, `clip.rs`; stickers P10a, P10b, STICKER_PLAN 6.1-6.3)
 
 **Why.** winit's drop target reads `CF_HDROP` only and drops the point (8.1), so a picture could not land where it was
 let go and picture data without a file (a browser's image) never arrived. WTE registers its own `IDropTarget` instead
-(hand-written `raw-dylib` FFI, no new crate). The clipboard (P10b) and drag out (P11) add to `ole/`.
+(hand-written `raw-dylib` FFI, no new crate). The clipboard (P10b, "Clipboard" below) and drag out (P11) add to `ole/`.
 
 **Install.** `ole::install(cc)` from `WteApp::new` (interactive runs; a self-test run with `WTE_OLE=1`): the HWND from
 `cc.window_handle()`, `RevokeDragDrop(hwnd)`, `RegisterDragDrop(hwnd, target)`. The target is a leaked box (never
@@ -9638,6 +9686,89 @@ sources; `spot_at`; the table above row by row through `prepare` + `apply`, one 
 picture data on the worker; the drop target's drops start a job or open a document; a drop prepared for another
 document is not placed) and core
 `k10a_an_edit_group_is_one_undo_step` (9.1).
+
+**Clipboard (stickers P10b, STICKER_PLAN 6.3, 13.5).** *Where it is.* `AppState::clipboard: Box<dyn Clipboard>`
+(`ole/clipboard.rs`): `write(entries)` replaces the content, `read(format)` copies one format's bytes, `format_names()`
+lists everything offered (standard formats by their constant names, `CF_DIB` ..., registered ones by their names,
+others as "private format 0x0201" / "format 0x...") and `is_memory()`. `clipboard_for(selftest)`: the real Windows
+clipboard (`real::RealClipboard`) only in an interactive run of a non-test Windows build; `MemClipboard` (named blocks,
+no synthesized formats) in every self-test run, every test build and elsewhere. The real one opens the clipboard with
+the app window as owner (`ole::window`, stored by `install`), retried 5 times 20 ms apart ("the clipboard is in use by
+another program; try again"); a write empties it and hands every block to `SetClipboardData` (a refused block is freed);
+a read copies the `GetClipboardData` block between `GlobalLock` / `GlobalUnlock` (never freed: the clipboard owns it);
+the clipboard is always closed (a guard).
+
+*The keys (8.1, 8.10 rule 8).* `raw_input_hook` calls `clip::input_hook` after the self-test's events: (a)
+`Event::Copy` / `Event::Cut` while no text field has the keyboard (`text_edit_focused()`, or a selected label text) are
+removed and become `ClipAction::Copy` / `Cut`; with a text field they stay for egui. (b-d) The paste chord comes from
+WTE's **key subclass** (`ole/subclass.rs`, installed by `ole::install` above the pen subclass; Windows only): on
+`WM_KEYDOWN` of V with Ctrl down and Shift and Alt up (Ctrl+Alt is AltGr), or of Insert with Shift down and Ctrl and Alt
+up (egui-winit's `is_paste_command`; `GetKeyState` gives the keys at that message), it queues `OleEvent::Chord(Paste)`
+and forwards the message unchanged to the previous procedure (never eaten; a panic while looking at it is caught; at
+`WM_NCDESTROY` the previous procedure goes back). In the frame of the chord every `Event::Paste` egui-winit made from its
+in-app string is removed; with a text field the clipboard's `CF_UNICODETEXT` is pushed as one `Event::Paste(text)`
+(`\r\n` as `\n`), or, without text on the clipboard (or when it cannot be read), egui-winit's events are put back;
+without a text field `ClipAction::Paste` is queued. While a dialog is open or a modal job runs no `ClipAction` is
+queued (text fields still copy and paste). Without the subclass (it could not be installed, not Windows) Ctrl+V pastes
+egui's own text only; Edit > Paste always works (and is what the tablet companion uses). (4) At the end of `App::ui`
+`clip::after_ui` writes the text of this frame's `OutputCommand::CopyText` to the clipboard too (the command stays).
+
+*Copy* (`ClipAction::Copy`; Edit > Copy, Ctrl+C): in the Sticker view with an open editor, the active picture layer's
+pixels with its mask applied and without layer styles ("the pixels being edited"), cut to the selected pixels when there
+is a selection (`clip::layer_pixels`: `select::selection_in_content`, `extract`, the bounds of what is left; a selection
+holding none of them: "The selection holds no pixels of this layer"); a text or shape layer: "Copy takes a picture
+layer's pixels: rasterize this layer first"; a text stamp: the text-stamp line. Otherwise the selected stamp (or the
+stamp of the active layer): its finished picture **with its styles** (`Document::stamp_picture(id, true)`) as `PNG` +
+`CF_DIBV5`, plus `WTE.Sticker.v1` (this process's id, a `.wtes` of the sticker with the stamp's styles and the picture as
+preview) for a sticker stamp and for an image stamp with styles (a one-layer sticker of its picture); an image stamp
+without styles and a text stamp offer no sticker (a paste in WTE gives the same kind of stamp back, a picture). Otherwise
+the active paint layer at texture size (`PNG` + `CF_DIBV5`; an unpainted layer: "Select a stamp, or a paint layer with
+pixels, to copy"). The pixels are taken on the UI thread (shared buffers: `Arc`s, a `StickerDoc` clone, the blob store's
+`Arc`s) and a worker thread renders the selection, encodes the PNG (`PngLevel::Fast`) and the DIB and writes the
+`.wtes`; `clip::poll` (every `ui`) writes finished copies to the clipboard (status line "Copied the stamp "Badge" (70 x
+70 pixels)"; a failure is a warning toast "Nothing was copied: ..."). The log names the formats. *Cut* (Sticker view
+only, Edit > Cut, Ctrl+X): a selection is needed ("Select an area first: Cut takes the selected pixels"); the copy as
+above, then `StickerAction::DeleteSelected` (its own entry "Delete Selected Pixels", with the shared-sticker question of
+any content edit). Outside the Sticker view Cut only says "Cut takes selected pixels in the Sticker view; use Copy
+here".
+
+*Paste* (`ClipAction::Paste`; Edit > Paste, Ctrl+V / Shift+Insert without a text field): first every copy still being
+encoded is finished and written (`finish_copies`), so Copy then Paste always pastes what was copied. The formats are
+logged ("paste: the clipboard offers ..."), then `paste_item` reads in `PASTE_ORDER`: `WTE.Sticker.v1` (from any WTE,
+this one included: unlike a drag, a paste of one's own copy is the point), `PNG` (must start with the PNG signature),
+`CF_DIBV5`, `CF_DIB` (decoded on the worker by `formats::dib_to_pixels`: a 32-bit DIB whose alpha is zero everywhere is
+opaque, 13.5; mixed alpha is straight alpha), the first picture / PSD / `.wtes` file of `CF_HDROP`. Nothing usable: the
+info toast "Nothing WTE can paste. The clipboard offers: <names>." (or "nothing"). The item goes through the drop
+pipeline (`dnd::start_items`: the worker, `DropReady`, `dnd::apply`, one undo step) with the spot of `paste_spot`:
+outside the Sticker view `Elsewhere` - the picture (as "Pasted picture.png") becomes the Stamp tool's source and the
+Stamp tool is chosen (its usual placement outline under the pointer; **nothing is placed until a click**), a sticker
+becomes a kept tray sticker and the source (one entry "Add Sticker"), a picture file goes the way of Import Stamp Image;
+a `.wtes` that carries stamp styles gives them to the Stamp tool (as a click on a library entry does; also for a dropped
+`.wtes`). **Paste at View Centre**: `View(Main3D)` (3D and Split) or `View(Main2D)` at the view's centre: placed at
+once like a drop there; a miss, the Preview view or no laid-out view is a plain Paste. In the Sticker view (with an
+open editor) both are `Canvas(centre of the visible canvas)`: a new picture layer "Pasted picture" centred there (a
+`.wtes`: its layers). Without a project: "Open a model first".
+
+*Help > Clipboard contents...* (`ClipAction::ShowContents`): `Dialog::Message` "Clipboard contents" with the formats
+(or "The clipboard is empty.") and the line "WTE pastes WTE.Sticker.v1, PNG, CF_DIBV5, CF_DIB and picture files
+(CF_HDROP), in this order." It reads the in-memory clipboard in a self-test. With it, hand test 24 (what Photoshop and
+PhotoCraft offer) can be written down without other tools.
+
+*Tests* (9.2): `ole::clipboard::tests` (a test build has only the in-memory clipboard; picture and `.wtes` round trips
+in the paste order with alpha kept; a 32-bit DIB with zero alpha is opaque and with mixed alpha keeps it; `CF_HDROP`
+picks the first picture file, a model alone is nothing; bad sticker or PNG blocks fall through; text with `\r\n`;
+foreign formats listed by name; the standard and unnamed format names), `ole::subclass::tests` (the routing on a fake
+previous procedure: Ctrl+V queues one paste and is forwarded; Ctrl+Alt (AltGr), Ctrl+Shift+V, a plain V and Ctrl+Insert
+queue nothing; Shift+Insert queues; key-up, characters, system keys, pointer and user messages are forwarded unchanged
+with the previous procedure's result; a panic in the sink still forwards; the real procedure forwards to a fake
+previous one through `CallWindowProcW`), `clip::tests` ((a)-(d) on recorded inputs, a dialog in front, `CopyText` at the
+end of `ui` reaches the in-memory clipboard and stays; a paste is the Stamp tool's source and places nothing, a click
+places it; Paste at View Centre places one stamp in one entry and falls back to a plain Paste; a styled sticker stamp's
+copy (PNG + DIBV5 = `stamp_picture(id, true)`, the sticker with its styles) pasted back as the tray sticker and the
+tool's styles; an unpainted layer, a painted layer at texture size, an image stamp without styles (no sticker), Cut
+outside the view; `layer_pixels` with a mask and a selection; the "Nothing WTE can paste" toast and the contents dialog
+on the in-memory formats), `shortcuts::tests::neither_table_binds_the_clipboard_chords`,
+`selftest::tests::chords_are_injected_as_real_use_produces_them`; scenario `sticker_clip` (8.11).
 
 ---
 
@@ -10319,7 +10450,9 @@ scenario count (65: `sticker_text`, `sticker_layout`, `sticker_library`). Sticke
 `sticker_link_path`). Stickers P9b: `link::editor_tests` (8.16 "Tests"), the menu sweep's Help > Editor locations...,
 and the Photoshop pass of `sticker_link` (no new scenario). Stickers P10a: `ole::formats`, `ole::com`,
 `ole::data_object`, `ole::drop_target`, `ole::tests` and `dnd::tests` (8.17 "Tests") and the scenario count (68:
-`sticker_drop`).
+`sticker_drop`). Stickers P10b: `ole::clipboard::tests`, `ole::subclass::tests`, `clip::tests` (8.17 "Clipboard"),
+`shortcuts::tests::neither_table_binds_the_clipboard_chords`, `selftest::tests::chords_are_injected_as_real_use_produces_them`
+and the scenario count (69: `sticker_clip`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

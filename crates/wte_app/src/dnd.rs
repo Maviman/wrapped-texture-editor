@@ -189,6 +189,9 @@ pub(crate) fn handle_events(ctx: &egui::Context, state: &mut AppState, events: V
                 ui.hover = None;
                 drops.push((egui::pos2(pos[0], pos[1]) / ppp, items, skipped));
             }
+            // Stickers P10b: `raw_input_hook` takes the chords before this runs (`ole::take_chords`); one that came
+            // later belongs to the next frame's hook.
+            OleEvent::Chord(c) => crate::ole::push(OleEvent::Chord(c)),
         }
     }
     // While a modal job runs nothing may replace the session (8.9): drops are ignored.
@@ -311,6 +314,12 @@ fn start_drop(ctx: &egui::Context, state: &mut AppState, pos: egui::Pos2, items:
         return;
     }
     let spot = spot_at(state, pos);
+    start_items(ctx, state, spot, items);
+}
+
+/// Prepares `items` on a worker for `spot` (the drop's spot, or stickers P10b: the spot of a Paste) and hands them to
+/// `apply` through `AppAction::DropReady` when they are ready. A project must be open.
+pub(crate) fn start_items(ctx: &egui::Context, state: &mut AppState, spot: Spot, items: Vec<DropItem>) {
     let generation = state.session.as_ref().map(|s| s.scene_generation);
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
@@ -503,6 +512,7 @@ fn stamp_source(state: &mut AppState, item: &Ready) -> Option<(StampToolSource, 
         }
         _ => {
             let id = to_tray_sticker(state, item)?;
+            tool_styles_of(state, item);
             state.sticker_ui.tray_selected = Some(id);
             let name = state.doc().and_then(|d| d.sticker(id)).map(|s| s.name.clone()).unwrap_or_default();
             Some((StampToolSource::Sticker(id), name))
@@ -539,9 +549,20 @@ fn elsewhere(state: &mut AppState, item: &Ready) {
         }
         Ready::Sticker { .. } => {
             if let Some(id) = to_tray_sticker(state, item) {
+                tool_styles_of(state, item);
                 crate::sticker::tray::use_as_source(state, id);
             }
         }
+    }
+}
+
+/// Stickers P10b: a `.wtes` that carries stamp styles (a copied stamp, a library file) gives them to the Stamp tool,
+/// so the stamp it places looks like the one that was copied (as a click on a library entry does).
+fn tool_styles_of(state: &mut AppState, item: &Ready) {
+    if let Ready::Sticker { file } = item
+        && let Some(styles) = &file.styles
+    {
+        state.tools.stamp.styles = styles.clone();
     }
 }
 
@@ -727,6 +748,11 @@ pub fn is_wtes_path(path: &std::path::Path) -> bool {
 /// True for the image extensions of `IMAGE_EXTENSIONS`.
 pub fn is_image_path(path: &std::path::Path) -> bool {
     IMAGE_EXTENSIONS.contains(&extension_of(path).as_str())
+}
+
+/// Stickers P10b: a picture, PSD or sticker file (what Paste takes from a `CF_HDROP`).
+pub fn is_placeable_path(path: &std::path::Path) -> bool {
+    is_placeable_extension(&extension_of(path))
 }
 
 /// A picture, PSD or sticker file extension (what a drop places at a point).

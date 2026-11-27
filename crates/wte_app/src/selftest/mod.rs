@@ -140,6 +140,10 @@ pub enum Step {
     DragHover { payload: Vec<crate::ole::DropItem>, target: Target, at: [f32; 2] },
     /// `DragLeave` of the drag of `DragHover`.
     DragLeave,
+    /// Stickers P10b (STICKER_PLAN 6.3 item 5, 8.2): a clipboard chord exactly as real use produces it - Copy and Cut as
+    /// the `Event::Copy` / `Event::Cut` egui-winit makes for Ctrl+C / Ctrl+X (never a key event), Paste as the
+    /// `OleEvent::Chord(Paste)` of WTE's key subclass, in a frame with Ctrl held. `Step::Key` is never used for these.
+    Chord(crate::ole::Chord),
     Exit,
 }
 
@@ -178,6 +182,7 @@ impl Step {
             Step::Drop { payload, target, at } => format!("Drop({} item(s), {target:?}, {at:?})", payload.len()),
             Step::DragHover { payload, target, at } => format!("DragHover({} item(s), {target:?}, {at:?})", payload.len()),
             Step::DragLeave => "DragLeave".to_owned(),
+            Step::Chord(c) => format!("Chord({c:?})"),
             Step::Exit => "Exit".to_owned(),
         }
     }
@@ -252,6 +257,10 @@ pub struct Runner {
     shots: Vec<(&'static str, &'static str)>,
     /// Stickers P10a: the drag of `Step::DragHover`, until `Step::DragLeave` (or the next drop).
     drag: Option<crate::ole::TestDrag>,
+    /// Stickers P10b: `Step::Chord(Paste)` goes with the next injected frame (`paste_with_next`), then waits in
+    /// `chords` for `WteApp::raw_input_hook`, which queues it after dropping the real OLE events.
+    paste_with_next: bool,
+    chords: Vec<crate::ole::Chord>,
 }
 
 impl Runner {
@@ -315,6 +324,8 @@ impl Runner {
             bake_wait: true,
             shots: Vec::new(),
             drag: None,
+            paste_with_next: false,
+            chords: Vec::new(),
         })
     }
 
@@ -360,9 +371,17 @@ impl Runner {
         raw.time = Some(self.frame as f64 / 60.0);
         raw.predicted_dt = 1.0 / 60.0;
         let Some(input) = input else { return Vec::new() };
+        if std::mem::take(&mut self.paste_with_next) {
+            self.chords.push(crate::ole::Chord::Paste);
+        }
         raw.events.extend(input.events);
         self.last_inject_frame = Some(self.frame);
         input.pen
+    }
+
+    /// Stickers P10b: the chords of this frame's `Step::Chord(Paste)` (`WteApp::raw_input_hook` queues them).
+    pub fn take_chords(&mut self) -> Vec<crate::ole::Chord> {
+        std::mem::take(&mut self.chords)
     }
 
     /// Branch `pen-input`: what a pen in contact did this frame, for the `pen` scenario's asserts (scratch values
@@ -651,6 +670,12 @@ impl Runner {
                     drag.leave();
                 }
             }
+            Step::Chord(chord) => {
+                self.inject.extend(chord_frames(chord));
+                // Steps wait for their injected frames (`Active::Input`), so the chord's frame is the next one.
+                self.paste_with_next = chord == crate::ole::Chord::Paste;
+                self.active = Some((Active::Input, name));
+            }
             Step::Exit => self.finish(ctx, state, frame),
         }
     }
@@ -812,6 +837,7 @@ fn is_idle(state: &AppState, tools_busy: bool) -> bool {
         && !crate::sticker::live::pending(state)
         && !crate::ole::pending()
         && !state.drop_ui.busy()
+        && !state.clip_ui.busy()
         && state.doc().is_none_or(|d| !d.has_pending_edit() && !d.has_pending_composite())
 }
 
@@ -878,6 +904,17 @@ fn hover_frames(pos: egui::Pos2) -> Vec<FrameInput> {
 fn key_frames(key: egui::Key, mods: egui::Modifiers) -> Vec<FrameInput> {
     let event = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: mods };
     vec![FrameInput { events: vec![event(true)], modifiers: mods, pen: Vec::new() }, FrameInput { events: vec![event(false)], modifiers: mods, pen: Vec::new() }]
+}
+
+/// Stickers P10b: the frame of a clipboard chord - Ctrl held, and for Copy / Cut the event egui-winit makes (for Paste
+/// the runner queues the subclass's chord with this frame).
+fn chord_frames(chord: crate::ole::Chord) -> Vec<FrameInput> {
+    let events = match chord {
+        crate::ole::Chord::Copy => vec![egui::Event::Copy],
+        crate::ole::Chord::Cut => vec![egui::Event::Cut],
+        crate::ole::Chord::Paste => Vec::new(),
+    };
+    vec![FrameInput { events, modifiers: egui::Modifiers::COMMAND, pen: Vec::new() }]
 }
 
 /// The pointer id and touch device of the self-test's pen (`pen_frames`).
@@ -1123,6 +1160,35 @@ mod tests {
         assert_eq!(r.shot_path(None), PathBuf::from(r"E:\x\shot.png"));
         assert_eq!(r.shot_path(Some("hover")), PathBuf::from(r"E:\x\shot_hover.png"));
         assert_eq!(Step::Shot { name: "hover", expect: "" }.describe(), "Shot(hover)");
+    }
+
+    /// Stickers P10b: `Step::Chord` makes what real use makes - Copy / Cut as egui-winit's events (no key event), Paste
+    /// as a chord that goes with its frame (Ctrl held) and that the app takes after the real OLE events are dropped.
+    #[test]
+    fn chords_are_injected_as_real_use_produces_them() {
+        use crate::ole::Chord;
+        let copy = chord_frames(Chord::Copy);
+        assert_eq!(copy.len(), 1);
+        assert_eq!(copy[0].events, vec![egui::Event::Copy]);
+        assert_eq!(copy[0].modifiers, egui::Modifiers::COMMAND);
+        assert_eq!(chord_frames(Chord::Cut)[0].events, vec![egui::Event::Cut]);
+        let paste = chord_frames(Chord::Paste);
+        assert!(paste[0].events.is_empty(), "no key event and no in-app paste text");
+        assert!(chord_frames(Chord::Copy).iter().chain(&paste).all(|f| !f.events.iter().any(|e| matches!(e, egui::Event::Key { .. }))));
+        assert_eq!(Step::Chord(Chord::Paste).describe(), "Chord(Paste)");
+        // The paste chord is handed over in the frame its input is injected, once.
+        let mut r = Runner::new(&args("smoke", r"E:\x\shot.png"), Arc::new(AtomicI32::new(0))).unwrap();
+        r.inject.extend(chord_frames(Chord::Paste));
+        r.paste_with_next = true;
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { events: vec![egui::Event::Paste("in-app".into())], ..Default::default() };
+        r.raw_input_hook(&ctx, &mut raw);
+        assert!(!raw.events.iter().any(|e| matches!(e, egui::Event::Paste(_))), "the real paste event is dropped");
+        assert!(raw.events.contains(&egui::Event::ModifiersChanged(egui::Modifiers::COMMAND)));
+        assert_eq!(r.take_chords(), vec![Chord::Paste]);
+        assert!(r.take_chords().is_empty());
+        r.raw_input_hook(&ctx, &mut egui::RawInput::default());
+        assert!(r.take_chords().is_empty());
     }
 
     #[test]

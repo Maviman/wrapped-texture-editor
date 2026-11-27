@@ -19,6 +19,12 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: &str, enabled: bool, selected:
     ui.add_enabled(enabled, button).clicked()
 }
 
+/// Stickers P10b: a menu entry whose keys are not in a shortcut table (the clipboard chords egui-winit turns into
+/// events, STICKER_PLAN 6.3): the key text is given as it is.
+fn item_keys(ui: &mut egui::Ui, label: &str, keys: &str, enabled: bool) -> bool {
+    ui.add_enabled(enabled, Button::new(label).shortcut_text(keys)).clicked()
+}
+
 /// Draws the menu bar: File, Edit, View, Layer, Object, (Sticker in the Sticker view), Help.
 pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let mut actions: Vec<AppAction> = Vec::new();
@@ -48,6 +54,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             // Stickers P9a / P9b (STICKER_PLAN 5.7, 13.1): where the outside editors' programs are, and the default one.
             if item(ui, "Editor locations...", "", true, false) {
                 actions.push(AppAction::Link(crate::link::LinkAction::ShowEditorLocations));
+            }
+            // Stickers P10b (STICKER_PLAN 13.5): what the clipboard offers (hand test 24).
+            if item(ui, "Clipboard contents...", "", true, false) {
+                actions.push(AppAction::Clip(crate::clip::ClipAction::ShowContents));
             }
             if item(ui, "About", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::About));
@@ -152,6 +162,22 @@ fn edit_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
     ui.separator();
     if item(ui, "Delete", "Delete", can_delete, false) {
         actions.push(AppAction::DeleteSelection);
+    }
+    // Stickers P10b (STICKER_PLAN 6.3): the clipboard. Menu items too, so the tablet and a run without the key
+    // subclass can do all of it without a key.
+    ui.separator();
+    let open = state.session.is_some();
+    let in_editor = state.view_mode == ViewMode::Sticker && crate::sticker::edit_of(state).is_some();
+    use crate::clip::ClipAction;
+    for (label, keys, enabled, action) in [
+        ("Cut", "Ctrl+X", in_editor, ClipAction::Cut),
+        ("Copy", "Ctrl+C", open, ClipAction::Copy),
+        ("Paste", "Ctrl+V", open, ClipAction::Paste),
+        ("Paste at View Centre", "", open, ClipAction::PasteAtViewCentre),
+    ] {
+        if item_keys(ui, label, keys, enabled) {
+            actions.push(AppAction::Clip(action));
+        }
     }
     // Stickers P6b (STICKER_PLAN 3.7): the styles of the selected stamps, or in the Sticker view of the sticker layers.
     ui.separator();

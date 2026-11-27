@@ -181,6 +181,9 @@ pub enum AppAction {
     DropReady(std::sync::Arc<crate::dnd::Prepared>),
     /// Stickers P9a (STICKER_PLAN 5): the editor link (logic in `link/flows.rs`).
     Link(crate::link::LinkAction),
+    /// Stickers P10b (STICKER_PLAN 6.3): Copy, Cut, Paste, Paste at View Centre, Help > Clipboard contents... (logic in
+    /// `clip.rs`).
+    Clip(crate::clip::ClipAction),
 }
 
 /// Severity of a toast.

@@ -1106,6 +1106,8 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         }
         A::Sticker(s) => crate::sticker::run(app, s, frame),
         A::DropReady(p) => crate::dnd::apply(&mut app.state, &p),
+        // ---- stickers P10b: the clipboard ----
+        A::Clip(c) => crate::clip::run(app, c),
     }
 }
 

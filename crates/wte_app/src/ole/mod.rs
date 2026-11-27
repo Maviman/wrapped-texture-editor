@@ -1,7 +1,12 @@
 //! Stickers P10a (STICKER_PLAN 6.1, 6.2; ARCHITECTURE 8.17): WTE's own OLE drag and drop on Windows, hand-written
 //! `raw-dylib` FFI (no new crate). This part is the drop target: `install` swaps winit's `IDropTarget` (which reads
 //! `CF_HDROP` only and loses the drop point) for WTE's (`drop_target.rs`), whose callbacks queue `OleEvent`s here; the
-//! app drains them in `dnd::handle`. The clipboard (P10b) and drag out (P11) add to this module.
+//! app drains them in `dnd::handle`. Drag out (P11) adds to this module.
+//!
+//! Stickers P10b (6.1, 6.3): the clipboard (`clipboard.rs`: a trait with the real Windows clipboard and an in-memory
+//! one for self-tests and tests) and the key subclass (`subclass.rs`), which queues `OleEvent::Chord(Paste)` for
+//! Ctrl+V / Shift+Insert before winit sees the key; `raw_input_hook` takes the chords (`take_chords`) in the same
+//! frame (`clip::input_hook`).
 //!
 //! Rules: the callbacks run on the UI thread inside winit's message dispatch, outside eframe's frame: they only push
 //! small events (and `Drop` the copied data) to the queue and ask for a repaint. `install` runs in interactive runs; a
@@ -17,6 +22,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use eframe::egui;
 
+pub mod clipboard;
 pub mod formats;
 
 #[cfg(windows)]
@@ -25,6 +31,17 @@ pub mod com;
 pub mod data_object;
 #[cfg(windows)]
 pub mod drop_target;
+#[cfg(windows)]
+pub mod subclass;
+
+/// Stickers P10b (6.3): a clipboard key chord. The subclass queues `Paste`; the self-test's `Step::Chord` makes all
+/// three (Copy and Cut as the `Event::Copy` / `Event::Cut` egui-winit makes, Paste through this queue).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Chord {
+    Copy,
+    Cut,
+    Paste,
+}
 
 /// What a drag carries, for the overlay and the drop marker (`Hover`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -66,6 +83,8 @@ pub enum OleEvent {
     Leave,
     /// `Drop`: the copied items and how many were not taken because of a cap (6.1).
     Drop { pos: [f32; 2], items: Vec<DropItem>, skipped: usize },
+    /// Stickers P10b: a clipboard chord of the key subclass (taken by `take_chords` in `raw_input_hook`).
+    Chord(Chord),
 }
 
 /// At most this many events wait in the queue (the oldest go first; a stream of `Hover`s is all that can pile up).
@@ -103,10 +122,32 @@ pub fn pending() -> bool {
     !queue().is_empty()
 }
 
-/// Drops the queued events (a self-test run with `WTE_OLE=1`: a real drag must not reach a scenario).
+/// Drops the queued events (a self-test run with `WTE_OLE=1`: a real drag or key chord must not reach a scenario).
 pub fn discard() {
     queue().clear();
 }
+
+/// Stickers P10b: takes the queued clipboard chords, in order, and leaves every other event for `dnd`.
+pub fn take_chords() -> Vec<Chord> {
+    let mut out = Vec::new();
+    queue().retain(|e| match e {
+        OleEvent::Chord(c) => {
+            out.push(*c);
+            false
+        }
+        _ => true,
+    });
+    out
+}
+
+/// The app window `install` was given (the real clipboard's owner); `None` before `install` or without one.
+#[cfg_attr(any(not(windows), test), allow(dead_code, reason = "the real clipboard of a non-test Windows build"))]
+pub fn window() -> Option<isize> {
+    let h = WINDOW.load(Ordering::Acquire);
+    (h != 0).then_some(h)
+}
+
+static WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// True when WTE's drop target is registered on the window.
 pub fn installed() -> bool {
@@ -130,6 +171,12 @@ pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
                 return false;
             }
         };
+        WINDOW.store(hwnd, Ordering::Release);
+        // Stickers P10b: the key subclass (above the pen subclass, which `WteApp::new` installed first).
+        match subclass::install(hwnd) {
+            Ok(line) => log::info!("{line}"),
+            Err(e) => log::warn!("ole: the key subclass could not be installed ({e}); Ctrl+V pastes text only (Edit > Paste works)"),
+        }
         match register(hwnd) {
             Ok(line) => {
                 log::info!("{line}");

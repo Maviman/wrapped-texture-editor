@@ -12,6 +12,7 @@ mod action;
 mod app;
 mod brush_flows;
 mod cli;
+mod clip;
 mod companion;
 #[cfg(test)]
 mod control_sweep;

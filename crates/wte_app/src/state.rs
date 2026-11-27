@@ -1671,6 +1671,11 @@ pub struct AppState {
     pub drop_ui: crate::dnd::DropUi,
     /// Stickers P6b (STICKER_PLAN 3.7): the styles of Copy Style (app state, never the OS clipboard).
     pub style_clipboard: Option<StyleStack>,
+    /// Stickers P10b (STICKER_PLAN 6.3): the clipboard - the Windows one in an interactive run, an in-memory one in a
+    /// self-test run and in every test build (`ole::clipboard::clipboard_for`).
+    pub clipboard: Box<dyn crate::ole::clipboard::Clipboard>,
+    /// Stickers P10b: the copies being encoded (`clip.rs`).
+    pub clip_ui: crate::clip::ClipUi,
     /// Stickers P9a (STICKER_PLAN 5.3, 5.6, 5.7): the editor link's sessions, watcher, launcher (the stub in a self-test
     /// run) and questions (`link/mod.rs`).
     pub link_ui: crate::link::LinkUi,
@@ -1774,6 +1779,8 @@ impl AppState {
             sticker_ui: crate::sticker::StickerUi::default(),
             drop_ui: crate::dnd::DropUi::default(),
             style_clipboard: None,
+            clipboard: crate::ole::clipboard::clipboard_for(selftest),
+            clip_ui: crate::clip::ClipUi::default(),
             link_ui: crate::link::LinkUi::new(selftest),
         }
     }

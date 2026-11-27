@@ -357,6 +357,37 @@ If dropping does nothing at all, the log says "drop target" near the top
 dropping files does not work in this run. If Photoshop or another program
 runs "as administrator" and WTE does not, Windows blocks drops between them.
 
+Copy and paste (new in this build; also in the Edit menu):
+ 11. Select a stamp (click it with the Transform tool) and press Ctrl+C.
+     Paste it into Paint, PhotoCraft or Photoshop: the picture arrives as
+     you see it in WTE, styles (outline, shadow) included. Note whether
+     the background is transparent, white or black, and in which program.
+ 12. Back in WTE press Ctrl+V: nothing is placed yet; the Stamp tool is
+     chosen with the picture (for a sticker: the sticker with its styles,
+     also in the Sticker tab's tray). Click the model: it is placed there.
+ 13. Edit > Paste at View Centre: the picture is placed at once in the
+     middle of the 3D view (one Undo step).
+ 14. In another program copy a picture (Snipping Tool, a browser's "Copy
+     image", PhotoCraft or Photoshop Ctrl+C), then Ctrl+V in WTE: the same
+     as 12. If nothing happens, a note says "Nothing WTE can paste. The
+     clipboard offers: ...". Help > Clipboard contents... shows that list
+     at any time: please write it down for each program you tried.
+ 15. Copy a picture file in Explorer (Ctrl+C on the file) and Ctrl+V in
+     WTE: the same as 12.
+ 16. In the Sticker view, select an area (Marquee, M) and press Ctrl+C,
+     then Ctrl+V: a new layer with just those pixels in the middle of the
+     canvas. Ctrl+X takes the selected pixels out of the layer (one Undo
+     step) and puts them on the clipboard.
+ 17. With no stamp selected and a painted paint layer active, Ctrl+C
+     copies that whole layer at texture size; paste it in another program.
+ 18. Text: copy a sentence in Notepad, click into the Text tool's text
+     field in WTE and press Ctrl+V: the sentence appears there (also with
+     Shift+Insert). Select text in that field, Ctrl+C, and paste it in
+     Notepad. Ctrl+C / Ctrl+V in a text field never copies or pastes a
+     stamp.
+ 19. Hold AltGr and press V on a keyboard that has AltGr (German, French,
+     ...): nothing is pasted (AltGr is not Ctrl).
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

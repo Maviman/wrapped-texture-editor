@@ -316,6 +316,21 @@ mod tests {
         }
     }
 
+    /// Stickers P10b (STICKER_PLAN 6.3): egui-winit turns Ctrl+C / Ctrl+X / Ctrl+V (and Ctrl+Insert, Shift+Insert,
+    /// Shift+Delete) into `Event::Copy` / `Cut` / `Paste`, never into key events, so a binding of them would never fire:
+    /// neither table binds one (the clipboard goes through `clip.rs`).
+    #[test]
+    fn neither_table_binds_the_clipboard_chords() {
+        for d in table().iter().chain(sticker_table()) {
+            let (m, k) = (d.shortcut.modifiers, d.shortcut.logical_key);
+            let ctrl = m.command || m.ctrl;
+            let only_ctrl = ctrl && !m.shift && !m.alt;
+            assert!(!(only_ctrl && matches!(k, Key::C | Key::X | Key::V)), "{} binds a clipboard chord {:?}", d.action_label, d.shortcut);
+            assert!(!(k == Key::Insert && (ctrl || m.shift)), "{} binds {:?}", d.action_label, d.shortcut);
+            assert!(!(k == Key::Delete && m.shift), "{} binds {:?}", d.action_label, d.shortcut);
+        }
+    }
+
     #[test]
     fn the_contract_bindings_exist() {
         let find = |m: Modifiers, k: Key| table().iter().find(|d| d.shortcut == KeyboardShortcut::new(m, k));

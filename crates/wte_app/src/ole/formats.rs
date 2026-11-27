@@ -21,7 +21,6 @@ use wte_core::PixelBuf;
 
 /// Standard clipboard formats (`winuser.h`).
 pub const CF_DIB: u16 = 8;
-#[cfg_attr(not(test), allow(dead_code, reason = "the clipboard (P10b)"))]
 pub const CF_UNICODETEXT: u16 = 13;
 pub const CF_HDROP: u16 = 15;
 pub const CF_DIBV5: u16 = 17;
@@ -324,14 +323,12 @@ pub fn build_file_group(entries: &[FileDescriptor]) -> Vec<u8> {
 }
 
 /// The text of a `CF_UNICODETEXT` block (up to the first NUL; `\r\n` becomes `\n`).
-#[cfg_attr(not(test), allow(dead_code, reason = "the clipboard (P10b)"))]
 pub fn text_from_unicode(b: &[u8]) -> String {
     let units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
     String::from_utf16_lossy(&units).replace("\r\n", "\n")
 }
 
 /// `text` as a `CF_UNICODETEXT` block (`\n` becomes `\r\n`, NUL-terminated).
-#[cfg_attr(not(test), allow(dead_code, reason = "the clipboard (P10b)"))]
 pub fn text_to_unicode(text: &str) -> Vec<u8> {
     let windows = text.replace("\r\n", "\n").replace('\n', "\r\n");
     windows.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect()

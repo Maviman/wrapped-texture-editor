@@ -55,6 +55,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             if item(ui, "Editor locations...", "", true, false) {
                 actions.push(AppAction::Link(crate::link::LinkAction::ShowEditorLocations));
             }
+            // Stickers P13 (STICKER_PLAN 7 "P13", 13.9 "P13"): the help of the editor link, drag and drop and clipboard.
+            if item(ui, "Working with PhotoCraft and Photoshop", "", true, false) {
+                actions.push(AppAction::ShowDialog(Dialog::EditorHelp));
+            }
             // Stickers P10b (STICKER_PLAN 13.5): what the clipboard offers (hand test 24).
             if item(ui, "Clipboard contents...", "", true, false) {
                 actions.push(AppAction::Clip(crate::clip::ClipAction::ShowContents));

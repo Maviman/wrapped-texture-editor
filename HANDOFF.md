@@ -16,6 +16,15 @@ and text stamps (system fonts, warp, text on a path, styles, per-gap spacing), 3
 and since round 6 **Wrap on surface** for 3D text and image stamps. Exports PNG / PSD / ORA and saves `.wtep`
 projects (format version 3).
 
+**Stickers (branch `stickers`, version 0.4.0, not landed; 5.4):** layered stickers (picture, text and shape layers with
+masks, clipping, adjustments and layer styles) edited in a **Sticker view** beside the live 3D result; layer styles
+(die-cut contour, stroke, shadow, glow, overlays, bevel) on every image, text and sticker stamp; the sticker tray and
+library; **Edit in PhotoCraft / Photoshop** through a linked PSD next to the project (WTE's own PSD reader and
+writer; Ctrl+S in the editor updates the sticker or texture paint layer in place); WTE's own Windows drop target,
+clipboard and drag out (hand-written OLE). A project that uses stickers or links is saved as **format 4**
+(`required_reader` 4: older versions refuse it with the "newer version" message); a project without them is written
+exactly as before.
+
 - `crates/wte_core` — document model, mesh/UV/texel maps, brush, stroke, stamps, text, wrap, project I/O, export.
 - `crates/wte_app` — the egui/wgpu app, tools, panels, jobs, and the **headless self-test runner** (`selftest/`).
 - `ARCHITECTURE.md` — the **binding design contract** (≈580 KB). Every round updates its own sections. Read
@@ -83,7 +92,7 @@ text_preview_path brush_hover final_bake_async wrap_surface export_selected expo
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
 companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen
 sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path sticker_drop sticker_clip sticker_dragout
-layer_link` (71; `scenarios::tests` checks the count and that every shot of a `sticker*` / `layer_link` scenario says
+layer_link sticker_flow_path` (72; `scenarios::tests` checks the count and that every shot of a `sticker*` / `layer_link` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -130,14 +139,25 @@ its row menu, the editor's save of a blue band = one "Update Linked Layer", undo
 conflict with Take, save and reopen; then Photoshop as the default editor: Layer > Edit Layer in Photoshop, an update, a
 canvas size change refused with Photoshop's sentence on the layer badge, "needs a merged picture" with the MaxCompat
 sentence; shots `layer_link_menu`, `layer_link_made`, `layer_link_updated`, `layer_link_conflict`,
-`layer_link_reopened`, `layer_link_ps_size`, `layer_link_ps_merged`).
+`layer_link_reopened`, `layer_link_ps_size`, `layer_link_ps_merged`);
+P13: `sticker_flow_path` (PATH = a model; gate: `ABeautifulGame.glb`, `DamagedHelmet.glb`; the user's whole sticker
+workflow: a photo dropped from Explorer onto the model, Remove Background and a text layer in the Sticker view, the
+Classic sticker preset, Wrap, Save As, "Edit in <default editor>" (PhotoCraft as the default: the button's wording
+comes from the default editor) with the stub, the sticker moved and scaled in WTE (the link and the file untouched),
+the editor's save with a new layer = one "Update Linked Sticker" that keeps the placement, the styles and the text,
+a second picture dropped and the style copied onto it, a paint stroke linked with "Edit Layer in" and updated, Save
+(neither PSD rewritten), reopen (the same stickers, styles, wrap, links and composites), then export one layer, a
+selection and everything as one zip with the `export_flow` checks; shots `flow_dropped`, `flow_sticker_view`,
+`flow_styled_wrapped`, `flow_linked`, `flow_updated`, `flow_style_pasted`, `flow_saved`, `flow_reopened`; run it with `WTE_OLE=1
+WTE_PEN_SUBCLASS=1` too).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
 `*_path` scenarios need a PATH argument (a model); `objects_path` needs a model with **several objects** (gate:
 `ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model; `objects_flow_path` (the whole user workflow: hide the board,
 paint / stamp / wrap / text a pawn, save, reopen, export) needs a model whose board-like object has its own texture set
-(gate: `ABeautifulGame.glb`). Branch
+(gate: `ABeautifulGame.glb`); `sticker_flow_path` needs any textured model (gate: `ABeautifulGame.glb`,
+`DamagedHelmet.glb`). Branch
 `objects-tabs`: `side_tabs` (the two tab groups of the side panel; also run at `--size 900x600` and `640x480`) and
 `objects` (the built-in Three Objects sample) need no PATH. `tools/objtabs/sweep.sh EXE OUT tools/objtabs/jobs_gate.txt`
 runs the whole gate sweep (sequential, off-screen). `export_flow` takes an optional PATH (a model or a saved `.wtep`):
@@ -199,7 +219,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
-| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P11 built and checked; P12 built (linked texture paint layers, Paste as New Paint Layer); P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
+| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | built on branch `stickers` (from `main` b2fb8f5): P0-P12 built and checked, P13 (docs, licences, version 0.4.0, `sticker_flow_path`) built; S1 / S2 and the gate next; **not merged, no tag, no release**; hand tests owed (5.4) | — |
 | companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -293,12 +313,21 @@ links folder; the editor's Ctrl+S = one undo step "Update Linked Layer"; the sam
 Save As and load rules as a sticker; a file of another canvas size is refused with "<layer> is W x H in <editor>; the
 texture is w x h. Undo the size change in <editor>."; the Layers tab shows a linked active layer's badge and buttons;
 manifest `layer_links` and archive `links/l<id>.psd`; Edit > Paste as New Paint Layer, also the right-click menu of the
-Layers tab's "New").
-Next: P13 docs and version 0.4.0; S1 / S2 only if everything is green; then the gate.
+Layers tab's "New"), **P13** docs and the version (Help > **Working with PhotoCraft and Photoshop**: how the link
+works, what comes back and what is lost, the limits of the "already open" guard, no drag out of either editor, the
+table "In Photoshop you... / In WTE", Maximize Compatibility = Always, "Leave as is" for colour profiles, the tab bar,
+Export Clipboard, the administrator note, drag and drop / copy and paste, the trademark sentence; Help > Shortcuts
+lists the Sticker view's keys; About > **Licences...** shows `licenses/photocraft-MIT.txt` word for word and the
+trademark sentence; the installer installs `licenses\*` into `{app}\licenses` (CI stages it, the smoke test checks
+it); README "Stickers", "Working with PhotoCraft and Photoshop", "Licences"; release notes 0.4.0; `dist/HOW_TO_TEST.txt`
+chapters "Working with Photoshop" (hand tests 19-25 word for word from plan 13.6) and "Stickers: the hand tests to
+report (1-25)"; the workspace version **0.4.0** (no tag, no release); scenario `sticker_flow_path`).
+Next: S1 / S2 only if everything is green; then the gate (plan 8.6) and its completeness critic.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open
-ones listed here. **Owed so far:** all of them (the drop part of hand test 7 can be tried now: `dist/HOW_TO_TEST.txt` "Drag, drop, copy,
+ones listed here. The list to report from is `dist/HOW_TO_TEST.txt` "Stickers: the hand tests to report (1-25)".
+**Owed so far:** all of them (the drop part of hand test 7 can be tried now: `dist/HOW_TO_TEST.txt` "Drag, drop, copy,
 paste", now with copy / paste (11-19) and drag out (20-27); Photoshop with P9b); the
 "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b, P7a, P7b and P8 parts) can be tried now: styles, tray, Edit
 before placing, the shared-picture question, Export Picture, the five tabs; painting with the mouse and a pen (part 2);
@@ -393,6 +422,10 @@ shares texels with its mirror half); ABeautifulGame's blobs on other pieces come
 5. The 9 round-4 fuzz repro jobs were never rebuilt (round 5 report, "Stage-1 open points" 4).
 6. All timings in the reports were measured on the old laptop under memory pressure (often < 1 GB free); none of
    them hold on the new machine.
+7. **Stickers (branch `stickers`, 5.4):** the user's hand tests 1-25 are owed (landing needs 1, 3, 4, 7, 8, 12, 15,
+   19, 21, 23, 24 or "land, tests owed"); everything said about the latest PhotoCraft (read at HEAD only) and about
+   Photoshop CC 2019 (plan 13.7 A1-A8) is unverified until those tests; S1 (GrabCut) / S2 (live PNG copy, watch folder)
+   are not built; the gate has not run. Open minors are in `docs/notes/sticker/check-P*.md`.
 
 ## 9. Things for the new session to look over and confirm
 

@@ -156,6 +156,8 @@ fn every_menu_entry_queues_its_action() {
         (&["Help", "About"], |a, _| matches!(a, [A::ShowDialog(Dialog::About)])),
         // Stickers P9b: the editors' programs and the default editor.
         (&["Help", "Editor locations..."], |a, _| matches!(a, [A::Link(crate::link::LinkAction::ShowEditorLocations)])),
+        // Stickers P13: the help of the editor link.
+        (&["Help", "Working with PhotoCraft and Photoshop"], |a, _| matches!(a, [A::ShowDialog(Dialog::EditorHelp)])),
     ];
     for (path, check) in cases {
         let actions = app.menu(path);

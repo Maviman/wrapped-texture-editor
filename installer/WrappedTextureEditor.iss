@@ -3,7 +3,8 @@
 ; Built by .github/workflows/installer.yml; by hand:
 ;   ISCC /DAppVersion=0.1.0 /DAppVersionNumeric=0.1.0.0 /DStageDir=<staged files> /DOutputDir=<out> installer\WrappedTextureEditor.iss
 ; StageDir holds the files under their installed names (see the workflow's "Stage" step):
-;   Wrapped Texture Editor.exe, app.ico, Start - DirectX 12.cmd, Start - Vulkan without overlays.cmd, Examples\*
+;   Wrapped Texture Editor.exe, app.ico, Start - DirectX 12.cmd, Start - Vulkan without overlays.cmd, Examples\*,
+;   licenses\* (the licence texts of code the editor adapts; About > Licences... shows the same text)
 ;
 ; Silent use:  Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART [/COMPONENTS=...] [/TASKS=...] [/LOG=file]
 ; Uninstall:   unins000.exe /VERYSILENT [/PURGEUSERDATA]   (without /PURGEUSERDATA a silent uninstall keeps user data)
@@ -85,6 +86,8 @@ Name: "assoc"; Description: "Open .wtep &project files with {#AppName}"; GroupDe
 [Files]
 Source: "{#StageDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Components: main
 Source: "{#StageDir}\app.ico"; DestDir: "{app}"; Flags: ignoreversion; Components: main
+; Stickers (v0.4.0): the licence of the PhotoCraft code the sticker editor adapts (MIT), always installed with the editor.
+Source: "{#StageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs; Components: main
 Source: "{#StageDir}\Start - DirectX 12.cmd"; DestDir: "{app}"; Flags: ignoreversion; Components: gpulaunchers
 Source: "{#StageDir}\Start - Vulkan without overlays.cmd"; DestDir: "{app}"; Flags: ignoreversion; Components: gpulaunchers
 Source: "{#StageDir}\Examples\*"; DestDir: "{app}\Examples"; Flags: ignoreversion recursesubdirs; Components: examples

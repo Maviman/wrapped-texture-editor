@@ -345,6 +345,92 @@ groups and other blend modes make the sticker one finished picture; 16-bit
 files come back as 8-bit; parts outside the canvas are cut off. There is
 no drag from PhotoCraft into WTE: use Ctrl+S on a linked sticker.
 
+Working with Photoshop (new in this build)
+------------------------------------------
+The same link works with Photoshop (CC 2019 is what this was made for).
+WTE finds Photoshop by itself (it only reads the registry); it never starts
+Photoshop unless you click "Edit in Photoshop". Before you start: in
+Photoshop set Edit > Preferences > File Handling > "Maximize PSD and PSB
+File Compatibility" to Always, and keep Edit > Preferences > General >
+"Export Clipboard" on. If Photoshop asks about a colour profile when it
+opens a sticker, answer "Leave as is". Write down anything that differs.
+ 19. Round trip. A sticker with a picture, a text and a shape layer. Edit
+     in... > Photoshop (first time: the chooser; Photoshop is found by
+     itself). (a) The file opens as a tab in Photoshop without a warning
+     (write down any message, also a colour-profile question: answer
+     "Leave as is"). (b) Paint on the picture layer, Ctrl+S (if Photoshop
+     asks about maximizing compatibility, leave it on): within about a
+     second the model in WTE updates, the text is still an editable text
+     layer in WTE, the badge reads "linked". (c) Once more.
+ 20. New layers. In Photoshop add an empty layer and paint on it, add a
+     text layer, rename one layer, delete one, drag one to another place
+     in the stack, Ctrl+S: WTE shows the same stack; the Photoshop text is
+     a picture layer; WTE's own untouched layers are what they were.
+ 21. Merged path. Add a layer style (Stroke or Drop Shadow) in Photoshop,
+     Ctrl+S: WTE shows the finished picture and the note that names layer
+     effects; Undo in WTE brings the layers back. Remove the style, add a
+     shape layer, Ctrl+S: layers again, the shape is a picture layer (the
+     document is 8-bit and Maximize Compatibility is on). Then File >
+     Place Embedded a picture (a smart object), Ctrl+S: the finished
+     picture again, with the note that names smart objects.
+ 22. Maximize Compatibility off. (If Photoshop showed its "Maximize
+     Compatibility" box at the saves before, write down whether it came at
+     every save or only once.) Preferences > File Handling > Maximize PSD
+     and PSB File Compatibility: Never. With a layer style on, Ctrl+S: WTE
+     does not update and the badge reads "needs a merged picture" with the
+     sentence that names the Photoshop preference. Set it to Always,
+     Ctrl+S: WTE updates.
+ 23. Drag into Photoshop. Drag a sticker thumbnail from WTE onto an open
+     Photoshop document: it becomes a layer (press Enter). Onto Photoshop's
+     tab bar: it opens as a document. Drag the PSD handle onto the tab bar,
+     Ctrl+S there: WTE updates. Afterwards the next mouse move in WTE drags
+     nothing.
+ 24. Copy and paste, both ways. In Photoshop select a layer with
+     transparent parts, Select All, Ctrl+C; in WTE Ctrl+V: the sticker
+     follows the pointer, a click places it. Note: transparent / white /
+     black background, and what Help > Clipboard contents... lists. (If
+     nothing arrives: Photoshop > Preferences > General > Export Clipboard
+     must be on.) Then Ctrl+C on a stamp in WTE, Ctrl+V in Photoshop: a
+     new layer; note the background again.
+ 25. The rest. Click Edit in Photoshop twice: Photoshop shows the tab that
+     is already open, no second copy, WTE asks nothing. Change the sticker
+     in WTE and in Photoshop, save: the conflict question. Send to
+     Photoshop while the file is open there: the warning, and the file is
+     replaced (if WTE says it "could not be replaced because another
+     program has it open", write that down: assumption A8); then Ctrl+S in
+     Photoshop: WTE asks instead of updating. Image > Mode > 16
+     Bits/Channel, Ctrl+S: updates. Image > Mode > CMYK Color, Ctrl+S: no
+     update, the badge says how to switch back. Edit Layer in Photoshop on
+     a texture paint layer: paint, Ctrl+S, the model updates. While
+     Photoshop (or a full-screen game) is in front, WTE never comes
+     forward, flashes or beeps.
+In Photoshop you... -> in WTE:
+  - paint on a layer, add a layer, paste, move, rename, reorder, hide,
+    change opacity or one of the seven blend modes, add or paint a layer
+    mask, clip a layer -> comes back layer by layer; untouched WTE layers
+    stay text / shape / live
+  - add an empty layer -> an empty picture layer; everything else stays
+  - add a text layer -> a new picture layer (pixels); still text in the PSD
+  - add a shape or a fill layer -> a new picture layer when Photoshop
+    stored its pixels (an 8-bit document with Maximize Compatibility on);
+    in a 16-bit document one finished picture; with Maximize Compatibility
+    off the "needs a merged picture" message
+  - add a smart object (also File > Place Embedded), a layer style, an
+    adjustment layer, a group or artboard, a vector mask on a pixel layer,
+    mask feather / density, Fill below 100 %, another blend mode -> the
+    sticker comes back as one finished picture (needs Maximize
+    Compatibility on); Undo in WTE restores the layers
+  - flatten the image -> one picture layer
+  - switch to 16 bits -> works, reduced to 8
+  - switch to CMYK, Lab, Indexed, 32 bits... -> nothing is applied; the
+    badge says how to switch back
+There is no drag from Photoshop into WTE (Photoshop cannot drag a layer or
+a document out to another program): use Ctrl+S on a link, copy / paste, or
+drag the saved file from Explorer. If Photoshop runs "as administrator" and
+WTE does not, Windows blocks drags and drops between them; "Edit in
+Photoshop" still works. The same text is in Help > Working with PhotoCraft
+and Photoshop.
+
 Drag, drop, copy, paste (new in this build)
 -------------------------------------------
 WTE now takes drops itself, so a picture lands where you let it go.
@@ -446,6 +532,92 @@ Files dragged out are written to %LOCALAPPDATA%\WrappedTextureEditor\dragout
 only when they are older than a day and nobody changed them: a file you
 saved there yourself (for example with PhotoCraft's Save As) stays. A drag
 you cancel with Esc removes its file at once.
+
+Stickers: the hand tests to report (1-25)
+-----------------------------------------
+These are the hand tests the sticker work is landed on. Please report each
+one as "works", "does not work: <what happened>" or "not tried". Tests 1,
+3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 are needed before this build goes to
+the main version (or say "land, tests owed"). The chapters above have more
+detail; the number in brackets is the step there.
+  1. PhotoCraft v0.2.0 round trip ("Working with PhotoCraft" 1-2). A
+     sticker with a picture, a text and a shape layer: Edit in PhotoCraft
+     (save the project when asked; locate photocraft.exe once), paint on
+     the picture layer, Ctrl+S. Expected: the model updates, the text is
+     still an editable text layer in WTE; once more, it updates again.
+     With a picture two stamps use: "Edit all / Only this one" comes
+     first, and "Only this one" leaves the other stamp unchanged after the
+     update.
+  2. A layer effect in PhotoCraft (3), save. Expected: WTE shows the
+     finished picture and a note that names the effect; Undo brings the
+     layers back.
+ 2b. A text and a layer mask added in PhotoCraft (no effects), save.
+     Expected: the new text is a new picture layer in WTE, the mask is a
+     mask in WTE, and WTE's own layers (the text still text) are all
+     there.
+  3. Edit in PhotoCraft twice (6). Expected with v0.2.0 / the portable
+     copy: "This sticker is already open in PhotoCraft..." With the
+     installed build: write down whether a second tab opens or the first
+     comes forward.
+  4. Change the sticker in WTE and in PhotoCraft, save (5). Expected: the
+     conflict question; try both answers. Then Send to PhotoCraft while
+     PhotoCraft has the file open: the warning; save in PhotoCraft: WTE
+     asks instead of updating silently.
+  5. Close WTE, change the PSD, reopen the project (8). Expected: "Linked
+     sticker <name> changed while the project was closed." Also: link a
+     sticker, close WTE without saving (9). Expected: the prompt names the
+     sticker; a later save in PhotoCraft breaks nothing, the PSD is still
+     in the links folder.
+  6. After updating PhotoCraft to the latest: 1, 2 and 2b again; with
+     Maximize PSD and PSB File Compatibility off (13). Expected: the
+     "needs a merged picture" message only when the file needs the
+     finished picture. Everything about the latest version was read in
+     its source, not tried: write down what differs.
+  7. Drag a picture from Explorer onto the model, from a browser, and onto
+     the sticker canvas ("Drag, drop, copy, paste" 1, 5, 6). Expected: it
+     lands where you let go, one Undo step each.
+  8. Drag a sticker thumbnail and a layer row to the desktop (20-22).
+     Expected: a PNG appears, with the border and shadow. Onto PhotoCraft
+     v0.2.0 (23). Expected: it opens as a document. Onto the latest
+     PhotoCraft's picture and tab strip. Expected (unverified): becomes a
+     layer / opens; write down what really happens.
+  9. Drag the PSD handle onto PhotoCraft (25), Ctrl+S there. Expected: WTE
+     updates.
+ 10. After any drag out (26): the next mouse move in WTE drags nothing;
+     reordering layers still works. A day later, files you saved yourself
+     into the drag-out folder are still there.
+ 11. The same drags with the pen (27). Expected: may not work; write down
+     what happens.
+ 12. Ctrl+C in PhotoCraft, Ctrl+V in WTE (14, 12): the sticker follows the
+     pointer, a click places it; and the other way (11). Expected:
+     transparency survives. Also Ctrl+V with a picture copied in Paint or
+     a browser.
+ 13. Paste text from Notepad into the Text tool's field with Ctrl+V and
+     with Shift+Insert; copy text out with Ctrl+C (18). Expected: the text
+     arrives both ways; no stamp is copied or pasted.
+ 14. Stay in PhotoCraft (or a full-screen game) and press Ctrl+S
+     ("Working with PhotoCraft" 12). Expected: WTE does not come to the
+     front, its taskbar button does not flash, no sound plays; a conflict
+     or "changed while closed" question waits inside WTE's window.
+ 15. Tablet companion: enter the Sticker view, paint with the S Pen with
+     pressure, erase, drag one finger (the canvas pans), pinch-zoom the
+     canvas, add a style, Revert, Done ("Stickers, part 2" 8, "Stickers,
+     part 3" 12). Expected: each works as with the mouse; pressure changes
+     the stroke width.
+ 16. Open a project made with v0.3.0 and export ("Stickers, part 1" 10).
+     Expected: the files equal a v0.3.0 export.
+ 17. Edit Layer in PhotoCraft on a texture paint layer ("Working with
+     PhotoCraft" 16): paint, Ctrl+S. Expected: the model updates (one Undo
+     step "Update Linked Layer"); Undo works.
+ 18. In the Sticker view press V, W, H, F, X, Delete (with and without a
+     selection), Esc. Expected: each does what Help > Shortcuts lists
+     under "In the Sticker view"; outside the view the same keys do what
+     they did before.
+ 19-25: the chapter "Working with Photoshop" above (19, 21, 23 and 24 are
+     needed before landing).
+Also try once: Help > About > Licences... shows the licence text and a
+trademark line; Help > Working with PhotoCraft and Photoshop shows the
+help; Help > About says Version 0.4.0.
 
 Pen tablets (new in this build)
 -------------------------------

@@ -1,3 +1,21 @@
+## What's new in 0.4.0
+
+- **Stickers:** give any image, text or sticker stamp a white die-cut border, a stroke, a shadow, a glow, an overlay
+  or a bevel (Sticker tab; presets such as Classic sticker; Copy / Paste Style). Press **4** on a stamp to open the
+  **Sticker view**: the sticker on the left, the model on the right, following every change. A sticker has layers -
+  pictures, text and shapes - and you can paint, erase, fill, select, cut out a background (Remove Background, Magic
+  Eraser, Color to Alpha), crop, resize, mask and clip, with the mouse, a pen or the tablet companion. The sticker
+  tray and a sticker library keep stickers for later.
+- **Edit in PhotoCraft or Photoshop:** "Edit in <editor>" opens a sticker, or a texture paint layer, in your editor;
+  press Ctrl+S there and the model updates by itself, in place. Layers come back one by one; text you did not change
+  stays text. Help > Working with PhotoCraft and Photoshop explains the settings (in Photoshop: Maximize PSD and PSB
+  File Compatibility = Always).
+- **Drag and drop, copy and paste:** drop pictures from Explorer or a browser exactly where you want them on the
+  model; drag stickers and layers out as PNG files; copy and paste pictures and text with other programs.
+- Projects with stickers need this version or newer to open; projects from 0.3.0 open and export exactly as before.
+- Help > About > Licences... lists the licence of the PhotoCraft code the sticker editor adapts (also installed in
+  the `licenses` folder).
+
 ## What's new in 0.3.0
 
 - **Pen tablets and pen displays:** pen pressure now changes the brush size (and, if you choose, the flow) in 3D and

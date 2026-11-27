@@ -1464,6 +1464,12 @@ pub enum Dialog {
     /// Stickers P9b (STICKER_PLAN 13.1): Help > Editor locations... - the programs of Photoshop, PhotoCraft and another
     /// editor (Browse / Clear each) and the default editor (`dialogs/editors.rs`).
     EditorLocations,
+    /// Stickers P13 (STICKER_PLAN 4.0, 13.8 D6): About > Licences... - the MIT notice of the adapted PhotoCraft code and
+    /// the trademark sentence (`dialogs/about.rs`).
+    Licences,
+    /// Stickers P13 (STICKER_PLAN 7 "P13", 13.9 "P13"): Help > Working with PhotoCraft and Photoshop - what comes back,
+    /// what is lost, the guard's limits, the Photoshop settings, drag and drop (`dialogs/editor_help.rs`).
+    EditorHelp,
 }
 
 /// User preferences, stored as JSON by `prefs.rs`. Every field falls back to its default when missing.

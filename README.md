@@ -25,18 +25,55 @@ Silent install: `Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART [/COMPONENTS
 [`.github/workflows/installer.yml`](.github/workflows/installer.yml) when a `v<version>` tag matching `Cargo.toml` is
 pushed; the installer script is [`installer/WrappedTextureEditor.iss`](installer/WrappedTextureEditor.iss).
 
-## Stickers (in progress, branch `stickers`)
+## Stickers (version 0.4.0, branch `stickers`)
 
 - Every image, text and sticker stamp can have **layer styles**: a die-cut contour (the white sticker border), stroke,
   drop shadow, inner shadow, outer and inner glow, colour and gradient overlay, bevel, with presets (Classic sticker,
   Outline, Glow, Badge, Shadow only). The **Sticker** tab of the side panel styles the selected stamps without opening
   an editor; Copy / Paste / Clear Style (also in the Edit menu) move a style between stamps.
 - A **sticker** is a small layered picture: open a stamp in the **Sticker view** (key 4, or Edit Sticker) to change its
-  layers with the model beside it. The **sticker tray** keeps the project's stickers: make one from a picture or blank,
-  place it with the Stamp tool (several stamps can share one; editing a shared one asks "Edit all / Only this one"),
-  "Edit before placing", Export Picture as PNG.
-- Coming in this branch: painting, selections and cut-out in the sticker editor, text and shape layers, and editing a
-  sticker in PhotoCraft or Photoshop with Ctrl+S updating the model.
+  layers with the model beside it, which follows every change. Picture, text and shape layers with opacity, blend
+  mode, mask, clipping, adjustments and their own styles; Brush, Eraser (pen pressure), Fill, Gradient, Eyedropper;
+  Marquee, Lasso, Magic Wand, Magic Eraser, Remove Background, Color to Alpha, Defringe, Blur, Sharpen; Move with
+  transform handles, Crop, Trim, Canvas Size, Resize, Rotate, Flip, Merge Down, Flatten. Help > Shortcuts lists the
+  Sticker view's keys.
+- The **sticker tray** keeps the project's stickers: make one from a picture or blank, place it with the Stamp tool
+  (several stamps can share one; editing a shared one asks "Edit all / Only this one"), "Edit before placing", Export
+  Picture as PNG (in the Sticker view also Sticker > Export as PSD), and a **library** folder of `.wtes` sticker files
+  shared between projects.
+- Projects with stickers are saved as project format 4 (older versions say the project was made by a newer version);
+  projects made with 0.3.0 open and export exactly as before.
+
+## Working with PhotoCraft and Photoshop
+
+- **Edit in <editor>** (Sticker tab, Layer menu, a layer's right-click menu; "Edit in..." lists every editor) opens a
+  sticker, or a texture paint layer, in PhotoCraft or Photoshop through a linked PSD file in `<project>_links\`. Press
+  **Ctrl+S** there and the sticker updates on the model by itself, in place; moving or scaling the sticker in WTE never
+  touches the link. WTE never starts an editor by itself and never comes to the front when the editor saves. The
+  project must be saved first; WTE never rewrites the linked file at a project save.
+- Layers come back one by one (names, visibility, opacity, seven blend modes, masks, clipping); WTE's own text and
+  shape layers you did not change stay editable. Layer effects, adjustment layers, groups, smart objects (Photoshop)
+  and other blend modes make the sticker come back as one finished picture (Undo brings the layers back); WTE's
+  styles are not written into the file and are added again to what comes back.
+- **Photoshop:** set Edit > Preferences > File Handling > "Maximize PSD and PSB File Compatibility" to Always; answer
+  "Leave as is" to a colour-profile question; drop the "PSD" handle on Photoshop's tab bar to keep it linked. 16-bit
+  files work; CMYK, Lab, Indexed and 32-bit files are refused with a sentence that says what to choose in Photoshop.
+- **Drag and drop, copy and paste:** pictures dropped from Explorer or a browser land where you let them go (on the
+  model, the 2D view, the sticker canvas, a layer row); a layer row, the Sticker tab's picture or a tray sticker dragged
+  out of the window becomes a PNG; Ctrl+C / Ctrl+V move pictures and text to and from other programs. There is no drag
+  out of PhotoCraft or Photoshop into WTE (use Ctrl+S on a link, copy / paste, or the saved file).
+- Help > **Working with PhotoCraft and Photoshop** has the details; the hand tests are in `dist/HOW_TO_TEST.txt`.
+
+## Licences
+
+Wrapped Texture Editor is MIT-licensed (`Cargo.toml`). Parts of the sticker editor (layer styles, selections,
+cut-out, adjustments, shapes) are adapted from PhotoCraft's source code under the MIT licence in
+[`licenses/photocraft-MIT.txt`](licenses/photocraft-MIT.txt); the installer puts that file into the program's
+`licenses` folder and Help > About > **Licences...** shows it. The PSD test files under
+`crates/wte_core/tests/fixtures/psd/photoshop/` come with their own licence file there and are not shipped.
+
+Adobe and Photoshop are either registered trademarks or trademarks of Adobe in the United States and/or other
+countries. PhotoCraft belongs to its authors. Wrapped Texture Editor is not affiliated with or endorsed by either.
 
 ## Pen tablets
 

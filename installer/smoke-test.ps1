@@ -70,7 +70,7 @@ Check ($entry.DisplayVersion -eq $Version) "Add/Remove Programs shows version $V
 Check ($entry.UninstallString -match 'unins\d+\.exe') 'Add/Remove Programs has an uninstaller'
 Check ((Resolve-Path $entry.InstallLocation).Path.TrimEnd('\') -eq $InstallDir) "installed per user into $InstallDir"
 Check (-not (Test-Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{C73E1B7D-2702-4D07-9460-D71FB97FD2B4}_is1')) 'nothing written to HKLM'
-foreach ($f in @($ExeName, 'app.ico', 'Start - DirectX 12.cmd', 'Start - Vulkan without overlays.cmd', 'Examples\torus_knot.obj')) {
+foreach ($f in @($ExeName, 'app.ico', 'Start - DirectX 12.cmd', 'Start - Vulkan without overlays.cmd', 'Examples\torus_knot.obj', 'licenses\photocraft-MIT.txt')) {
     Check (Test-Path (Join-Path $InstallDir $f)) "installed $f"
 }
 foreach ($l in @("$AppName.lnk", "$AppName (DirectX 12).lnk", "$AppName (Vulkan without overlays).lnk")) {

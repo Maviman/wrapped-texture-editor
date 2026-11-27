@@ -105,6 +105,8 @@ impl FullApp {
             Dialog::StickerShared { .. } => "StickerShared",
             Dialog::Link(_) => "Link",
             Dialog::EditorLocations => "EditorLocations",
+            Dialog::Licences => "Licences",
+            Dialog::EditorHelp => "EditorHelp",
         }
     }
 
@@ -211,6 +213,46 @@ fn about_shortcuts_and_message_dialogs_close_by_button_backdrop_and_esc() {
     a.press(Key::Escape, Modifiers::NONE);
     a.idle(1);
     assert_eq!(a.dialog_name(), "None", "Esc closes Tablet setup");
+
+    // Stickers P13 (STICKER_PLAN 4.0, 13.8 D6): About > Licences... lists the MIT notice and the trademark sentence;
+    // Back returns to About, Close and Esc close it.
+    a.menu(&["Help", "About"]);
+    a.click("Licences...");
+    a.idle(12);
+    assert_eq!(a.dialog_name(), "Licences");
+    assert!(a.h.has(crate::dialogs::about::PHOTOCRAFT_MIT), "the licence text is shown word for word");
+    assert!(a.h.has(crate::dialogs::about::TRADEMARK), "the trademark sentence is shown");
+    assert!(a.h.has(crate::dialogs::about::LICENCES_INTRO));
+    a.click("Back");
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "About");
+    a.click("Licences...");
+    a.idle(3);
+    a.click("Close");
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "None");
+    a.menu(&["Help", "About"]);
+    a.click("Licences...");
+    a.idle(3);
+    a.press(Key::Escape, Modifiers::NONE);
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "None", "Esc closes Licences");
+    // Help > Working with PhotoCraft and Photoshop: the chapters, the table's heads and the first paragraph.
+    a.menu(&["Help", "Working with PhotoCraft and Photoshop"]);
+    a.idle(12);
+    assert_eq!(a.dialog_name(), "EditorHelp");
+    for text in ["Working with PhotoCraft (and any editor)", "In Photoshop you...", "In WTE", crate::dialogs::editor_help::LINK_HELP[0]] {
+        assert!(a.h.has(text), "{text:?} is shown");
+    }
+    a.click("Close");
+    a.idle(1);
+    assert_eq!(a.dialog_name(), "None");
+    // The Shortcuts dialog lists the Sticker view's keys too.
+    a.menu(&["Help", "Shortcuts"]);
+    a.idle(12);
+    assert!(a.h.has("In the Sticker view (key 4)") && a.h.has("Magic Wand"), "the Sticker view's keys are listed");
+    a.press(Key::Escape, Modifiers::NONE);
+    a.idle(1);
 
     a.app.state.dialog = Dialog::Message { title: "Problem".into(), lines: vec!["line one".into()] };
     a.idle(2);

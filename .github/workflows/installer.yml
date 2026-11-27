@@ -85,6 +85,8 @@ jobs:
             Copy-Item -LiteralPath "test-assets\shapes\$f" "$stage\Examples\"
           }
           Copy-Item installer\EXAMPLES.txt "$stage\Examples\README.txt"
+          New-Item -ItemType Directory -Force -Path "$stage\licenses" | Out-Null
+          Copy-Item licenses\* "$stage\licenses\"
           Get-ChildItem -Recurse $stage | Select-Object FullName, Length | Format-Table -AutoSize
 
       - name: Inno Setup

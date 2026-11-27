@@ -8888,8 +8888,12 @@ scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P
   the sticker's key at the end, no full recomposite at any time (`LiveCounters::full_composites`, `canvas_uploads`).
   **The model:** while the stroke is open, at most every 100 ms (`PREVIEW_EVERY`) and only after new paint, a Preview job
   (`sticker_preview_job`) renders the sticker with its styles at the users' Preview scale; `apply_sticker_preview` bakes
-  it (no history); a job still running is not started twice (`most_previews_running` = 1). The stroke's end bakes the
-  Final (deferred to the bake jobs). Jobs render snapshots and change nothing; results that no longer fit are dropped;
+  it (no history); a job still running is not started twice. P7a check: every job thread is counted while it runs
+  (`RenderJobs::preview_alive` / `canvas_alive`, a dropped one included: its render still takes memory and the cores), a
+  Preview or restyle job starts only when no thread of its kind runs (a restyle waits for the dropped restyle of an
+  earlier stroke; the unstyled picture stays meanwhile), and `most_previews_running` / `most_restyles_running` are the
+  real counts (before the check a quick series of strokes on a styled layer ran a restyle per stroke at once). The
+  stroke's end bakes the Final (deferred to the bake jobs). Jobs render snapshots and change nothing; results that no longer fit are dropped;
   `live::pending` keeps the self-test's `WaitIdle` waiting until the live canvas and its jobs are done.
 - **Guard rules.** A stroke is `CanvasDrag::Stroke { painted }`: `drag_moved` is true once it painted, so the dispatch
   guard's Undo takes back the stroke only (`sticker_stroke_cancel`, no entry); Save / Export finish it (one entry);
@@ -8902,7 +8906,10 @@ scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P
   unstyled layer; pressure changes the width and the Eraser erases; Esc / Save / Undo / a tool switch; locked, hidden and
   text layers with the Rasterize offer for each paint tool; the E6 question before a stroke; Fill of a region and of a
   selection; the gradient in a selection, Reverse and the stop editor; the Eyedropper; the mask commands and Paint on mask;
-  the selection dropped with the artboard), the updated `sticker::tests` (the unbuilt-tool status with the Marquee);
+  the selection dropped with the artboard; P7a check `k7a_check_*`: quick strokes on a styled layer with the job threads
+  held run one restyle at a time and end as a fresh full render, stroke mode on a turned / scaled layer and on a moved
+  layer across the artboard edge, a selection that excludes the stroke, every paint tool on a shape layer), the updated
+  `sticker::tests` (the unbuilt-tool status with the Marquee);
   scenarios `sticker_edit`, `sticker_pen` (8.11); core `k7a_*` (9.1).
 
 ---

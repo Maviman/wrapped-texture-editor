@@ -16,8 +16,15 @@
 //
 // Jobs are plain named threads with a channel (like `stamp_bakes::warm_up`): they render a snapshot of the sticker and
 // change nothing; a result that no longer fits (another stroke, an undo, a closed view) is dropped.
+//
+// P7a check: a dropped job's thread runs on until its render is done; every thread is counted while it runs
+// (`RenderJobs::preview_alive` / `canvas_alive`), and a new job of the same kind starts only when none runs. Before
+// the check a quick series of strokes on a styled layer started a restyle per stroke while the earlier ones still ran
+// (each one a whole render with its style buffers, plan 8.4: up to 256 MB extra at 4096 px), and the "at most one
+// Preview job" counter was set to 1 without looking.
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -64,6 +71,13 @@ pub(crate) struct RenderJobs {
     canvas: Option<(mpsc::Receiver<StickerRenderOutput>, CanvasKey)>,
     /// When the last Preview job started.
     last_preview: Option<Instant>,
+    /// P7a check: the Preview / restyle threads still running, a dropped one included (its result is not wanted, but
+    /// its render still takes memory and the cores): no second one starts beside it.
+    preview_alive: Arc<AtomicU64>,
+    canvas_alive: Arc<AtomicU64>,
+    /// Tests: while set, the job threads of this editor wait before they finish (a slow render, deterministically).
+    #[cfg(test)]
+    pub(crate) hold: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RenderJobs {
@@ -82,8 +96,10 @@ pub struct LiveCounters {
     pub regions: u64,
     pub previews_started: u64,
     pub previews_applied: u64,
-    /// The most Preview jobs that ran at the same time (STICKER_PLAN 3.5: one).
+    /// The most Preview jobs that ran at the same time (STICKER_PLAN 3.5: one), counted from the running threads.
     pub most_previews_running: u64,
+    /// P7a check: the most restyle jobs that ran at the same time (STICKER_PLAN 7 "P7a": one).
+    pub most_restyles_running: u64,
     pub restyles_started: u64,
     pub restyles_applied: u64,
     /// Restyle results that no longer fit the sticker (dropped; the canvas draws it again from the document).
@@ -167,11 +183,13 @@ pub(crate) fn cancelled(state: &mut AppState) {
     }
 }
 
-/// Drops the live canvas and its jobs (the view closes, a new document).
+/// Drops the live canvas and its jobs (the view closes, a new document). Threads still running stay counted.
 pub(crate) fn clear(state: &mut AppState) {
     let ui = &mut state.sticker_ui;
     ui.live = None;
-    ui.jobs = RenderJobs::default();
+    ui.jobs.preview = None;
+    ui.jobs.canvas = None;
+    ui.jobs.last_preview = None;
 }
 
 /// Once per frame after the canvas's input: uploads the dirty rectangle (or the full recomposite of stroke mode),
@@ -256,6 +274,10 @@ fn preview(ctx: &egui::Context, state: &mut AppState, live: &LiveStroke) {
             return;
         }
     }
+    // P7a check: a dropped Preview job still running (an earlier stroke) finishes first; its thread asks for a frame.
+    if state.sticker_ui.jobs.preview_alive.load(Ordering::Acquire) > 0 {
+        return;
+    }
     let job = match state.doc_mut().map(|d| d.sticker_preview_job(live.sticker)) {
         Some(Ok(Some(job))) => job,
         Some(Err(e)) => {
@@ -264,12 +286,13 @@ fn preview(ctx: &egui::Context, state: &mut AppState, live: &LiveStroke) {
         }
         _ => return,
     };
-    if let Some(rx) = spawn(ctx, "Sticker preview", job) {
+    let alive = Arc::clone(&state.sticker_ui.jobs.preview_alive);
+    if let Some((rx, running)) = spawn(ctx, "Sticker preview", job, alive, &state.sticker_ui.jobs) {
         let ui = &mut state.sticker_ui;
         ui.jobs.preview = Some(rx);
         ui.jobs.last_preview = Some(Instant::now());
         ui.counters.previews_started += 1;
-        ui.counters.most_previews_running = ui.counters.most_previews_running.max(1);
+        ui.counters.most_previews_running = ui.counters.most_previews_running.max(running);
         if let Some(l) = ui.live.as_mut() {
             l.painted = false;
         }
@@ -280,6 +303,11 @@ fn preview(ctx: &egui::Context, state: &mut AppState, live: &LiveStroke) {
 /// (when the sticker is still the value it drew) and leaves the live mode.
 fn restyle(ctx: &egui::Context, state: &mut AppState, live: &LiveStroke, doc: &wte_core::StickerDoc) {
     if state.sticker_ui.jobs.canvas.is_none() {
+        // P7a check: the restyle of an earlier stroke still running finishes first (its thread asks for a frame); the
+        // unstyled picture stays meanwhile.
+        if state.sticker_ui.jobs.canvas_alive.load(Ordering::Acquire) > 0 {
+            return;
+        }
         let job = match state.doc_mut().map(|d| d.sticker_canvas_job(live.sticker)) {
             Some(Ok(job)) => job,
             _ => {
@@ -288,10 +316,13 @@ fn restyle(ctx: &egui::Context, state: &mut AppState, live: &LiveStroke, doc: &w
             }
         };
         let key = sticker_key(live.sticker, job.doc());
-        match spawn(ctx, "Sticker restyle", job) {
-            Some(rx) => {
+        let alive = Arc::clone(&state.sticker_ui.jobs.canvas_alive);
+        match spawn(ctx, "Sticker restyle", job, alive, &state.sticker_ui.jobs) {
+            Some((rx, running)) => {
+                let c = &mut state.sticker_ui.counters;
+                c.restyles_started += 1;
+                c.most_restyles_running = c.most_restyles_running.max(running);
                 state.sticker_ui.jobs.canvas = Some((rx, key));
-                state.sticker_ui.counters.restyles_started += 1;
             }
             None => cancelled(state),
         }
@@ -323,23 +354,60 @@ fn restyle(ctx: &egui::Context, state: &mut AppState, live: &LiveStroke, doc: &w
     state.sticker_ui.live = None;
 }
 
-/// Runs `job` on a named thread; the result comes back through the channel and asks for a frame.
-fn spawn(ctx: &egui::Context, name: &str, job: StickerRenderJob) -> Option<mpsc::Receiver<StickerRenderOutput>> {
+/// Counts a job thread in `alive` while it runs; at its end (a panic included) the count drops and a frame is asked
+/// for, so the result is taken and a job of the same kind waiting for this one can start.
+struct AliveGuard {
+    alive: Arc<AtomicU64>,
+    ctx: egui::Context,
+}
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.alive.fetch_sub(1, Ordering::AcqRel);
+        self.ctx.request_repaint();
+    }
+}
+
+/// Runs `job` on a named thread counted in `alive`; the result comes back through the channel and asks for a frame.
+/// Returns the receiver and how many threads of that kind run now (this one included).
+fn spawn(
+    ctx: &egui::Context,
+    name: &str,
+    job: StickerRenderJob,
+    alive: Arc<AtomicU64>,
+    jobs: &RenderJobs,
+) -> Option<(mpsc::Receiver<StickerRenderOutput>, u64)> {
+    let _ = jobs;
+    #[cfg(test)]
+    let hold = Arc::clone(&jobs.hold);
     let (tx, rx) = mpsc::channel();
-    let ctx = ctx.clone();
+    let running = alive.fetch_add(1, Ordering::AcqRel) + 1;
+    let guard = AliveGuard { alive, ctx: ctx.clone() };
     let spawned = std::thread::Builder::new().name(name.to_owned()).spawn(move || {
+        let _guard = guard;
         let out = job.run();
-        if tx.send(out).is_ok() {
-            ctx.request_repaint();
+        #[cfg(test)]
+        while hold.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        // The guard's drop (after the send) asks for the frame that takes the result.
+        let _ = tx.send(out);
     });
     match spawned {
-        Ok(_) => Some(rx),
+        Ok(_) => Some((rx, running)),
         Err(e) => {
+            // The closure, and the guard in it, went with the error: the count is back.
             log::warn!("{name}: the job cannot start ({e})");
             None
         }
     }
+}
+
+/// P7a check (tests): the Preview and restyle threads running now, dropped ones included.
+#[cfg(test)]
+pub(crate) fn alive(state: &AppState) -> (u64, u64) {
+    let j = &state.sticker_ui.jobs;
+    (j.preview_alive.load(Ordering::Acquire), j.canvas_alive.load(Ordering::Acquire))
 }
 
 /// Puts `data` (straight RGBA8 of `rect`, artboard pixels) into the canvas texture of an artboard of `size`: the

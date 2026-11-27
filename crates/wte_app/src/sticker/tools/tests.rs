@@ -579,3 +579,187 @@ fn the_selection_is_dropped_when_the_artboard_changes() {
     crate::sticker::validate_in(&mut state);
     assert!(edit_of(&state).unwrap().selection.is_none());
 }
+
+// ---- P7a check ----
+
+/// Sets the transform of layer `layer` of sticker `id` (one structure entry).
+fn set_transform(state: &mut AppState, id: StickerId, layer: StickerLayerId, t: wte_core::LayerTransform) {
+    let r = state.doc_mut().unwrap().set_sticker(
+        StickerRef::Id(id),
+        move |s| s.layer_mut(layer).unwrap().transform = t,
+        "Transform",
+        wte_core::Commit::Final,
+    );
+    r.unwrap();
+}
+
+/// Waits (bounded) until no Preview or restyle thread runs any more, dropped ones included.
+fn threads_done(state: &AppState) {
+    let start = Instant::now();
+    while super::super::live::alive(state) != (0, 0) {
+        assert!(start.elapsed() < Duration::from_secs(60), "a render thread never ended");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// P7a check: a quick series of strokes on a styled layer, each released before the restyle of the one before it is
+/// back, never runs two restyle jobs at once (a dropped job's thread is counted until it ends; before the check each
+/// stroke started its own while the earlier ones still ran) and the canvas ends as a fresh full render.
+#[test]
+fn k7a_check_quick_strokes_on_a_styled_layer_run_one_restyle_at_a_time() {
+    let ctx = egui::Context::default();
+    let (mut state, stamp, layer) = with_paint_layer(&ctx, false);
+    let id = sticker_id(&state, stamp);
+    // A larger artboard and a large disc on the painted layer, so a restyle takes a while (the strokes come faster
+    // than the restyles).
+    const SIDE: u32 = 256;
+    let mut disc = PixelBuf::new(SIDE, SIDE);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let d = Vec2::new(x as f32 + 0.5, y as f32 + 0.5).distance(Vec2::splat(SIDE as f32 * 0.5));
+            if d < SIDE as f32 * 0.4 {
+                disc.set(x, y, [200, 40, 40, 255]);
+            }
+        }
+    }
+    let styles = StylePreset::ClassicSticker.styles([SIDE, SIDE]);
+    let r = state.doc_mut().unwrap().set_sticker(
+        StickerRef::Id(id),
+        move |s| {
+            s.artboard = wte_core::IRect::new(0, 0, SIDE as i32, SIDE as i32);
+            let l = s.layer_mut(layer).unwrap();
+            l.content = StickerContent::Picture(PicturePixels::Owned { pixels: Arc::new(disc), version: 0 });
+            l.styles = styles;
+        },
+        "Big disc",
+        wte_core::Commit::Final,
+    );
+    r.unwrap();
+    crate::sticker::validate_in(&mut state);
+    edit_mut(&mut state).unwrap().camera.fit([SIDE, SIDE], CANVAS);
+    refresh(&ctx, &mut state);
+    tool(&mut state, StickerTool::Brush);
+    state.tools.brush.size_px = 6.0;
+    let before = state.sticker_ui.counters;
+    // The job threads wait until the strokes are done: every restyle is still running when the next stroke ends.
+    let hold = Arc::clone(&state.sticker_ui.jobs.hold);
+    hold.store(true, std::sync::atomic::Ordering::Release);
+    for k in 0..5 {
+        let y = 100.0 + 9.0 * k as f32;
+        drag(&ctx, &mut state, Hit::Sticker(id), &[Vec2::new(8.0, y), Vec2::new(60.0, y)], None);
+        let (_, restyles) = super::super::live::alive(&state);
+        assert!(restyles <= 1, "stroke {k}: {restyles} restyle threads");
+        assert!(state.sticker_ui.live.as_ref().is_some_and(|l| l.stroke_mode()), "stroke {k}: the restyle has not landed");
+    }
+    hold.store(false, std::sync::atomic::Ordering::Release);
+    settle(&ctx, &mut state);
+    let c = state.sticker_ui.counters;
+    assert!(c.restyles_started > before.restyles_started && c.most_restyles_running <= 1, "{c:?}");
+    assert!(c.most_previews_running <= 1, "{c:?}");
+    threads_done(&state);
+    refresh(&ctx, &mut state);
+    let want = finished(&mut state, id);
+    assert_eq!(seen(state.sticker_ui.mirror.as_ref().unwrap()), seen(&want), "the canvas equals a fresh full render");
+    assert!(painted(&state, stamp, layer) > 0);
+}
+
+/// P7a check: stroke mode on a turned and scaled layer and on a moved layer reaching past the artboard edge: after every
+/// dab the canvas is the unstyled composite (the dirty rectangle of a turned layer reaches far enough), and after the
+/// end the finished picture.
+#[test]
+fn k7a_check_strokes_on_turned_and_moved_layers_across_the_edge() {
+    let ctx = egui::Context::default();
+    let turned = wte_core::LayerTransform { rotation: 0.37, scale: Vec2::new(1.3, 0.8), ..wte_core::LayerTransform::moved(9.5, -4.25) };
+    let moved = wte_core::LayerTransform::moved(-20.0, 30.0);
+    for t in [turned, moved] {
+        let (mut state, stamp, layer) = with_paint_layer(&ctx, true);
+        let id = sticker_id(&state, stamp);
+        set_transform(&mut state, id, layer, t);
+        refresh(&ctx, &mut state);
+        tool(&mut state, StickerTool::Brush);
+        state.tools.brush.size_px = 7.0;
+        state.tools.brush.hardness = 0.4;
+        let first = screen(&state, Vec2::new(30.0, 40.0));
+        pass(&ctx, &mut state, Hit::Sticker(id), vec![egui::Event::PointerMoved(first), button(first, true)]);
+        // Towards and past the bottom-left corner of the artboard.
+        for k in 1..=10 {
+            let at = screen(&state, Vec2::new(30.0 - 4.0 * k as f32, 40.0 + 3.0 * k as f32));
+            pass(&ctx, &mut state, Hit::Sticker(id), vec![egui::Event::PointerMoved(at)]);
+            let want = unstyled_render(&mut state, id, layer);
+            assert_eq!(seen(state.sticker_ui.mirror.as_ref().unwrap()), seen(&want), "{t:?} dab {k}");
+        }
+        let last = screen(&state, Vec2::new(-10.0, 70.0));
+        pass(&ctx, &mut state, Hit::Sticker(id), vec![button(last, false)]);
+        assert_eq!(doc(&state).undo_label(), Some(STICKER_BRUSH_LABEL), "{t:?}");
+        assert!(painted(&state, stamp, layer) > 0, "{t:?}");
+        settle(&ctx, &mut state);
+        let want = finished(&mut state, id);
+        assert_eq!(seen(state.sticker_ui.mirror.as_ref().unwrap()), seen(&want), "{t:?}: the finished picture");
+    }
+}
+
+/// P7a check: a stroke outside the selection changes nothing and leaves no entry; the canvas still shows the document.
+#[test]
+fn k7a_check_a_selection_that_excludes_the_stroke_paints_nothing() {
+    let ctx = egui::Context::default();
+    let (mut state, stamp, layer) = with_paint_layer(&ctx, true);
+    let id = sticker_id(&state, stamp);
+    run_in(&mut state, StickerAction::SelectRect([40.0, 40.0, 60.0, 60.0]));
+    let undo = undo_len(&state);
+    for t in [StickerTool::Brush, StickerTool::Eraser, StickerTool::Brush] {
+        tool(&mut state, t);
+        drag(&ctx, &mut state, Hit::Sticker(id), &[Vec2::new(4.0, 6.0), Vec2::new(30.0, 8.0)], None);
+        assert_eq!((undo_len(&state), painted(&state, stamp, layer)), (undo, 0), "{t:?}");
+    }
+    settle(&ctx, &mut state);
+    threads_done(&state);
+    refresh(&ctx, &mut state);
+    let want = finished(&mut state, id);
+    assert_eq!(seen(state.sticker_ui.mirror.as_ref().unwrap()), seen(&want));
+}
+
+/// P7a check: on a shape layer every paint tool offers Rasterize and paints nothing; the Eyedropper picks there.
+#[test]
+fn k7a_check_a_shape_layer_offers_rasterize_to_every_paint_tool() {
+    let ctx = egui::Context::default();
+    let (mut state, stamp, _) = with_paint_layer(&ctx, false);
+    let id = sticker_id(&state, stamp);
+    let r = state.doc_mut().unwrap().set_sticker(
+        StickerRef::Id(id),
+        |s| {
+            let lid = s.alloc_layer();
+            let spec = wte_core::ShapeSpec {
+                kind: wte_core::ShapeKind::Ellipse,
+                size: Vec2::new(40.0, 30.0),
+                fill: wte_core::Paint::Solid([20, 220, 90, 255]),
+                outline: None,
+            };
+            let mut l = wte_core::StickerLayer::new(lid, "shape", StickerContent::Shape(spec));
+            l.transform.translate = Vec2::new(12.0, 17.0);
+            s.layers.push(l);
+        },
+        "Add Shape",
+        wte_core::Commit::Final,
+    );
+    r.unwrap();
+    let shape = sticker_of(&state, stamp).layers.last().unwrap().id;
+    run_in(&mut state, StickerAction::SelectLayer(shape));
+    refresh(&ctx, &mut state);
+    let undo = undo_len(&state);
+    let (a, b) = (screen(&state, Vec2::new(32.0, 32.0)), screen(&state, Vec2::new(38.0, 34.0)));
+    for t in [StickerTool::Brush, StickerTool::Eraser, StickerTool::Fill, StickerTool::Gradient] {
+        tool(&mut state, t);
+        state.sticker_ui.rasterize_offer = None;
+        pass(&ctx, &mut state, Hit::Sticker(id), vec![egui::Event::PointerMoved(a), button(a, true)]);
+        pass(&ctx, &mut state, Hit::Sticker(id), vec![egui::Event::PointerMoved(b)]);
+        pass(&ctx, &mut state, Hit::Sticker(id), vec![button(b, false)]);
+        assert_eq!((state.sticker_ui.rasterize_offer, undo_len(&state)), (Some(shape), undo), "{t:?}");
+        assert!(matches!(sticker_of(&state, stamp).layer(shape).unwrap().content, StickerContent::Shape(_)), "{t:?}");
+    }
+    tool(&mut state, StickerTool::Eyedropper);
+    state.colors.primary = [0, 0, 0, 255];
+    pass(&ctx, &mut state, Hit::Sticker(id), vec![egui::Event::PointerMoved(a), button(a, true)]);
+    pass(&ctx, &mut state, Hit::Sticker(id), vec![button(a, false)]);
+    assert_eq!(state.colors.primary, [20, 220, 90, 255], "the Eyedropper picks on a shape layer");
+    assert_eq!(undo_len(&state), undo);
+}

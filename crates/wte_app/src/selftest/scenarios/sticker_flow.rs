@@ -204,9 +204,23 @@ fn editor_paints_band(s: &AppState, sc: &mut Scratch, band: [f32; 2], rgba: [u8;
     let path = layer_file(s, sc)?;
     let [w, h] = texture(s, id)?;
     let mut picture = wte_core::link::paint_source(&testkit::read(&path)?, [w, h], "photocraft").map_err(|e| format!("{e:?}"))?.pixels;
+    // Check of P13: the band leaves the two stickers' texels of this set free (on a model with scattered UV islands
+    // no row band misses them), so the shots show both stickers above or beside the band.
+    let doc = doc_of(s)?;
+    let (set, _) = doc.find_layer(id).ok_or("the linked layer is gone")?;
+    let mut stickers = Vec::new();
+    for key in ["photo", "badge"] {
+        for (lset, layer) in doc.stamp_layers(stamp_key(s, sc, key)?) {
+            if lset == set {
+                stickers.push(doc.layer(layer).ok_or("no layer")?.to_dense(w, h));
+            }
+        }
+    }
     for y in (band[0] * h as f32) as u32..(band[1] * h as f32) as u32 {
         for x in 0..w {
-            picture.set(x, y, rgba);
+            if stickers.iter().all(|p| p.get(x, y)[3] == 0) {
+                picture.set(x, y, rgba);
+            }
         }
     }
     sc.values.insert("file_crc", u64::from(wte_core::link::paint::normalised_crc(&picture, w, h)));
@@ -286,6 +300,112 @@ fn flat_spots(s: &AppState) -> Result<(ViewXform, egui::Pos2, egui::Pos2), Strin
         .unwrap_or(ranked.last().ok_or("no hit")?.1);
     log::info!("sticker_flow_path: drop points {:?} (set {}) and {:?} (set {})", first.pos, first.set.0, second.pos, second.set.0);
     Ok((xf, first.pos, second.pos))
+}
+
+/// The Stamp tool's sizes tried for the second picture (the badge), largest first: smaller than the photo, so that a
+/// clear spot is found on a model with many parts (the chess board between its pieces).
+const BADGE_SIZES: [f32; 4] = [0.10, 0.08, 0.06, 0.05];
+
+/// The screen rectangle of a projected stamp's box (its four corners in the box plane).
+fn stamp_screen_rect(xf: &ViewXform, p: &Projector) -> Result<egui::Rect, String> {
+    let mut rect = egui::Rect::NOTHING;
+    for (a, b) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let corner = p.origin + p.rotation * Vec3::new(a * p.half_size.x, b * p.half_size.y, 0.0);
+        rect.extend_with(world_screen(xf, corner)?);
+    }
+    Ok(rect)
+}
+
+/// The drop point and the Stamp tool's size of the badge (check of P13): a projected stamp lands on the first surface
+/// the viewer sees, so on the chess set a box that also covers pieces paints the pieces, not the board (the first run's
+/// `flow_style_pasted` showed blue pieces instead of the badge). The point is a grid hit whose whole box (a 7 x 7 lattice
+/// of rays over it) hits the hit's own texture set, apart from the photo sticker's box; the largest of `BADGE_SIZES`
+/// that has such a point wins, the point nearest the photo first (the same part of the model). The badge's screen size is estimated from the
+/// photo's box (scaled by size / 0.15, back from the x1.2 of step 6, plus a tenth). Falls back to `flat_spots`' second
+/// point at the first size (logged) when no size has one. Returns the size and the point in view fractions.
+fn badge_spot(s: &AppState, sc: &Scratch) -> Result<(f32, [f32; 2]), String> {
+    let (xf, hits) = model_hits(s)?;
+    let doc = doc_of(s)?;
+    let Placement::Projected(p) = doc.stamp(stamp_key(s, sc, "photo")?).ok_or("gone")?.placement else {
+        return Err("the photo sticker is not a 3D stamp".into());
+    };
+    let photo = stamp_screen_rect(&xf, &p)?;
+    let mut ranked: Vec<&ScreenHit> = hits.iter().collect();
+    ranked.sort_by(|a, b| (a.pos - photo.center()).length().total_cmp(&(b.pos - photo.center()).length()));
+    for size in BADGE_SIZES {
+        let r = photo.width().max(photo.height()) / 2.0 * (size / 0.15) / 1.2 * 1.1;
+        let apart = |h: &ScreenHit| !egui::Rect::from_center_size(h.pos, egui::vec2(2.0 * r, 2.0 * r)).expand(8.0).intersects(photo);
+        let clear = |h: &ScreenHit| {
+            (0..7).all(|i| {
+                (0..7).all(|j| {
+                    let d = egui::vec2((i as f32 / 3.0 - 1.0) * r, (j as f32 / 3.0 - 1.0) * r);
+                    surface_set(&xf, doc, h.pos + d) == Some(h.set)
+                })
+            })
+        };
+        if let Some(h) = ranked.iter().find(|h| h.facing > 0.25 && apart(h) && clear(h)) {
+            log::info!(
+                "sticker_flow_path: the badge at {:?} (set {}), size {size}, box half {r:.0} px; the photo's box {photo:?}",
+                h.pos,
+                h.set.0
+            );
+            return Ok((size, norm(&xf, h.pos)));
+        }
+    }
+    let (xf, _, second) = flat_spots(s)?;
+    log::warn!("sticker_flow_path: no clear spot for the badge; the second flat spot {second:?}");
+    Ok((BADGE_SIZES[0], norm(&xf, second)))
+}
+
+/// The linked paint layer (check of P13): of the paint layers the stroke changed, the one in the texture set the viewer
+/// sees most of (the chess board rather than a king, whose band could not be seen in the shots).
+fn most_visible_changed(s: &AppState, changed: &[LayerId]) -> Result<LayerId, String> {
+    let (_, hits) = model_hits(s)?;
+    let doc = doc_of(s)?;
+    let seen = |l: &LayerId| doc.find_layer(*l).map_or(0, |(set, _)| hits.iter().filter(|h| h.set == set).count());
+    // `max_by_key` keeps the last of equal keys: walk backwards so the first changed layer wins a tie.
+    changed.iter().rev().max_by_key(|l| seen(l)).copied().ok_or_else(|| "the stroke changed no paint layer".to_owned())
+}
+
+/// The rows (fractions of the height) of the green band the editor paints into the linked layer (check of P13): a tenth of
+/// the texture centred on a row the viewer sees most of in that set, clear of the rows where the viewer sees the two
+/// stickers (the grid hits of that set inside each sticker's screen box, with a margin) when such rows exist (the chess
+/// board), else the most visible rows (the helmet's scattered UV islands: `editor_paints_band` then leaves the stickers'
+/// texels free). Falls back to 0.45-0.55 (logged).
+fn band_rows(s: &AppState, sc: &Scratch) -> Result<[f32; 2], String> {
+    let id = layer_key(s, sc, "paint")?;
+    let doc = doc_of(s)?;
+    let (set, _) = doc.find_layer(id).ok_or("the linked layer is gone")?;
+    let (xf, hits) = model_hits(s)?;
+    let mut boxes = Vec::new();
+    for key in ["photo", "badge"] {
+        if let Placement::Projected(p) = doc.stamp(stamp_key(s, sc, key)?).ok_or("gone")?.placement {
+            boxes.push(stamp_screen_rect(&xf, &p)?.expand(12.0));
+        }
+    }
+    let mine: Vec<&ScreenHit> = hits.iter().filter(|x| x.set == set).collect();
+    let blocked: Vec<f32> = mine.iter().filter(|x| boxes.iter().any(|b| b.contains(x.pos))).map(|x| x.uv.y).collect();
+    let seen: Vec<f32> = mine.iter().filter(|x| x.facing > 0.25 && !boxes.iter().any(|b| b.contains(x.pos))).map(|x| x.uv.y).collect();
+    let free = |b: [f32; 2]| blocked.iter().all(|v| *v < b[0] - 0.02 || *v > b[1] + 0.02);
+    let best = seen
+        .iter()
+        .map(|v| [(v - 0.05).clamp(0.0, 0.9), (v - 0.05).clamp(0.0, 0.9) + 0.1])
+        .map(|b| (free(b), seen.iter().filter(|v| (b[0]..b[1]).contains(*v)).count(), b))
+        .max_by_key(|(clear, n, _)| (*clear, *n))
+        .map(|(clear, n, b)| (n, b, clear));
+    match best {
+        Some((n, b, clear)) => {
+            log::info!(
+                "sticker_flow_path: the editor's band at rows {b:?} ({n} grid hits in it; clear of the stickers' rows: {clear}; {} hits on the stickers)",
+                blocked.len()
+            );
+            Ok(b)
+        }
+        None => {
+            log::warn!("sticker_flow_path: no visible row of the linked layer's set; rows 0.45-0.55");
+            Ok([0.45, 0.55])
+        }
+    }
 }
 
 /// `sticker_flow_path` (the dispatcher adds the final screenshot and Exit).
@@ -426,6 +546,12 @@ pub(super) fn sticker_flow_path(has_path: bool) -> Vec<Step> {
             if s.final_bakes_pending || s.wrap_jobs_pending || doc_of(s)?.has_unbaked_stamps() {
                 return Err("a bake is still pending".into());
             }
+            // Check of P13: the step's title says "its layer has ink"; it is now asserted.
+            let layer = home_layer(s, id)?;
+            let [w, h] = texture(s, layer)?;
+            if ink(&doc_of(s)?.layer(layer).ok_or("no layer")?.to_dense(w, h)) == 0 {
+                return Err("the wrapped sticker's layer has no ink".into());
+            }
             no_error_toast(s)
         }),
         Step::Setup("remember the photo sticker's layer", |s, sc| {
@@ -549,10 +675,16 @@ pub(super) fn sticker_flow_path(has_path: bool) -> Vec<Step> {
         Step::Do(AppAction::SelectStamp(None)),
         Step::Do(AppAction::SetTool(ToolKind::Stamp)),
         Step::WaitIdle,
-        Step::Setup("remember", remember_undo),
-        Step::Dyn("drop Badge.png on the model", |s, sc| {
-            let (xf, _, second) = flat_spots(s)?;
-            Ok(vec![Step::Drop { payload: vec![DropItem::File(assets(sc).join("Badge.png"))], target: Target::View(ViewId::Main3D), at: norm(&xf, second) }])
+        Step::Setup("remember; a clear spot for the badge and the Stamp tool's size for it", |s, sc| {
+            let (size, at) = badge_spot(s, sc)?;
+            s.tools.stamp.size_frac = size;
+            sc.values.insert("badge_x", u64::from(at[0].to_bits()));
+            sc.values.insert("badge_y", u64::from(at[1].to_bits()));
+            remember_undo(s, sc)
+        }),
+        Step::Dyn("drop Badge.png on that spot", |_, sc| {
+            let at = [f32::from_bits(remembered(sc, "badge_x")? as u32), f32::from_bits(remembered(sc, "badge_y")? as u32)];
+            Ok(vec![Step::Drop { payload: vec![DropItem::File(assets(sc).join("Badge.png"))], target: Target::View(ViewId::Main3D), at }])
         }),
         Step::WaitIdle,
         Step::Setup("one new stamp \"Badge\"", |s, sc| {
@@ -611,8 +743,9 @@ pub(super) fn sticker_flow_path(has_path: bool) -> Vec<Step> {
             undo_since(s, sc, 1)?;
             let before = RASTERS.lock().map_err(|e| e.to_string())?.clone();
             let changed: Vec<LayerId> = raster_hashes(s)?.into_iter().filter(|x| !before.contains(x)).map(|(id, _)| id).collect();
-            // A 3D stroke may cross several texture sets (a chess board's pieces): the first changed layer is linked.
-            let painted = *changed.first().ok_or("the stroke changed no paint layer")?;
+            // A 3D stroke may cross several texture sets (a chess board's pieces): the changed layer of the set the
+            // viewer sees most of is linked.
+            let painted = most_visible_changed(s, &changed)?;
             sc.values.insert("paint", painted.0);
             log::info!("sticker_flow_path: the stroke changed {changed:?}; {painted:?} is linked");
             Ok(())
@@ -641,9 +774,10 @@ pub(super) fn sticker_flow_path(has_path: bool) -> Vec<Step> {
             undo_since(s, sc, 0)?;
             badge_is(s, id.into(), "linked")
         }),
-        Step::Setup("remember; the editor paints a blue band", |s, sc| {
+        Step::Setup("remember; the editor paints a green band (the badge is blue)", |s, sc| {
             remember_link(s, sc)?;
-            editor_paints_band(s, sc, [0.45, 0.55], [30, 90, 230, 255])
+            let band = band_rows(s, sc)?;
+            editor_paints_band(s, sc, band, [40, 170, 70, 255])
         }),
         Step::Until("the update arrives", one_more_update),
         Step::WaitIdle,
@@ -686,9 +820,9 @@ pub(super) fn sticker_flow_path(has_path: bool) -> Vec<Step> {
         }),
         Step::Shot {
             name: "flow_saved",
-            expect: "3D view: the styled photo sticker with the red bar and \"GO!\"; the badge where it was dropped (it may \
-                     lie under the blue band); a red brush stroke across the model and a wide blue band of the linked paint \
-                     layer; the Layers tab shows the linked layer's block (\"Link: linked\", \"Editor: PhotoCraft \u{b7} <layer>_l<id>.psd\" \
+            expect: "3D view: the styled photo sticker with the red bar and \"GO!\"; the badge (the blue square) where it was \
+                     dropped, with the same border; a red brush stroke across the model and a wide green band of the linked \
+                     paint layer clear of both stickers; the Layers tab shows the linked layer's block (\"Link: linked\", \"Editor: PhotoCraft \u{b7} <layer>_l<id>.psd\" \
                      and its buttons) above the layer rows; the toast \"Saved\"",
         },
         // (11) Reopen.
@@ -718,8 +852,8 @@ pub(super) fn sticker_flow_path(has_path: bool) -> Vec<Step> {
         }),
         Step::Shot {
             name: "flow_reopened",
-            expect: "the same picture as flow_saved without the \"Saved\" toast: the wrapped photo sticker with its border, \
-                     shadow, red bar and \"GO!\", the badge with the same style, the brush stroke, the blue band, and the \
+            expect: "the same picture as flow_saved (its \"Saved\" toast may still be fading on a quick model): the wrapped photo sticker with its border, \
+                     shadow, red bar and \"GO!\", the badge with the same style, the brush stroke, the green band, and the \
                      linked layer's block \"Link: linked\" in the Layers tab",
         },
         // (12) Export one layer, a selection and everything as one zip.

@@ -460,12 +460,12 @@ fn the_psd_handle_asks_first_then_links_and_hands_out_the_psd() {
     assert!(state.status_hint.contains("drag the PSD handle to PhotoCraft"), "{}", state.status_hint);
     assert!(matches!(state.doc().unwrap().stamp(other).unwrap().source, wte_core::StampSource::Image { .. }), "the other stamp keeps its picture");
     assert!(!state.toasts.visible_labels().iter().any(|l| l.starts_with("Opening")), "no editor is started");
-    assert!(state.link_ui.sessions.get(&sticker).is_none_or(|s| s.child.is_none() && !s.opened));
+    assert!(state.link_ui.sessions.get(&sticker.into()).is_none_or(|s| s.child.is_none() && !s.opened));
     // Now the drag: CF_HDROP with the linked PSD only; the link counts as opened in the link's editor.
     let (rec, _) = drag_out(&ctx, &mut state, DragSource::PsdHandle(stamp));
     assert_eq!(rec.names(), ["CF_HDROP"]);
     assert_eq!(dropped_path(&rec), psd);
-    let s = state.link_ui.sessions.get(&sticker).unwrap();
+    let s = state.link_ui.sessions.get(&sticker.into()).unwrap();
     assert!(s.opened && s.opened_editor.as_deref() == Some("photocraft"));
     assert!(psd.is_file(), "the linked PSD is never removed");
     // Photoshop is known on this machine: the tab-bar toast once per session.

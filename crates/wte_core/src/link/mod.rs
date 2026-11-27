@@ -14,6 +14,7 @@
 
 pub mod file;
 pub mod map;
+pub mod paint;
 pub mod texts;
 
 #[cfg(test)]
@@ -29,6 +30,10 @@ use crate::ids::{StickerId, StickerLayerId};
 
 pub use file::{LinkFileIo, LinkWriteError, RealFileIo, write_link_file};
 pub use map::{ImportContext, ImportProblem, LayerOutcome, LinkExport, LinkImport, export, import, link_scale};
+pub use paint::{
+    MAX_PAINT_LINK_SIDE, PAINT_UPDATE_LABEL, PaintLink, PaintPicture, PaintProblem, TOO_LARGE_TO_LINK, paint_archive_entry,
+    paint_link_file_name, paint_source,
+};
 
 /// SMART (smart objects) makes a file come back as one merged picture for every link whose editor is not PhotoCraft
 /// (STICKER_PLAN 13.2, decision D3: what the user was told). `false` would bring a smart object back as its own
@@ -178,6 +183,8 @@ pub enum LinkProblem {
     TooLarge { crc32: u32, width: u32, height: u32 },
     /// The file is damaged (it read completely but is not a well-formed PSD).
     Unreadable { crc32: u32, reason: String },
+    /// Stickers P12 (5.9): a linked paint layer's file whose canvas is not the texture's size.
+    SizeMismatch { crc32: u32, size: [u32; 2], texture: [u32; 2] },
 }
 
 impl LinkProblem {
@@ -188,7 +195,8 @@ impl LinkProblem {
             | LinkProblem::NeedsMerged { crc32 }
             | LinkProblem::CanvasTooLarge { crc32, .. }
             | LinkProblem::TooLarge { crc32, .. }
-            | LinkProblem::Unreadable { crc32, .. } => *crc32,
+            | LinkProblem::Unreadable { crc32, .. }
+            | LinkProblem::SizeMismatch { crc32, .. } => *crc32,
         }
     }
 }
@@ -252,6 +260,8 @@ pub enum LinkState {
     TooLarge { width: u32, height: u32 },
     /// A damaged file.
     Unreadable(String),
+    /// Stickers P12: a linked paint layer's file has another canvas size than the texture (5.9).
+    SizeMismatch { size: [u32; 2], texture: [u32; 2] },
 }
 
 impl LinkState {
@@ -268,6 +278,7 @@ impl LinkState {
             LinkState::CanvasTooLarge { width, height } => texts::canvas_too_large(sticker, *width, *height, editor),
             LinkState::TooLarge { width, height } => texts::too_large(file, *width, *height),
             LinkState::Unreadable(reason) => texts::unreadable(file, reason),
+            LinkState::SizeMismatch { size, texture } => texts::size_mismatch(sticker, *size, *texture, editor),
         }
     }
 }
@@ -276,16 +287,23 @@ impl LinkState {
 /// missing), `sticker_hash` = the sticker's current `Document::sticker_link_hash`. A problem recorded for the file's
 /// current content wins over "changed in <editor>".
 pub fn link_state(link: &StickerLink, observed: Option<&FileStamp>, sticker_hash: u64) -> LinkState {
+    state_of(&link.synced, link.problem.as_ref(), observed, sticker_hash != link.synced_sticker)
+}
+
+/// The state table of 5.5 for any link (a sticker's, or a paint layer's, P12): `synced` = the content WTE last wrote
+/// or applied, `problem` = why the file could not be applied, `observed` = the file's current stamp (`None` =
+/// missing), `wte_changed` = WTE's side changed since the sync. A problem recorded for the current content wins.
+pub fn state_of(synced: &FileStamp, problem: Option<&LinkProblem>, observed: Option<&FileStamp>, wte_changed: bool) -> LinkState {
     let Some(observed) = observed else { return LinkState::Missing };
-    let file_changed = !observed.same_content(&link.synced);
-    let wte_changed = sticker_hash != link.synced_sticker;
-    if let Some(problem) = link.problem.as_ref().filter(|p| p.crc32() == observed.crc32) {
+    let file_changed = !observed.same_content(synced);
+    if let Some(problem) = problem.filter(|p| p.crc32() == observed.crc32) {
         return match problem {
             LinkProblem::Refused { sentence, .. } => LinkState::Refused(sentence.clone()),
             LinkProblem::NeedsMerged { .. } => LinkState::NeedsMerged,
             LinkProblem::CanvasTooLarge { width, height, .. } => LinkState::CanvasTooLarge { width: *width, height: *height },
             LinkProblem::TooLarge { width, height, .. } => LinkState::TooLarge { width: *width, height: *height },
             LinkProblem::Unreadable { reason, .. } => LinkState::Unreadable(reason.clone()),
+            LinkProblem::SizeMismatch { size, texture, .. } => LinkState::SizeMismatch { size: *size, texture: *texture },
         };
     }
     match (file_changed, wte_changed) {
@@ -344,11 +362,17 @@ pub fn next_stale(stale: bool, event: StaleEvent) -> bool {
 /// The question "Edit in <editor>" asks when WTE holds newer content (5.5 row "no / yes"): `None` when nothing needs
 /// sending. The answers are **Send and open** / **Open the file as it is** / Cancel.
 pub fn send_first_question(link: &StickerLink, wte_changed: bool, editor: &str) -> Option<String> {
+    send_first_text(wte_changed, link.mode == LinkMode::Merged || link.editor_native, editor)
+}
+
+/// The question of [`send_first_question`] for any link (stickers P12: a paint layer's too): `replaces_editor_layers`
+/// = the file holds the editor's own layers or effects that a rewrite turns into plain pixels.
+pub fn send_first_text(wte_changed: bool, replaces_editor_layers: bool, editor: &str) -> Option<String> {
     if !wte_changed {
         return None;
     }
     let mut q = "Send WTE's changes to the file first?".to_owned();
-    if link.mode == LinkMode::Merged || link.editor_native {
+    if replaces_editor_layers {
         q.push_str(&format!(" This replaces {editor}'s own layers (text, effects) in the file with plain picture layers."));
     }
     Some(q)

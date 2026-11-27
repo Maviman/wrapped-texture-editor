@@ -176,3 +176,30 @@ pub fn with_foreign_layer(base: &[u8], donor: &[u8], index: usize, lyid: u32) ->
     out.extend_from_slice(&base[bi.section_end..]);
     Ok(out)
 }
+
+/// Stickers P12: sets `hasRealMergedData` of resource 1057 to false in a PSD the sticker writer made (what Photoshop or
+/// the latest PhotoCraft write with "Maximize PSD and PSB File Compatibility" off: no usable merged picture).
+pub fn clear_real_merged(bytes: &mut [u8]) -> Result<(), String> {
+    let be32 = |b: &[u8], at: usize| -> Result<usize, String> {
+        b.get(at..at + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]) as usize).ok_or_else(|| "the file ends early".to_owned())
+    };
+    let colour = be32(bytes, 26)?;
+    let start = 26 + 4 + colour + 4;
+    let end = start + be32(bytes, 26 + 4 + colour)?;
+    let mut at = start;
+    while at + 12 <= end {
+        let id = u16::from_be_bytes([bytes[at + 4], bytes[at + 5]]);
+        let name_len = bytes[at + 6] as usize;
+        let name = (1 + name_len).div_ceil(2) * 2;
+        let size_at = at + 6 + name;
+        let size = be32(bytes, size_at)?;
+        let data = size_at + 4;
+        if id == 1057 {
+            let flag = bytes.get_mut(data + 4).ok_or("resource 1057 is too short")?;
+            *flag = 0;
+            return Ok(());
+        }
+        at = data + size.div_ceil(2) * 2;
+    }
+    Err("the file has no resource 1057".to_owned())
+}

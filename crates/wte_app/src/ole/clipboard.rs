@@ -167,8 +167,22 @@ pub const PASTED_STICKER: &str = "Pasted sticker.wtes";
 /// `Ok(None)` when none of them is there (or none is usable: a bad sticker block or PNG falls through to the next
 /// format). A DIB is not decoded here: that happens on the drop worker, with the all-zero alpha rule.
 pub fn paste_item(cb: &dyn Clipboard) -> Result<Option<(ClipFormat, DropItem)>, String> {
+    paste_item_in(cb, &PASTE_ORDER, crate::dnd::is_placeable_path)
+}
+
+/// Stickers P12: what Paste as New Paint Layer takes (5.9): a picture (PNG, CF_DIBV5, CF_DIB, then a picture or PSD file
+/// of CF_HDROP). WTE's own sticker data is skipped: a WTE copy always carries its finished picture as PNG too.
+pub const LAYER_PASTE_ORDER: [ClipFormat; 4] = [ClipFormat::Png, ClipFormat::DibV5, ClipFormat::Dib, ClipFormat::HDrop];
+
+/// `paste_item` for Paste as New Paint Layer.
+pub fn picture_item(cb: &dyn Clipboard) -> Result<Option<(ClipFormat, DropItem)>, String> {
+    paste_item_in(cb, &LAYER_PASTE_ORDER, |p| crate::dnd::is_image_path(p) || crate::dnd::is_psd_path(p))
+}
+
+/// The first usable item of the formats `order` (a `CF_HDROP` file must pass `file_ok`).
+fn paste_item_in(cb: &dyn Clipboard, order: &[ClipFormat], file_ok: fn(&std::path::Path) -> bool) -> Result<Option<(ClipFormat, DropItem)>, String> {
     use super::DataKind;
-    for format in PASTE_ORDER {
+    for &format in order {
         let Some(bytes) = cb.read(format)? else { continue };
         let item = match format {
             ClipFormat::Sticker => formats::unwrap_sticker(&bytes)
@@ -179,10 +193,7 @@ pub fn paste_item(cb: &dyn Clipboard) -> Result<Option<(ClipFormat, DropItem)>, 
             ClipFormat::DibV5 | ClipFormat::Dib => {
                 (bytes.len() >= 40).then(|| DropItem::Data { name: PASTED_PICTURE.to_owned(), kind: DataKind::Dib, bytes })
             }
-            ClipFormat::HDrop => formats::parse_dropfiles(&bytes, 64)
-                .into_iter()
-                .find(|p| crate::dnd::is_placeable_path(p))
-                .map(DropItem::File),
+            ClipFormat::HDrop => formats::parse_dropfiles(&bytes, 64).into_iter().find(|p| file_ok(p)).map(DropItem::File),
             ClipFormat::UnicodeText => None,
         };
         if let Some(item) = item {

@@ -25,7 +25,7 @@ use crate::project::manifest::{
 };
 use crate::project::migrate::parse_manifest;
 use crate::project::sticker_entries::{
-    AdjustmentEntry, LinkEntry, ShapeEntry, StickerContentEntry, StickerEntry, StickerLayerEntry, StyleStackEntry,
+    AdjustmentEntry, LinkEntry, PaintLinkEntry, ShapeEntry, StickerContentEntry, StickerEntry, StickerLayerEntry, StyleStackEntry,
     adjustment_floats, artboard_entry, shape_floats, style_floats, transform_entry,
 };
 use crate::project::{
@@ -132,7 +132,7 @@ fn check_entry_sizes(snapshot: &DocumentSnapshot, limit: u64) -> Result<(), Proj
 /// The lowest format version whose reader shows everything in this file correctly (FEATURE_TEXT 4.3 item 2): 4 when
 /// any stamp shows a sticker or has non-default styles (an entry that is off counts: an older build would drop it on
 /// its next save), or the file lists a sticker (STICKER_PLAN 2.11; a link always belongs to a saved sticker, so links
-/// need nothing more, P5c); else 3 when any projected stamp is
+/// need nothing more, P5c), or a raster paint layer is linked (stickers P12); else 3 when any projected stamp is
 /// wrapped or has a Wrap option set (round 6; also a projected stamp that only keeps options for switching back: an
 /// older build would drop them silently on its next save), else 2 when any text stamp uses a
 /// round-4 feature (a gap value counts, also one on the last character of a line), else 1. `save` writes it as
@@ -142,7 +142,8 @@ pub fn required_reader(snapshot: &DocumentSnapshot) -> u32 {
         .stamps
         .iter()
         .any(|s| matches!(s.source, StampSource::Sticker { .. }) || !s.styles.is_default())
-        || !saved_stickers(snapshot).is_empty();
+        || !saved_stickers(snapshot).is_empty()
+        || has_layer_links(snapshot);
     if uses_stickers {
         return 4;
     }
@@ -154,6 +155,11 @@ pub fn required_reader(snapshot: &DocumentSnapshot) -> u32 {
     }
     let uses_fx = snapshot.stamps.iter().any(|s| matches!(&s.source, StampSource::Text(spec) if !spec.fx.is_default()));
     if uses_fx { 2 } else { 1 }
+}
+
+/// Stickers P12: some existing raster paint layer is linked (an older reader would drop the link on its next save).
+fn has_layer_links(snapshot: &DocumentSnapshot) -> bool {
+    snapshot.layer_links.keys().any(|id| snapshot.sets.iter().flat_map(|s| &s.layers).any(|l| l.id == *id && l.is_raster()))
 }
 
 /// Every float of a stamp that is written to the manifest, with a name for error messages.
@@ -525,6 +531,8 @@ fn write_archive<W: Write + Seek>(
     // Their editor links and the copies of the linked files (P5c).
     let mut warnings = Vec::new();
     let links = write_links(&mut archive, snapshot, links_dir, &mut reuse, &mut warnings)?;
+    // Stickers P12: the links of raster paint layers and copies of their files.
+    let layer_links = write_layer_links(&mut archive, snapshot, links_dir, &mut reuse, &mut warnings)?;
 
     // Layers and composites, set by set.
     let total_layers = snapshot.sets.iter().map(|s| s.layers.len() + 1).sum::<usize>().max(1) as f32;
@@ -611,6 +619,7 @@ fn write_archive<W: Write + Seek>(
         ui_state: snapshot.ui_state.clone(),
         stickers,
         links,
+        layer_links,
     };
     let json = serde_json::to_vec_pretty(&manifest).map_err(invalid)?;
     archive.add(MANIFEST_ENTRY.to_owned(), zip_deflated(), &json)?;
@@ -687,6 +696,47 @@ fn write_links<W: Write + Seek>(
             None => None,
         };
         out.push(LinkEntry::of(*id, link, stored));
+    }
+    Ok(out)
+}
+
+/// Stickers P12 (STICKER_PLAN 5.9): the links of the snapshot's raster paint layers and a copy of every `InFolder`
+/// link file as `links/l<id:05>.psd`, by the same `archive_choice` rule as a sticker's. Only reads link files.
+fn write_layer_links<W: Write + Seek>(
+    archive: &mut Archive<'_, W>,
+    snapshot: &DocumentSnapshot,
+    links_dir: Option<&Path>,
+    reuse: &mut Option<Reuse<'_>>,
+    warnings: &mut Vec<SaveWarning>,
+) -> Result<Vec<PaintLinkEntry>, ProjectError> {
+    let mut out = Vec::new();
+    for (id, link) in &snapshot.layer_links {
+        let Some(layer) = snapshot.sets.iter().flat_map(|s| &s.layers).find(|l| l.id == *id && l.is_raster()) else {
+            continue;
+        };
+        let crate::link::LinkFile::InFolder(name) = &link.file else {
+            out.push(PaintLinkEntry::of(*id, link, None));
+            continue;
+        };
+        let current = links_dir.and_then(|dir| std::fs::read(dir.join(name)).ok());
+        let entry = crate::link::paint_archive_entry(*id);
+        let bytes = match archive_choice(current.as_deref(), link.synced.crc32) {
+            ArchiveChoice::Store => current,
+            ArchiveChoice::KeepEarlier { warn } => {
+                if warn {
+                    warnings.push(SaveWarning::LayerLinkBeingWritten { layer: *id, name: layer.name.clone() });
+                }
+                reuse.as_mut().and_then(|r| r.read(&entry))
+            }
+        };
+        let stored = match bytes {
+            Some(bytes) => {
+                archive.add(entry.clone(), zip_stored(), &bytes)?;
+                Some(entry)
+            }
+            None => None,
+        };
+        out.push(PaintLinkEntry::of(*id, link, stored));
     }
     Ok(out)
 }
@@ -781,7 +831,8 @@ fn verify(tmp: &Path) -> Result<(), ProjectError> {
         entry.read_to_end(&mut json).map_err(|e| failed(format!("{MANIFEST_ENTRY}: {e}")))?;
     }
     let manifest = parse_manifest(&json).map_err(|e| failed(e.to_string()))?.manifest;
-    for entry in manifest.links.iter().filter_map(|l| l.archive.as_ref()) {
+    let archives = manifest.links.iter().filter_map(|l| l.archive.as_ref());
+    for entry in archives.chain(manifest.layer_links.iter().filter_map(|l| l.archive.as_ref())) {
         zip.by_name(entry).map_err(|e| failed(format!("{entry}: {e}")))?;
     }
     for file_ref in file_refs(&manifest) {

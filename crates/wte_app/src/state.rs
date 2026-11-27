@@ -244,6 +244,20 @@ pub enum PanelHit {
     EditorBrowse(u8),
     EditorClear(u8),
     EditorDefault(u8),
+    // ---- stickers P12: a linked paint layer (the Layers tab's link block under the active layer's controls) ----
+    /// "Edit Layer in <editor>" of the block (the active raster layer, linked or not).
+    LayerLinkEditIn,
+    /// The small "Edit in..." beside it (the editor list for the layer).
+    LayerLinkEditInList,
+    LayerLinkUpdateNow,
+    LayerLinkSend,
+    LayerLinkShowFile,
+    LayerLinkUnlink,
+    LayerLinkRestore,
+    /// "Edit Layer in <editor>" in a layer row's context menu.
+    LayerMenuEditIn,
+    /// "Paste as New Paint Layer" in the "+" button's menu of the Layers tab.
+    LayersPasteAsLayer,
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while

@@ -22,14 +22,14 @@ use crate::layer::{Layer, LayerKind};
 use crate::math::IRect;
 use crate::pixel::{AlphaBuf, CroppedBuf, PixelBuf, SparseBuf};
 use crate::progress::Progress;
-use crate::project::{LinkAtLoad, LinkFileState, LoadReport, PngReuse, composite_key};
+use crate::project::{LayerLinkAtLoad, LinkAtLoad, LinkFileState, LoadReport, PngReuse, composite_key};
 use crate::project::manifest::{
     BlobEntry, GapEntry, ImportEntry, LayerEntry, LayerKindEntry, Manifest, SetEntry, SourceEntry, SourceFileEntry,
     StampSourceEntry, TextFxEntry,
 };
 use crate::project::migrate::{ParsedManifest, parse_manifest};
 use crate::project::save::{MANIFEST_ENTRY, parallel_budget};
-use crate::project::sticker_entries::{LinkEntry, StickerContentEntry, StickerEntry, artboard_of, transform_of};
+use crate::project::sticker_entries::{LinkEntry, PaintLinkEntry, StickerContentEntry, StickerEntry, artboard_of, transform_of};
 use crate::stamp::{BakeQuality, StampObject, StampSource};
 use crate::sticker::{LayerMask, MAX_PICTURE_SIDE, PicturePixels, StickerContent, StickerDoc, StickerLayer};
 use crate::text::{DEFAULT_FONT_FAMILY, DEFAULT_FONT_STYLE, FontRef, default_font_bytes};
@@ -867,8 +867,13 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
         sets.push(SetParts { name: set.name.clone(), width: set.width, height: set.height, layers, active: None });
     }
     // P5c: which link copies the archive holds (read later by the app with `read_link_archive`, never here).
-    let link_archives: BTreeSet<String> =
-        manifest.links.iter().filter_map(|l| l.archive.clone()).filter(|a| zip.by_name(a).is_ok()).collect();
+    let link_archives: BTreeSet<String> = manifest
+        .links
+        .iter()
+        .filter_map(|l| l.archive.clone())
+        .chain(manifest.layer_links.iter().filter_map(|l| l.archive.clone()))
+        .filter(|a| zip.by_name(a).is_ok())
+        .collect();
     drop(zip);
 
     // Step 7: every stamp needs a linked layer in its home set before the document is assembled.
@@ -966,6 +971,8 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
     // Step 8 (P5c): the editor links, with what is on disk for each. Nothing is written.
     let (links, link_report) = load_links(path, &manifest.links, &link_archives, &document);
     document.set_loaded_links(links);
+    let (layer_links, layer_link_report) = load_layer_links(path, &manifest.layer_links, &link_archives, &document);
+    document.set_loaded_layer_links(layer_links);
     document.mark_links_saved(document.links_revision());
     progress.report(1.0, "Project opened");
     // A newer format, or a text or stamp feature this build cannot keep: a plain Save would overwrite the newer file
@@ -973,7 +980,7 @@ pub fn load(path: &Path, progress: &dyn Progress) -> Result<LoadReport, ProjectE
     let unknown_text = warnings
         .iter()
         .any(|w| matches!(w, LoadWarning::TextFeatureUnknown { .. } | LoadWarning::StampFeatureUnknown { .. }));
-    Ok(LoadReport { document, warnings, force_save_as: newer || unknown_text, links: link_report })
+    Ok(LoadReport { document, warnings, force_save_as: newer || unknown_text, links: link_report, layer_links: layer_link_report })
 }
 
 /// Step 8 of the load procedure (P5c, STICKER_PLAN 5.3 "At load"): the links of `entries` whose sticker was loaded,
@@ -1001,22 +1008,58 @@ fn load_links(
             }
         };
         let path = link.file.path(Some(project));
-        let state = match path.as_deref().map(std::fs::metadata) {
-            Some(Ok(meta)) if meta.is_file() => {
-                let modified = meta.modified().ok().and_then(crate::link::unix_ns);
-                let same_stamp = meta.len() == link.synced.size && modified.is_some() && modified == link.synced.modified_ns;
-                let same_content = same_stamp
-                    || path
-                        .as_deref()
-                        .and_then(|p| std::fs::read(p).ok())
-                        .is_some_and(|b| b.len() as u64 == link.synced.size && crc32fast::hash(&b) == link.synced.crc32);
-                if same_content { LinkFileState::Present } else { LinkFileState::Changed }
-            }
-            _ => LinkFileState::Missing,
-        };
+        let state = file_state(path.as_deref(), &link.synced);
         let archive = entry.archive.clone().filter(|a| archives.contains(a));
         report.push(LinkAtLoad { sticker: entry.sticker, state, path, archive });
         links.insert(entry.sticker, link);
+    }
+    (links, report)
+}
+
+/// What is at a link's path: the synced content (`Present`; a copy with another time counts), nothing (`Missing`),
+/// or other content (`Changed`). Only reads.
+fn file_state(path: Option<&Path>, synced: &crate::link::FileStamp) -> LinkFileState {
+    match path.map(std::fs::metadata) {
+        Some(Ok(meta)) if meta.is_file() => {
+            let modified = meta.modified().ok().and_then(crate::link::unix_ns);
+            let same_stamp = meta.len() == synced.size && modified.is_some() && modified == synced.modified_ns;
+            let same_content = same_stamp
+                || path
+                    .and_then(|p| std::fs::read(p).ok())
+                    .is_some_and(|b| b.len() as u64 == synced.size && crc32fast::hash(&b) == synced.crc32);
+            if same_content { LinkFileState::Present } else { LinkFileState::Changed }
+        }
+        _ => LinkFileState::Missing,
+    }
+}
+
+/// Stickers P12 (STICKER_PLAN 5.9): the links of `entries` whose layer was loaded as a raster paint layer, with what is
+/// on disk for each (as `load_links`). Only reads files.
+fn load_layer_links(
+    project: &Path,
+    entries: &[PaintLinkEntry],
+    archives: &BTreeSet<String>,
+    document: &Document,
+) -> (BTreeMap<LayerId, crate::link::PaintLink>, Vec<LayerLinkAtLoad>) {
+    let mut links = BTreeMap::new();
+    let mut report = Vec::new();
+    for entry in entries {
+        if !document.layer(entry.layer).is_some_and(|l| l.is_raster()) || links.contains_key(&entry.layer) {
+            log::warn!("the link of layer {} is left out: no such paint layer, or a second link", entry.layer.0);
+            continue;
+        }
+        let link = match entry.to_link() {
+            Ok(link) => link,
+            Err(why) => {
+                log::warn!("the link of layer {} is left out: {why}", entry.layer.0);
+                continue;
+            }
+        };
+        let path = link.file.path(Some(project));
+        let state = file_state(path.as_deref(), &link.synced);
+        let archive = entry.archive.clone().filter(|a| archives.contains(a));
+        report.push(LayerLinkAtLoad { layer: entry.layer, state, path, archive });
+        links.insert(entry.layer, link);
     }
     (links, report)
 }

@@ -11,6 +11,12 @@
 // Help > Editor locations..., the per-editor two-copies guard and the question before a link is opened in a second
 // editor.
 //
+// Stickers P12 (STICKER_PLAN 5.9, 13.9 "P12"): a raster paint layer can be linked too. Every link has a `LinkId`
+// (`Sticker` or `Layer`); the sessions, the watcher, the generic commands (Send, Update now, Show file, Unlink,
+// Restore, the conflict and load answers) and the questions are keyed by it. "Edit Layer in <editor>" is
+// `LinkTarget::Layer` (`flows::edit_layer_in`); the layer's file is a one-layer PSD at the texture's size, and an
+// update is one undo step "Update Linked Layer".
+//
 // Nothing here raises, focuses or flashes the window or plays a sound: an update applies in place and questions are
 // in-window dialogs that wait there (`Dialog::Link`). The watcher's events are applied in `pump` (called by
 // `App::logic` every frame), never while a stroke, a drag, a pending Preview edit or a focused text field is open
@@ -26,6 +32,8 @@ pub mod watch;
 #[cfg(test)]
 mod editor_tests;
 #[cfg(test)]
+mod layer_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -36,12 +44,65 @@ use std::sync::atomic::AtomicU64;
 use eframe::egui;
 use wte_core::link::{FileStamp, LinkFile, LinkState, SyncAction, sync_action, texts};
 use wte_core::psd::PsdDoc;
-use wte_core::{ShareScope, StampId, StickerId};
+use wte_core::{Document, LayerId, ShareScope, StampId, StickerId};
 
 use crate::action::AppAction;
 use crate::state::{AppState, Dialog};
 use launch::{ChildProc, ChildState, Launcher, RegistryReader};
 use watch::{LinkEvent, LinkWatcher, OwnWrites, WatchEntry, WatchTimes};
+
+/// Stickers P12: which link (a sticker's or a raster paint layer's).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LinkId {
+    Sticker(StickerId),
+    Layer(LayerId),
+}
+
+impl From<StickerId> for LinkId {
+    fn from(id: StickerId) -> LinkId {
+        LinkId::Sticker(id)
+    }
+}
+
+impl From<LayerId> for LinkId {
+    fn from(id: LayerId) -> LinkId {
+        LinkId::Layer(id)
+    }
+}
+
+impl LinkId {
+    /// The layer of a paint layer link.
+    pub fn layer(self) -> Option<LayerId> {
+        match self {
+            LinkId::Layer(l) => Some(l),
+            LinkId::Sticker(_) => None,
+        }
+    }
+}
+
+/// What every kind of link has (stickers P12): its file, its editor's key, the content WTE last wrote or applied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkCommon {
+    pub file: LinkFile,
+    pub editor: String,
+    pub synced: FileStamp,
+}
+
+/// The common part of link `id` of `doc`.
+pub fn common(doc: &Document, id: LinkId) -> Option<LinkCommon> {
+    match id {
+        LinkId::Sticker(s) => doc.link(s).map(|l| LinkCommon { file: l.file.clone(), editor: l.editor.clone(), synced: l.synced }),
+        LinkId::Layer(l) => doc.layer_link(l).map(|l| LinkCommon { file: l.file.clone(), editor: l.editor.clone(), synced: l.synced }),
+    }
+}
+
+/// True while link `id` exists in `doc` and its sticker or raster layer does too (what the watcher follows).
+pub fn is_live(doc: &Document, id: LinkId) -> bool {
+    match id {
+        LinkId::Sticker(s) => doc.link(s).is_some() && doc.sticker(s).is_some(),
+        LinkId::Layer(l) => doc.layer_link(l).is_some() && doc.layer(l).is_some_and(|x| x.is_raster()),
+    }
+}
 
 /// What "Edit in" acts on.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -50,6 +111,8 @@ pub enum LinkTarget {
     Stamp(StampId),
     /// A sticker of the document (a tray sticker, or the sticker the Sticker view shows).
     Sticker(StickerId),
+    /// Stickers P12: a raster paint layer ("Edit Layer in <editor>", 5.9).
+    Layer(LayerId),
 }
 
 /// "Edit in <editor>" and the answers it has collected so far (each question re-enters the flow with one more).
@@ -91,7 +154,7 @@ impl EditRequest {
 /// "Send to <editor>" (and "Keep WTE's version", "Send and open").
 #[derive(Clone, Debug, PartialEq)]
 pub struct SendRequest {
-    pub sticker: StickerId,
+    pub link: LinkId,
     /// "Send anyway" to the warning that the editor may still have the file open.
     pub anyway: bool,
     /// The send answers a conflict ("Keep WTE's version"): `stale_in_editor` is cleared first.
@@ -101,8 +164,8 @@ pub struct SendRequest {
 }
 
 impl SendRequest {
-    pub fn new(sticker: StickerId) -> SendRequest {
-        SendRequest { sticker, anyway: false, answers_conflict: false, then_open: None }
+    pub fn new(link: impl Into<LinkId>) -> SendRequest {
+        SendRequest { link: link.into(), anyway: false, answers_conflict: false, then_open: None }
     }
 }
 
@@ -112,19 +175,19 @@ pub enum LinkAction {
     EditIn(EditRequest),
     Send(SendRequest),
     /// The badge's "Update now": read the file and apply it (also after an undo of an update, 5.5).
-    UpdateNow(StickerId),
+    UpdateNow(LinkId),
     /// "Show file in Explorer".
-    ShowFile(StickerId),
+    ShowFile(LinkId),
     /// Keep the picture, stop following the file (the PSD stays on disk).
-    Unlink(StickerId),
+    Unlink(LinkId),
     /// "Restore from project": the archived copy of a missing file.
-    Restore(StickerId),
+    Restore(LinkId),
     /// The conflict answers "Take <editor>'s version" and "Decide later" ("Keep WTE's version" is a `Send`).
-    Take(StickerId),
-    Later(StickerId),
+    Take(LinkId),
+    Later(LinkId),
     /// "Changed while the project was closed": Update / Ignore.
-    UpdateClosed(StickerId),
-    IgnoreClosed(StickerId),
+    UpdateClosed(LinkId),
+    IgnoreClosed(LinkId),
     /// "Fit it into the sticker" (5.4, review A18) / Ignore.
     Fit(StickerId),
     /// "Save..." of the save-first question: save, then continue the edit.
@@ -204,7 +267,8 @@ pub struct QuestionButton {
 #[derive(Clone, Debug)]
 pub struct LinkQuestion {
     pub kind: QuestionKind,
-    pub sticker: Option<StickerId>,
+    /// The link the question is about (stickers P12: a sticker's or a paint layer's).
+    pub link: Option<LinkId>,
     pub title: String,
     pub lines: Vec<String>,
     /// Left to right; the last one is the default.
@@ -212,8 +276,8 @@ pub struct LinkQuestion {
 }
 
 impl LinkQuestion {
-    fn new(kind: QuestionKind, sticker: Option<StickerId>, title: &str, lines: Vec<String>) -> LinkQuestion {
-        LinkQuestion { kind, sticker, title: title.to_owned(), lines, buttons: Vec::new() }
+    fn new(kind: QuestionKind, link: Option<LinkId>, title: &str, lines: Vec<String>) -> LinkQuestion {
+        LinkQuestion { kind, link, title: title.to_owned(), lines, buttons: Vec::new() }
     }
 
     fn button(mut self, label: impl Into<String>, actions: Vec<AppAction>) -> LinkQuestion {
@@ -319,7 +383,7 @@ pub struct ConvertJob {
 
 /// The link state of the app (`AppState::link_ui`).
 pub struct LinkUi {
-    pub sessions: BTreeMap<StickerId, LinkSession>,
+    pub sessions: BTreeMap<LinkId, LinkSession>,
     pub launcher: Box<dyn Launcher>,
     pub registry: Box<dyn RegistryReader>,
     pub own_writes: OwnWrites,
@@ -331,19 +395,21 @@ pub struct LinkUi {
     sent: Option<Vec<WatchEntry>>,
     /// Questions waiting for the dialog slot.
     pub questions: VecDeque<LinkQuestion>,
-    /// Stickers linked since the last project save (the close prompt's line, 5.3).
-    pub made_since_save: BTreeSet<StickerId>,
+    /// Stickers (and paint layers, P12) linked since the last project save (the close prompt's line, 5.3).
+    pub made_since_save: BTreeSet<LinkId>,
     /// "Save..." of the save-first question, until its save starts (`flows::before_save` moves it to `after_save`;
     /// `LinkAction::DropUnstartedEdit` drops it when no save started; check-P9a).
     pub save_then_edit: Option<EditRequest>,
     /// The edit that continues after the save that is running now.
     pub after_save: Option<EditRequest>,
     /// The links made since the last save that the running save holds (`made_since_save` when it started).
-    pub saving_made: BTreeSet<StickerId>,
+    pub saving_made: BTreeSet<LinkId>,
     /// A Save As in flight: the links whose old file becomes an alias when it succeeds.
-    pub pending_aliases: Vec<(StickerId, PathBuf)>,
+    pub pending_aliases: Vec<(LinkId, PathBuf)>,
     /// The note about styles was shown in this session.
     pub first_note_shown: bool,
+    /// Stickers P12: the note about a linked paint layer was shown in this session.
+    pub layer_note_shown: bool,
     pub convert: Option<ConvertJob>,
     pub counters: LinkCounters,
     /// The window had the focus in the last frame (a gained focus pokes the watcher).
@@ -380,6 +446,7 @@ impl LinkUi {
             saving_made: BTreeSet::new(),
             pending_aliases: Vec::new(),
             first_note_shown: false,
+            layer_note_shown: false,
             convert: None,
             counters: LinkCounters::default(),
             focused: false,
@@ -390,8 +457,8 @@ impl LinkUi {
     }
 
     /// The session of `id` (made on first use).
-    pub fn session(&mut self, id: StickerId) -> &mut LinkSession {
-        self.sessions.entry(id).or_default()
+    pub fn session(&mut self, id: impl Into<LinkId>) -> &mut LinkSession {
+        self.sessions.entry(id.into()).or_default()
     }
 
     /// Everything of the previous document goes (a new document, a load).
@@ -418,10 +485,10 @@ impl LinkUi {
 // Small helpers
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// The name of the link editor of sticker `id` (for a sticker without a link: the editor a new link opens in, or
-/// "your editor" while the chooser has to ask).
-pub fn editor_name(state: &AppState, id: StickerId) -> String {
-    match state.doc().and_then(|d| d.link(id)) {
+/// The name of the link editor of link `id` (for a sticker or layer without a link: the editor a new link opens in,
+/// or "your editor" while the chooser has to ask).
+pub fn editor_name(state: &AppState, id: impl Into<LinkId>) -> String {
+    match state.doc().and_then(|d| common(d, id.into())) {
         Some(l) => editor::name_of_key(&l.editor, state.prefs.other_editor_exe.as_deref()),
         None => editor_name_new(state),
     }
@@ -448,15 +515,36 @@ pub fn sticker_name(state: &AppState, id: StickerId) -> String {
     state.doc().and_then(|d| d.sticker(id)).map_or_else(|| "sticker".to_owned(), |d| d.name.clone())
 }
 
-/// Where sticker `id`'s link file is (`None` without a link, or an `InFolder` link of a never-saved project).
-pub fn link_path(state: &AppState, id: StickerId) -> Option<PathBuf> {
-    let session = state.session.as_ref()?;
-    session.doc.link(id)?.file.path(session.path.as_deref())
+/// The name of what link `id` belongs to: the sticker's name, or the paint layer's ("layer" when it is gone).
+pub fn link_name(state: &AppState, id: impl Into<LinkId>) -> String {
+    match id.into() {
+        LinkId::Sticker(s) => sticker_name(state, s),
+        LinkId::Layer(l) => state.doc().and_then(|d| d.layer(l)).map_or_else(|| "layer".to_owned(), |x| x.name.clone()),
+    }
 }
 
-/// The file name of sticker `id`'s link.
-pub fn file_name(state: &AppState, id: StickerId) -> String {
-    state.doc().and_then(|d| d.link(id)).map_or_else(String::new, |l| l.file.display_name())
+/// Where link `id`'s file is (`None` without a link, or an `InFolder` link of a never-saved project).
+pub fn link_path(state: &AppState, id: impl Into<LinkId>) -> Option<PathBuf> {
+    let session = state.session.as_ref()?;
+    common(&session.doc, id.into())?.file.path(session.path.as_deref())
+}
+
+/// The file name of link `id`.
+pub fn file_name(state: &AppState, id: impl Into<LinkId>) -> String {
+    state.doc().and_then(|d| common(d, id.into())).map_or_else(String::new, |l| l.file.display_name())
+}
+
+/// True when link `id`'s sticker or layer changed in WTE since the last sync (`wte_changed` of 5.5).
+pub fn wte_changed(state: &mut AppState, id: impl Into<LinkId>) -> bool {
+    let Some(doc) = state.doc_mut() else { return false };
+    match id.into() {
+        LinkId::Sticker(s) => {
+            let synced = doc.link(s).map(|l| l.synced_sticker);
+            let hash = doc.sticker_link_hash(s).ok();
+            synced.is_some() && hash != synced
+        }
+        LinkId::Layer(l) => doc.layer_link_changed_in_wte(l),
+    }
 }
 
 /// The sticker a stamp shows (`None` for an image or text stamp).
@@ -498,20 +586,24 @@ pub fn open_question(state: &AppState) -> Option<&LinkQuestion> {
     }
 }
 
-/// The badge of sticker `id`'s link: its state and its text (`None` without a link).
-pub fn badge(state: &mut AppState, id: StickerId) -> Option<(LinkState, String)> {
+/// The badge of link `id`: its state and its text (`None` without a link).
+pub fn badge(state: &mut AppState, id: impl Into<LinkId>) -> Option<(LinkState, String)> {
+    let id = id.into();
     let observed = {
-        let link = state.doc()?.link(id)?;
+        let link = common(state.doc()?, id)?;
         match state.link_ui.sessions.get(&id).and_then(|s| s.observed) {
             None => Some(link.synced),
             Some(o) => o,
         }
     };
     let editor = editor_name(state, id);
-    let sticker = sticker_name(state, id);
+    let name = link_name(state, id);
     let file = file_name(state, id);
-    let st = state.doc_mut()?.link_state(id, observed.as_ref()).ok()?;
-    let text = st.badge(&editor, &sticker, &file);
+    let st = match id {
+        LinkId::Sticker(s) => state.doc_mut()?.link_state(s, observed.as_ref()).ok()?,
+        LinkId::Layer(l) => state.doc_mut()?.layer_link_state(l, observed.as_ref()).ok()?,
+    };
+    let text = st.badge(&editor, &name, &file);
     Some((st, text))
 }
 
@@ -519,14 +611,15 @@ pub fn badge(state: &mut AppState, id: StickerId) -> Option<(LinkState, String)>
 // The frame hook
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// True while an update of sticker `id` must wait (5.6): a 3D tool interaction, a pending Preview edit or an open
+/// True while an update of link `id` must wait (5.6): a 3D tool interaction, a pending Preview edit or an open
 /// sticker stroke anywhere in the document, and in the Sticker view on that sticker a drag of the canvas or a
-/// focused text field.
-pub fn busy_for(state: &AppState, id: StickerId, tools_busy: bool) -> bool {
+/// focused text field. A paint layer's update waits for the same document-wide interactions (stickers P12).
+pub fn busy_for(state: &AppState, id: impl Into<LinkId>, tools_busy: bool) -> bool {
     let Some(session) = state.session.as_ref() else { return false };
     if tools_busy || session.doc.has_pending_edit() || session.doc.sticker_stroke_active() {
         return true;
     }
+    let LinkId::Sticker(id) = id.into() else { return false };
     let in_view = session.sticker_edit.as_ref().is_some_and(|e| match e.target {
         crate::state::StickerTarget::Tray(s) => s == id,
         crate::state::StickerTarget::Stamp(stamp) => session.doc.stamp(stamp).is_some_and(|o| {
@@ -539,11 +632,11 @@ pub fn busy_for(state: &AppState, id: StickerId, tools_busy: bool) -> bool {
 /// The list the watcher should have.
 fn wanted(state: &AppState) -> Vec<WatchEntry> {
     let Some(session) = state.session.as_ref() else { return Vec::new() };
-    session
-        .doc
-        .links()
-        .filter(|(id, _)| session.doc.sticker(*id).is_some())
-        .filter_map(|(id, link)| {
+    let doc = &session.doc;
+    let ids = doc.links().map(|(id, _)| LinkId::Sticker(id)).chain(doc.layer_links().map(|(id, _)| LinkId::Layer(id)));
+    ids.filter(|id| is_live(doc, *id))
+        .filter_map(|id| {
+            let link = common(doc, id)?;
             let path = link.file.path(session.path.as_deref())?;
             let alias = state.link_ui.sessions.get(&id).and_then(|s| s.alias.clone());
             Some(WatchEntry { id, path, alias, synced: link.synced })
@@ -600,7 +693,7 @@ pub fn pump(state: &mut AppState, ctx: &egui::Context, tools_busy: bool) {
 /// One watcher event.
 pub fn on_event(state: &mut AppState, event: LinkEvent, tools_busy: bool) {
     let id = event.id();
-    if state.doc().and_then(|d| d.link(id)).is_none() {
+    if state.doc().and_then(|d| common(d, id)).is_none() {
         return;
     }
     match event {
@@ -618,13 +711,16 @@ pub fn on_event(state: &mut AppState, event: LinkEvent, tools_busy: bool) {
             s.observed = Some(Some(stamp));
             s.unreadable = None;
             if let Some(doc) = state.doc_mut() {
-                let r = doc.link_file_refused(id, &error, stamp, &file);
+                let r = match id {
+                    LinkId::Sticker(sid) => doc.link_file_refused(sid, &error, stamp, &file),
+                    LinkId::Layer(lid) => doc.layer_link_file_refused(lid, &error, stamp, &file),
+                };
                 crate::dispatch::edited(state, r);
             }
         }
         LinkEvent::Changed { id, stamp, psd, from_alias } => {
             if from_alias {
-                log::info!("the linked file of sticker {} was saved at its old place and copied over", id.0);
+                log::info!("the linked file of {id:?} was saved at its old place and copied over");
             }
             let s = state.link_ui.session(id);
             s.observed = Some(Some(stamp));
@@ -646,7 +742,7 @@ pub fn on_event(state: &mut AppState, event: LinkEvent, tools_busy: bool) {
 }
 
 /// Keeps a change until the view is idle (5.6).
-fn hold(state: &mut AppState, id: StickerId, ev: HeldEvent) {
+fn hold(state: &mut AppState, id: LinkId, ev: HeldEvent) {
     state.link_ui.session(id).held = Some(ev);
     state.link_ui.counters.held += 1;
     if let Some(e) = crate::sticker::edit_mut(state) {
@@ -656,7 +752,7 @@ fn hold(state: &mut AppState, id: StickerId, ev: HeldEvent) {
 
 /// Held changes whose sticker is no longer busy are decided now.
 fn retry_held(state: &mut AppState, tools_busy: bool) {
-    let ids: Vec<StickerId> = state
+    let ids: Vec<LinkId> = state
         .link_ui
         .sessions
         .iter()
@@ -678,11 +774,10 @@ fn retry_held(state: &mut AppState, tools_busy: bool) {
 }
 
 /// The table of 5.5 for a settled change of the file.
-fn decide(state: &mut AppState, id: StickerId, ev: HeldEvent) {
-    let Some(link) = state.doc().and_then(|d| d.link(id)).cloned() else { return };
+fn decide(state: &mut AppState, id: LinkId, ev: HeldEvent) {
+    let Some(link) = state.doc().and_then(|d| common(d, id)) else { return };
     let file_changed = !ev.stamp.same_content(&link.synced);
-    let Some(hash) = state.doc_mut().and_then(|d| d.sticker_link_hash(id).ok()) else { return };
-    let wte_changed = hash != link.synced_sticker;
+    let wte_changed = wte_changed(state, id);
     let stale = state.link_ui.sessions.get(&id).is_some_and(|s| s.stale_in_editor);
     match sync_action(file_changed, wte_changed, stale) {
         SyncAction::Nothing => {}
@@ -714,8 +809,11 @@ pub fn unsaved_line(state: &AppState) -> Option<String> {
         .link_ui
         .made_since_save
         .iter()
-        .filter(|id| session.doc.link(**id).is_some_and(|l| matches!(l.file, LinkFile::InFolder(_))))
-        .map(|id| sticker_name(state, *id))
+        .filter(|id| common(&session.doc, **id).is_some_and(|l| matches!(l.file, LinkFile::InFolder(_))))
+        .map(|id| match id {
+            LinkId::Sticker(_) => link_name(state, *id),
+            LinkId::Layer(_) => format!("{} (paint layer)", link_name(state, *id)),
+        })
         .collect();
     if names.is_empty() {
         return None;
@@ -727,7 +825,7 @@ pub fn unsaved_line(state: &AppState) -> Option<String> {
 }
 
 /// The editors of these links' stickers, each once, in the order met: "Photoshop", "Photoshop and PhotoCraft".
-pub fn editors_of(state: &AppState, ids: impl Iterator<Item = StickerId>) -> String {
+pub fn editors_of(state: &AppState, ids: impl Iterator<Item = LinkId>) -> String {
     let mut names: Vec<String> = Vec::new();
     for id in ids {
         let name = editor_name(state, id);

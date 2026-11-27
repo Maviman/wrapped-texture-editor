@@ -314,6 +314,29 @@ WTE never comes to the front, flashes or beeps when PhotoCraft saves.
      the same file overwrite each other.") and "Open in Photoshop anyway"
      makes Photoshop the link's editor: the badge, the buttons and the
      questions name Photoshop from then on.
+ 16. A paint layer in your editor: select a paint layer (not a stamp, not
+     locked) and choose Layer > "Edit Layer in PhotoCraft" (or right-click
+     its row in the Layers tab; "Edit Layer in" lists the other editors).
+     The file is <project>_links\<layer>_l<number>.psd at the texture's
+     size; a note says the layer's opacity and blend mode stay in WTE. The
+     Layers tab now shows "Link: linked", the editor, the file and the
+     buttons Update now / Send to / Show file in Explorer / Unlink above
+     the layer list. Paint in the editor and press Ctrl+S: the layer and
+     the model update (one Undo step "Update Linked Layer"). Ctrl+Z, a
+     conflict, Save, Save As and reopening work as for a sticker (2-10).
+     Stamp, text and locked layers do not offer the command.
+ 17. Change the canvas size of that file in the editor and save: nothing
+     changes in WTE and the layer's badge (and a note) say "<layer> is
+     W x H in PhotoCraft; the texture is w x h. Undo the size change in
+     PhotoCraft." Undo the size change there and save again: it updates.
+     Add a second layer in the editor: with "Maximize Compatibility" on
+     the layer gets the finished picture; with it off the badge says
+     "needs a merged picture" with what to turn on.
+ 18. Edit > Paste as New Paint Layer (also a right-click on the Layers
+     tab's "New" button): a picture copied in another program (or a PNG
+     / PSD file copied in Explorer) becomes a new paint layer above the
+     active one. A picture of the texture's size lands as it is; another
+     size is scaled to fit (its shape kept) and centred. One Undo step.
 What does not come across: WTE's layer styles and stamp styles are not
 in the file (WTE adds them again to what comes back); a WTE text or shape
 layer you change in PhotoCraft comes back as pixels; PhotoCraft's text,

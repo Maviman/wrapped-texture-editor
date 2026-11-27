@@ -92,7 +92,7 @@ pub(super) fn deliver(state: &mut AppState, id: StickerId, tools_busy: bool) {
     let path = link_path(state, id).unwrap();
     let (stamp, bytes) = FileStamp::read(&path).unwrap();
     let psd = wte_core::psd::read(&bytes, &wte_core::psd::PsdLimits::default()).unwrap();
-    on_event(state, LinkEvent::Changed { id, stamp, psd: Box::new(psd), from_alias: false }, tools_busy);
+    on_event(state, LinkEvent::Changed { id: id.into(), stamp, psd: Box::new(psd), from_alias: false }, tools_busy);
 }
 
 pub(super) fn badge_text(state: &mut AppState, id: StickerId) -> String {
@@ -225,7 +225,7 @@ fn first_event(w: &LinkWatcher) -> LinkEvent {
 
 fn entry(path: &Path, bytes: &[u8]) -> WatchEntry {
     let modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-    WatchEntry { id: StickerId(7), path: path.to_path_buf(), alias: None, synced: FileStamp::of_bytes(bytes, modified) }
+    WatchEntry { id: StickerId(7).into(), path: path.to_path_buf(), alias: None, synced: FileStamp::of_bytes(bytes, modified) }
 }
 
 #[test]
@@ -248,7 +248,7 @@ fn the_watcher_reports_a_change_once_and_is_quiet_without_one() {
     testkit::save_bytes(&file, &second).unwrap();
     match first_event(&w) {
         LinkEvent::Changed { id, stamp, psd, from_alias } => {
-            assert_eq!((id, from_alias), (StickerId(7), false));
+            assert_eq!((id, from_alias), (StickerId(7).into(), false));
             assert_eq!(stamp.crc32, super::watch::crc(&second));
             assert_eq!(psd.layers.len(), 1);
         }
@@ -269,10 +269,10 @@ fn the_watcher_gives_up_on_a_file_that_stays_half_written_and_reports_a_deleted_
     std::thread::sleep(Duration::from_millis(80));
     let second = small_psd([200, 20, 30, 255]);
     std::fs::write(&file, &second[..second.len() - 7]).unwrap();
-    assert!(matches!(first_event(&w), LinkEvent::Unreadable { id: StickerId(7) }));
+    assert!(matches!(first_event(&w), LinkEvent::Unreadable { id: LinkId::Sticker(StickerId(7)) }));
     assert!(collect(&w, 200).is_empty(), "unreadable twice");
     std::fs::remove_file(&file).unwrap();
-    assert!(matches!(first_event(&w), LinkEvent::Missing { id: StickerId(7) }));
+    assert!(matches!(first_event(&w), LinkEvent::Missing { id: LinkId::Sticker(StickerId(7)) }));
     assert!(collect(&w, 150).is_empty(), "missing twice");
     // Complete bytes that are not a PSD: refused once.
     std::fs::write(&file, vec![b'x'; 64]).unwrap();
@@ -310,7 +310,7 @@ fn a_new_links_first_write_is_used_up_at_the_first_look() {
     let mut io = super::watch::OwnWritesIo(own.clone());
     let stamp = wte_core::link::write_link_file(&file, &first, &mut io).unwrap();
     assert_eq!(own.len(), 1);
-    let mut e = WatchEntry { id: StickerId(7), path: file.clone(), alias: None, synced: stamp };
+    let mut e = WatchEntry { id: StickerId(7).into(), path: file.clone(), alias: None, synced: stamp };
     w.set_list(vec![e.clone()]);
     assert!(collect(&w, 250).is_empty(), "the link's own first file was reported");
     assert_eq!(own.len(), 0, "the first write's registration stayed");
@@ -403,7 +403,7 @@ fn pump_starts_the_watcher_for_the_first_link_and_stops_it_with_the_last() {
     pump(&mut state, &ctx, false);
     let alive = state.link_ui.watcher.as_ref().expect("a watcher for the link").alive();
     let id = sticker_id(&state, stamp);
-    flows::run_in(&mut state, LinkAction::Unlink(id));
+    flows::run_in(&mut state, LinkAction::Unlink(id.into()));
     pump(&mut state, &ctx, false);
     assert!(state.link_ui.watcher.is_none());
     let end = Instant::now() + Duration::from_secs(3);
@@ -478,9 +478,9 @@ fn check_p9a_a_link_made_during_a_save_stays_in_the_close_prompt() {
     flows::before_save(&mut state, &project);
     edit(&mut state, stamp);
     let id = sticker_id(&state, stamp);
-    assert!(state.link_ui.made_since_save.contains(&id));
+    assert!(state.link_ui.made_since_save.contains(&id.into()));
     flows::after_save(&mut state, 0, &[]);
-    assert!(state.link_ui.made_since_save.contains(&id), "the running save did not hold the link");
+    assert!(state.link_ui.made_since_save.contains(&id.into()), "the running save did not hold the link");
     assert!(unsaved_line(&state).is_some());
     // The next save holds it.
     flows::before_save(&mut state, &project);
@@ -505,12 +505,12 @@ fn edit_in_promotes_writes_the_file_and_starts_the_stub() {
     assert_eq!(calls.len(), 1);
     assert_eq!((calls[0].editor.as_str(), calls[0].file.as_path()), ("photocraft", path.as_path()));
     assert_eq!(calls[0].exe, state.prefs.photocraft_exe.clone().unwrap());
-    let s = &state.link_ui.sessions[&id];
+    let s = &state.link_ui.sessions[&id.into()];
     assert!(s.opened && !s.stale_in_editor);
     assert_eq!(state.doc().unwrap().link(id).unwrap().editor, "photocraft");
     assert!(state.link_ui.own_writes.contains(super::watch::crc(&std::fs::read(&path).unwrap())));
     assert_eq!(badge_text(&mut state, id), "linked");
-    assert!(state.link_ui.made_since_save.contains(&id));
+    assert!(state.link_ui.made_since_save.contains(&id.into()));
     let line = unsaved_line(&state).unwrap();
     assert!(line.starts_with("Stickers linked to PhotoCraft since the last save: Logo.") && line.contains("proj_links"), "{line}");
     assert!(state.toasts.visible_texts().iter().any(|t| t.contains("styles are not in the file")));
@@ -577,7 +577,7 @@ fn a_running_child_asks_already_open_and_an_exited_one_clears_stale() {
     edit(&mut state, stamp);
     assert_eq!(state.dialog_name(), "None");
     assert_eq!(state.link_ui.launcher.calls().len(), 3);
-    assert!(!state.link_ui.sessions[&id].stale_in_editor);
+    assert!(!state.link_ui.sessions[&id.into()].stale_in_editor);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -614,7 +614,7 @@ fn a_change_is_applied_once_and_an_undo_does_not_bring_it_back() {
     deliver(&mut state, id, false);
     assert_eq!(state.doc().unwrap().sticker(id).unwrap().layers.len(), 1, "the undone update came back by itself");
     // "Update now" applies it again.
-    flows::run_in(&mut state, LinkAction::UpdateNow(id));
+    flows::run_in(&mut state, LinkAction::UpdateNow(id.into()));
     assert_eq!(state.doc().unwrap().sticker(id).unwrap().layers.len(), 2);
     assert_eq!(badge_text(&mut state, id), "linked");
 }
@@ -637,18 +637,18 @@ fn an_update_waits_while_the_sticker_view_is_busy() {
     // A drag of the canvas is open: the update waits.
     state.sticker_ui.drag = Some(crate::sticker::CanvasDrag::Pan { last: egui::pos2(1.0, 1.0), button: egui::PointerButton::Secondary });
     deliver(&mut state, id, false);
-    assert!(state.link_ui.sessions[&id].held.is_some());
+    assert!(state.link_ui.sessions[&id.into()].held.is_some());
     assert!(crate::sticker::edit_of(&state).unwrap().held_update);
     assert_eq!(state.doc().unwrap().sticker(id).unwrap().layers[0].id, first_layer);
     super::retry_held(&mut state, false);
-    assert!(state.link_ui.sessions[&id].held.is_some(), "applied while the drag was open");
+    assert!(state.link_ui.sessions[&id.into()].held.is_some(), "applied while the drag was open");
     // A pending Preview edit also holds it.
     state.sticker_ui.drag = None;
     super::retry_held(&mut state, true);
-    assert!(state.link_ui.sessions[&id].held.is_some(), "applied while a tool interaction was open");
+    assert!(state.link_ui.sessions[&id.into()].held.is_some(), "applied while a tool interaction was open");
     // Released: applied in the next frame; the selection is gone, the active layer is the top one.
     super::retry_held(&mut state, false);
-    assert!(state.link_ui.sessions[&id].held.is_none());
+    assert!(state.link_ui.sessions[&id.into()].held.is_none());
     let d = state.doc().unwrap().sticker(id).unwrap();
     assert_eq!(d.layers.len(), 1);
     assert_eq!(d.layers[0].name, "pc layer");
@@ -697,7 +697,7 @@ fn both_changed_is_a_conflict_and_a_send_while_open_makes_the_next_save_a_questi
     assert!(read.layers.iter().any(|l| l.name == "wte again"));
     assert!(wte_core::link::file::backup_path(&path).is_file());
     assert_eq!(badge_text(&mut state, id), "linked");
-    assert!(state.link_ui.sessions[&id].stale_in_editor);
+    assert!(state.link_ui.sessions[&id.into()].stale_in_editor);
     // The editor saves its old picture over it: never applied silently.
     editor_adds_a_layer(&mut state, id, "blue");
     let undo = state.doc().unwrap().history.undo_len();
@@ -708,7 +708,7 @@ fn both_changed_is_a_conflict_and_a_send_while_open_makes_the_next_save_a_questi
     // Decide later (also Esc): the badge says so; the answer clears the stale flag.
     press(&mut state, "Decide later").unwrap();
     run_queued(&mut state);
-    assert!(!state.link_ui.sessions[&id].stale_in_editor);
+    assert!(!state.link_ui.sessions[&id.into()].stale_in_editor);
     assert_eq!(badge_text(&mut state, id), "changed in PhotoCraft");
 }
 
@@ -775,7 +775,7 @@ fn a_save_writes_no_link_file_and_save_as_takes_the_files_along_with_aliases() {
     let new_path = link_path(&state, id).unwrap();
     assert_eq!(new_path.parent().unwrap(), links_folder(&moved));
     assert_eq!(std::fs::read(&new_path).unwrap(), before.0);
-    assert_eq!(state.link_ui.sessions[&id].alias.as_deref(), Some(path.as_path()));
+    assert_eq!(state.link_ui.sessions[&id.into()].alias.as_deref(), Some(path.as_path()));
     assert!(state.toasts.visible_texts().iter().any(|t| t.starts_with("Logo may still be open in PhotoCraft from the old folder.")));
     let want = super::wanted(&state);
     assert_eq!(want.len(), 1);
@@ -855,7 +855,7 @@ fn a_psd_file_becomes_a_tray_sticker_optionally_linked() {
     let l = state.doc().unwrap().link(linked).unwrap();
     assert_eq!(l.file, LinkFile::External(file.clone()));
     assert_eq!(badge_text(&mut state, linked), "linked");
-    assert!(super::wanted(&state).iter().any(|w| w.id == linked && w.path == file));
+    assert!(super::wanted(&state).iter().any(|w| w.id == linked.into() && w.path == file));
     // A refused file: its sentence, nothing added.
     let n = state.doc().unwrap().stickers().count();
     std::fs::write(dir.join("bad.psd"), vec![b'x'; 64]).unwrap();

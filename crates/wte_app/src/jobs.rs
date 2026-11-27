@@ -78,6 +78,8 @@ pub enum JobOutput {
         warnings: Vec<String>,
         force_save_as: bool,
         links: Vec<wte_core::project::LinkAtLoad>,
+        /// Stickers P12: the same for every linked paint layer.
+        layer_links: Vec<wte_core::project::LayerLinkAtLoad>,
     },
     /// `result` = what was saved; `scene_generation` = `Session::scene_generation` at the moment the save started.
     Saved { result: Result<Saved, String>, scene_generation: u64, then: Option<Pending> },

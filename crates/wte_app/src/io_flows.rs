@@ -159,7 +159,7 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                 report_failure(&mut app.state, cancel_requested, "Import cancelled", toast, "Import failed", lines);
             }
         },
-        JobOutput::Built { result, path, warnings, force_save_as, links } => match result {
+        JobOutput::Built { result, path, warnings, force_save_as, links, layer_links } => match result {
             Ok(doc) => {
                 // Refused before it replaces anything: buffers above the device limits would end in a wgpu
                 // validation panic when the views build the scene.
@@ -186,6 +186,12 @@ pub fn on_job_output(app: &mut WteApp, out: JobOutput, cancel_requested: bool) {
                     && !links.is_empty()
                 {
                     crate::link::flows::after_load(&mut app.state, p, &links);
+                }
+                // Stickers P12: the same for linked paint layers.
+                if let Some(p) = &path
+                    && !layer_links.is_empty()
+                {
+                    crate::link::flows::after_load_layers(&mut app.state, p, &layer_links);
                 }
             }
             Err(e) => {
@@ -420,7 +426,7 @@ pub fn start_build(app: &mut WteApp, model: ImportedModel, choices: Vec<TextureC
     // The import warnings were listed in the import dialog already; they are not shown a second time.
     app.jobs.spawn(&app.ctx, "Creating document", true, move |p| {
         let result = Document::from_import(model, choices, p).map_err(|e| e.to_string());
-        JobOutput::Built { result, path: None, warnings: Vec::new(), force_save_as: false, links: Vec::new() }
+        JobOutput::Built { result, path: None, warnings: Vec::new(), force_save_as: false, links: Vec::new(), layer_links: Vec::new() }
     });
 }
 
@@ -437,10 +443,18 @@ pub fn start_open_project(app: &mut WteApp, path: PathBuf) {
             force_save_as: report.force_save_as,
             path: Some(path),
             links: report.links,
+            layer_links: report.layer_links,
         },
         Err(e) => {
             let text = cannot_open_text(&path).unwrap_or_else(|| e.to_string());
-            JobOutput::Built { result: Err(text), path: Some(path), warnings: Vec::new(), force_save_as: false, links: Vec::new() }
+            JobOutput::Built {
+                result: Err(text),
+                path: Some(path),
+                warnings: Vec::new(),
+                force_save_as: false,
+                links: Vec::new(),
+                layer_links: Vec::new(),
+            }
         }
     });
 }

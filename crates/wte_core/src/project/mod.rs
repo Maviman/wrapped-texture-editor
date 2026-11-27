@@ -62,12 +62,16 @@ pub enum SaveWarning {
     /// The linked file of sticker `sticker` changed and does not read completely (its editor is writing it): the
     /// project keeps the earlier copy of it (none on a first save).
     LinkBeingWritten { sticker: crate::ids::StickerId, name: String },
+    /// Stickers P12: the same for the linked file of paint layer `layer`.
+    LayerLinkBeingWritten { layer: crate::ids::LayerId, name: String },
 }
 
 impl std::fmt::Display for SaveWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SaveWarning::LinkBeingWritten { name, .. } => f.write_str(&crate::link::texts::being_written(name)),
+            SaveWarning::LinkBeingWritten { name, .. } | SaveWarning::LayerLinkBeingWritten { name, .. } => {
+                f.write_str(&crate::link::texts::being_written(name))
+            }
         }
     }
 }
@@ -118,6 +122,19 @@ pub struct LoadReport {
     /// nothing. The app restores a missing `InFolder` file from its archive entry (`read_link_archive`) and asks
     /// about a changed one.
     pub links: Vec<LinkAtLoad>,
+    /// Stickers P12: the same for every linked paint layer (STICKER_PLAN 5.9).
+    pub layer_links: Vec<LayerLinkAtLoad>,
+}
+
+/// Stickers P12: one paint layer's editor link as `load` found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayerLinkAtLoad {
+    pub layer: crate::ids::LayerId,
+    pub state: LinkFileState,
+    /// Where the file is expected.
+    pub path: Option<std::path::PathBuf>,
+    /// The copy of the file inside the project (`links/l<id:05>.psd`), when the archive has it.
+    pub archive: Option<String>,
 }
 
 /// One editor link as `load` found it.

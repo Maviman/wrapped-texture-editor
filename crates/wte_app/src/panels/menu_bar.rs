@@ -174,6 +174,8 @@ fn edit_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
         ("Copy", "Ctrl+C", open, ClipAction::Copy),
         ("Paste", "Ctrl+V", open, ClipAction::Paste),
         ("Paste at View Centre", "", open, ClipAction::PasteAtViewCentre),
+        // Stickers P12 (STICKER_PLAN 5.9, 6.3): the clipboard picture as a new paint layer of the active set.
+        ("Paste as New Paint Layer", "", open && !in_editor, ClipAction::PasteAsLayer),
     ] {
         if item_keys(ui, label, keys, enabled) {
             actions.push(AppAction::Clip(action));
@@ -341,6 +343,25 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
             if let Some(id) = selected {
                 let mut hits = Vec::new();
                 crate::link::ui::editor_list(ui, state, crate::link::LinkTarget::Stamp(id), actions, &mut hits);
+            }
+        });
+    });
+    // Stickers P12 (STICKER_PLAN 5.9, 13.9): the active paint layer in the outside editor ("Edit Layer in <editor>",
+    // its link's editor, else the default one; "Edit Layer in..." asks), and the submenu "Edit Layer in" with the
+    // editor list. Not for stamp, text or locked layers.
+    let raster_active = active.filter(|l| l.is_raster()).map(|l| l.id);
+    let can_edit_layer = raster_active.is_some_and(|id| crate::link::ui::layer_editable(state, id));
+    let edit_layer_label = raster_active.map_or_else(|| "Edit Layer in...".to_owned(), |id| crate::link::ui::edit_layer_label(state, id));
+    if item(ui, &edit_layer_label, "", can_edit_layer, false)
+        && let Some(id) = raster_active
+    {
+        actions.push(AppAction::Link(crate::link::LinkAction::EditIn(crate::link::EditRequest::new(crate::link::LinkTarget::Layer(id)))));
+    }
+    ui.add_enabled_ui(can_edit_layer, |ui| {
+        ui.menu_button("Edit Layer in", |ui| {
+            if let Some(id) = raster_active {
+                let mut hits = Vec::new();
+                crate::link::ui::editor_list(ui, state, crate::link::LinkTarget::Layer(id), actions, &mut hits);
             }
         });
     });

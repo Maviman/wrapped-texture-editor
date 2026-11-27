@@ -8,7 +8,7 @@
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{BlobId, StickerId, StickerLayerId};
+use crate::ids::{BlobId, LayerId, StickerId, StickerLayerId};
 use crate::layer::BlendMode;
 use crate::math::IRect;
 use crate::project::manifest::{FileRef, TextEntry};
@@ -783,6 +783,72 @@ impl LinkEntry {
                 .collect(),
             next_lyid: self.next_lyid.max(top.saturating_add(1)).max(1),
             editor_native: self.editor_native,
+            problem: None,
+        })
+    }
+}
+
+// ----- linked paint layers (STICKER_PLAN 5.9; stickers P12) -----
+
+/// One link of `Manifest::layer_links`: a raster paint layer's editor link (`link::PaintLink`) plus the archive entry
+/// of its file (`links/l<id:05>.psd`). Stickers P12 keeps them in their own list (not in `links` with a `"layer"`
+/// key, as the plan sketched): a `links` entry needs a sticker, and a project without layer links writes no key at all.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PaintLinkEntry {
+    pub layer: LayerId,
+    pub file: LinkFileEntry,
+    #[serde(default = "default_editor")]
+    pub editor: String,
+    pub synced: FileStampEntry,
+    /// CRC-32 of the layer's normalised pixels at the sync.
+    pub synced_pixels: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editor_layers: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<String>,
+}
+
+impl PaintLinkEntry {
+    /// The entry of `link` (layer `layer`); `archive` = the stored copy of the file, if any.
+    pub fn of(layer: LayerId, link: &crate::link::PaintLink, archive: Option<String>) -> PaintLinkEntry {
+        PaintLinkEntry {
+            layer,
+            file: match &link.file {
+                crate::link::LinkFile::InFolder(name) => LinkFileEntry::InFolder { name: name.clone() },
+                crate::link::LinkFile::External(path) => LinkFileEntry::External { path: path.to_string_lossy().into_owned() },
+            },
+            editor: link.editor.clone(),
+            synced: FileStampEntry { size: link.synced.size, modified_unix_ns: link.synced.modified_ns, crc32: link.synced.crc32 },
+            synced_pixels: link.synced_pixels,
+            editor_layers: link.editor_layers,
+            archive,
+        }
+    }
+
+    /// The link this entry describes; `Err` (with the reason) for an `InFolder` name that is not a plain file name.
+    pub fn to_link(&self) -> Result<crate::link::PaintLink, &'static str> {
+        let file = match &self.file {
+            LinkFileEntry::InFolder { name } => {
+                let plain = !name.is_empty()
+                    && std::path::Path::new(name).file_name().is_some_and(|n| n == std::ffi::OsStr::new(name))
+                    && !name.contains(['/', '\\', ':']);
+                if !plain {
+                    return Err("the linked file name is not a plain file name");
+                }
+                crate::link::LinkFile::InFolder(name.clone())
+            }
+            LinkFileEntry::External { path } => crate::link::LinkFile::External(path.into()),
+        };
+        Ok(crate::link::PaintLink {
+            file,
+            editor: self.editor.clone(),
+            synced: crate::link::FileStamp {
+                size: self.synced.size,
+                modified_ns: self.synced.modified_unix_ns,
+                crc32: self.synced.crc32,
+            },
+            synced_pixels: self.synced_pixels,
+            editor_layers: self.editor_layers,
             problem: None,
         })
     }

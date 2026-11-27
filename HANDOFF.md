@@ -82,7 +82,8 @@ brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_wa
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
 companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen
-sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path sticker_drop sticker_clip sticker_dragout` (70; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
+sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path sticker_drop sticker_clip sticker_dragout
+layer_link` (71; `scenarios::tests` checks the count and that every shot of a `sticker*` / `layer_link` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -123,7 +124,13 @@ P11: `sticker_dragout` (drag out with `Step::ScreenHold`: a Layers row, a painte
 thumbnail (Esc'd), a tray item and the PSD handle leave the window with the button held; the drag is recorded by
 `ole::drag_source::Recorder`, never the OS; an in-window reorder still works; the handle asks "Save first", then hands out
 the linked PSD with Photoshop as the default editor and its toast once; shots `dragout_after_row`,
-`dragout_sticker_tab`, `dragout_save_first`, `dragout_psd_toast`).
+`dragout_sticker_tab`, `dragout_save_first`, `dragout_psd_toast`);
+P12: `layer_link` (a linked texture paint layer with the stub launcher: Paint 1 painted, "Edit Layer in PhotoCraft" from
+its row menu, the editor's save of a blue band = one "Update Linked Layer", undo stays "changed in WTE", Update now, a
+conflict with Take, save and reopen; then Photoshop as the default editor: Layer > Edit Layer in Photoshop, an update, a
+canvas size change refused with Photoshop's sentence on the layer badge, "needs a merged picture" with the MaxCompat
+sentence; shots `layer_link_menu`, `layer_link_made`, `layer_link_updated`, `layer_link_conflict`,
+`layer_link_reopened`, `layer_link_ps_size`, `layer_link_ps_merged`).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
@@ -192,7 +199,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
-| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P10b built and checked; P11 built (drag out: Layers rows, the Sticker tab's thumbnails and the "PSD" handle to Explorer, PhotoCraft and Photoshop); P12-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
+| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P11 built and checked; P12 built (linked texture paint layers, Paste as New Paint Layer); P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
 | companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -279,9 +286,15 @@ one PNG file (`CF_HDROP`) + PNG + CF_DIBV5 (+ WTE.Sticker.v1 for stickers), prep
 handle under the Sticker tab's thumbnail ("drag to your editor: stays linked") hands out the stamp's linked PSD, making
 the link at the press, in the default editor, with the Photoshop tab-bar toast once per session; `DoDragDrop` only from
 WTE's subclass for a posted message; the files in `%LOCALAPPDATA%\WrappedTextureEditor\dragout\` with a manifest, and
-only unchanged files of WTE's older than a day are removed at start).
-Next: P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if everything is green; then
-the gate.
+only unchanged files of WTE's older than a day are removed at start), **P12** linked texture paint layers
+(`link/paint.rs`, `doc_layer_links.rs`, `LinkId` in `link/`: "Edit Layer in <editor>" in the Layer menu and a paint
+layer's row menu, never for stamp, text or locked layers; a one-layer PSD at the texture's size `<layer>_l<id>.psd` in the
+links folder; the editor's Ctrl+S = one undo step "Update Linked Layer"; the same watcher, states, conflict, Send, save,
+Save As and load rules as a sticker; a file of another canvas size is refused with "<layer> is W x H in <editor>; the
+texture is w x h. Undo the size change in <editor>."; the Layers tab shows a linked active layer's badge and buttons;
+manifest `layer_links` and archive `links/l<id>.psd`; Edit > Paste as New Paint Layer, also the right-click menu of the
+Layers tab's "New").
+Next: P13 docs and version 0.4.0; S1 / S2 only if everything is green; then the gate.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open

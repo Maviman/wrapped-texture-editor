@@ -47,7 +47,13 @@ pub enum ClipAction {
     PasteAtViewCentre,
     /// Help > Clipboard contents...: the formats on the clipboard (13.5).
     ShowContents,
+    /// Stickers P12 (STICKER_PLAN 5.9): the clipboard's picture as a new paint layer of the active set (the same size:
+    /// as it is; another size: scaled to fit with its aspect kept, centred).
+    PasteAsLayer,
 }
+
+/// The undo label of Paste as New Paint Layer.
+pub(crate) const PASTE_LAYER_LABEL: &str = "Paste as New Paint Layer";
 
 /// Status line of Cut outside the Sticker view.
 pub(crate) const CUT_HINT: &str = "Cut takes selected pixels in the Sticker view; use Copy here";
@@ -68,8 +74,18 @@ type CopyDone = Result<(String, Vec<(ClipFormat, Vec<u8>)>), String>;
 #[derive(Default)]
 pub struct ClipUi {
     job: Option<CopyJob>,
+    /// Stickers P12: a Paste as New Paint Layer whose picture is being decoded and fitted.
+    layer: Option<LayerPasteJob>,
     /// Copies written to the clipboard so far (the self-test's and the tests' counter).
     pub(crate) copies: u64,
+}
+
+/// Stickers P12: a Paste as New Paint Layer on its worker: the layer's name and texture-sized picture (or the
+/// sentence why not), for the set and document generation it was started in.
+struct LayerPasteJob {
+    rx: mpsc::Receiver<Result<(String, PixelBuf), String>>,
+    set: wte_core::TextureSetId,
+    generation: u64,
 }
 
 /// One copy on its worker: its result, and the flag that tells the worker it was superseded.
@@ -81,7 +97,7 @@ struct CopyJob {
 impl ClipUi {
     /// True while a copy is being encoded (the self-test's idle check).
     pub(crate) fn busy(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.layer.is_some()
     }
 }
 
@@ -170,8 +186,9 @@ pub fn after_ui(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
-/// Writes the copy when its encoding is done (every frame, `App::ui`).
+/// Writes the copy when its encoding is done, and adds a pasted layer whose picture is ready (every frame, `App::ui`).
 pub fn poll(state: &mut AppState) {
+    poll_layer(state);
     let Some(job) = &state.clip_ui.job else { return };
     match job.rx.try_recv() {
         Ok(d) => {
@@ -220,6 +237,7 @@ pub(crate) fn run_with(ctx: &egui::Context, state: &mut AppState, action: ClipAc
         ClipAction::Paste => paste(ctx, state, false),
         ClipAction::PasteAtViewCentre => paste(ctx, state, true),
         ClipAction::ShowContents => show_contents(state),
+        ClipAction::PasteAsLayer => paste_as_layer(ctx, state),
     }
 }
 
@@ -479,6 +497,104 @@ fn paste(ctx: &egui::Context, state: &mut AppState, at_centre: bool) {
             let spot = paste_spot(state, at_centre);
             crate::dnd::start_items(ctx, state, spot, vec![item], PASTE_LABEL);
         }
+    }
+}
+
+/// Stickers P12 (STICKER_PLAN 5.9): Paste as New Paint Layer. The clipboard's picture (PNG, CF_DIBV5, CF_DIB, or a
+/// picture or PSD file) is decoded and fitted to the active set's texture on a worker (`poll_layer` adds the layer:
+/// one undo step). WTE's sticker data is skipped (a WTE copy has its PNG too).
+fn paste_as_layer(ctx: &egui::Context, state: &mut AppState) {
+    finish_copies(state);
+    if state.busy.as_ref().is_some_and(|b| b.modal) {
+        state.toasts.warn("Please wait for the running operation to finish");
+        return;
+    }
+    let Some(session) = state.session.as_ref() else {
+        state.toasts.warn("Open a model first");
+        return;
+    };
+    let set = session.active_set;
+    let Some([w, h]) = session.doc.set(set).map(|s| [s.width, s.height]) else { return };
+    let generation = session.scene_generation;
+    let item = match clipboard::picture_item(&*state.clipboard) {
+        Err(e) => {
+            state.toasts.warn(format!("Could not read the clipboard: {e}"));
+            return;
+        }
+        Ok(None) => {
+            let names = state.clipboard.format_names().unwrap_or_default();
+            state.toasts.info(nothing_text(&names));
+            return;
+        }
+        Ok(Some((format, item))) => {
+            log::info!("paste as a new paint layer: {} taken", format.name());
+            item
+        }
+    };
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let made = layer_picture(item).map(|(name, p)| (name, wte_core::doc_layer_links::fit_centred(&p, w, h)));
+        let _ = tx.send(made);
+        ctx.request_repaint();
+    });
+    state.clip_ui.layer = Some(LayerPasteJob { rx, set, generation });
+}
+
+/// The picture of a pasted item and the new layer's name (on the worker).
+pub(crate) fn layer_picture(item: crate::ole::DropItem) -> Result<(String, PixelBuf), String> {
+    use crate::ole::{DataKind, DropItem};
+    let decode = |bytes: &[u8], name: &str| -> Result<PixelBuf, String> {
+        if crate::dnd::is_psd_path(std::path::Path::new(name)) {
+            let psd = crate::link::flows::parse_psd(bytes, name)?;
+            return psd.merged.filter(|_| psd.has_real_merged).ok_or_else(|| format!("{name} has no merged picture to paste"));
+        }
+        wte_core::decode_image(bytes, Some(name), 8192).map(|d| d.pixels).map_err(|e| format!("Cannot paste {name}: {e}"))
+    };
+    match item {
+        DropItem::Data { kind: DataKind::Dib, bytes, .. } => {
+            crate::ole::formats::dib_to_pixels(&bytes).map(|p| ("Pasted".to_owned(), p)).map_err(|e| format!("Cannot paste the picture: {e}"))
+        }
+        DropItem::Data { name, kind: DataKind::Png | DataKind::File, bytes } => decode(&bytes, &name).map(|p| ("Pasted".to_owned(), p)),
+        DropItem::Data { kind: DataKind::Sticker, .. } => Err("Paste as New Paint Layer takes a picture".to_owned()),
+        DropItem::File(path) => {
+            let name = path.file_name().map_or_else(|| "picture".to_owned(), |n| n.to_string_lossy().into_owned());
+            let stem = path.file_stem().map_or_else(|| "Pasted".to_owned(), |n| n.to_string_lossy().into_owned());
+            let bytes = std::fs::read(&path).map_err(|e| format!("Cannot open {name}: {e}"))?;
+            decode(&bytes, &name).map(|p| (stem, p))
+        }
+    }
+}
+
+/// Adds the pasted layer once its picture is ready (one undo step "Paste as New Paint Layer"); a document opened
+/// meanwhile gets nothing.
+fn poll_layer(state: &mut AppState) {
+    let Some(job) = &state.clip_ui.layer else { return };
+    let made = match job.rx.try_recv() {
+        Ok(made) => made,
+        Err(mpsc::TryRecvError::Empty) => return,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            state.clip_ui.layer = None;
+            return;
+        }
+    };
+    let Some(job) = state.clip_ui.layer.take() else { return };
+    let (name, pixels) = match made {
+        Ok(m) => m,
+        Err(text) => {
+            state.toasts.warn(text);
+            return;
+        }
+    };
+    if state.session.as_ref().is_none_or(|s| s.scene_generation != job.generation) {
+        state.toasts.warn("The picture was not pasted: another document was opened meanwhile");
+        return;
+    }
+    let r = state.doc_mut().map(|d| d.add_paint_layer_with_pixels(job.set, &name, pixels, PASTE_LAYER_LABEL));
+    if let Some(r) = r
+        && crate::dispatch::edited(state, r).is_some()
+    {
+        state.status_hint = format!("Pasted as the new paint layer \"{name}\"");
     }
 }
 

@@ -106,6 +106,11 @@ pub(crate) struct StickerState {
     pub(crate) links_saved: u64,
     /// CRC-32 of sticker pictures and masks by picture version, for `sticker_link_hash` (derived, not persisted).
     pub(crate) link_crcs: HashMap<u64, u32>,
+    /// Stickers P12: the editor links of raster paint layers (STICKER_PLAN 5.9); outside the history like `links`,
+    /// sharing its revision (the modified flag).
+    pub(crate) layer_links: BTreeMap<LayerId, crate::link::PaintLink>,
+    /// Stickers P12: CRC-32 of a linked layer's normalised pixels by layer version (derived, not persisted).
+    pub(crate) layer_crcs: HashMap<LayerId, (u64, u32)>,
 }
 
 /// Most parameterizations a document keeps (least recently used dropped first).
@@ -414,6 +419,7 @@ impl Document {
             png_reuse: self.png_reuse.clone(),
             stickers: self.sticker_state.map.clone(),
             links: self.sticker_state.links.clone(),
+            layer_links: self.sticker_state.layer_links.clone(),
             links_revision: self.sticker_state.links_revision,
         }
     }
@@ -618,6 +624,9 @@ pub struct DocumentSnapshot {
     pub stickers: std::collections::BTreeMap<crate::ids::StickerId, Arc<crate::sticker::StickerDoc>>,
     /// The editor links (STICKER_PLAN 5.3); `project::save` writes those of saved stickers and archives their files.
     pub links: std::collections::BTreeMap<crate::ids::StickerId, crate::link::StickerLink>,
+    /// Stickers P12: the editor links of paint layers (STICKER_PLAN 5.9); `project::save` writes those of the saved
+    /// raster layers and archives their files.
+    pub layer_links: std::collections::BTreeMap<crate::ids::LayerId, crate::link::PaintLink>,
     /// `Document::links_revision` when the snapshot was taken (for `mark_links_saved` after a background save).
     pub links_revision: u64,
 }

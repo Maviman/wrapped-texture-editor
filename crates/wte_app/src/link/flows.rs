@@ -2,6 +2,9 @@
 //! to", "Update now", the conflict and load answers, Restore, Unlink, Show file, the command-line conversion, Import
 //! PSD as sticker, and the hooks of the save, Save As and load flows.
 //!
+//! Stickers P12 (5.9): the same commands for a linked raster paint layer (`LinkId::Layer`); "Edit Layer in <editor>"
+//! is `edit_layer_in`.
+//!
 //! Only three things write a link file (5.3, review B1): making the link, an explicit "Send to <editor>" (also "Keep
 //! WTE's version" and "Send and open"), and restoring a missing file from the project's archived copy. A project save
 //! never does. Every write goes through `link::write_link_file` with the watcher's `own_writes` registration.
@@ -9,19 +12,19 @@
 use std::path::{Path, PathBuf};
 
 use wte_core::link::{
-    EDITOR_OTHER, EDITOR_PHOTOCRAFT, FileStamp, LinkFile, LinkState, OpenedState, StaleEvent, StickerLink, archive_entry,
-    link_file_name, links_folder, next_stale, rewrite_warning, send_first_question, texts,
+    EDITOR_OTHER, EDITOR_PHOTOCRAFT, FileStamp, LinkFile, LinkMode, LinkState, OpenedState, StaleEvent, archive_entry,
+    link_file_name, links_folder, next_stale, paint_archive_entry, paint_link_file_name, rewrite_warning, send_first_text, texts,
 };
 use wte_core::psd::{PsdColorMode, PsdDoc, PsdError, PsdLimits};
 use wte_core::doc_links::LinkApplied;
-use wte_core::{ShareScope, StampSource, StickerId};
+use wte_core::{LayerId, ShareScope, StampSource, StickerId};
 
 use super::editor::{self, ExternalEditor};
 use super::launch::ChildState;
 use super::watch::OwnWritesIo;
 use super::{
-    EditRequest, HeldEvent, LinkAction, LinkQuestion, LinkTarget, QuestionKind, SendRequest, ask, editor_name, file_name,
-    link_path, sticker_name,
+    EditRequest, HeldEvent, LinkAction, LinkId, LinkQuestion, LinkTarget, QuestionKind, SendRequest, ask, common, editor_name,
+    file_name, link_name, link_path, sticker_name, wte_changed,
 };
 use crate::action::AppAction;
 use crate::app::WteApp;
@@ -149,15 +152,18 @@ pub(crate) fn run_in(state: &mut AppState, action: LinkAction) {
             s.ignore_crc = crc;
         }
         LinkAction::Fit(id) => {
-            if let Some(ev) = read_now(state, id) {
-                apply(state, id, &ev.psd, ev.stamp, true);
+            if let Some(ev) = read_now(state, id.into()) {
+                apply(state, id.into(), &ev.psd, ev.stamp, true);
             }
         }
         LinkAction::Unlink(id) => {
-            let name = sticker_name(state, id);
+            let name = link_name(state, id);
             let file = file_name(state, id);
             if let Some(doc) = state.doc_mut() {
-                doc.unlink(id);
+                match id {
+                    LinkId::Sticker(s) => doc.unlink(s),
+                    LinkId::Layer(l) => doc.unlink_layer(l),
+                }
             }
             state.link_ui.sessions.remove(&id);
             state.link_ui.made_since_save.remove(&id);
@@ -234,9 +240,14 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
         }
         return;
     }
+    if let LinkTarget::Layer(layer) = req.target {
+        edit_layer_in(state, req, layer, pick);
+        return;
+    }
     let Some(session) = state.session.as_ref() else { return };
     let doc = &session.doc;
     let (stamp, sticker) = match req.target {
+        LinkTarget::Layer(_) => return,
         LinkTarget::Stamp(s) => {
             if doc.stamp(s).is_none() {
                 return;
@@ -254,27 +265,19 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
     // A link needs a saved project (5.3, reviews A10, B8); an external link does not.
     let external = existing.as_ref().is_some_and(|l| matches!(l.file, LinkFile::External(_)));
     if session.path.is_none() && !external {
-        let q = LinkQuestion::new(QuestionKind::SaveFirst, sticker, "Save first", vec![texts::SAVE_FIRST.to_owned()])
+        let q = LinkQuestion::new(QuestionKind::SaveFirst, sticker.map(LinkId::from), "Save first", vec![texts::SAVE_FIRST.to_owned()])
             .cancel("Cancel")
             .button("Save...", vec![act(LinkAction::SaveThenEdit(req))]);
         ask(state, q);
         return;
     }
     editor::ensure_discovered(state, false);
-    let Some(editor) = choose_editor(state, &req, sticker, existing.as_ref()) else { return };
+    let Some(editor) = choose_editor(state, &req, sticker, existing.as_ref().map(|l| l.editor.as_str())) else { return };
     // A link opened in another editor in this session (13.1): two programs saving one file overwrite each other.
     if let Some(id) = sticker
         && existing.is_some()
-        && !req.switch_ok
-        && let Some(old) = state.link_ui.sessions.get(&id).filter(|s| s.opened).and_then(|s| s.opened_editor.clone())
-        && old != editor.key()
+        && switch_question(state, id.into(), &req, &editor)
     {
-        let old_name = editor::name_of_key(&old, state.prefs.other_editor_exe.as_deref());
-        let anyway = EditRequest { editor: Some(editor.key().to_owned()), switch_ok: true, ..req.clone() };
-        let q = LinkQuestion::new(QuestionKind::OtherEditor, Some(id), "Open in another program?", vec![texts::other_editor_open(&old_name)])
-            .cancel("Cancel")
-            .button(format!("Open in {} anyway", editor.name()), vec![act(LinkAction::EditIn(anyway))]);
-        ask(state, q);
         return;
     }
     let Some(exe) = editor_exe(state, &editor, pick) else { return };
@@ -302,52 +305,94 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
         if !make_link(state, id, &editor) {
             return;
         }
-    } else {
-        let path = link_path(state, id);
-        let missing = path.as_deref().is_none_or(|p| !p.is_file());
-        if missing {
-            // The file is gone: written again from the sticker (WTE's content; nothing of the editor's is lost by it).
-            let file = state.doc().and_then(|d| d.link(id)).map(|l| (l.file.clone(), l.editor.clone()));
-            if let Some((file, key)) = file
-                && let Err(text) = write_file(state, id, file, &key)
-            {
-                ask(state, info(Some(id), "Could not write the file", text));
-                return;
-            }
-        } else if !req.open_as_is {
-            let wte_changed = wte_changed(state, id);
-            let link = state.doc().and_then(|d| d.link(id)).cloned();
-            if let Some(link) = link
-                && let Some(q) = send_first_question(&link, wte_changed, &editor.name())
-            {
-                let mut as_is = req.clone();
-                as_is.open_as_is = true;
-                let mut then = req.clone();
-                then.open_as_is = true;
-                let send = SendRequest { then_open: Some(then), ..SendRequest::new(id) };
-                let q = LinkQuestion::new(QuestionKind::SendFirst, Some(id), "Send WTE's changes?", vec![q])
-                    .cancel("Cancel")
-                    .button("Open the file as it is", vec![link_action(LinkAction::EditIn(as_is))])
-                    .button("Send and open", vec![link_action(LinkAction::Send(send))]);
-                ask(state, q);
-                return;
-            }
-        }
+    } else if !existing_ready(state, id.into(), &req, &editor) {
+        return;
     }
+    open_in_editor(state, id.into(), &req, &editor, &exe);
+}
+
+/// The question before a link opened in another editor in this session is opened in `editor` (13.1): true when it
+/// was asked (the edit waits for the answer).
+fn switch_question(state: &mut AppState, id: LinkId, req: &EditRequest, editor: &ExternalEditor) -> bool {
+    if req.switch_ok {
+        return false;
+    }
+    let Some(old) = state.link_ui.sessions.get(&id).filter(|s| s.opened).and_then(|s| s.opened_editor.clone()) else { return false };
+    if old == editor.key() {
+        return false;
+    }
+    let old_name = editor::name_of_key(&old, state.prefs.other_editor_exe.as_deref());
+    let anyway = EditRequest { editor: Some(editor.key().to_owned()), switch_ok: true, ..req.clone() };
+    let q = LinkQuestion::new(QuestionKind::OtherEditor, Some(id), "Open in another program?", vec![texts::other_editor_open(&old_name)])
+        .cancel("Cancel")
+        .button(format!("Open in {} anyway", editor.name()), vec![act(LinkAction::EditIn(anyway))]);
+    ask(state, q);
+    true
+}
+
+/// True when the link's editor key and the file hold more than plain picture layers WTE wrote (the "Send first?"
+/// question adds that a rewrite replaces them): a sticker in Merged mode or with the editor's own layers, a paint layer
+/// whose file had editor layers.
+fn replaces_editor_layers(state: &AppState, id: LinkId) -> bool {
+    let Some(doc) = state.doc() else { return false };
+    match id {
+        LinkId::Sticker(s) => doc.link(s).is_some_and(|l| l.mode == LinkMode::Merged || l.editor_native),
+        LinkId::Layer(l) => doc.layer_link(l).is_some_and(|l| l.editor_layers),
+    }
+}
+
+/// An existing link before its file opens (5.5): a missing file is written again from WTE's content; when WTE holds
+/// newer content (and the request is not "Open the file as it is") the question "Send WTE's changes to the file
+/// first?" is asked. False when the edit stops here (a question, or a failed write).
+fn existing_ready(state: &mut AppState, id: LinkId, req: &EditRequest, editor: &ExternalEditor) -> bool {
+    let missing = link_path(state, id).as_deref().is_none_or(|p| !p.is_file());
+    if missing {
+        // The file is gone: written again from WTE's content (nothing of the editor's is lost by it).
+        let file = state.doc().and_then(|d| common(d, id)).map(|l| (l.file, l.editor));
+        if let Some((file, key)) = file
+            && let Err(text) = write_file(state, id, file, &key)
+        {
+            ask(state, info(Some(id), "Could not write the file", text));
+            return false;
+        }
+        return true;
+    }
+    if req.open_as_is {
+        return true;
+    }
+    let changed = wte_changed(state, id);
+    let Some(q) = send_first_text(changed, replaces_editor_layers(state, id), &editor.name()) else { return true };
+    let mut as_is = req.clone();
+    as_is.open_as_is = true;
+    let mut then = req.clone();
+    then.open_as_is = true;
+    let send = SendRequest { then_open: Some(then), ..SendRequest::new(id) };
+    let q = LinkQuestion::new(QuestionKind::SendFirst, Some(id), "Send WTE's changes?", vec![q])
+        .cancel("Cancel")
+        .button("Open the file as it is", vec![link_action(LinkAction::EditIn(as_is))])
+        .button("Send and open", vec![link_action(LinkAction::Send(send))]);
+    ask(state, q);
+    false
+}
+
+/// The two-copies guard and the start of the editor on link `id`'s file (5.7, 13.1), then the link's editor is
+/// `editor`.
+fn open_in_editor(state: &mut AppState, id: LinkId, req: &EditRequest, editor: &ExternalEditor, exe: &Path) {
     // The two-copies guard (5.7, 13.1): a launched child of this editor that still runs (PhotoCraft v0.2.0 and portable
     // copies, another program); never for Photoshop (A3: opening an open file shows its tab; its first child lives as
-    // long as Photoshop does). A child of another editor was asked about above.
+    // long as Photoshop does). A child of another editor was asked about before.
     let s = state.link_ui.session(id);
     let same_editor = s.opened_editor.as_deref().is_none_or(|k| k == editor.key());
     let running = same_editor && s.child_state() == ChildState::Running;
-    if running && !req.open_anyway && guards_two_copies(&editor) {
+    if running && !req.open_anyway && guards_two_copies(editor) {
         let mut anyway = req.clone();
         anyway.open_anyway = true;
+        let what = if id.layer().is_some() { "layer" } else { "sticker" };
         let q = LinkQuestion::new(
             QuestionKind::AlreadyOpen,
             Some(id),
             "Already open",
-            vec![format!("This sticker is already open in {}. A second copy could overwrite your changes.", editor.name())],
+            vec![format!("This {what} is already open in {}. A second copy could overwrite your changes.", editor.name())],
         )
         .cancel("Cancel")
         .button("Show file", vec![link_action(LinkAction::ShowFile(id))])
@@ -359,7 +404,7 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
     let s = state.link_ui.session(id);
     let exited = s.child_state() == ChildState::Exited;
     s.stale_in_editor = next_stale(s.stale_in_editor, StaleEvent::EditAgain { child_exited: exited });
-    match state.link_ui.launcher.open(&editor, &exe, &path) {
+    match state.link_ui.launcher.open(editor, exe, &path) {
         Ok(child) => {
             let s = state.link_ui.session(id);
             if child.is_some() {
@@ -368,13 +413,88 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
             s.opened = true;
             s.opened_editor = Some(editor.key().to_owned());
             if let Some(doc) = state.doc_mut() {
-                let _ = doc.set_link_file_and_editor(id, None, Some(editor.key()));
+                let _ = match id {
+                    LinkId::Sticker(s) => doc.set_link_file_and_editor(s, None, Some(editor.key())),
+                    LinkId::Layer(l) => doc.set_layer_link_file_and_editor(l, None, Some(editor.key())),
+                };
             }
             let file = file_name(state, id);
             state.toasts.info(format!("Opening {file} in {}", editor.name()));
         }
         Err(e) => ask(state, info(Some(id), &format!("{} could not be started", editor.name()), e)),
     }
+}
+
+/// The note shown the first time a paint layer is linked in a session (5.9).
+pub fn layer_note(editor: &str) -> String {
+    format!("{editor} gets the layer's pixels at the texture's size; the layer's opacity and blend mode stay in WTE. Keep the canvas size in {editor}.")
+}
+
+/// Why a layer cannot be edited in an outside editor (the Layer menu and the row menu leave the command out for these;
+/// this is the status line when it arrives anyway): `None` when it can.
+pub(crate) fn layer_refusal(state: &AppState, layer: LayerId) -> Option<&'static str> {
+    let l = state.doc()?.layer(layer)?;
+    if !l.is_raster() {
+        Some("Only paint layers can be edited in another program; edit a stamp's sticker instead")
+    } else if l.locked {
+        Some("The layer is locked: unlock it to edit it in another program")
+    } else {
+        None
+    }
+}
+
+/// Stickers P12 (5.9, 13.9): "Edit Layer in <editor>" on a raster paint layer: save first (an `External` link needs
+/// no folder, but a paint layer's link is always in the links folder), the editor (the request's, the link's, the
+/// default, the only known one, else the chooser), the switch question, the editor's program, then the link's one-layer
+/// PSD (made, or written again when missing, or the "Send first?" question), the two-copies guard, and the start.
+/// A stamp or text layer and a locked layer are refused with a status line (the menus do not offer them).
+pub(crate) fn edit_layer_in(state: &mut AppState, req: EditRequest, layer: LayerId, pick: &mut dyn FnMut(&Prefs, &ExternalEditor) -> Option<PathBuf>) {
+    let Some(session) = state.session.as_ref() else { return };
+    if session.doc.layer(layer).is_none() {
+        return;
+    }
+    if let Some(why) = layer_refusal(state, layer) {
+        state.status_hint = why.to_owned();
+        return;
+    }
+    let id = LinkId::Layer(layer);
+    let session = state.session.as_ref().expect("checked above");
+    let existing = session.doc.layer_link(layer).cloned();
+    let external = existing.as_ref().is_some_and(|l| matches!(l.file, LinkFile::External(_)));
+    if session.path.is_none() && !external {
+        let q = LinkQuestion::new(QuestionKind::SaveFirst, None, "Save first", vec![texts::SAVE_FIRST.to_owned()])
+            .cancel("Cancel")
+            .button("Save...", vec![act(LinkAction::SaveThenEdit(req))]);
+        ask(state, q);
+        return;
+    }
+    editor::ensure_discovered(state, false);
+    let Some(editor) = choose_editor(state, &req, None, existing.as_ref().map(|l| l.editor.as_str())) else { return };
+    if existing.is_some() && switch_question(state, id, &req, &editor) {
+        return;
+    }
+    let Some(exe) = editor_exe(state, &editor, pick) else { return };
+    match existing {
+        None => {
+            let name = link_name(state, id);
+            let file = LinkFile::InFolder(paint_link_file_name(&name, layer));
+            if let Err(text) = write_file(state, id, file, editor.key()) {
+                ask(state, info(None, "Could not write the file", text));
+                return;
+            }
+            state.link_ui.made_since_save.insert(id);
+            if !state.link_ui.layer_note_shown {
+                state.link_ui.layer_note_shown = true;
+                state.toasts.info(layer_note(&editor.name()));
+            }
+        }
+        Some(_) => {
+            if !existing_ready(state, id, &req, &editor) {
+                return;
+            }
+        }
+    }
+    open_in_editor(state, id, &req, &editor, &exe);
 }
 
 /// Stickers P11 (STICKER_PLAN 6.4, 13.5, 13.9): what the PSD handle hands to the drag.
@@ -400,7 +520,7 @@ pub(crate) const HANDLE_TEXT_HINT: &str = "Convert the text stamp to a layered s
 /// The editor of a link the PSD handle makes or hands out (13.9: the default editor): the default editor (or the only
 /// known one), else the link's own, else the first known one, else PhotoCraft. Never a question: the handle is pressed
 /// and dragged in one gesture.
-fn handle_editor(state: &AppState, existing: Option<&StickerLink>) -> ExternalEditor {
+fn handle_editor(state: &AppState, existing: Option<&wte_core::link::StickerLink>) -> ExternalEditor {
     editor::quiet_editor(state)
         .or_else(|| existing.and_then(|l| editor::editor_of_key(&state.prefs, &l.editor)))
         .or_else(|| state.link_ui.known.first().cloned())
@@ -424,7 +544,7 @@ pub(crate) fn prepare_handle(state: &mut AppState, req: EditRequest) -> Option<H
     let existing = sticker.and_then(|id| session.doc.link(id).cloned());
     let external = existing.as_ref().is_some_and(|l| matches!(l.file, LinkFile::External(_)));
     if session.path.is_none() && !external {
-        let q = LinkQuestion::new(QuestionKind::SaveFirst, sticker, "Save first", vec![texts::SAVE_FIRST.to_owned()])
+        let q = LinkQuestion::new(QuestionKind::SaveFirst, sticker.map(LinkId::from), "Save first", vec![texts::SAVE_FIRST.to_owned()])
             .cancel("Cancel")
             .button("Save...", vec![act(LinkAction::SaveThenEdit(req))]);
         ask(state, q);
@@ -448,8 +568,8 @@ pub(crate) fn prepare_handle(state: &mut AppState, req: EditRequest) -> Option<H
             }
             if link_path(state, id).as_deref().is_none_or(|p| !p.is_file()) {
                 // The file is gone: written again from the sticker (WTE's content), as "Edit in" does.
-                if let Err(text) = write_file(state, id, link.file.clone(), editor.key()) {
-                    ask(state, info(Some(id), "Could not write the file", text));
+                if let Err(text) = write_file(state, id.into(), link.file.clone(), editor.key()) {
+                    ask(state, info(Some(id.into()), "Could not write the file", text));
                     return None;
                 }
             } else if wte_changed(state, id) {
@@ -471,8 +591,9 @@ pub(crate) fn guards_two_copies(editor: &ExternalEditor) -> bool {
     !matches!(editor, ExternalEditor::Photoshop)
 }
 
-/// The editor of an "Edit in" (13.1, D1); `None` after the chooser was asked (or nothing can be opened).
-fn choose_editor(state: &mut AppState, req: &EditRequest, sticker: Option<StickerId>, existing: Option<&StickerLink>) -> Option<ExternalEditor> {
+/// The editor of an "Edit in" (13.1, D1); `None` after the chooser was asked (or nothing can be opened). `existing`
+/// is the key of the link's editor, when there is a link.
+fn choose_editor(state: &mut AppState, req: &EditRequest, sticker: Option<StickerId>, existing: Option<&str>) -> Option<ExternalEditor> {
     if let Some(key) = &req.editor {
         let e = editor::editor_of_key(&state.prefs, key);
         if e.is_none() {
@@ -480,7 +601,7 @@ fn choose_editor(state: &mut AppState, req: &EditRequest, sticker: Option<Sticke
         }
         return e;
     }
-    if let Some(e) = existing.and_then(|l| editor::editor_of_key(&state.prefs, &l.editor)) {
+    if let Some(e) = existing.and_then(|key| editor::editor_of_key(&state.prefs, key)) {
         return Some(e);
     }
     if let Some(e) = editor::default_of(&state.prefs) {
@@ -499,7 +620,7 @@ fn choose_editor(state: &mut AppState, req: &EditRequest, sticker: Option<Sticke
         several => {
             let mut q = LinkQuestion::new(
                 QuestionKind::ChooseEditor,
-                sticker,
+                sticker.map(LinkId::from),
                 "Edit in which program?",
                 vec!["WTE opens the sticker's layers in it; Ctrl+S there updates the sticker on the model.".to_owned()],
             )
@@ -517,8 +638,8 @@ fn choose_editor(state: &mut AppState, req: &EditRequest, sticker: Option<Sticke
 }
 
 /// An OK message.
-fn info(sticker: Option<StickerId>, title: &str, text: String) -> LinkQuestion {
-    LinkQuestion::new(QuestionKind::Info, sticker, title, vec![text]).cancel("OK")
+fn info(link: Option<LinkId>, title: &str, text: String) -> LinkQuestion {
+    LinkQuestion::new(QuestionKind::Info, link, title, vec![text]).cancel("OK")
 }
 
 /// The sticker an edit acts on, after the shared-picture question (3.1, review B2): an image stamp is promoted (with
@@ -528,6 +649,7 @@ fn resolve_sticker(state: &mut AppState, req: &EditRequest) -> Option<StickerId>
     let stamp = match req.target {
         LinkTarget::Sticker(id) => return Some(id),
         LinkTarget::Stamp(s) => s,
+        LinkTarget::Layer(_) => return None,
     };
     let doc = state.doc()?;
     let source = doc.stamp(stamp)?.source.clone();
@@ -578,11 +700,11 @@ fn resolve_sticker(state: &mut AppState, req: &EditRequest) -> Option<StickerId>
 fn make_link(state: &mut AppState, id: StickerId, editor: &ExternalEditor) -> bool {
     let name = sticker_name(state, id);
     let file = LinkFile::InFolder(link_file_name(&name, id));
-    if let Err(text) = write_file(state, id, file, editor.key()) {
-        ask(state, info(Some(id), "Could not write the file", text));
+    if let Err(text) = write_file(state, id.into(), file, editor.key()) {
+        ask(state, info(Some(id.into()), "Could not write the file", text));
         return false;
     }
-    state.link_ui.made_since_save.insert(id);
+    state.link_ui.made_since_save.insert(id.into());
     if !state.link_ui.first_note_shown {
         state.link_ui.first_note_shown = true;
         state.toasts.info(styles_note(&editor.name()));
@@ -590,16 +712,10 @@ fn make_link(state: &mut AppState, id: StickerId, editor: &ExternalEditor) -> bo
     true
 }
 
-/// True when the sticker changed in WTE since the last sync.
-fn wte_changed(state: &mut AppState, id: StickerId) -> bool {
-    let synced = state.doc().and_then(|d| d.link(id)).map(|l| l.synced_sticker);
-    let hash = state.doc_mut().and_then(|d| d.sticker_link_hash(id).ok());
-    synced.is_some() && hash != synced
-}
-
-/// Writes sticker `id`'s link file (a new link or a send): the PSD of the sticker, atomically, registered with the
-/// watcher before the rename; the link is in sync afterwards. `Err` = the sentence the user sees; nothing changed.
-pub(crate) fn write_file(state: &mut AppState, id: StickerId, file: LinkFile, editor_key: &str) -> Result<FileStamp, String> {
+/// Writes link `id`'s file (a new link or a send): the PSD of the sticker (or the paint layer's one-layer PSD, P12),
+/// atomically, registered with the watcher before the rename; the link is in sync afterwards. `Err` = the sentence
+/// the user sees; nothing changed.
+pub(crate) fn write_file(state: &mut AppState, id: LinkId, file: LinkFile, editor_key: &str) -> Result<FileStamp, String> {
     // The other program's texts name its exe's stem ("could not be replaced ... Close it in gimp-2.10"), check-P9b.
     let editor = super::editor::name_of_key(editor_key, state.prefs.other_editor_exe.as_deref());
     let project = state.session.as_ref().and_then(|s| s.path.clone());
@@ -607,12 +723,22 @@ pub(crate) fn write_file(state: &mut AppState, id: StickerId, file: LinkFile, ed
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{} could not be made: {e}.", dir.display()))?;
     }
-    let doc = state.doc_mut().ok_or("no document")?;
-    let prepared = doc.prepare_link_file(id, file, editor_key).map_err(|e| e.to_string())?;
     let mut io = OwnWritesIo(state.link_ui.own_writes.clone());
-    let stamp = wte_core::link::write_link_file(&path, &prepared.bytes, &mut io).map_err(|e| e.sentence(&editor))?;
     let doc = state.doc_mut().ok_or("no document")?;
-    doc.finish_link_write(prepared, stamp).map_err(|e| e.to_string())?;
+    let stamp = match id {
+        LinkId::Sticker(sid) => {
+            let prepared = doc.prepare_link_file(sid, file, editor_key).map_err(|e| e.to_string())?;
+            let stamp = wte_core::link::write_link_file(&path, &prepared.bytes, &mut io).map_err(|e| e.sentence(&editor))?;
+            doc.finish_link_write(prepared, stamp).map_err(|e| e.to_string())?;
+            stamp
+        }
+        LinkId::Layer(lid) => {
+            let prepared = doc.prepare_layer_link_file(lid, file, editor_key).map_err(|e| e.to_string())?;
+            let stamp = wte_core::link::write_link_file(&path, &prepared.bytes, &mut io).map_err(|e| e.sentence(&editor))?;
+            doc.finish_layer_link_write(prepared, stamp).map_err(|e| e.to_string())?;
+            stamp
+        }
+    };
     let s = state.link_ui.session(id);
     s.observed = Some(Some(stamp));
     s.unreadable = None;
@@ -628,8 +754,8 @@ pub(crate) fn write_file(state: &mut AppState, id: StickerId, file: LinkFile, ed
 /// "Send to <editor>" (5.5): the warning when the file was opened in this session, then the write; afterwards
 /// `stale_in_editor` is set when it was opened (the editor's next save is a question).
 pub(crate) fn send(state: &mut AppState, req: SendRequest) {
-    let id = req.sticker;
-    let Some(link) = state.doc().and_then(|d| d.link(id)).cloned() else { return };
+    let id = req.link;
+    let Some(link) = state.doc().and_then(|d| common(d, id)) else { return };
     let editor = editor_name(state, id);
     let s = state.link_ui.session(id);
     if req.answers_conflict {
@@ -661,7 +787,7 @@ pub(crate) fn send(state: &mut AppState, req: SendRequest) {
             let s = state.link_ui.session(id);
             let was_opened = s.opened;
             s.stale_in_editor = next_stale(s.stale_in_editor, StaleEvent::Rewrote { opened: was_opened });
-            let name = sticker_name(state, id);
+            let name = link_name(state, id);
             state.toasts.info(format!("Sent {name} to {editor}"));
             if let Some(then) = req.then_open {
                 state.push(act(LinkAction::EditIn(then)));
@@ -671,9 +797,9 @@ pub(crate) fn send(state: &mut AppState, req: SendRequest) {
     }
 }
 
-/// Reads sticker `id`'s file now ("Update now", the answers): `None` (with a toast or the badge's problem) when it
-/// is missing, half written or refused.
-fn read_now(state: &mut AppState, id: StickerId) -> Option<HeldEvent> {
+/// Reads link `id`'s file now ("Update now", the answers): `None` (with a toast or the badge's problem) when it is
+/// missing, half written or refused.
+fn read_now(state: &mut AppState, id: LinkId) -> Option<HeldEvent> {
     let path = link_path(state, id)?;
     let file = file_name(state, id);
     let (stamp, bytes) = match FileStamp::read(&path) {
@@ -695,7 +821,10 @@ fn read_now(state: &mut AppState, id: StickerId) -> Option<HeldEvent> {
         }
         Err(e) => {
             if let Some(doc) = state.doc_mut() {
-                let r = doc.link_file_refused(id, &e, stamp, &file);
+                let r = match id {
+                    LinkId::Sticker(s) => doc.link_file_refused(s, &e, stamp, &file),
+                    LinkId::Layer(l) => doc.layer_link_file_refused(l, &e, stamp, &file),
+                };
                 crate::dispatch::edited(state, r);
             }
             None
@@ -703,15 +832,22 @@ fn read_now(state: &mut AppState, id: StickerId) -> Option<HeldEvent> {
     }
 }
 
-/// Applies a file to sticker `id` (5.4, 5.6): one undo step "Update Linked Sticker", the toast "Updated from
-/// <editor>" (and the merged reason, the profile note once). In the Sticker view on that sticker the selection is
-/// dropped and the active layer re-picked. A canvas too large for a sticker asks "Fit it into the sticker" / Ignore.
-pub(crate) fn apply(state: &mut AppState, id: StickerId, psd: &PsdDoc, stamp: FileStamp, fit: bool) {
+/// Applies a file to link `id` (5.4, 5.6): one undo step "Update Linked Sticker" (a paint layer: "Update Linked
+/// Layer", 5.9), the toast "Updated from <editor>" (and the merged reason, the profile note once). In the Sticker view
+/// on that sticker the selection is dropped and the active layer re-picked. A canvas too large for a sticker asks "Fit
+/// it into the sticker" / Ignore; a paint layer's file that cannot be applied (another size, no merged picture) says
+/// why in a toast, since its badge shows only while the layer is active.
+pub(crate) fn apply(state: &mut AppState, id: LinkId, psd: &PsdDoc, stamp: FileStamp, fit: bool) {
     let editor = editor_name(state, id);
     let file = file_name(state, id);
+    let name = link_name(state, id);
     let Some(doc) = state.doc_mut() else { return };
     doc.flush_pending_edit();
-    let r = if fit { doc.apply_link_fit(id, psd, stamp, &editor, &file) } else { doc.apply_link_update(id, psd, stamp, &editor, &file) };
+    let r = match id {
+        LinkId::Sticker(s) if fit => doc.apply_link_fit(s, psd, stamp, &editor, &file),
+        LinkId::Sticker(s) => doc.apply_link_update(s, psd, stamp, &editor, &file),
+        LinkId::Layer(l) => doc.apply_layer_link_update(l, psd, stamp, &editor, &file),
+    };
     let Some(applied) = crate::dispatch::edited(state, r) else { return };
     let s = state.link_ui.session(id);
     s.held = None;
@@ -730,10 +866,11 @@ pub(crate) fn apply(state: &mut AppState, id: StickerId, psd: &PsdDoc, stamp: Fi
             if let Some(n) = note {
                 state.toasts.info(n);
             }
-            after_update_in_view(state, id);
+            if let LinkId::Sticker(s) = id {
+                after_update_in_view(state, s);
+            }
         }
-        LinkApplied::Problem(LinkState::CanvasTooLarge { width, height }) => {
-            let name = sticker_name(state, id);
+        LinkApplied::Problem(LinkState::CanvasTooLarge { width, height }) if let LinkId::Sticker(s) = id => {
             let q = LinkQuestion::new(
                 QuestionKind::CanvasTooLarge,
                 Some(id),
@@ -741,10 +878,22 @@ pub(crate) fn apply(state: &mut AppState, id: StickerId, psd: &PsdDoc, stamp: Fi
                 vec![texts::canvas_too_large(&name, width, height, &editor)],
             )
             .cancel("Ignore")
-            .button("Fit it into the sticker", vec![act(LinkAction::Fit(id))]);
+            .button("Fit it into the sticker", vec![act(LinkAction::Fit(s))]);
             ask(state, q);
         }
-        LinkApplied::Problem(st) => log::info!("the linked file of sticker {} was not applied: {st:?}", id.0),
+        LinkApplied::Problem(st) => {
+            log::info!("the linked file of {id:?} was not applied: {st:?}");
+            if id.layer().is_some() {
+                let text = match &st {
+                    LinkState::NeedsMerged => {
+                        let key = state.doc().and_then(|d| common(d, id)).map(|l| l.editor).unwrap_or_default();
+                        texts::needs_merged(&key, &editor)
+                    }
+                    other => other.badge(&editor, &name, &file),
+                };
+                state.toasts.warn(text);
+            }
+        }
     }
 }
 
@@ -770,14 +919,15 @@ fn after_update_in_view(state: &mut AppState, id: StickerId) {
 }
 
 /// The conflict question (5.5): **Take <editor>'s version** / **Keep WTE's version** / Decide later.
-pub(crate) fn conflict_question(state: &AppState, id: StickerId, saved_over: bool) -> LinkQuestion {
+pub(crate) fn conflict_question(state: &AppState, id: LinkId, saved_over: bool) -> LinkQuestion {
     let editor = editor_name(state, id);
-    let name = sticker_name(state, id);
+    let name = link_name(state, id);
     let text = if saved_over { texts::saved_over(&name, &editor) } else { texts::conflict(&name, &editor) };
+    let title = if id.layer().is_some() { "Linked layer changed" } else { "Linked sticker changed" };
     LinkQuestion::new(
         QuestionKind::Conflict { saved_over },
         Some(id),
-        "Linked sticker changed",
+        title,
         vec![text, "Taking one version keeps the other one an undo step away (WTE's) or in the .bak.psd file (the editor's).".to_owned()],
     )
     .button("Decide later", vec![act(LinkAction::Later(id))])
@@ -786,7 +936,7 @@ pub(crate) fn conflict_question(state: &AppState, id: StickerId, saved_over: boo
 }
 
 /// "Restore from project": the archived copy of a missing `InFolder` file is written back (5.3 "At load").
-fn restore(state: &mut AppState, id: StickerId) {
+fn restore(state: &mut AppState, id: LinkId) {
     let Some(project) = state.session.as_ref().and_then(|s| s.path.clone()) else { return };
     let Some(path) = link_path(state, id) else { return };
     let file = file_name(state, id);
@@ -796,9 +946,17 @@ fn restore(state: &mut AppState, id: StickerId) {
     }
 }
 
-/// Writes the archived copy of sticker `id`'s file to `path`.
-fn restore_from_archive(state: &mut AppState, project: &Path, id: StickerId, path: &Path) -> Result<(), String> {
-    let bytes = wte_core::project::read_link_archive(project, &archive_entry(id)).map_err(|e| e.to_string())?;
+/// The archive entry of link `id`'s file inside the project (`links/k<id>.psd`, a paint layer's `links/l<id>.psd`).
+fn archive_of(id: LinkId) -> String {
+    match id {
+        LinkId::Sticker(s) => archive_entry(s),
+        LinkId::Layer(l) => paint_archive_entry(l),
+    }
+}
+
+/// Writes the archived copy of link `id`'s file to `path`.
+fn restore_from_archive(state: &mut AppState, project: &Path, id: LinkId, path: &Path) -> Result<(), String> {
+    let bytes = wte_core::project::read_link_archive(project, &archive_of(id)).map_err(|e| e.to_string())?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -916,7 +1074,7 @@ pub(crate) fn poll_convert(state: &mut AppState) {
                         too_large: false,
                         icc_description: None,
                     };
-                    apply(state, job.sticker, &psd, job.stamp, false);
+                    apply(state, job.sticker.into(), &psd, job.stamp, false);
                 }
                 Err(e) => state.toasts.warn(format!("The command-line conversion gave no picture: {e}")),
             }
@@ -1031,7 +1189,9 @@ pub(crate) fn before_save(state: &mut AppState, new_path: &Path) {
     }
     let (from_dir, to_dir) = (links_folder(&old), links_folder(new_path));
     let mut aliases = Vec::new();
-    for (id, l) in session.doc.links() {
+    let doc = &session.doc;
+    let ids = doc.links().map(|(id, _)| LinkId::Sticker(id)).chain(doc.layer_links().map(|(id, _)| LinkId::Layer(id)));
+    for (id, l) in ids.filter_map(|id| common(doc, id).map(|l| (id, l))) {
         let LinkFile::InFolder(name) = &l.file else { continue };
         let (src, dst) = (from_dir.join(name), to_dir.join(name));
         if !src.is_file() {
@@ -1060,7 +1220,7 @@ pub(crate) fn after_save(state: &mut AppState, links_revision: u64, warnings: &[
     let aliases = std::mem::take(&mut state.link_ui.pending_aliases);
     if !aliases.is_empty() {
         let editor = super::editors_of(state, aliases.iter().map(|(id, _)| *id));
-        let names: Vec<String> = aliases.iter().map(|(id, _)| sticker_name(state, *id)).collect();
+        let names: Vec<String> = aliases.iter().map(|(id, _)| link_name(state, *id)).collect();
         for (id, old) in aliases {
             state.link_ui.session(id).alias = Some(old);
         }
@@ -1088,15 +1248,35 @@ pub(crate) fn save_failed(state: &mut AppState) {
 /// is restored from its archived copy, a file that changed while the project was closed is asked about (Update /
 /// Ignore), a missing external file shows "file missing".
 pub(crate) fn after_load(state: &mut AppState, project: &Path, links: &[wte_core::project::LinkAtLoad]) {
-    use wte_core::project::LinkFileState;
     for l in links {
-        let id = l.sticker;
-        let Some(link) = state.doc().and_then(|d| d.link(id)).cloned() else { continue };
-        match l.state {
+        found_at_load(state, project, l.sticker.into(), l.state, l.path.as_deref(), l.archive.is_some());
+    }
+}
+
+/// Stickers P12: `after_load` for the linked paint layers (`LoadReport::layer_links`).
+pub(crate) fn after_load_layers(state: &mut AppState, project: &Path, links: &[wte_core::project::LayerLinkAtLoad]) {
+    for l in links {
+        found_at_load(state, project, l.layer.into(), l.state, l.path.as_deref(), l.archive.is_some());
+    }
+}
+
+/// What `after_load` does for one link that `load` found in `found` at `path`.
+fn found_at_load(
+    state: &mut AppState,
+    project: &Path,
+    id: LinkId,
+    found: wte_core::project::LinkFileState,
+    path: Option<&Path>,
+    archived: bool,
+) {
+    use wte_core::project::LinkFileState;
+    {
+        let Some(link) = state.doc().and_then(|d| common(d, id)) else { return };
+        match found {
             LinkFileState::Present => state.link_ui.session(id).observed = Some(Some(link.synced)),
             LinkFileState::Missing => {
-                let restorable = matches!(link.file, LinkFile::InFolder(_)) && l.archive.is_some();
-                match (restorable, l.path.as_deref()) {
+                let restorable = matches!(link.file, LinkFile::InFolder(_)) && archived;
+                match (restorable, path) {
                     (true, Some(path)) => match restore_from_archive(state, project, id, path) {
                         Ok(()) => state.toasts.info(format!("Restored {} from the project", link.file.display_name())),
                         Err(e) => {
@@ -1108,17 +1288,16 @@ pub(crate) fn after_load(state: &mut AppState, project: &Path, links: &[wte_core
                 }
             }
             LinkFileState::Changed => {
-                let stamp = l.path.as_deref().and_then(|p| FileStamp::read(p).ok()).map(|(s, _)| s);
+                let stamp = path.and_then(|p| FileStamp::read(p).ok()).map(|(s, _)| s);
                 let s = state.link_ui.session(id);
                 s.observed = Some(stamp);
                 s.closed_change = true;
-                let name = sticker_name(state, id);
-                let q = LinkQuestion::new(
-                    QuestionKind::ChangedWhileClosed,
-                    Some(id),
-                    "Linked sticker changed",
-                    vec![texts::changed_while_closed(&name)],
-                )
+                let name = link_name(state, id);
+                let (title, text) = match id {
+                    LinkId::Sticker(_) => ("Linked sticker changed", texts::changed_while_closed(&name)),
+                    LinkId::Layer(_) => ("Linked layer changed", texts::layer_changed_while_closed(&name)),
+                };
+                let q = LinkQuestion::new(QuestionKind::ChangedWhileClosed, Some(id), title, vec![text])
                 .button("Ignore", vec![act(LinkAction::IgnoreClosed(id))])
                 .button("Update", vec![act(LinkAction::UpdateClosed(id))]);
                 ask(state, q);

@@ -70,6 +70,21 @@ fn row_menu(
             crate::link::ui::editor_list(ui, state, crate::link::LinkTarget::Stamp(stamp), actions, &mut list_hits);
         });
         ui.separator();
+    } else if crate::link::ui::layer_editable(state, layer) {
+        // Stickers P12 (STICKER_PLAN 5.9, 13.9): an unlocked paint layer in the outside editor (its link's editor,
+        // else the default one) and the submenu "Edit Layer in" with the editor list. Not for locked layers.
+        let target = crate::link::LinkTarget::Layer(layer);
+        let resp = ui.button(crate::link::ui::edit_layer_label(state, layer));
+        hits.push((PanelHit::LayerMenuEditIn, resp.rect));
+        if resp.clicked() {
+            actions.push(AppAction::Link(crate::link::LinkAction::EditIn(crate::link::EditRequest::new(target))));
+            ui.close();
+        }
+        ui.menu_button("Edit Layer in", |ui| {
+            let mut list_hits = Vec::new();
+            crate::link::ui::editor_list(ui, state, target, actions, &mut list_hits);
+        });
+        ui.separator();
     }
     if selection.len() > 1 && selection.contains(&layer) {
         let resp = ui.button(format!("Export selected layers... ({})", selection.len()));
@@ -175,13 +190,47 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
     ps.layers_content_bottom = Some(out.response.rect.bottom());
 }
 
-fn body(ui: &mut egui::Ui, state: &AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>, hits: &mut Vec<(PanelHit, Rect)>) {
+fn body(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>, hits: &mut Vec<(PanelHit, Rect)>) {
+    let Some(linked) = controls(ui, state, ps, actions) else { return };
+    // Stickers P12 (STICKER_PLAN 5.9): a linked active paint layer shows its link block (badge, Edit Layer in, Update
+    // now, Send to, Show file, Unlink, Restore) at the top of the list's scroll area.
+    let block = linked.map(|layer| crate::link::ui::layer_block_data(state, layer));
+    let state: &AppState = state;
+    let Some(session) = state.session.as_ref() else { return };
+    let Some(set) = session.doc.set(session.active_set) else { return };
+
+    // The list scrolls in the room the footer (measured in the last frame) leaves; the footer follows it directly.
+    let list_height = (ui.available_height() - ps.layers_footer_height - ui.spacing().item_spacing.y).max(ROW_HEIGHT);
+    let list = egui::ScrollArea::vertical()
+        .id_salt("side_layers_scroll")
+        .max_height(list_height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            if let Some(b) = &block {
+                crate::link::ui::layer_block(ui, state, b, actions, hits);
+                ui.separator();
+            }
+            layer_list(ui, state, ps, set, actions, hits)
+        });
+    // `inner_rect` is the largest viewport; the list shrinks to its rows when they need less.
+    let shown = list.content_size.y.min(list.inner_rect.height());
+    ps.layers_list_overflow = (list.content_size.y - shown).max(0.0);
+    hits.push((PanelHit::LayersList, Rect::from_min_size(list.inner_rect.min, vec2(list.inner_rect.width(), shown))));
+
+    let footer_rect = footer(ui, state, actions, hits);
+    ps.layers_footer_height = footer_rect.height().max(0.0);
+    hits.push((PanelHit::LayersFooter, footer_rect));
+}
+
+/// The texture set's name (several sets) and the active layer's opacity and blend. `None` without a document or set;
+/// else the active layer when it is a linked paint layer (stickers P12).
+fn controls(ui: &mut egui::Ui, state: &AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>) -> Option<Option<LayerId>> {
     let Some(session) = state.session.as_ref() else {
         ui.weak("No document open");
-        return;
+        return None;
     };
     let doc = &session.doc;
-    let Some(set) = doc.set(session.active_set) else { return };
+    let set = doc.set(session.active_set)?;
     if doc.sets.len() > 1 {
         ui.label(egui::RichText::new(format!("Texture set: {}", set.name)).weak());
     }
@@ -212,22 +261,7 @@ fn body(ui: &mut egui::Ui, state: &AppState, ps: &mut PanelState, actions: &mut 
         ui.weak("No active layer");
     }
     ui.add_space(2.0);
-
-    // The list scrolls in the room the footer (measured in the last frame) leaves; the footer follows it directly.
-    let list_height = (ui.available_height() - ps.layers_footer_height - ui.spacing().item_spacing.y).max(ROW_HEIGHT);
-    let list = egui::ScrollArea::vertical()
-        .id_salt("side_layers_scroll")
-        .max_height(list_height)
-        .auto_shrink([false, true])
-        .show(ui, |ui| layer_list(ui, state, ps, set, actions, hits));
-    // `inner_rect` is the largest viewport; the list shrinks to its rows when they need less.
-    let shown = list.content_size.y.min(list.inner_rect.height());
-    ps.layers_list_overflow = (list.content_size.y - shown).max(0.0);
-    hits.push((PanelHit::LayersList, Rect::from_min_size(list.inner_rect.min, vec2(list.inner_rect.width(), shown))));
-
-    let footer_rect = footer(ui, state, actions, hits);
-    ps.layers_footer_height = footer_rect.height().max(0.0);
-    hits.push((PanelHit::LayersFooter, footer_rect));
+    Some(set.active_layer().filter(|l| l.is_raster() && doc.layer_link(l.id).is_some()).map(|l| l.id))
 }
 
 /// The rows of the active set, top row = top layer, inside a drop zone for drag-reordering.
@@ -587,9 +621,23 @@ fn footer(ui: &mut egui::Ui, state: &AppState, actions: &mut Vec<AppAction>, hit
     }
     let row = ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        if ui.button("New").on_hover_text("New paint layer above the active layer").clicked() {
+        let new = ui.button("New").on_hover_text("New paint layer above the active layer (right-click: Paste as New Paint Layer)");
+        if new.clicked() {
             actions.push(AppAction::AddPaintLayer);
         }
+        // Stickers P12 (STICKER_PLAN 5.9): the "New" button's menu has Paste as New Paint Layer.
+        new.context_menu(|ui| {
+            if ui.button("New Paint Layer").clicked() {
+                actions.push(AppAction::AddPaintLayer);
+                ui.close();
+            }
+            let resp = ui.button("Paste as New Paint Layer");
+            hits.push((PanelHit::LayersPasteAsLayer, resp.rect));
+            if resp.clicked() {
+                actions.push(AppAction::Clip(crate::clip::ClipAction::PasteAsLayer));
+                ui.close();
+            }
+        });
         let Some(layer) = active else { return };
         // fix_export item 5: with several layers selected, Duplicate and Delete act on all of them (one undo step
         // each); Merge Down stays on the active layer. The labels and tooltips say so.

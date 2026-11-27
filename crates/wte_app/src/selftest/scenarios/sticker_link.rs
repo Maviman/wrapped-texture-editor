@@ -287,7 +287,7 @@ pub(super) fn sticker_link() -> Vec<Step> {
             if r != remembered(sc, "repaints")? { Err(format!("the watcher asked for {r} repaints")) } else { Ok(()) }
         }),
         Step::Setup("the badge reads exactly \"changed in WTE\"", |s, sc| badge_is(s, sc, "sticker", "changed in WTE")),
-        Step::Dyn("Update now", |_, sc| Ok(vec![Step::Do(AppAction::Link(LinkAction::UpdateNow(sticker_key(sc, "sticker")?)))])),
+        Step::Dyn("Update now", |_, sc| Ok(vec![Step::Do(AppAction::Link(LinkAction::UpdateNow(sticker_key(sc, "sticker")?.into())))])),
         Step::WaitIdle,
         Step::Setup("applied again: two layers, linked", |s, sc| {
             if !one_more_update(s, sc)? || layer_names(s, sticker_key(sc, "sticker")?)?.len() != 2 {
@@ -325,7 +325,7 @@ pub(super) fn sticker_link() -> Vec<Step> {
         }),
         Step::Until("the watcher reports the file missing", |s, sc| {
             let id = sticker_key(sc, "sticker")?;
-            Ok(s.link_ui.sessions.get(&id).is_some_and(|x| x.observed == Some(None)))
+            Ok(s.link_ui.sessions.get(&id.into()).is_some_and(|x| x.observed == Some(None)))
         }),
         Step::Setup("the badge says file missing", |s, sc| badge_is(s, sc, "sticker", "file missing")),
         Step::WaitFrames(3),
@@ -819,7 +819,7 @@ fn photoshop_pass() -> Vec<Step> {
             if r != remembered(sc, "repaints")? { Err(format!("the watcher asked for {r} repaints")) } else { Ok(()) }
         }),
         Step::Setup("the badge reads exactly \"changed in WTE\"", |s, sc| badge_is(s, sc, "pss", "changed in WTE")),
-        Step::Dyn("Update now", |_, sc| Ok(vec![Step::Do(AppAction::Link(LinkAction::UpdateNow(sticker_key(sc, "pss")?)))])),
+        Step::Dyn("Update now", |_, sc| Ok(vec![Step::Do(AppAction::Link(LinkAction::UpdateNow(sticker_key(sc, "pss")?.into())))])),
         Step::WaitIdle,
         Step::Setup("applied again: two layers, linked", |s, sc| {
             if !one_more_update(s, sc)? || layer_names(s, sticker_key(sc, "pss")?)?.len() != 2 {

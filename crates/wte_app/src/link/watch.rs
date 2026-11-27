@@ -25,8 +25,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wte_core::StickerId;
 use wte_core::link::FileStamp;
+
+use super::LinkId;
 use wte_core::psd::{PsdDoc, PsdError, PsdLimits};
 
 /// At most this many CRCs of WTE's own writes are remembered (the oldest is dropped).
@@ -97,7 +98,7 @@ impl wte_core::link::LinkFileIo for OwnWritesIo {
 /// One watched link.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WatchEntry {
-    pub id: StickerId,
+    pub id: LinkId,
     pub path: PathBuf,
     pub alias: Option<PathBuf>,
     /// The content WTE last wrote or applied (`StickerLink::synced`).
@@ -108,17 +109,17 @@ pub struct WatchEntry {
 #[derive(Debug)]
 pub enum LinkEvent {
     /// The file settled with new content that reads as a PSD.
-    Changed { id: StickerId, stamp: FileStamp, psd: Box<PsdDoc>, from_alias: bool },
+    Changed { id: LinkId, stamp: FileStamp, psd: Box<PsdDoc>, from_alias: bool },
     /// The file settled with content `psd::read` refuses as a whole (a colour mode, 32 bits, too large, damaged).
-    Refused { id: StickerId, stamp: FileStamp, error: PsdError },
+    Refused { id: LinkId, stamp: FileStamp, error: PsdError },
     /// The file did not become readable within `WatchTimes::give_up`.
-    Unreadable { id: StickerId },
+    Unreadable { id: LinkId },
     /// The file is gone.
-    Missing { id: StickerId },
+    Missing { id: LinkId },
 }
 
 impl LinkEvent {
-    pub fn id(&self) -> StickerId {
+    pub fn id(&self) -> LinkId {
         match self {
             LinkEvent::Changed { id, .. } | LinkEvent::Refused { id, .. } | LinkEvent::Unreadable { id } | LinkEvent::Missing { id } => *id,
         }

@@ -426,7 +426,7 @@ pub(super) fn sticker_dragout() -> Vec<Step> {
             if dropped_file(&rec)? != psd || !psd.is_file() {
                 return Err(format!("dropped {:?}, linked {}", dropped_file(&rec), psd.display()));
             }
-            let opened = s.link_ui.sessions.get(&id).is_some_and(|x| x.opened && x.opened_editor.as_deref() == Some(wte_core::link::EDITOR_PHOTOSHOP));
+            let opened = s.link_ui.sessions.get(&id.into()).is_some_and(|x| x.opened && x.opened_editor.as_deref() == Some(wte_core::link::EDITOR_PHOTOSHOP));
             if !opened {
                 return Err("the link does not count as opened in Photoshop".into());
             }

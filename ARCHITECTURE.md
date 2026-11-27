@@ -471,6 +471,8 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `link/file.rs` | stickers P5c | `write_link_file` (temp file, `.bak.psd`, own-write registration before the rename, retries, "could not be replaced"), `LinkFileIo`, `LinkWriteError` |
 | `link/texts.rs` | stickers P5c | every sentence about a link, each taking the editor's name |
 | `link/tests.rs`, `link/fixture_tests.rs` | stickers P5c | test-only: the `k5_link_*` tests (9.1) |
+| `link/paint.rs` | stickers P12 | linked texture paint layers (5.28 "link", 6.13 "Linked paint layers"): `PaintLink`, `PaintProblem`, `PaintPicture`, `paint_source`, `layer_psd`, `normalised_crc`, `paint_link_file_name`, `paint_archive_entry`, `PAINT_UPDATE_LABEL` |
+| `doc_layer_links.rs`, `doc_layer_links_tests.rs` | stickers P12 | the paint layer links of `Document` (5.28): `layer_link(s)`, `layer_pixels_crc`, `layer_link_state`, `prepare_layer_link_file`, `finish_layer_link_write`, `unlink_layer`, `apply_layer_link_update`, `layer_link_file_refused`; `replace_layer_pixels`, `add_paint_layer_with_pixels`, `fit_centred` (5.14); the `k12_*` tests (9.1) |
 | `doc_links.rs` | stickers P5c | the links of `Document` (5.28 "link"): `link`, `links`, `links_revision`, `mark_links_saved`, `sticker_link_hash`, `link_state`, `prepare_link_file`, `finish_link_write`, `unlink`, `set_link_file_and_editor`, `apply_link_update`, `apply_link_fit`, `link_file_refused`; `PreparedLink`, `LinkApplied`; P9a: `add_sticker_from_psd`, `PsdSticker` (5.8 Import PSD as sticker) |
 | `fill.rs` | C3 | `Document::fill`, `FillScope`, island flood |
 | `stamp_bake.rs` | C4 | `Projector` methods, `bake_projected`, `bake_uv` (round 6: the scratch helpers are `pub(crate)` for the wrap bake) |
@@ -624,6 +626,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `link/ui.rs` | stickers P9a | the Sticker tab's link block and the canvas header's badge with Edit in; P9b: the "Edit in..." list button, `editor_list`, `listed_editors` |
 | `link/testkit.rs` | stickers P9a | files "as the editor saved them" (the sticker writer, temp file + rename) for the tests and scenarios; P9b: `with_foreign_layer` (an editor's own layer record and channel data spliced into a file WTE wrote) |
 | `link/editor_tests.rs` | stickers P9b | test-only: the editor list's tests (8.16 "Tests") |
+| `link/layer_tests.rs` | stickers P12 | test-only: linked paint layers in the app (8.16 "Linked paint layers") |
 | `ole/mod.rs` | stickers P10a | OLE drag and drop (8.17): `OleEvent`, `DragKinds`, `DropItem`, `DataKind`, the queue (`push`, `drain`, `pending`, `discard`), `install` / `installed` / `take_registration_lost`, `TestDrag` (the self-test's drags through a drop target object), `kinds_of`; P10b: `Chord`, `OleEvent::Chord`, `take_chords`, `window` (the clipboard's owner), the key subclass installed by `install` |
 | `ole/clipboard.rs` | stickers P10b | the clipboard (8.17 "Clipboard"): `ClipFormat`, `PASTE_ORDER`, `trait Clipboard` (`write`, `read`, `format_names`, `is_memory`), `MemClipboard` (self-tests, tests), `clipboard_for`, the real Windows clipboard (`real::RealClipboard`, not compiled into a test build), `standard_format_name` / `unnamed_format`, `paste_item`, `read_text` / `write_text`, `picture_entries` |
 | `ole/subclass.rs` | stickers P10b | Windows only: WTE's key subclass above the pen subclass: `chord_of` / `route` (Ctrl+V and Shift+Insert queue `Chord::Paste`; every message forwarded unchanged), `install` |
@@ -645,6 +648,7 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `dragout.rs`, `dragout/{files,tests}.rs` | stickers P11 | drag out of WTE (8.17 "Drag out"): `DragSource`, `DragOutUi`, `DragPort` (`TestPort`, `WindowPort`), `begin` / `start_job` / `step` / `pump` / `input_hook` / `finish`, `deliver_test_post`; `files.rs`: the drag-out folder's `manifest.json` (`Manifest`, `ManifestEntry`, `write_new`, `record`, `remove_unused`, `cleanup`, `file_name`) |
 | `ole/drag_source.rs` | stickers P11 | Windows only: `DragJob`, the slot and `DRAG_ACTIVE`, `request` / `handle_message` (the posted `WTE.OleDrag.v1` message), WTE's `IDropSource` (`DropSource`, `continue_answer`), the `DoDrag` seam (`DoDragDrop` in a non-test build; `Recorder` / `RecordedDrag` in tests and self-test runs), `own_drag_on_this_thread` |
 | `selftest/scenarios/sticker_dragout.rs` | stickers P11 | the scenario `sticker_dragout` (8.11) |
+| `selftest/scenarios/layer_link.rs` | stickers P12 | the scenario `layer_link` (8.11) |
 | `tools/sticker/frame_spans.py` (repo root) | stickers P7a | the worst `sticker.*` / `link.*` / `ole.*` frame spans of a scenario's frame log (STICKER_PLAN 8.4; exit 1 over the limit) |
 | `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
@@ -2324,8 +2328,23 @@ impl Document {
     pub fn layer_thumbnail(&self, layer: LayerId, side: u32) -> Option<PixelBuf>;
     pub fn set_thumbnail(&self, set: TextureSetId, side: u32) -> Option<PixelBuf>;               // from the composite
 }
+
+// doc_layer_links.rs (stickers P12, STICKER_PLAN 5.9)
+impl Document {
+    /// Replaces a raster layer's pixels with `pixels` (exactly the texture's size, straight RGBA) as ONE `Edit::Pixels`
+    /// entry `label` whose patch holds only the 64 x 64 tiles that changed (`TilePatch::diff` against the old buffer);
+    /// the layer gets a new version and the changed tiles are marked dirty (caches and views update as after a stroke).
+    /// Ok(false) and no entry when no pixel changed (an unallocated layer and an all-zero picture allocate nothing).
+    /// Errors: UnknownLayer, NotRaster, LayerLocked, StrokeInProgress, InvalidParam (another size). Ignores alpha lock.
+    pub fn replace_layer_pixels(&mut self, layer: LayerId, pixels: PixelBuf, label: &str) -> Result<bool, EditError>;
+    /// "Paste as New Paint Layer": `add_raster_layer(set, Some(name))` + `replace_layer_pixels` as ONE entry `label`
+    /// (`begin_edit_group` / `end_edit_group`). InvalidParam for a picture of another size than the set's texture.
+    pub fn add_paint_layer_with_pixels(&mut self, set: TextureSetId, name: &str, pixels: PixelBuf, label: &str) -> Result<LayerId, EditError>;
+}
+pub fn fit_centred(src: &PixelBuf, width: u32, height: u32) -> PixelBuf;   // same size: as is; else scaled to fit with
+                                                                           // the aspect kept (pixel_ops::resize), centred; normalised
 ```
-Every method except `paint_target`, `set_active_layer` and the thumbnails pushes exactly one `Edit::Structure` (label e.g. "Add Layer").
+Every method of `doc_layers.rs` except `paint_target`, `set_active_layer` and the thumbnails pushes exactly one `Edit::Structure` (label e.g. "Add Layer").
 `layer_thumbnail` / `set_thumbnail` call `pixel_ops::thumbnail` (stride-sampled, O(side^2)).
 
 **Delegation between `doc_layers.rs` [C2] and `doc_stamps.rs` [C4]** (one direction only, so there is no recursion and exactly one
@@ -3356,7 +3375,10 @@ pub struct PngReuse { pub path: PathBuf, pub len: u64, pub modified: Option<Syst
 /// Test counters (thread-local): `counters::sticker_encodes()` = sticker PNGs encoded by saves on this thread.
 pub mod counters { pub fn sticker_encodes() -> u64; }
 pub struct LoadReport { pub document: Document, pub warnings: Vec<LoadWarning>, pub force_save_as: bool,
-                        pub links: Vec<LinkAtLoad> /* P5c: what is on disk per editor link; load writes nothing */ }
+                        pub links: Vec<LinkAtLoad> /* P5c: what is on disk per editor link; load writes nothing */,
+                        pub layer_links: Vec<LayerLinkAtLoad> /* P12: the same per linked paint layer */ }
+pub struct LayerLinkAtLoad { pub layer: LayerId, pub state: LinkFileState, pub path: Option<PathBuf>,
+                             pub archive: Option<String> /* links/l<id:05>.psd */ }   // stickers P12
 pub struct LinkAtLoad { pub sticker: StickerId, pub state: LinkFileState, pub path: Option<PathBuf>,
                         pub archive: Option<String> /* links/k<id:05>.psd when the archive holds it */ }
 pub enum LinkFileState { Present /* the synced content (size + CRC; the time is not compared) */, Missing, Changed }
@@ -3987,6 +4009,26 @@ pub fn rewrite_warning(opened: OpenedState, editor: &str) -> Option<String>;
 pub fn links_folder(project: &Path) -> PathBuf;                                // X.wtep -> X_links
 pub fn link_file_name(sticker_name: &str, id: StickerId) -> String;            // "<sanitised name>_k<id>.psd"
 pub fn archive_entry(id: StickerId) -> String;                                 // "links/k<id:05>.psd"
+// P12: the state table for any link; link_state = state_of(&link.synced, link.problem, observed, hash != synced_sticker)
+pub fn state_of(synced: &FileStamp, problem: Option<&LinkProblem>, observed: Option<&FileStamp>, wte_changed: bool) -> LinkState;
+pub fn send_first_text(wte_changed: bool, replaces_editor_layers: bool, editor: &str) -> Option<String>;
+// P12: LinkProblem::SizeMismatch { crc32, size: [u32; 2], texture: [u32; 2] } and LinkState::SizeMismatch { size, texture }
+// ("<layer> is W x H in <editor>; the texture is w x h. Undo the size change in <editor>.", texts::size_mismatch)
+
+// link/paint.rs (P12, STICKER_PLAN 5.9: linked texture paint layers)
+pub const PAINT_UPDATE_LABEL: &str = "Update Linked Layer";
+pub const MAX_PAINT_LINK_SIDE: u32 = 8192;  pub const TOO_LARGE_TO_LINK: &str = "This texture is too large to link.";
+pub struct PaintLink { pub file: LinkFile, pub editor: String /* key */, pub synced: FileStamp,
+    pub synced_pixels: u32 /* normalised_crc of the layer at the sync */, pub editor_layers: bool /* the file held more
+    than one plain layer (the "Send first?" question warns) */, pub problem: Option<LinkProblem> /* not saved */ }
+pub enum PaintProblem { SizeMismatch { size, texture }, NeedsMerged, TooLarge { width, height } }   // into_link_problem(crc32)
+pub struct PaintPicture { pub pixels: PixelBuf /* texture-sized, normalised */, pub merged: bool, pub editor_layers: bool }
+pub fn paint_link_file_name(layer_name: &str, id: LayerId) -> String;          // "<sanitised name>_l<id>.psd"
+pub fn paint_archive_entry(id: LayerId) -> String;                             // "links/l<id:05>.psd"
+pub fn normalise_in_place(data: &mut [u8]);                                    // zero RGB under alpha 0
+pub fn normalised_crc(buf: &PixelBuf, width: u32, height: u32) -> u32;         // 0 x 0 = never painted: CRC of zeros
+pub fn layer_psd(name: &str, pixels: &PixelBuf, width: u32, height: u32) -> StickerPsd;   // one layer, lyid 1, 255, Normal
+pub fn paint_source(psd: &PsdDoc, texture: [u32; 2], editor_key: &str) -> Result<PaintPicture, PaintProblem>;
 
 // link/map.rs (6.13)
 pub fn link_scale(doc: &StickerDoc, final_scale: f32) -> u32;                  // 1 | 2 | 4
@@ -4040,7 +4082,29 @@ pub fn add_sticker_from_psd(&mut self, psd: &PsdDoc, name: &str, stamp: FileStam
 pub struct PsdSticker { pub id: StickerId, pub mode: LinkMode, pub toast: Option<String>, pub linked: bool }
 pub struct PreparedLink { pub sticker: StickerId, pub bytes: Vec<u8>, pub crc32: u32, pub link: StickerLink }
 pub enum LinkApplied { Updated { mode, toast, profile_note, log }, Problem(LinkState) }
+
+// doc_layer_links.rs (impl Document; P12) - the same shape for a raster paint layer
+pub fn layer_link(&self, id: LayerId) -> Option<&PaintLink>;
+pub fn layer_links(&self) -> impl Iterator<Item = (LayerId, &PaintLink)>;     // links of deleted layers stay (undo)
+pub fn layer_texture_size(&self, id: LayerId) -> Option<[u32; 2]>;
+pub fn layer_pixels_crc(&mut self, id: LayerId) -> Result<u32, EditError>;    // normalised_crc, cached by layer version
+pub fn layer_link_changed_in_wte(&mut self, id: LayerId) -> bool;
+pub fn layer_link_state(&mut self, id: LayerId, observed: Option<&FileStamp>) -> Result<LinkState, EditError>;
+pub fn prepare_layer_link_file(&mut self, id: LayerId, file: LinkFile, editor: &str) -> Result<PreparedPaintLink, EditError>;
+    // NotRaster for a stamp / text layer; StickerLimit(TOO_LARGE_TO_LINK) over 8192 a side
+pub fn finish_layer_link_write(&mut self, prepared: PreparedPaintLink, written: FileStamp) -> Result<(), EditError>;
+pub fn unlink_layer(&mut self, id: LayerId);
+pub fn set_layer_link_file_and_editor(&mut self, id: LayerId, file: Option<LinkFile>, editor: Option<&str>) -> Result<(), EditError>;
+pub fn apply_layer_link_update(&mut self, id: LayerId, psd: &PsdDoc, stamp: FileStamp, editor_name: &str, file_name: &str)
+    -> Result<LinkApplied, EditError>;   // paint_source -> replace_layer_pixels(.., "Update Linked Layer"); a problem: no change
+pub fn layer_link_file_refused(&mut self, id: LayerId, err: &PsdError, stamp: FileStamp, file_name: &str) -> Result<LinkState, EditError>;
+pub struct PreparedPaintLink { pub layer: LayerId, pub bytes: Vec<u8>, pub crc32: u32, pub link: PaintLink }
 ```
+
+**Linked paint layers (P12).** `PaintLink`s live in `StickerState::layer_links` beside the sticker links, outside the history
+and sharing `links_revision` (the modified flag); `DocumentSnapshot::layer_links` carries them to the save. The plan's
+`synced_pixels` "the layer's version" is a CRC-32 of the normalised pixels instead: layer versions are not kept across a
+save and a load, the CRC is (and the document caches it by version, so the badge costs nothing per frame).
 
 `DocumentSnapshot` carries `links` and `links_revision`; `Document::is_modified` is true while the history state differs
 from the saved one **or** `links_revision` differs from the last `mark_links_saved` (links are outside the history, R6).
@@ -5510,6 +5574,24 @@ on failure both temp files are deleted, the registration is taken back (`rename_
 that fails with a sharing / lock / access error (an editor holding the PSD without read sharing) is the same
 "could not be replaced" result (check-P5c).
 
+**Linked paint layers** (P12, STICKER_PLAN 5.9; `link/paint.rs`, `doc_layer_links.rs`). A raster paint layer's file is a
+one-layer PSD at the texture's size (`layer_psd`: the layer's straight pixels, normalised and trimmed by the writer, `lyid`
+1, opacity 255, Normal, visible; the merged picture is the same picture; an unallocated layer = one empty layer). The
+layer's own opacity, blend, visibility and lock stay in WTE. Up to 8192 a side (the reader's decode limit); a larger set:
+"This texture is too large to link." What comes back (`paint_source`, pure): a canvas of another size is refused
+(`SizeMismatch`: "<layer> is W x H in <editor>; the texture is w x h. Undo the size change in <editor>.", nothing
+changes); pixels over the reader's limits = `TooLarge`; nothing forcing (`forcing(smart_forces(editor))` empty), not a
+flat file and at most one visible ordinary layer with pixels that is not clipped onto a layer below -> that layer on a
+transparent canvas, its mask (unless disabled) and opacity multiplied into alpha (no visible pixel layer = a
+transparent picture); otherwise the merged picture, which must be real merged data (else `NeedsMerged`, the badge "needs
+a merged picture" and the editor's MaxCompat sentence). The result is normalised (zero RGB under alpha 0).
+`editor_layers` = the file held more than one layer, a forcing feature or the editor's own layer kinds (the "Send
+first?" question then adds that a rewrite replaces them). `apply_layer_link_update` = `paint_source` +
+`replace_layer_pixels(.., "Update Linked Layer")` (one `Edit::Pixels` entry with the changed tiles, none when nothing
+changed), then the link takes the stamp and the new pixel CRC and loses its problem. The state table is the sticker's
+(`state_of`) with `wte_changed` = `layer_pixels_crc != synced_pixels`, so an undo of an update is "changed in WTE" and
+nothing is applied again by itself (R6). The writes, `.bak.psd`, the save rule and the watcher are the sticker link's.
+
 Known limits: the reader bounds each layer, not the sum of all layers (P5a check note A; a document of many full-size
 8192 layers is as large in WTE); a hidden layer with a non-WTE blend key comes back with the WTE layer's blend (or
 Normal).
@@ -5546,6 +5628,7 @@ let deflated = zip::write::SimpleFileOptions::DEFAULT.compression_method(zip::Co
 | `stickers/k<id:05>/p<layer:03>.png` | STORED | format 4: the owned (edited) picture of a sticker picture layer, straight RGBA8, the whole picture (never cropped) |
 | `stickers/k<id:05>/m<layer:03>.png` | STORED | format 4: the mask of a sticker picture layer, 8-bit greyscale PNG, the size of its picture |
 | `links/k<id:05>.psd` | STORED | format 4 (P5c): the stored copy of an `InFolder` link file of a saved sticker, by the save rule below; never for an `External` link |
+| `links/l<id:05>.psd` | STORED | format 4 (stickers P12): the same for the link file of a linked raster paint layer (id = the layer's id) |
 | `sets/s<set:02>/l<layer id>.png` | STORED | layer pixels: RGBA8 PNG cropped to `nonzero_bounds` (raster: bbox of pixels != `[0,0,0,0]`, so RGB under alpha 0 is kept) or to the bounds of the cache parts (stamp/text) |
 | `sets/s<set:02>/flattened.png` | STORED | full-size composite of the set (if `write_flattened`) — lets other tools grab the result without our app |
 | `thumbnail.png` | STORED | at most 256 px, from the composite of set 0 |
@@ -5553,7 +5636,7 @@ let deflated = zip::write::SimpleFileOptions::DEFAULT.compression_method(zip::Co
 
 Entry names are built only from numeric ids and sanitized extensions; no user string reaches a ZIP path. Original names live in the
 manifest. Readers take entry names from the manifest only. The sticker entries come after the blobs and before the layers.
-The link copies (`links/k<id:05>.psd`) follow the sticker entries.
+The link copies (`links/k<id:05>.psd`, then P12's `links/l<id:05>.psd`) follow the sticker entries.
 
 **Which stickers are saved (format 4).** Those a stamp shows and those with `keep` (the tray), ascending id
 (`save::saved_stickers`, `Document::saved_sticker_ids`); any other sticker in the document is a leftover of undo and is
@@ -5602,6 +5685,9 @@ damaged (the editor is writing it) -> the previous entry is copied from the old 
 none on a first save) and `SaveStats::warnings` gets `SaveWarning::LinkBeingWritten` ("<name>: the linked file is
 being written; the project keeps the earlier copy."); a missing file keeps the previous entry silently. `verify` also
 checks that every `archive` entry exists. At Save As the app copies the link files into the new folder first (P9a).
+Stickers P12: the links of the snapshot's existing raster paint layers are written as `PaintLinkEntry`s (`layer_links`,
+7.2) by the same rule (`write_layer_links`, `links/l<id:05>.psd`, `SaveWarning::LayerLinkBeingWritten` with the layer's
+name); a link of a deleted layer is not written. `required_reader` is 4 when an existing raster layer is linked.
 
 `write_atomic`: temp name `<file name>.tmp-<pid>` in the same directory; `File::sync_all()`; if `keep_backup` and the target exists,
 rename it to `<path>.bak` (replacing an older one); `std::fs::rename(tmp, path)` (replaces on Windows); delete the temp file on any error.
@@ -5670,6 +5756,9 @@ rename it to `<path>.bak` (replacing an older one); `std::fs::rename(tmp, path)`
    above every map id. `LoadReport::links` says per link what is at its path: `Present` (size and modification time
    equal, or the bytes' CRC equal), `Missing`, `Changed`; and the archive entry when the archive has it. **Nothing is
    written**: the app restores a missing `InFolder` file with `read_link_archive` and asks about a changed one.
+   Stickers P12 (`load::load_layer_links`): each `PaintLinkEntry` whose layer was loaded as a raster layer becomes a
+   `PaintLink` (a second link of one layer, a layer that is gone or not raster, an `InFolder` name that is not plain:
+   left out with a log line); `LoadReport::layer_links` reports them the same way (`LayerLinkAtLoad`).
 
 Fatal: not a ZIP, no/invalid manifest, too new, unrecoverable model, manifest or model file beyond its size limit. Everything else
 degrades with a warning. Corruption is detected by
@@ -5713,6 +5802,7 @@ pub struct Manifest {
     // format 4 (stickers P4), not written when empty:
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub stickers: Vec<StickerEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub links: Vec<LinkEntry>,   // written since P5c
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub layer_links: Vec<PaintLinkEntry>,   // stickers P12
 }
 pub struct FileRef { pub entry: String, pub size: u64, pub crc32: u32 }
 pub struct SourceEntry { pub format: ModelFormat, pub main: SourceFileEntry, pub sidecars: Vec<SourceFileEntry>,
@@ -5800,6 +5890,11 @@ pub struct LinkEntry { sticker, file: LinkFileEntry /* in_folder { name } | exte
                        layer_map: Vec<LinkLayerEntry /* { lyid, layer (0 = placeholder), name (default ""), origin, size,
                        pixels_crc, mask_crc, wte: { hash, at: [x, y] } (optional; check-P5c) } */>, next_lyid,
                        editor_native /* also read as "pc_native" */, archive: Option<String> }   // written by P5c (STICKER_PLAN 5.3)
+pub struct PaintLinkEntry { layer: LayerId, file: LinkFileEntry, editor: String /* default "photocraft" */,
+                            synced: FileStampEntry, synced_pixels: u32 /* CRC-32 of the normalised layer */,
+                            editor_layers: bool /* skipped when false */, archive: Option<String> }   // stickers P12
+// P12 deviation from STICKER_PLAN 5.9 ("manifest `links` entries with "layer": id"): a list of its own, so a `links`
+// entry keeps its required `sticker`, and a project without layer links writes no new key (the bytes of older files).
 ```
 The content tag is `kind`, so the shape's geometry is named `form`, and the inner tags of shapes and paints are `type`.
 A picture entry names its PNG as a `FileRef` (entry, size, CRC-32), like the layer images, not as a bare file name.
@@ -6085,6 +6180,9 @@ document's store (identical bytes are shared), maps the ids and adds the sticker
 `Document::sticker_wtes(id, styles)` writes the file of a sticker of the document with its finished picture as preview.
 
 ### 7.9 The PSD subset of the editor link (`psd/`, stickers P5a reader, P5b writer; STICKER_PLAN 5.2, 13.2, 13.3)
+
+Stickers P12: a linked paint layer's file is written by the same writer (one layer, `link::paint::layer_psd`, 6.13
+"Linked paint layers") and read by the same reader; nothing in `psd/` changed for it.
 
 **Reader** (`psd::read`; P5a). All integers big-endian. The walk is one pass, front to back; running out of bytes at
 the top level is `Truncated` (a half-written file is never a picture), running out inside a part of known length is
@@ -8963,6 +9061,7 @@ counted down) instead of failing (`export_errors`).
 | `sticker_drop` | Stickers P10a (`selftest/scenarios/sticker_drop.rs`). Sphere, Split; files written to `<out_stem>_assets` (three PNGs, `Badge.wtes`); (1) a PNG hovered over the model (`DragHover`, shot `drop_hover_picture`) and let go there (shot `drop_model`); (2) a PNG on the 2D view; (3) a PNG on the corner of the 3D view (a miss); (4) `Badge.wtes` as a file on the model; (5) the three PNG files at once on the model (shot `drop_three`); (6) a DIB on the first stamp's Layers row (`Target::Screen`); that stamp selected, 4, (7) a virtual `badge.png` (`FileGroupDescriptorW` + `FileContents`) on the sticker canvas (shot `drop_canvas`), Esc; (8) a `.wtep` hovered (shot `drop_hover_project`), `DragLeave`; undo everything. Run again with `WTE_OLE=1` (the window's own target installed too): the same result | (1) the hover is known with its point, the overlay `Place`; a stamp "Dropped picture" centred at the drop point's hit (1e-3 of the diagonal; its texel logged), the Stamp tool's size, the Transform tool, no hover left, one entry; (2) a UV stamp "Dropped picture" (picture data has no name: the drop target calls it "Dropped picture.png") centred at the drop texel (+-2), one entry; (3) nothing placed, no entry, the picture "Dropped picture.png" is the Stamp tool's source and the tool the Stamp tool; (4) a sticker stamp "Badge" showing a one-layer sticker, one entry labelled "Drop"; (5) a stamp "one", "two" and "three" kept tray stickers, the toast "2 more added to the tray", one entry; (6) the first stamp's picture is the 30 x 30 DIB, one entry; (7) the image stamp promoted with a second layer "badge" centred at the point (+-1.5 px), one entry; (8) the overlay `Open`; after `DragLeave` no hover and nothing opened; six entries in all, undoing them gives the start's document hash and no stamp |
 | `sticker_clip` | Stickers P10b (`selftest/scenarios/sticker_clip.rs`). Sphere, 3D; only `Step::Chord` for the chords, the in-memory clipboard. (1) a 64-px sticker with the Outline stamp styles dropped on the model as `WTE.Sticker.v1` data; (2) Ctrl+C on it; (3) Ctrl+V (after the Stamp tool's styles were reset), a hover (shot `clip_paste_source`), a click on the model; (4) Edit > Paste at View Centre (`Do`, shot `clip_view_centre`); (5) the first stamp selected, 4, M, a Marquee over the disc's middle, Ctrl+C, Ctrl+X, Ctrl+V (shot `clip_sticker_layer`), Done; (6) the Text tool, text put on the clipboard, the content field emptied and focused, Ctrl+V; new text in the field, Ctrl+A, Ctrl+C (shot `clip_text`), Esc; undo everything | the clipboard empty at the start and in memory; (1) a styled sticker stamp "Badge"; (2) exactly PNG, CF_DIBV5, WTE.Sticker.v1, the DIB's pixels = the PNG's, transparent and opaque pixels, the sticker block of this process with the sticker and its styles, no entry; (3) the Stamp tool with the tray sticker "Badge" (kept) as its source and the copied stamp's styles, no stamp placed, one entry; the click places a sticker stamp with those styles (one more); (4) one more stamp centred where the view's centre meets the model (1e-3 of the diagonal), one entry; (5) Copy: exactly PNG + CF_DIBV5 of the selection's size in the disc's orange, no entry; Cut: the same picture, the selected pixels gone from the disc layer, "Delete Selected Pixels", one entry; Paste: a top layer "Pasted picture" of that size centred at the visible canvas's centre (+-1.5), one entry; (6) the field holds the clipboard's text, no paste of WTE's, no entry; then the clipboard holds only CF_UNICODETEXT with the field's text; six entries in all, undoing them gives the start's document hash, no stamp and no tray sticker |
 | `sticker_dragout` | Stickers P11 (`selftest/scenarios/sticker_dragout.rs`). Sphere, 3D; the test port (the recorder, never the OS) and `<out_stem>_dragout`. (1) a 64-px sticker with the Outline stamp styles dropped on the model; (2) `ScreenHold` from its Layers row out past the window's right edge (shot `dragout_after_row`); (3) a `Hover` over the list; (4) a `ScreenPointer` reorder of that row onto the lower half of the row below it, Undo; (5) the paint layer filled red and its row dragged out; (6) the Sticker tab, the recorder answering Esc, the thumbnail dragged out (shot `dragout_sticker_tab`); (7) the tray item revealed and dragged out; (8) the PSD handle dragged out of the unsaved project (released outside; shot `dragout_save_first`), Cancel; (9) Save As into the run folder, a stub `Photoshop.exe` as the default editor, the handle dragged out (shot `dragout_psd_toast`); (10) once more | the folder is the run's; (2) one recorded drag: exactly CF_HDROP (one PNG in the run's folder holding the offered PNG), PNG = `stamp_picture(id, true)`, CF_DIBV5 = the PNG's pixels, WTE.Sticker.v1 of this process; the drop source's answers right; the layer order unchanged, nothing dragged in egui or WTE; (3) nothing dragged, nothing recorded; (4) the row moved, nothing posted, its prepared file removed; (5) CF_HDROP, PNG, CF_DIBV5 only, the PNG at texture size and red; (6) the Esc'd drag offered all four formats and its file is gone; (7) the PNG = `sticker_picture(id, None, 1.0)`; (8) "Save first", no link, nothing posted or recorded; (9) CF_HDROP alone with the linked PSD (it exists), the link in Photoshop and counted as opened, the tab-bar toast once; (10) the same PSD, still one toast, six posts in all |
+| `layer_link` | Stickers P12 (`selftest/scenarios/layer_link.rs`). Sphere, 3D; a stub `photocraft.exe` (empty file) in `<out_stem>_stub`; a red stroke on Paint 1; Save As `<out_stem>.wtep`; (1) a right-click on Paint 1's row (shot `layer_link_menu`), its "Edit Layer in PhotoCraft" (shot `layer_link_made`); (2) the scenario saves the PSD with a blue band (shot `layer_link_updated`); (3) Undo, 2 s, the block's Update now; (4) a second WTE stroke, then the editor saves a green band (shot `layer_link_conflict`), Take PhotoCraft's version; (5) Save, Open the project again (shot `layer_link_reopened`); then the Photoshop pass: an injected registry names a stub `Photoshop.exe`, Photoshop the default editor; a new Paint 2 painted and linked from Layer > Edit Layer in Photoshop; Photoshop's save of a red band; a file 64 px wider (shot `layer_link_ps_size`); two layers without a merged picture (`testkit::clear_real_merged`, shot `layer_link_ps_merged`) | (1) the row menu offers "Edit Layer in PhotoCraft"; a one-layer PSD of the texture's size in `<out_stem>_links\`, the stub saw (photocraft, that file), no new entry, badge "linked"; (2) exactly one entry "Update Linked Layer", the layer holds the file's picture, the composite changed; (3) after the undo no update for 2 s and the same composite, badge "changed in WTE"; Update now applies it again ("linked"); (4) the conflict question "Both WTE and PhotoCraft changed Paint 1.", nothing applied before the answer; Take: the file's picture, one entry; (5) the project archives `links/l<id:05>.psd`; after reopening the link (editor photocraft) and the same pixels, "linked"; Photoshop: the label "Edit Layer in Photoshop", the stub saw Photoshop's program, "Updated from Photoshop" and one entry; the wider file changes nothing and the badge reads "Paint 2 is W x H in Photoshop; the texture is w x h. Undo the size change in Photoshop."; the merged-less file gives "needs a merged picture" and Photoshop's MaxCompat sentence word for word |
 | `sticker_link_path` | Stickers P9a. PATH = a `.psd` / `.psb` file (gate: `crates/wte_core/tests/fixtures/psd/f1w_pc.psd`); Sphere, 3D; `OpenPath(PATH)`; a click on the model (shot `psd_placed`) | one "Add Sticker" entry: a kept tray sticker from the file layer by layer, the Stamp tool's source and tool; the placed stamp is a sticker stamp with layers |
 | `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
@@ -9637,6 +9736,40 @@ sticker in place on the model, keeping every stamp's placement.
   held without sharing gives the "could not be replaced" message and changes nothing; an unlinked import of a smart
   object is merged whatever the default; `testkit::with_foreign_layer` reads back with the type layer's `TySh`. The
   menu sweep: Help > Editor locations....
+- **Linked paint layers (stickers P12, STICKER_PLAN 5.9, 13.9 "P12").** Every link has a `LinkId { Sticker(StickerId) |
+  Layer(LayerId) }`: `LinkUi::sessions`, `made_since_save`, `saving_made`, `pending_aliases`, the watcher's
+  `WatchEntry::id` and `LinkEvent`s, `LinkQuestion::link` (Esc on a conflict or "changed while closed" answers it for
+  either kind) and the generic commands (`Send(SendRequest { link, .. })`, `UpdateNow`, `ShowFile`, `Unlink`,
+  `Restore`, `Take`, `Later`, `UpdateClosed`, `IgnoreClosed`) take it; `Fit` and `Convert` stay sticker-only. The helpers
+  `common(doc, id)` (file, editor key, synced), `is_live`, `link_name`, `link_path`, `file_name`, `wte_changed`,
+  `editor_name` and `badge` work for both (`impl Into<LinkId>`, so a `StickerId` still does). **"Edit Layer in
+  <editor>"** = `LinkTarget::Layer(id)` -> `flows::edit_layer_in`: refused for a stamp / text layer and a locked layer
+  (status line; the menus do not offer them, `ui::layer_editable`); save first; the editor (the request's, the link's,
+  the default, the only known one, else the chooser); the switch-editor question; the program; a new link writes
+  `<layer name>_l<id>.psd` into the links folder (`made_since_save`, once per session the note "<editor> gets the
+  layer's pixels at the texture's size; the layer's opacity and blend mode stay in WTE. Keep the canvas size in
+  <editor>."), an existing one is written again when missing or asks "Send WTE's changes to the file first?" (with the
+  "replaces <editor>'s own layers" sentence when `editor_layers`); the per-editor two-copies guard ("This layer is
+  already open in <editor>..."); the start. Shared with the sticker flow: `switch_question`, `existing_ready`,
+  `open_in_editor`, `write_file(state, LinkId, ..)`, `send`, `read_now`, `apply` (a layer: `apply_layer_link_update`,
+  "Updated from <editor>"; a problem is also a warning toast with the badge's sentence, since the layer's badge shows
+  only while the layer is active), `conflict_question` ("Linked layer changed"), `restore` (`links/l<id>.psd`),
+  `before_save` (both kinds copied at Save As), `after_load_layers` (from `JobOutput::Built::layer_links`: "Linked
+  layer <name> changed while the project was closed."). An update of a layer waits (5.6) for a tool interaction, a
+  pending Preview edit or an open sticker stroke. **UI**: the Layer menu "Edit Layer in <editor>" (the active unlocked
+  raster layer) and the submenu "Edit Layer in" with the editor list; a paint layer's row menu the same (`PanelHit::
+  LayerMenuEditIn`); the Layers tab shows a linked active layer's block at the top of the list's scroll area
+  (`ui::layer_block_data` with the state mutable, then `ui::layer_block`: "Link: <badge>" with the refusal and size
+  sentences, "Editor: <name> · <file>", the needs-merged sentence, Edit Layer in / Edit in... / Update now / Send to /
+  Show file / Unlink / Restore, `PanelHit::LayerLink*`). **Paste as New Paint Layer** (Edit menu, and the right-click
+  menu of the Layers tab's "New" button: there is no "+" menu) = `ClipAction::PasteAsLayer` (`clip.rs`): the
+  clipboard's PNG, CF_DIBV5, CF_DIB or picture / PSD file (`clipboard::picture_item`, `LAYER_PASTE_ORDER`; WTE's sticker
+  data is skipped, a WTE copy has its PNG) is decoded and fitted (`fit_centred`) on a worker; `poll` adds the layer
+  ("Pasted", or the file's stem) above the active one as one entry "Paste as New Paint Layer"; a document opened
+  meanwhile gets nothing. Tests: `link::layer_tests` (7: the PSD and the stub; locked and stamp layers refused; an
+  update and the undo that stays "changed in WTE"; the conflict with both answers; a size change and a CMYK file on the
+  layer badge with Photoshop's wording; Unlink and restore / "changed while closed" after a load; Paste as New Paint
+  Layer through the in-memory clipboard); scenario `layer_link` (8.11).
 
 ### 8.17 OLE drag and drop and the clipboard (`ole/*`, `dnd.rs`, `clip.rs`; stickers P10a, P10b, STICKER_PLAN 6.1-6.3)
 
@@ -10503,6 +10636,18 @@ and text layers (exactly those two files, each = `dense(layer)`).
   picture, MaxCompat-on shape, masks, 16 bit, a flat file, the profile note, Lab refused); ignored
   `k5_link_make_f15_input`. The P4 test `k4_unknown_extra_fields_in_the_new_entries_still_load` now asserts the
   `editor` default.
+- Branch `stickers`, P12 (`doc_layer_links_tests.rs`, names `k12_*`): `replace_layer_pixels` is one `Edit::Pixels`
+  entry with the changed tiles only (one tile of 12; nothing for the same picture or an all-zero picture on an
+  unallocated layer; undo / redo; size, lock refused); the PSD of a layer reads back to the same pixels (never painted =
+  one empty layer; opacity not sent; the CRC of `normalised_crc`); one-layer and multi-layer files choose the right
+  source (the layer without merged data, mask and opacity applied, a hidden layer ignored, a second visible one = the
+  merged picture, none = `NeedsMerged`, an effect = merged, a flat file); a size mismatch is refused with the sentence
+  and changes nothing (no entry, no revision); the state table (linked, missing, changed in <editor>, applied as one
+  "Update Linked Layer", undo = changed in WTE, conflict, needs merged, a CMYK refusal sentence, Unlink keeps the
+  pixels); the project (a project without layer links has no `layer_links` key and reader version 1; with one: the
+  entry, `links/l<id>.psd`, reader 4, the link and its state after a load, Changed and Missing, a deleted layer's link
+  not saved); Paste as New Paint Layer at equal and other sizes (one entry, active, undo / redo; `fit_centred` of a
+  square and a wide picture).
 - Branch `stickers`, P6a (`doc_stickers_tests.rs`): `k6a_layer_at_and_layer_thumbnail` (the top visible layer under a
   point, hidden layers skipped, a masked pixel not hit, NaN and outside points none; a layer's thumbnail alone at half
   scale; no history entry). The app-side tests of the Sticker view are listed in 8.15.
@@ -10585,7 +10730,8 @@ and the Photoshop pass of `sticker_link` (no new scenario). Stickers P10a: `ole:
 `shortcuts::tests::neither_table_binds_the_clipboard_chords`, `selftest::tests::chords_are_injected_as_real_use_produces_them`
 and the scenario count (69: `sticker_clip`). Stickers P11: `ole::drag_source::tests`, the drag message of
 `ole::subclass::tests`, the `IDropSource` layout of `ole::com::tests`, `dragout::tests` (8.17 "Drag out") and the
-scenario count (70: `sticker_dragout`).
+scenario count (70: `sticker_dragout`). Stickers P12: `link::layer_tests` (8.16 "Linked paint layers") and the scenario
+count (71: `layer_link`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

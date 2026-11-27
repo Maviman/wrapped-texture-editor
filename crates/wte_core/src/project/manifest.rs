@@ -12,7 +12,7 @@ use crate::blob::BlobKind;
 use crate::ids::{BlobId, LayerId, StampId, StickerId, TextureSetId};
 use crate::import::ModelFormat;
 use crate::layer::BlendMode;
-use crate::project::sticker_entries::{LinkEntry, StickerEntry, StyleStackEntry};
+use crate::project::sticker_entries::{LinkEntry, PaintLinkEntry, StickerEntry, StyleStackEntry};
 use crate::stamp::{Placement, Projector, StampObject, StampSource, SurfaceMode, UvPlacement, WrapOptions};
 use crate::text::{FontRef, Gap, Outline, PathShape, TextAlign, TextFx, TextPath, TextSpec, Warp, WarpStyle};
 
@@ -44,6 +44,9 @@ pub struct Manifest {
     /// Format 4: PhotoCraft links (STICKER_PLAN 5.3). Not written when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<LinkEntry>,
+    /// Stickers P12: editor links of raster paint layers (STICKER_PLAN 5.9). Not written when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layer_links: Vec<PaintLinkEntry>,
 }
 
 /// Reference to one ZIP entry with its uncompressed size and CRC-32.

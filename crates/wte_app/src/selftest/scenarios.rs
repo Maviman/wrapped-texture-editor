@@ -37,6 +37,7 @@ mod sticker;
 mod sticker_cutout;
 mod sticker_drop;
 mod sticker_clip;
+mod layer_link;
 mod sticker_dragout;
 mod sticker_layout;
 mod sticker_link;
@@ -115,6 +116,7 @@ const NAMES: &[&str] = &[
     "sticker_drop",
     "sticker_clip",
     "sticker_dragout",
+    "layer_link",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -210,6 +212,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "sticker_drop" => sticker_drop::sticker_drop(),
         "sticker_clip" => sticker_clip::sticker_clip(),
         "sticker_dragout" => sticker_dragout::sticker_dragout(),
+        "layer_link" => layer_link::layer_link(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -4309,7 +4312,8 @@ fn export_options(state: &AppState, scratch: &Scratch) -> Result<ExportOptions, 
 pub fn timeouts(name: &str) -> Option<(Duration, Duration)> {
     match name {
         "workflow_path" | "fuzz_path" | "brush_types_path" | "text_preview_path" | "final_bake_async" | "wrap_surface"
-        | "export_flow" | "export_unsettled" | "save_unsettled" | "objects_path" | "objects_flow_path" | "sticker_link" => {
+        | "export_flow" | "export_unsettled" | "save_unsettled" | "objects_path" | "objects_flow_path" | "sticker_link"
+        | "layer_link" => {
             Some((Duration::from_secs(300), Duration::from_secs(3600)))
         }
         // Branch `companion`: the Android end-to-end run waits up to 300 s for the tablet.
@@ -9331,9 +9335,9 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 70);
+        assert_eq!(scenario_names().len(), 71);
         // Stickers P6a (review B15): every shot of a sticker scenario says what it must show.
-        for name in scenario_names().iter().filter(|n| n.starts_with("sticker")) {
+        for name in scenario_names().iter().filter(|n| n.starts_with("sticker") || n.starts_with("layer_link")) {
             // Stickers P9a: a `*_path` scenario has its steps only with a PATH (`sticker_link_path`: a PSD file).
             let with_path = CliArgs { path: Some(PathBuf::from("x.psd")), screenshot: None, scenario: String::new(), size: [1280, 800], log: None };
             let steps = scenario(name, if name.ends_with("_path") { &with_path } else { &args }).unwrap();

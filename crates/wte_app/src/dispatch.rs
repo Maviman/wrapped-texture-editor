@@ -476,7 +476,7 @@ fn close_dialog(app: &mut WteApp) {
     // Stickers P9a: Esc or a click outside a link question is its cancel: "Decide later" for a conflict, "Ignore"
     // for a change while the project was closed, nothing else for the others.
     if let Dialog::Link(q) = &app.state.dialog {
-        let follow = match (q.kind, q.sticker) {
+        let follow = match (q.kind, q.link) {
             (crate::link::QuestionKind::Conflict { .. }, Some(id)) => Some(crate::link::LinkAction::Later(id)),
             (crate::link::QuestionKind::ChangedWhileClosed, Some(id)) => Some(crate::link::LinkAction::IgnoreClosed(id)),
             _ => None,

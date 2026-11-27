@@ -63,6 +63,14 @@ pub fn canvas_too_large(sticker: &str, width: u32, height: u32, editor: &str) ->
     format!("{sticker} is now {width} x {height} in {editor}; a sticker can be at most 4096 px.")
 }
 
+/// Stickers P12 (5.9): a linked paint layer's file whose canvas is not the texture's size.
+pub fn size_mismatch(layer: &str, size: [u32; 2], texture: [u32; 2], editor: &str) -> String {
+    format!(
+        "{layer} is {} x {} in {editor}; the texture is {} x {}. Undo the size change in {editor}.",
+        size[0], size[1], texture[0], texture[1]
+    )
+}
+
 /// Over the reader's limits (5.2): the "too large" message only.
 pub fn too_large(file: &str, width: u32, height: u32) -> String {
     format!("{file} is too large for WTE ({width} x {height}; at most 8192 px a side).")
@@ -103,6 +111,11 @@ pub fn being_written(sticker: &str) -> String {
     format!("{sticker}: the linked file is being written; the project keeps the earlier copy.")
 }
 
+/// Stickers P12: the dialog after load for a linked paint layer: **Update** / **Ignore**.
+pub fn layer_changed_while_closed(layer: &str) -> String {
+    format!("Linked layer {layer} changed while the project was closed.")
+}
+
 /// The dialog after load (5.3): **Update** / **Ignore**.
 pub fn changed_while_closed(sticker: &str) -> String {
     format!("Linked sticker {sticker} changed while the project was closed.")
@@ -131,6 +144,11 @@ pub fn send_to(editor: &str) -> String {
 /// "Edit in <editor>".
 pub fn edit_in(editor: &str) -> String {
     format!("Edit in {editor}")
+}
+
+/// "Edit Layer in <editor>" (5.9, 13.9).
+pub fn edit_layer_in(editor: &str) -> String {
+    format!("Edit Layer in {editor}")
 }
 
 /// The close / New / Open prompt's extra line (5.3, review B8).

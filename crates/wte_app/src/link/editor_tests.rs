@@ -289,7 +289,7 @@ fn opening_a_link_in_a_second_editor_asks_first() {
     assert_eq!((calls.len(), calls[1].editor.as_str()), (2, "photoshop"));
     // The link follows Photoshop now: every text names it.
     assert_eq!(state.doc().unwrap().link(id).unwrap().editor, EDITOR_PHOTOSHOP);
-    assert_eq!(state.link_ui.sessions[&id].opened_editor.as_deref(), Some(EDITOR_PHOTOSHOP));
+    assert_eq!(state.link_ui.sessions[&id.into()].opened_editor.as_deref(), Some(EDITOR_PHOTOSHOP));
     assert_eq!(edit_in_label(&state, Some(id)), "Edit in Photoshop");
     // Back to PhotoCraft: asked again (now Photoshop may have it open); Cancel keeps Photoshop.
     flows::run_in(&mut state, LinkAction::EditIn(EditRequest::in_editor(LinkTarget::Stamp(stamp), EDITOR_PHOTOCRAFT)));
@@ -320,7 +320,7 @@ fn every_link_text_names_the_links_editor() {
     state.prefs.default_editor = Some(EDITOR_PHOTOSHOP.to_owned());
     edit(&mut state, stamp);
     let id = sticker_id(&state, stamp);
-    let q = flows::conflict_question(&state, id, true);
+    let q = flows::conflict_question(&state, id.into(), true);
     assert_eq!(q.lines[0], "Photoshop saved over the changes WTE sent to Logo.");
     assert!(q.find("Take Photoshop's version").is_some());
     assert_eq!(texts::send_to(&editor_name(&state, id)), "Send to Photoshop");
@@ -429,7 +429,7 @@ fn locked_file_case(key: &str, name: &str) {
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(!wte_core::link::file::backup_path(&path).exists());
     assert_eq!(badge_text(&mut state, id), "changed in WTE");
-    assert!(!state.link_ui.sessions[&id].stale_in_editor);
+    assert!(!state.link_ui.sessions[&id.into()].stale_in_editor);
     let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".wte-tmp")).collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }

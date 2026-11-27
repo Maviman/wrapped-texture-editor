@@ -22,6 +22,7 @@ pub mod brush_tip;
 pub mod bvh;
 pub mod composite;
 pub mod doc_build;
+pub mod doc_layer_links;
 pub mod doc_layers;
 pub mod doc_links;
 pub mod doc_stamps;

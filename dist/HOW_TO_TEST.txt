@@ -66,6 +66,44 @@ Side panel tabs (new in this build)
   - Try a small window too (e.g. half the screen): nothing should overlap,
     the pages scroll.
 
+Stickers, part 1: the Sticker tab (new in this build)
+-----------------------------------------------------
+The side panel has a fifth tab, "Sticker" (at the normal panel width the
+tabs stand in two rows: Tool | Color | Texture sets, then Objects |
+Sticker; widen the panel and they fit one row).
+  1. Place an image with the Stamp tool and a text with the Text tool.
+     Select the image (Transform tool), open the Sticker tab, click
+     "Classic sticker": the picture gets a white die-cut border and a soft
+     shadow on the model; its box (the Transform frame) stays where it was.
+     Select the text and do the same; tick "Stroke": a dark line runs
+     around the border. Each click is one Undo step.
+  2. Open a style block with its small arrow and drag a slider (Width,
+     Size...): the model follows while you drag; one Undo takes the whole
+     drag back. Untick a block and tick it again: your numbers are kept.
+  3. Copy Style on one stamp, select two other stamp layers in the Layers
+     list (Ctrl-click), Paste Style: both get it, one Undo removes it from
+     both. Clear Style removes every style.
+  4. Tray: "From picture..." makes a sticker of a picture file; click it in
+     the tray (the Stamp tool is chosen), click on the model twice: two
+     stamps show the same sticker. "New Sticker" makes a blank one.
+  5. Stamp tool, Tool tab: "Edit before placing" opens the picture in the
+     Sticker view before you place it ("Not placed yet" below); add a
+     layer, press Done, click on the model: the stamp shows the edited
+     picture. The "Style" list there gives new stamps a style right away.
+  6. With two stamps of the same sticker (step 4), open one in the Sticker
+     view (Edit Sticker) and move a layer with the arrow keys: you are
+     asked "This picture is used by 2 stickers." - "Edit all" changes both
+     stamps, "Only this one" gives this stamp its own copy first (the other
+     stays as it was), Cancel changes nothing.
+  7. In the Sticker view the Tool tab has "Layer styles" for the active
+     layer (the same blocks and presets).
+  8. Export Picture... (Sticker tab or tray) saves a PNG of the finished
+     picture, with its border and shadow.
+  9. Save, close, open the project again: styles, tray stickers and the
+     two stamps are as you left them.
+ 10. A project made with v0.3.0 (no stickers) opens and exports exactly as
+     before.
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

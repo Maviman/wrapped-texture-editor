@@ -463,6 +463,11 @@ fn close_dialog(app: &mut WteApp) {
         crate::brush_flows::answer_openings(app, None);
         return;
     }
+    // Stickers P6b (E6): Cancel of the shared-picture question drops the edit that waited for it.
+    if matches!(app.state.dialog, Dialog::StickerShared { .. }) {
+        crate::sticker::run_in(&mut app.state, crate::sticker::StickerAction::AnswerShared(None));
+        return;
+    }
     let was_message = matches!(app.state.dialog, Dialog::Message { .. });
     app.state.dialog = Dialog::None;
     if was_message && let Some(st) = app.export_stash.take() {
@@ -997,7 +1002,7 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
             }
             let Some(path) = resolve_path(app, p, |prefs| io_flows::pick_image(frame, prefs)) else { return };
             let Some((blob, name)) = add_stamp_image(app, &path) else { return };
-            app.state.tools.stamp.source = Some(blob);
+            app.state.tools.stamp.source = crate::state::StampToolSource::Blob(blob);
             app.state.tools.stamp.source_name = name;
             run(app, A::SetTool(ToolKind::Stamp), frame);
             app.state.status_hint = "Click on the model to place the stamp".to_owned();

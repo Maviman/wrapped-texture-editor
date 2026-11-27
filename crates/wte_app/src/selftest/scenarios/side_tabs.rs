@@ -30,6 +30,7 @@ pub(super) fn side_tabs() -> Vec<Step> {
         (UpperTab::Color, "tab_color"),
         (UpperTab::TextureSets, "tab_sets"),
         (UpperTab::Objects, "tab_objects"),
+        (UpperTab::Sticker, "tab_sticker"),
         (UpperTab::Tool, "tab_tool"),
     ] {
         steps.push(upper_tab_click(tab));
@@ -157,7 +158,7 @@ pub(super) fn side_tabs() -> Vec<Step> {
             let auto = f32::from_bits(remembered(sc, "auto_lower")? as u32);
             let now = s.side_rects.bottom_area.height();
             // In a small window the split stops at its largest height.
-            let want = (auto + 80.0).min(crate::panels::side_groups::layers_area_max(s.side_rects.panel.height()));
+            let want = (auto + 80.0).min(crate::panels::side_groups::layers_area_max(s.side_rects.panel.height(), s.side_rects.upper_strip_height));
             if (now - want).abs() > 4.0 {
                 return Err(format!("the lower group is {now:.1} pt, expected {want:.1}"));
             }
@@ -228,6 +229,7 @@ fn upper_tab_click(tab: UpperTab) -> Step {
         UpperTab::Color => |s, _| button_click(s, UpperTab::Color),
         UpperTab::TextureSets => |s, _| button_click(s, UpperTab::TextureSets),
         UpperTab::Objects => |s, _| button_click(s, UpperTab::Objects),
+        UpperTab::Sticker => |s, _| button_click(s, UpperTab::Sticker),
     };
     Step::Dyn("click an upper tab button", f)
 }
@@ -247,22 +249,30 @@ fn page_check(tab: UpperTab) -> fn(&AppState, &Scratch) -> Result<(), String> {
         UpperTab::Color => |s, sc| one_page(s, sc, UpperTab::Color),
         UpperTab::TextureSets => |s, sc| one_page(s, sc, UpperTab::TextureSets),
         UpperTab::Objects => |s, sc| one_page(s, sc, UpperTab::Objects),
+        UpperTab::Sticker => |s, sc| one_page(s, sc, UpperTab::Sticker),
     }
 }
 
 fn one_page(s: &AppState, sc: &Scratch, tab: UpperTab) -> Result<(), String> {
     upper_is(s, tab)?;
     let r = &s.side_rects;
-    let drawn = [r.tool_area.is_positive(), r.color.is_positive(), r.sets_tab.is_some(), r.objects_tab.is_some()];
-    let mut want = [false; 4];
+    let drawn = [r.tool_area.is_positive(), r.color.is_positive(), r.sets_tab.is_some(), r.objects_tab.is_some(), r.sticker_tab.is_some()];
+    let mut want = [false; 5];
     want[tab.index()] = true;
     if drawn != want {
         return Err(format!("{tab:?}: pages drawn {drawn:?}"));
     }
-    // G4: the four buttons in one row inside the upper group, the side panel at most 300 pt wide.
+    // G4 (stickers P6b: five buttons in one row, or in the two rows Tool | Color | Texture sets and Objects | Sticker):
+    // every button whole inside the upper group, none overlapping another, the side panel at most 300 pt wide.
     let b = r.upper_tab_buttons;
-    if b.iter().any(|x| (x.top() - b[0].top()).abs() > 0.5 || !r.upper_area.expand(0.5).contains_rect(*x)) {
-        return Err(format!("the upper tab buttons {b:?} are not one row inside {:?}", r.upper_area));
+    let rows_ok = if (r.upper_strip_height - crate::panels::side_groups::TAB_STRIP_HEIGHT).abs() < 0.5 {
+        b.iter().all(|x| (x.top() - b[0].top()).abs() <= 0.5)
+    } else {
+        (b[1].top() - b[0].top()).abs() <= 0.5 && (b[2].top() - b[0].top()).abs() <= 0.5 && (b[4].top() - b[3].top()).abs() <= 0.5 && b[3].top() >= b[0].bottom()
+    };
+    let overlap = (0..5).any(|i| (i + 1..5).any(|j| b[i].intersects(b[j]) && b[i].intersect(b[j]).area() > 0.5));
+    if !rows_ok || overlap || b.iter().any(|x| !x.is_positive() || !r.upper_area.expand(0.5).contains_rect(*x)) {
+        return Err(format!("the upper tab buttons {b:?} are not laid out in their rows inside {:?}", r.upper_area));
     }
     let side = s.side_panel_rect.ok_or("the side panel rect was not recorded")?;
     if side.width() > 300.5 {
@@ -274,7 +284,10 @@ fn one_page(s: &AppState, sc: &Scratch, tab: UpperTab) -> Result<(), String> {
         }
         panel_rect(s, PanelHit::ObjectsFooter)?;
     }
-    log::info!("side_tabs: {tab:?} page {:?}, buttons {b:?} ({:.1} pt)", r.upper_page, b[3].right() - b[0].left());
+    if tab == UpperTab::Sticker {
+        panel_rect(s, PanelHit::TrayNew)?;
+    }
+    log::info!("side_tabs: {tab:?} page {:?}, buttons {b:?} (strip {:.1} pt high)", r.upper_page, r.upper_strip_height);
     groups_ok(s, sc)
 }
 

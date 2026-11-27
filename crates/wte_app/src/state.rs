@@ -21,7 +21,7 @@ use wte_core::{
     ImportedModel, LayerId, PixelBuf, PressureDynamics, SampleKind, StampId, SurfaceMode, TextAlign, TextPath,
     TextureSetId, TipAlign, TipField, UvStats, Warp, WrapOptions,
 };
-use wte_core::{Selection, ShareScope, StickerCheckpoint, StickerId, StickerLayerId};
+use wte_core::{Selection, ShareScope, StickerCheckpoint, StickerId, StickerLayerId, StyleStack};
 
 use crate::action::AppAction;
 
@@ -128,6 +128,38 @@ pub enum PanelHit {
     StickerToolButton(StickerTool),
     /// The "Edit Sticker" button of the Tool page of a selected stamp.
     StickerEditButton,
+    /// Stickers P6b (STICKER_PLAN 3.9): the Sticker tab. Its first block (the selected stamp): Edit Sticker, Export
+    /// Picture.
+    StickerTabEdit,
+    StickerTabExport,
+    /// A preset button of the Sticker tab's style row (by its index in `StylePreset::ALL`).
+    StylePresetButton(u8),
+    /// Copy / Paste / Clear Style of the Sticker tab.
+    StyleCopy,
+    StylePaste,
+    StyleClear,
+    /// The on/off box of one style block of the style editor (by its index in `styles_ui::BLOCKS`).
+    StyleBlockToggle(u8),
+    /// The whole style editor as laid out.
+    StyleEditor,
+    /// The tray: one item (by `StickerId::0`), and its buttons New Sticker, New from picture..., Edit, Duplicate,
+    /// Delete, Export Picture....
+    TrayItem(u64),
+    TrayNew,
+    TrayNewFromPicture,
+    TrayEdit,
+    TrayDuplicate,
+    TrayDelete,
+    TrayExport,
+    /// The Stamp tool options: "Edit before placing" and the style choice for new stamps.
+    StampEditBeforePlacing,
+    StampToolStyle,
+    /// The shared-picture question (E6): Edit all, Only this one, Cancel.
+    SharedEditAll,
+    SharedOnlyThis,
+    SharedCancel,
+    /// The Tool tab in the Sticker view: the heading of the active layer's style editor (Layer styles).
+    StickerLayerStyles,
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
@@ -200,12 +232,9 @@ impl StickerTool {
 pub enum StickerTarget {
     /// The sticker of a stamp (an image stamp shows a virtual one-layer sticker until its first content edit).
     Stamp(StampId),
-    /// A sticker of the tray (stickers P6b).
-    #[allow(dead_code, reason = "stickers P6b: the tray")]
+    /// A sticker of the tray (stickers P6b): "Edit" on a tray item, and "Edit before placing" of the Stamp tool (E4;
+    /// the tool's picture is first made a tray sticker, so the tool's unplaced sticker is a tray sticker).
     Tray(StickerId),
-    /// The Stamp tool's sticker that is not placed yet (stickers P6b, E4).
-    #[allow(dead_code, reason = "stickers P6b: edit before placing")]
-    ToolSource,
 }
 
 /// Pan / zoom of the sticker canvas: the 2D view's camera type (`view2d.rs` methods) with the artboard as its
@@ -228,7 +257,6 @@ pub struct StickerEdit {
     /// The view mode the editor returns to.
     pub return_mode: ViewMode,
     /// E6: the answer to "This picture is used by N stickers" for this opening of the editor (stickers P6b).
-    #[allow(dead_code, reason = "stickers P6b: the shared-picture question")]
     pub share_answer: Option<ShareScope>,
     /// The stamp(s) and sticker as they were when the editor opened (`Arc` clones), for Revert.
     pub entry: StickerCheckpoint,
@@ -626,11 +654,14 @@ pub enum UpperTab {
     Color,
     TextureSets,
     Objects,
+    /// Stickers P6b (STICKER_PLAN 3.9): the selected stamp, its style, the tray. Serialized as "sticker"; an older build
+    /// reads it as its default tab (lenient prefs).
+    Sticker,
 }
 
 impl UpperTab {
-    /// The four tabs in the order of the strip.
-    pub const ALL: [UpperTab; 4] = [UpperTab::Tool, UpperTab::Color, UpperTab::TextureSets, UpperTab::Objects];
+    /// The five tabs in the order of the strip (stickers P6b: two rows when one does not fit).
+    pub const ALL: [UpperTab; 5] = [UpperTab::Tool, UpperTab::Color, UpperTab::TextureSets, UpperTab::Objects, UpperTab::Sticker];
 
     /// Position in the strip (index into `SideRects::upper_tab_buttons`).
     pub fn index(self) -> usize {
@@ -639,6 +670,7 @@ impl UpperTab {
             UpperTab::Color => 1,
             UpperTab::TextureSets => 2,
             UpperTab::Objects => 3,
+            UpperTab::Sticker => 4,
         }
     }
 
@@ -649,6 +681,7 @@ impl UpperTab {
             UpperTab::Color => "Color",
             UpperTab::TextureSets => "Texture sets",
             UpperTab::Objects => "Objects",
+            UpperTab::Sticker => "Sticker",
         }
     }
 }
@@ -671,8 +704,10 @@ pub struct SideRects {
     pub panel: egui::Rect,
     /// objects-tabs (WP4): the whole upper group (strip and page).
     pub upper_area: egui::Rect,
-    /// The buttons of the upper strip, indexed by `UpperTab::index`.
-    pub upper_tab_buttons: [egui::Rect; 4],
+    /// The buttons of the upper strip, indexed by `UpperTab::index` (stickers P6b: five, in one or two rows).
+    pub upper_tab_buttons: [egui::Rect; 5],
+    /// Stickers P6b: the height of the upper strip (one row: `TAB_STRIP_HEIGHT`; two rows: twice that).
+    pub upper_strip_height: f32,
     /// The visible page of the upper group, below its strip.
     pub upper_page: egui::Rect,
     /// The visible Tool page (= `upper_page`, = `PanelHit::SettingsArea`) in frames where the Tool page is shown, else
@@ -688,6 +723,8 @@ pub struct SideRects {
     pub sets_tab: Option<egui::Rect>,
     /// `Some` (the visible page) exactly in the frames in which the Objects page was drawn.
     pub objects_tab: Option<egui::Rect>,
+    /// Stickers P6b: `Some` (the visible page) exactly in the frames in which the Sticker page was drawn.
+    pub sticker_tab: Option<egui::Rect>,
     /// The lower area with the tab strip (= `PanelHit::LayersArea`).
     pub bottom_area: egui::Rect,
     /// The buttons of the tab strip, indexed by `SideTab::index`.
@@ -706,13 +743,15 @@ impl Default for SideRects {
         SideRects {
             panel: egui::Rect::NOTHING,
             upper_area: egui::Rect::NOTHING,
-            upper_tab_buttons: [egui::Rect::NOTHING; 4],
+            upper_tab_buttons: [egui::Rect::NOTHING; 5],
+            upper_strip_height: 0.0,
             upper_page: egui::Rect::NOTHING,
             tool_area: egui::Rect::NOTHING,
             tool_options: egui::Rect::NOTHING,
             color: egui::Rect::NOTHING,
             sets_tab: None,
             objects_tab: None,
+            sticker_tab: None,
             bottom_area: egui::Rect::NOTHING,
             tab_buttons: [egui::Rect::NOTHING; 3],
             brush_tab: None,
@@ -843,14 +882,44 @@ pub struct FontSampleState {
     pub atlases: Vec<egui::TextureHandle>,
 }
 
+/// Stickers P6b (STICKER_PLAN 3.6): what the Stamp tool places: nothing chosen, an image (placed as an image stamp
+/// with default styles, exactly as before), or a sticker of the tray.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum StampToolSource {
+    #[default]
+    None,
+    Blob(BlobId),
+    Sticker(StickerId),
+}
+
+impl StampToolSource {
+    /// The image, when the source is one.
+    pub fn blob(self) -> Option<BlobId> {
+        match self {
+            StampToolSource::Blob(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Nothing is chosen.
+    pub fn is_none(self) -> bool {
+        self == StampToolSource::None
+    }
+
+    /// An image or a sticker is chosen.
+    pub fn is_some(self) -> bool {
+        !self.is_none()
+    }
+}
+
 /// Settings of the Stamp tool (image decals).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StampSettings {
-    /// The image the tool places. Bound to the open document, therefore never serialized (a `BlobId` of one document
-    /// must never be used with another; `install_document` resets it, 8.9).
+    /// The image or sticker the tool places. Bound to the open document, therefore never serialized (an id of one
+    /// document must never be used with another; `install_document` resets it, 8.9).
     #[serde(skip)]
-    pub source: Option<BlobId>,
+    pub source: StampToolSource,
     /// Display name of `source`; not serialized either.
     #[serde(skip)]
     pub source_name: String,
@@ -867,19 +936,25 @@ pub struct StampSettings {
     /// for the session like `mode`, used only in Wrap.
     #[serde(skip)]
     pub wrap: WrapOptions,
+    /// Stickers P6b (STICKER_PLAN 3.6): the stamp-level styles new stamps of this tool get (default: none, so a placed
+    /// image is exactly today's image stamp). Lengths for the picture at reference size. Session state, never
+    /// serialized.
+    #[serde(skip)]
+    pub styles: StyleStack,
 }
 
 impl Default for StampSettings {
     /// No source, 15% size, no rotation, no project-through, Project mode with the default Wrap options.
     fn default() -> StampSettings {
         StampSettings {
-            source: None,
+            source: StampToolSource::None,
             source_name: String::new(),
             size_frac: 0.15,
             rotation_deg: 0.0,
             project_through: false,
             mode: SurfaceMode::Project,
             wrap: WrapOptions::default(),
+            styles: StyleStack::default(),
         }
     }
 }
@@ -1276,6 +1351,9 @@ pub enum Dialog {
     /// "How should the openings of this brush shape be closed?" (plan section 7 item 5; drawn by `brush_flows.rs`).
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
     CloseOpenings(Box<OpeningsDialogState>),
+    /// Stickers P6b (STICKER_PLAN 3.1, E6): "This picture is used by N stickers." Edit all / Only this one / Cancel,
+    /// before the first content edit of a shared sticker or picture in the Sticker view (`dialogs/sticker_shared.rs`).
+    StickerShared { users: usize },
 }
 
 /// User preferences, stored as JSON by `prefs.rs`. Every field falls back to its default when missing.
@@ -1470,6 +1548,8 @@ pub struct AppState {
     pub sticker_canvas_rect: Option<egui::Rect>,
     /// Stickers P6a: UI state of the Sticker view (canvas texture, thumbnails, the running drag, tool options).
     pub sticker_ui: crate::sticker::StickerUi,
+    /// Stickers P6b (STICKER_PLAN 3.7): the styles of Copy Style (app state, never the OS clipboard).
+    pub style_clipboard: Option<StyleStack>,
 }
 
 /// When the deferred stamp Preview bakes (`Document::bake_stale_previews`) may run next: after a bake that took `t`,
@@ -1568,6 +1648,7 @@ impl AppState {
             pen: crate::pen::PenState::default(),
             sticker_canvas_rect: None,
             sticker_ui: crate::sticker::StickerUi::default(),
+            style_clipboard: None,
         }
     }
 
@@ -1784,7 +1865,8 @@ mod tests {
         let tools = ToolSettings::default();
         assert!((1.0..=2048.0).contains(&tools.brush.size_px));
         assert_eq!(tools.stamp.size_frac, 0.15);
-        assert_eq!(tools.stamp.source, None);
+        assert_eq!(tools.stamp.source, StampToolSource::None);
+        assert!(tools.stamp.styles.is_default());
         assert_eq!(tools.text.content, "Text");
         assert_eq!(tools.text.family, DEFAULT_FONT_FAMILY);
         assert_eq!(tools.text.style, DEFAULT_FONT_STYLE);
@@ -1857,9 +1939,15 @@ mod tests {
 
     #[test]
     fn stamp_source_is_never_serialized() {
-        let stamp = StampSettings { source: Some(BlobId(7)), source_name: "logo.png".to_owned(), ..StampSettings::default() };
+        let stamp = StampSettings {
+            source: StampToolSource::Blob(BlobId(7)),
+            source_name: "logo.png".to_owned(),
+            styles: wte_core::StylePreset::Outline.styles([64, 64]),
+            ..StampSettings::default()
+        };
         let back = round_trip(&stamp);
-        assert_eq!(back.source, None);
+        assert_eq!(back.source, StampToolSource::None);
+        assert!(back.styles.is_default(), "the styles are session state");
         assert_eq!(back.source_name, "");
         assert_eq!(back.size_frac, stamp.size_frac);
     }

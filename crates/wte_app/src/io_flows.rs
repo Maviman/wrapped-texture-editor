@@ -790,8 +790,11 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
     session.validate();
     app.state.session = Some(session);
     app.scene = None; // rebuilt for the new generation by the views; frees the old GPU resources now
-    app.state.tools.stamp.source = None;
+    app.state.tools.stamp.source = crate::state::StampToolSource::None;
     app.state.tools.stamp.source_name.clear();
+    // Stickers P6b: the tray selection and a waiting shared-picture edit belong to the old document.
+    app.state.sticker_ui.tray_selected = None;
+    app.state.sticker_ui.shared_pending = None;
     app.state.dialog = Dialog::None;
     app.export_stash = None;
     app.state.hover = HoverInfo::default();
@@ -863,6 +866,21 @@ pub fn pick_image(frame: &eframe::Frame, prefs: &Prefs) -> Option<PathBuf> {
         dialog = dialog.set_directory(dir);
     }
     dialog.pick_file()
+}
+
+/// Stickers P6b: native "save picture" dialog (Export Picture...): a PNG named after `default_name`.
+pub fn pick_save_png(frame: &eframe::Frame, prefs: &Prefs, default_name: &str) -> Option<PathBuf> {
+    let stem = wte_core::export::sanitize_file_stem(default_name);
+    let stem = if stem.is_empty() { "sticker".to_owned() } else { stem };
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Export Picture")
+        .add_filter("PNG picture", &["png"])
+        .set_file_name(format!("{stem}.png"))
+        .set_parent(frame);
+    if let Some(dir) = dialog_dir(prefs) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file().map(|p| if crate::dnd::extension_of(&p) == "png" { p } else { p.with_extension("png") })
 }
 
 /// Native "choose folder" dialog.

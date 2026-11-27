@@ -1887,8 +1887,8 @@ fn a12_brush_tab_heights_at_1280x800() {
             assert!(r.panel.expand(0.5).contains_rect(r.upper_area), "{ctx}: upper group {:?} outside the panel {:?}", r.upper_area, r.panel);
             assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{ctx}: the groups overlap: {r:?}");
             let side_groups = crate::panels::side_groups::tab_area_height;
-            let keep = crate::panels::side_groups::upper_keep(app.ps.color_page_full_height());
-            assert!((r.bottom_area.height() - side_groups(r.panel.height(), keep)).abs() < 1.0, "{ctx}: lower group {r:?}, keep {keep}");
+            let keep = crate::panels::side_groups::upper_keep(app.ps.color_page_full_height(), r.upper_strip_height);
+            assert!((r.bottom_area.height() - side_groups(r.panel.height(), keep, r.upper_strip_height)).abs() < 1.0, "{ctx}: lower group {r:?}, keep {keep}");
             let spacing = app.h.prefix("Distance between dabs").rect;
             assert!(spacing.bottom() <= r.tool_area.bottom() + 0.5, "{ctx}: the Spacing row {spacing:?} ends below the tool area {:?}", r.tool_area);
             let content = app.ps.brush.content.expect("the tab records its content");
@@ -2214,52 +2214,109 @@ fn upper_button(app: &PanelApp, tab: UpperTab) -> Node {
         .unwrap_or_else(|| panic!("no {tab:?} button in the upper strip {area:?}"))
 }
 
-/// Plan 6.6 `upper_tabs_show_one_page_each` and G4: a click on each strip button (through AccessKit) shows exactly
-/// that page; the four buttons fit in one row of the 300 pt side panel, inside the upper group; the groups never
-/// overlap and no lower strip button lies in the upper group. At 900x600 and 640x480 too.
+/// Plan 6.6 `upper_tabs_show_one_page_each` and G4 (stickers P6b, STICKER_PLAN 3.9: five tabs): a click on each strip
+/// button (through AccessKit) shows exactly that page; in the 300 pt side panel the five buttons stand in the two rows
+/// Tool | Color | Texture sets and Objects | Sticker, in a wide panel (420 pt) in one row; every button whole inside
+/// the upper group and none over another; the groups never overlap and no lower strip button lies in the upper group.
+/// At 1280x800, 900x600 and 640x480 (the wide panel at the two larger sizes).
 #[test]
 fn upper_tabs_show_one_page_each() {
-    let mut app = PanelApp::new(sample_state(SampleKind::Objects));
-    for (w, h) in [(1280.0, 800.0), (900.0, 600.0), (640.0, 480.0)] {
-        app.h.size = vec2(w, h);
-        app.idle(3);
-        for tab in UpperTab::ALL {
-            let button = upper_button(&app, tab);
-            app.click_at(button.rect.center());
-            app.idle(1);
-            let what = format!("{tab:?} at {w}x{h}");
-            assert!(app.take().is_empty(), "{what}: a tab click queues nothing");
-            assert_eq!(app.state.upper_tab, tab, "{what}");
-            let r = app.state.side_rects.clone();
-            let drawn = [r.tool_area.is_positive(), r.color.is_positive(), r.sets_tab.is_some(), r.objects_tab.is_some()];
-            let mut want = [false; 4];
-            want[tab.index()] = true;
-            assert_eq!(drawn, want, "{what}: exactly one page is drawn: {r:?}");
-            let page = [Some(r.tool_area), Some(r.color), r.sets_tab, r.objects_tab][tab.index()].unwrap();
-            assert_eq!(page, r.upper_page, "{what}");
-            assert!(r.upper_area.expand(0.5).contains_rect(r.upper_page) && r.upper_page.height() >= 90.0, "{what}: {r:?}");
-            // G4.
-            let side = app.state.side_panel_rect.unwrap();
-            assert!(side.width() <= 300.5, "{what}: the side panel is {} pt wide", side.width());
-            let b = r.upper_tab_buttons;
-            for (i, rect) in b.iter().enumerate() {
-                assert!(rect.is_positive() && r.upper_area.expand(0.5).contains_rect(*rect), "{what}: button {i} {rect:?} outside {:?}", r.upper_area);
-                assert!((rect.top() - b[0].top()).abs() < 0.5, "{what}: the buttons are not in one row: {b:?}");
-                assert!(rect.right() <= r.panel.right() + 0.5, "{what}: button {i} {rect:?} past the panel {:?}", r.panel);
-                assert_eq!(app.state.panel_rects.get(&PanelHit::UpperTabButton(UpperTab::ALL[i])), Some(rect));
+    for (side_width, rows) in [(300.0, 2usize), (420.0, 1)] {
+        let mut app = PanelApp::with_side_width(sample_state(SampleKind::Objects), side_width);
+        // (A 420 pt panel does not fit beside the views of a 640 pt window: the wide case is checked at the two
+        // larger sizes.)
+        let sizes: &[(f32, f32)] = if rows == 1 { &[(1280.0, 800.0), (900.0, 600.0)] } else { &[(1280.0, 800.0), (900.0, 600.0), (640.0, 480.0)] };
+        for &(w, h) in sizes {
+            app.h.size = vec2(w, h);
+            app.idle(3);
+            for tab in UpperTab::ALL {
+                let button = upper_button(&app, tab);
+                app.click_at(button.rect.center());
+                app.idle(1);
+                let what = format!("{tab:?} at {w}x{h}, panel {side_width}");
+                assert!(app.take().is_empty(), "{what}: a tab click queues nothing");
+                assert_eq!(app.state.upper_tab, tab, "{what}");
+                let r = app.state.side_rects.clone();
+                let drawn = [r.tool_area.is_positive(), r.color.is_positive(), r.sets_tab.is_some(), r.objects_tab.is_some(), r.sticker_tab.is_some()];
+                let mut want = [false; 5];
+                want[tab.index()] = true;
+                assert_eq!(drawn, want, "{what}: exactly one page is drawn: {r:?}");
+                let page = [Some(r.tool_area), Some(r.color), r.sets_tab, r.objects_tab, r.sticker_tab][tab.index()].unwrap();
+                assert_eq!(page, r.upper_page, "{what}");
+                assert!(r.upper_area.expand(0.5).contains_rect(r.upper_page) && r.upper_page.height() >= 90.0, "{what}: {r:?}");
+                // G4.
+                let side = app.state.side_panel_rect.unwrap();
+                assert!(side.width() <= side_width + 0.5, "{what}: the side panel is {} pt wide", side.width());
+                assert_eq!(app.ps.upper_rows, rows, "{what}: the strip rows");
+                let b = r.upper_tab_buttons;
+                for (i, rect) in b.iter().enumerate() {
+                    assert!(rect.is_positive() && r.upper_area.expand(0.5).contains_rect(*rect), "{what}: button {i} {rect:?} outside {:?}", r.upper_area);
+                    assert!(rect.right() <= r.panel.right() + 0.5, "{what}: button {i} {rect:?} past the panel {:?}", r.panel);
+                    assert_eq!(app.state.panel_rects.get(&PanelHit::UpperTabButton(UpperTab::ALL[i])), Some(rect));
+                    for (j, other) in b.iter().enumerate().skip(i + 1) {
+                        assert!(rect.intersect(*other).area() <= 0.5 || !rect.intersects(*other), "{what}: buttons {i} and {j} overlap: {b:?}");
+                    }
+                }
+                let same_row = |i: usize, j: usize| (b[i].top() - b[j].top()).abs() < 0.5;
+                if rows == 1 {
+                    assert!((1..5).all(|i| same_row(0, i)), "{what}: not one row: {b:?}");
+                    assert!(b.windows(2).all(|p| p[0].right() <= p[1].left()), "{what}: {b:?}");
+                } else {
+                    assert!(same_row(0, 1) && same_row(0, 2) && same_row(3, 4), "{what}: the rows are not Tool | Color | Texture sets and Objects | Sticker: {b:?}");
+                    assert!(b[3].top() >= b[0].bottom(), "{what}: the second row is not below the first: {b:?}");
+                }
+                assert!((r.upper_strip_height - app.ps.upper_strip_height).abs() < 0.01, "{what}");
+                assert!(b.iter().all(|x| x.bottom() <= r.upper_area.top() + r.upper_strip_height + 0.5), "{what}: a button below the strip: {b:?}");
+                assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{what}: the groups overlap: {r:?}");
+                assert!(r.tab_buttons.iter().all(|t| t.top() >= r.upper_area.bottom() - 0.5), "{what}: a lower tab button in the upper group: {r:?}");
             }
-            assert!(b.windows(2).all(|p| p[0].right() <= p[1].left()), "{what}: {b:?}");
-            assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{what}: the groups overlap: {r:?}");
-            assert!(r.tab_buttons.iter().all(|t| t.top() >= r.upper_area.bottom() - 0.5), "{what}: a lower tab button in the upper group: {r:?}");
+        }
+        let b = app.state.side_rects.upper_tab_buttons;
+        eprintln!(
+            "G4 ({side_width} pt panel): upper tab buttons {:?} pt wide, strip {:.1} pt high, panel content {:.1} pt",
+            b.map(|r| r.width()),
+            app.state.side_rects.upper_strip_height,
+            app.state.side_rects.panel.width()
+        );
+    }
+}
+
+/// Stickers P6b (STICKER_PLAN 3.9): the guarantees G1 / G2 / G3 with the two-row strip: at 1280x800 the whole Color
+/// page with the full-size square is on screen with the Brush tab below; the five brush slider rows are inside the Tool
+/// page; the Layers footer stays inside the lower group; at 900x600 and 640x480 the groups stay apart and the upper page
+/// keeps at least 90 pt.
+#[test]
+fn the_two_row_strip_keeps_the_side_panel_guarantees() {
+    let mut app = PanelApp::new(sample_state(SampleKind::Sphere));
+    app.state.tool = ToolKind::Brush;
+    app.state.side_tab = crate::state::SideTab::Brush;
+    app.state.upper_tab = UpperTab::Color;
+    app.idle(4);
+    assert_eq!(app.ps.upper_rows, 2, "300 pt: two rows");
+    let r = app.state.side_rects.clone();
+    let color = app.state.panel_rects[&PanelHit::ColorSection];
+    let content = app.state.panel_rects[&PanelHit::ColorContent];
+    assert!(color.expand(0.5).contains_rect(content), "G1: the Color page is cut off: {content:?} in {color:?}");
+    assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{r:?}");
+    app.state.upper_tab = UpperTab::Tool;
+    app.idle(3);
+    let r = app.state.side_rects.clone();
+    assert!(r.tool_options.bottom() <= r.tool_area.bottom() + 0.5, "G2: the brush rows {:?} end below the Tool page {:?}", r.tool_options, r.tool_area);
+    app.state.side_tab = crate::state::SideTab::Layers;
+    app.idle(3);
+    let footer = app.state.panel_rects[&PanelHit::LayersFooter];
+    assert!(app.state.side_rects.bottom_area.expand(0.5).contains_rect(footer), "G3: the Layers footer {footer:?} outside the lower group");
+    for (w, h) in [(900.0, 600.0), (640.0, 480.0)] {
+        app.h.size = vec2(w, h);
+        for upper in UpperTab::ALL {
+            app.state.upper_tab = upper;
+            app.idle(3);
+            let r = app.state.side_rects.clone();
+            assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5, "{w}x{h} {upper:?}: {r:?}");
+            assert!(r.upper_page.height() >= 90.0, "{w}x{h} {upper:?}: the page is {:.1} pt high", r.upper_page.height());
+            assert!(r.panel.expand(0.5).contains_rect(r.bottom_area), "{w}x{h} {upper:?}: {r:?}");
         }
     }
-    let b = app.state.side_rects.upper_tab_buttons;
-    eprintln!(
-        "G4: upper tab buttons {:?} pt wide, {:.1} pt from the first left to the last right, panel content {:.1} pt",
-        b.map(|r| r.width()),
-        b[3].right() - b[0].left(),
-        app.state.side_rects.panel.width()
-    );
 }
 
 /// Plan 6.4: a tool change (toolbar button or key) never leaves the shown upper tab; the Text tool's focus request
@@ -2352,7 +2409,7 @@ fn the_split_is_dragged_kept_and_reset() {
         app.h.size = vec2(w, h);
         app.idle(4);
         let r = app.state.side_rects.clone();
-        let max = crate::panels::side_groups::layers_area_max(r.panel.height());
+        let max = crate::panels::side_groups::layers_area_max(r.panel.height(), r.upper_strip_height);
         assert!(r.bottom_area.height() <= max + 0.5, "{w}x{h}: {r:?} (max {max})");
         assert!(r.upper_area.bottom() <= r.bottom_area.top() + 0.5 && r.panel.expand(0.5).contains_rect(r.bottom_area), "{w}x{h}: {r:?}");
         assert!(r.upper_page.height() >= 90.0, "{w}x{h}: {r:?}");
@@ -2372,7 +2429,7 @@ fn the_split_is_dragged_kept_and_reset() {
     let prefs = Prefs { side_split: Some(380.0), side_upper_tab: UpperTab::Color, ..Prefs::default() };
     let mut state = sample_state(SampleKind::Sphere);
     state.upper_tab = prefs.side_upper_tab;
-    let mut app = PanelApp { h: Harness::new(1280.0, 800.0), state, ps: PanelState::with_prefs(&prefs), log: Vec::new(), apply: false };
+    let mut app = PanelApp { h: Harness::new(1280.0, 800.0), state, ps: PanelState::with_prefs(&prefs), log: Vec::new(), apply: false, side_width: 300.0 };
     app.idle(3);
     assert!((app.state.side_rects.bottom_area.height() - 380.0).abs() < 1.0, "{:?}", app.state.side_rects);
     assert!(app.state.side_rects.color.is_positive());

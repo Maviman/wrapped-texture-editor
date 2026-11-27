@@ -11,14 +11,14 @@
 use eframe::egui;
 use egui::color_picker::{Alpha, color_edit_button_srgba};
 use egui::{DragValue, Sense, Slider, SliderClamping, TextEdit, vec2};
-use wte_core::{FillScope, Placement, Projector, StampObject, StampSource, SurfaceMode, WrapOptions, WrapStats};
+use wte_core::{FillScope, Placement, Projector, StampObject, StampSource, StylePreset, StyleStack, SurfaceMode, WrapOptions, WrapStats};
 
 use crate::action::AppAction;
 use crate::panels::text_block;
 use crate::panels::toolbar::tool_name;
 use crate::panels::{PanelState, SOURCE_THUMB_SIDE, continuous_edit, from_color32, paint_thumb, percent_slider, to_color32};
 use crate::shortcuts::shortcut_text;
-use crate::state::{AppState, BrushSettings, PanelHit, StampSettings, ToolKind, ViewMode};
+use crate::state::{AppState, BrushSettings, PanelHit, StampSettings, StampToolSource, ToolKind, ViewMode};
 
 // Round 6 (R6-2, ROUND6_PLAN 5.1): the hover texts of the "On the model: Project | Wrap" selector and of the two Wrap
 // options.
@@ -508,22 +508,50 @@ fn pen_pressure_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings, pe
 
 fn stamp_options(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>) {
     let has_doc = state.session.is_some();
+    // Stickers P6b (STICKER_PLAN 3.6): the source is an image or a tray sticker.
+    let generation = state.session.as_ref().map(|s| s.scene_generation);
+    state.sticker_ui.pictures.begin(generation);
+    if let StampToolSource::Sticker(id) = state.tools.stamp.source
+        && state.doc().is_none_or(|d| d.sticker(id).is_none())
+    {
+        state.tools.stamp.source = StampToolSource::None;
+    }
+    let source = state.tools.stamp.source;
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(SOURCE_THUMB_SIDE, SOURCE_THUMB_SIDE), Sense::hover());
-        let thumb = state.tools.stamp.source.and_then(|blob| ps.source_thumb(ui.ctx(), state, blob));
+        let thumb = match source {
+            StampToolSource::Blob(blob) => ps.source_thumb(ui.ctx(), state, blob),
+            StampToolSource::Sticker(id) => crate::sticker::tray::sticker_thumb(ui.ctx(), state, id),
+            StampToolSource::None => None,
+        };
         let aspect = thumb.map_or(1.0, |(_, [w, h])| w as f32 / h.max(1) as f32);
         paint_thumb(ui.painter(), rect, thumb.map(|(t, _)| t), aspect);
         ui.vertical(|ui| {
-            match state.tools.stamp.source {
-                Some(_) => ui.label(&state.tools.stamp.source_name),
-                None => ui.weak("No image chosen"),
+            match source {
+                StampToolSource::Blob(_) => ui.label(&state.tools.stamp.source_name),
+                StampToolSource::Sticker(id) => {
+                    let name = state.doc().and_then(|d| d.sticker(id)).map_or_else(String::new, |d| d.name.clone());
+                    ui.label(format!("Sticker: {name}"))
+                }
+                StampToolSource::None => ui.weak("No image chosen"),
             };
-            let choose = ui.add_enabled(has_doc, egui::Button::new("Choose..."));
-            if choose.on_disabled_hover_text("Open a model first").on_hover_text("Choose the image to stamp").clicked() {
-                actions.push(AppAction::ImportStampImage(None));
-            }
+            ui.horizontal_wrapped(|ui| {
+                let choose = ui.add_enabled(has_doc, egui::Button::new("Choose..."));
+                if choose.on_disabled_hover_text("Open a model first").on_hover_text("Choose the image to stamp").clicked() {
+                    actions.push(AppAction::ImportStampImage(None));
+                }
+                let edit = ui
+                    .add_enabled(source.is_some(), egui::Button::new("Edit before placing"))
+                    .on_hover_text("Open the picture in the Sticker view first: layers, border, shadow")
+                    .on_disabled_hover_text("Choose an image or a sticker first");
+                state.panel_rects.insert(PanelHit::StampEditBeforePlacing, edit.rect);
+                if edit.clicked() {
+                    actions.push(AppAction::Sticker(crate::sticker::StickerAction::EditBeforePlacing));
+                }
+            });
         });
     });
+    stamp_tool_style(ui, state);
     let st = &mut state.tools.stamp;
     egui::Grid::new("stamp_grid").num_columns(2).show(ui, |ui| {
         grid_label(ui, "Size");
@@ -543,6 +571,53 @@ fn stamp_options(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, a
         "Also print on surfaces behind the first one (the far side of the model)",
     );
     help(ui, "Click on the model or the texture to place the stamp. It becomes its own layer.");
+}
+
+/// Stickers P6b (STICKER_PLAN 3.6): the style new stamps of the Stamp tool get (a setting: none by default, so a
+/// placed image is exactly an image stamp of before). The presets are scaled to the chosen picture.
+fn stamp_tool_style(ui: &mut egui::Ui, state: &mut AppState) {
+    let source = state.tools.stamp.source;
+    let size = match source.blob() {
+        Some(blob) => state.doc_mut().and_then(|d| d.image_size(blob).ok()),
+        None => match source {
+            StampToolSource::Sticker(id) => state.doc().and_then(|d| d.sticker(id)).map(|d| d.size()),
+            _ => None,
+        },
+    }
+    .unwrap_or([512, 512]);
+    let current = &state.tools.stamp.styles;
+    let shown = if current.is_default() {
+        "None".to_owned()
+    } else {
+        StylePreset::ALL
+            .into_iter()
+            .find(|p| *p != StylePreset::Clear && p.styles(size) == *current)
+            .map_or_else(|| "Custom".to_owned(), |p| p.name().to_owned())
+    };
+    let mut picked = None;
+    let resp = ui
+        .horizontal(|ui| {
+            grid_label(ui, "Style");
+            egui::ComboBox::from_id_salt("stamp_tool_style")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(current.is_default(), "None").clicked() {
+                        picked = Some(StyleStack::default());
+                    }
+                    for p in StylePreset::ALL.into_iter().filter(|p| *p != StylePreset::Clear) {
+                        if ui.selectable_label(false, p.name()).clicked() {
+                            picked = Some(p.styles(size));
+                        }
+                    }
+                })
+                .response
+        })
+        .inner
+        .on_hover_text("The style new stamps get: a die-cut border, a shadow... (change it later on the Sticker tab)");
+    state.panel_rects.insert(PanelHit::StampToolStyle, resp.rect);
+    if let Some(styles) = picked {
+        state.tools.stamp.styles = styles;
+    }
 }
 
 // ---- the selected stamp ----
@@ -671,6 +746,10 @@ fn stamp_properties(
                 ui.label(source_name.as_deref().unwrap_or("(missing)"));
                 if ui.add_enabled(!locked, egui::Button::new("Choose...")).on_hover_text("Replace the image of this stamp").clicked() {
                     actions.push(AppAction::ReplaceStampImage(id, None));
+                }
+                // Stickers P6b (STICKER_PLAN 3.9): the image opens in the Sticker view.
+                if ui.button("Edit").on_hover_text("Edit the picture in the Sticker view").clicked() {
+                    actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(Some(id))));
                 }
             });
             ui.end_row();

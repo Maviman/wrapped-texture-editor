@@ -1096,7 +1096,7 @@ mod tests {
                 let img = samples::sample_stamp_image(64);
                 let png = wte_core::encode_png(img.width, img.height, &img.data, wte_core::PngLevel::Fast).unwrap();
                 let blob = state.doc_mut().unwrap().add_image_blob("ring.png", Arc::from(png)).unwrap();
-                state.tools.stamp.source = Some(blob);
+                state.tools.stamp.source = crate::state::StampToolSource::Blob(blob);
                 state.tools.stamp.source_name = "ring.png".to_owned();
                 state.tools.stamp.mode = mode;
                 let before = composite(&mut state);

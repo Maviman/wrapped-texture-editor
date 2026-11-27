@@ -10,6 +10,7 @@ use wte_core::SampleKind;
 use crate::action::AppAction;
 use crate::shortcuts::shortcut_text;
 use crate::state::{AppState, Backdrop, CameraPreset, Dialog, ShadingMode, UpperTab, ViewMode};
+use crate::sticker::{StickerAction, StyleTarget};
 
 /// A menu entry: label, the `shortcut_text` label it shows ("" = none), enabled, selected, action.
 fn item(ui: &mut egui::Ui, label: &str, shortcut: &str, enabled: bool, selected: bool) -> bool {
@@ -135,6 +136,21 @@ fn edit_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
     ui.separator();
     if item(ui, "Delete", "Delete", can_delete, false) {
         actions.push(AppAction::DeleteSelection);
+    }
+    // Stickers P6b (STICKER_PLAN 3.7): the styles of the selected stamps, or in the Sticker view of the sticker layers.
+    ui.separator();
+    let in_view = state.view_mode == ViewMode::Sticker;
+    let target = if in_view { StyleTarget::Layers } else { StyleTarget::Stamps };
+    let has_target = if in_view { crate::sticker::edit_of(state).is_some() } else { !crate::sticker::selected_stamps(state).is_empty() };
+    let can_paste = has_target && state.style_clipboard.is_some();
+    for (label, enabled, action) in [
+        ("Copy Style", has_target, StickerAction::CopyStyle(target)),
+        ("Paste Style", can_paste, StickerAction::PasteStyle(target)),
+        ("Clear Style", has_target, StickerAction::ClearStyle(target)),
+    ] {
+        if item(ui, label, "", enabled, false) {
+            actions.push(AppAction::Sticker(action));
+        }
     }
 }
 

@@ -411,27 +411,57 @@ impl Document {
     /// one entry. An automatic depth is refitted when the margin changes (2.6). Errors: `UnknownStamp`, `LayerLocked`,
     /// `StrokeInProgress`, and the errors of preparing the source.
     pub fn set_stamp_styles(&mut self, stamp: StampId, styles: StyleStack, commit: Commit) -> Result<(), EditError> {
+        self.set_styles_of(&[stamp], &styles, commit)
+    }
+
+    /// `set_stamp_styles` for several stamps at once (stickers P6b, STICKER_PLAN 3.7 "apply to all selected": one
+    /// slider of the Sticker tab edits every selected stamp): every stamp of `stamps` gets `styles`; `Commit::Preview`
+    /// calls fold into one entry ("Edit Sticker Style") with the single-stamp form, `Commit::Final` ends it with Final
+    /// re-bakes of every changed stamp. Errors before anything changes: `UnknownStamp`, `LayerLocked` (a stamp that
+    /// would change is locked), `StrokeInProgress`.
+    pub fn set_styles_of(&mut self, stamps: &[StampId], styles: &StyleStack, commit: Commit) -> Result<(), EditError> {
+        let each: Vec<(StampId, StyleStack)> = stamps.iter().map(|id| (*id, styles.clone())).collect();
+        self.set_styles_each(&each, commit)
+    }
+
+    /// `set_styles_of` with styles of its own for each stamp (stickers P6b: a style preset applied to several stamps is
+    /// scaled to each stamp's picture, 2.3). One entry as `set_styles_of`; a stamp named twice takes its first styles.
+    pub fn set_styles_each(&mut self, each: &[(StampId, StyleStack)], commit: Commit) -> Result<(), EditError> {
         self.guard_no_stroke()?;
-        let object = self.stamp(stamp).ok_or(EditError::UnknownStamp)?.clone();
-        let styles = styles.sanitized();
-        let changed = object.styles != styles;
+        let mut changed: Vec<(StampObject, StyleStack)> = Vec::with_capacity(each.len());
+        let mut seen = Vec::with_capacity(each.len());
+        for (id, styles) in each {
+            let object = self.stamp(*id).ok_or(EditError::UnknownStamp)?.clone();
+            if seen.contains(id) {
+                continue;
+            }
+            seen.push(*id);
+            let styles = styles.sanitized();
+            if object.styles != styles {
+                changed.push((object, styles));
+            }
+        }
         let continues = self.pending_edit.as_ref().is_some_and(|p| p.label == STYLE_LABEL);
-        if !changed && !continues {
+        if changed.is_empty() && !continues {
             return Ok(());
         }
-        if changed && self.stamp_locked(stamp) {
+        if changed.iter().any(|(o, _)| self.stamp_locked(o.id)) {
             return Err(EditError::LayerLocked);
         }
-        let new_object = StampObject { styles, ..object.clone() };
-        let (old_frame, new_frame) = (self.styled_frame(&object), self.styled_frame(&new_object));
-        self.begin_pending(STYLE_LABEL);
-        if changed {
+        let mut updates = Vec::with_capacity(changed.len());
+        for (object, styles) in changed {
+            let new_object = StampObject { styles: styles.clone(), ..object.clone() };
+            let (old_frame, new_frame) = (self.styled_frame(&object), self.styled_frame(&new_object));
             let placement = self.refit_auto_depth_framed(&object.placement, &old_frame, object.placement, &new_frame);
-            if let Some(s) = self.stamps.iter_mut().find(|s| s.id == stamp) {
-                s.styles = new_object.styles;
+            updates.push((object.id, styles, placement));
+        }
+        self.begin_pending(STYLE_LABEL);
+        for (id, styles, placement) in updates {
+            if let Some(s) = self.stamps.iter_mut().find(|s| s.id == id) {
+                s.styles = styles;
                 s.placement = placement;
             }
-            self.mark_stamp_edited(stamp, commit);
+            self.mark_stamp_edited(id, commit);
         }
         if commit == Commit::Final {
             self.flush_pending_edit();
@@ -581,6 +611,17 @@ impl Document {
             }
             _ => new,
         }
+    }
+
+    /// The size of stamp `id`'s base picture at the **reference scale** of its style lengths (2.3): image pixels, the
+    /// text picture at 128 px per em, the sticker's artboard (render scale 1). The style presets are scaled by it
+    /// (`StylePreset::styles`); stickers P6b (the Sticker tab's preset row). Geometry only.
+    pub fn stamp_style_reference_size(&mut self, id: StampId) -> Result<[u32; 2], EditError> {
+        let stamp = self.stamp(id).ok_or(EditError::UnknownStamp)?.clone();
+        let content = self.stamp_source_frame2(id)?.content;
+        let k = self.ref_scale(&stamp);
+        let k = if k.is_finite() && k > 0.0 { k } else { 1.0 };
+        Ok(content.map(|v| ((v as f32 / k).round() as u32).max(1)))
     }
 
     // ----- finished pictures -----

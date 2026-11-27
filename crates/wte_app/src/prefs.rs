@@ -366,7 +366,16 @@ mod tests {
         assert_eq!(from_json(r#"{ "side_split": null }"#).unwrap().side_split, None);
         // A file of an older build has none of the keys.
         let old = from_json(r#"{ "flags_wireframe": true }"#).unwrap();
-        assert_eq!((old.side_upper_tab, old.side_lower_tab.as_str(), old.side_split), (UpperTab::Tool, "layers", None));
+        assert_eq!((old.side_upper_tab, old.side_lower_tab.as_str(), old.side_split), (UpperTab::Tool, "layers", None));        // Stickers P6b (STICKER_PLAN 3.9): the fifth tab is written as "sticker" and reads back; an unknown tab name (as
+        // "sticker" is for a build before P6b) falls back to the default tab through the same lenient path as before.
+        assert_eq!(serde_json::to_value(UpperTab::Sticker).unwrap(), "sticker");
+        let p = from_json(r#"{ "side_upper_tab": "sticker" }"#).unwrap();
+        assert_eq!(p.side_upper_tab, UpperTab::Sticker);
+        let prefs = Prefs { side_upper_tab: UpperTab::Sticker, ..Prefs::default() };
+        assert_eq!(from_json(&to_json(&prefs)).unwrap(), prefs);
+        for unknown in [r#"{ "side_upper_tab": "stickers2" }"#, r#"{ "side_upper_tab": "Sticker" }"#, r#"{ "side_upper_tab": 4 }"#] {
+            assert_eq!(from_json(unknown).unwrap().side_upper_tab, UpperTab::Tool, "{unknown}");
+        }
     }
 
     /// Branch `companion`: a file without the companion entry (every older version) loads with all links off; the

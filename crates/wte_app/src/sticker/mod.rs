@@ -7,6 +7,12 @@
 // built here from its picture (nothing in the document changes); its first content edit passes
 // `StickerRef::OfStamp` and the core promotes it inside that edit (one undo step, STICKER_PLAN 2.10). A text stamp
 // shows its picture read-only with the button "Convert to layered sticker".
+//
+// Stickers P6b: the editor also opens on a tray sticker (`StickerTarget::Tray`: "Edit" in the tray, "Edit before
+// placing" of the Stamp tool); before the first content edit of a sticker or picture that several stamps show it asks
+// "Edit all / Only this one" (E6, `Dialog::StickerShared`); the stamp-level and layer-level style commands, Copy /
+// Paste / Clear Style (3.7) and the tray commands (3.8) are `StickerAction`s too (`styles_ui.rs`, `panels.rs`,
+// `tray.rs` draw them).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,14 +21,17 @@ use std::sync::Arc;
 use eframe::egui;
 use wte_core::{
     BlendMode, BlobId, Commit, Document, PicturePixels, PixelBuf, REVERT_LABEL, ShareScope, StampId,
-    StampSource, StickerContent, StickerDoc, StickerId, StickerLayer, StickerLayerId, StickerRef,
+    StampSource, StickerContent, StickerDoc, StickerId, StickerLayer, StickerLayerId, StickerRef, StylePreset, StyleStack,
 };
 
 use crate::app::WteApp;
-use crate::state::{AppState, Canvas2D, StickerEdit, StickerTarget, StickerTool, ViewMode};
+use crate::state::{AppState, Canvas2D, Dialog, StickerEdit, StickerTarget, StickerTool, ViewMode};
 
 pub mod canvas;
 pub mod layers_ui;
+pub mod panels;
+pub mod styles_ui;
+pub mod tray;
 
 /// Status line when the Sticker view is asked for without a selected stamp.
 pub(crate) const NO_STAMP_HINT: &str = "Select a stamp or a text first (click it with the Transform tool, or its layer)";
@@ -40,6 +49,28 @@ const NEW_LABEL: &str = "New Picture Layer";
 const DUPLICATE_LABEL: &str = "Duplicate Sticker Layer";
 const DELETE_LABEL: &str = "Delete Sticker Layer";
 const RENAME_STICKER_LABEL: &str = "Rename Sticker";
+/// Stickers P6b: the history label of a sticker layer's styles (one entry per drag).
+pub(crate) const LAYER_STYLE_LABEL: &str = "Sticker Layer Style";
+/// The status line of the editor opened on a sticker no stamp shows yet (STICKER_PLAN 3.5).
+pub(crate) const NOT_PLACED_HINT: &str = "Not placed yet: the model shows this sticker once you place it with the Stamp tool";
+
+/// Stickers P6b (STICKER_PLAN 3.7): what a style command acts on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StyleTarget {
+    /// The selected stamps: the selected stamp and every stamp linked to the selected layers of the Layers list.
+    Stamps,
+    /// In the Sticker view: the selected sticker layers (Copy: the active one).
+    Layers,
+}
+
+/// Stickers P6b (STICKER_PLAN 3.8): what Export Picture... writes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PictureOf {
+    /// The finished picture of a stamp, with its styles ("what you see").
+    Stamp(StampId),
+    /// A tray sticker at render scale 1, without stamp styles.
+    Sticker(StickerId),
+}
 
 /// A command of the Sticker view (dispatched by `run`). "`None` layer" = the active layer.
 #[derive(Clone, Debug)]
@@ -91,6 +122,38 @@ pub enum StickerAction {
     ConvertText,
     /// The sticker's name (canvas header).
     Rename(String),
+
+    // ---- stickers P6b ----
+    /// "Edit" on a tray item: opens the Sticker view on that sticker.
+    EnterTray(StickerId),
+    /// The Stamp tool's "Edit before placing" (E4): an image source becomes a tray sticker first; the view opens on it.
+    EditBeforePlacing,
+    /// The answer to the shared-picture question (E6): `Some(AllUsers)` = Edit all, `Some(ThisStamp)` = Only this
+    /// one, `None` = Cancel (the waiting edit is dropped).
+    AnswerShared(Option<ShareScope>),
+    /// The stamp-level styles of these stamps (the Sticker tab's editor; one entry per drag; E3: never promotes).
+    SetStampStyles(Vec<StampId>, Box<StyleStack>, Commit),
+    /// A preset on the selected stamps, scaled to each stamp's picture (one entry).
+    ApplyPreset(StylePreset),
+    /// The styles of a sticker layer (the Tool tab's Layer styles in the Sticker view; a content edit).
+    SetLayerStyles(StickerLayerId, Box<StyleStack>, Commit),
+    /// A preset on the active sticker layer, scaled to the artboard.
+    ApplyLayerPreset(StylePreset),
+    /// Copy Style / Paste Style / Clear Style (3.7; the clipboard is `AppState::style_clipboard`).
+    CopyStyle(StyleTarget),
+    PasteStyle(StyleTarget),
+    ClearStyle(StyleTarget),
+    /// "New Sticker" of the tray: a blank 512 x 512 sticker with one empty picture layer, kept in the tray.
+    NewSticker,
+    /// "New from picture...": the picture as a one-layer tray sticker (`None`: the file dialog, never in a self-test).
+    NewStickerFromPicture(Option<PathBuf>),
+    /// A click on a tray item: it becomes the Stamp tool's source (and the Stamp tool the tool, outside the view).
+    TrayUse(StickerId),
+    TrayDuplicate(StickerId),
+    /// Only a sticker no stamp shows.
+    TrayDelete(StickerId),
+    /// "Export Picture...": a PNG (`None`: the save dialog, never in a self-test).
+    ExportPicture(PictureOf, Option<PathBuf>),
 }
 
 impl StickerAction {
@@ -113,9 +176,46 @@ impl StickerAction {
             | S::RenameLayer(..)
             | S::Nudge(..)
             | S::ConvertText
-            | S::Rename(_) => true,
+            | S::Rename(_)
+            | S::EditBeforePlacing
+            | S::ApplyPreset(_)
+            | S::ApplyLayerPreset(_)
+            | S::PasteStyle(_)
+            | S::ClearStyle(_)
+            | S::NewSticker
+            | S::NewStickerFromPicture(_)
+            | S::TrayDuplicate(_)
+            | S::TrayDelete(_)
+            | S::AnswerShared(Some(_)) => true,
+            S::SetStampStyles(_, _, c) | S::SetLayerStyles(_, _, c) => *c == Commit::Final,
             _ => false,
         }
+    }
+
+    /// Stickers P6b (E6): the commands that change the content of the edited sticker (they ask the shared-picture
+    /// question first). Style commands on stamps are no content edits (they never promote, E3).
+    pub(crate) fn is_content(&self) -> bool {
+        use StickerAction as S;
+        matches!(
+            self,
+            S::AddPictureLayer(_)
+                | S::DuplicateLayer(_)
+                | S::DeleteLayer(_)
+                | S::MoveLayer(..)
+                | S::MoveLayerTo(..)
+                | S::SetLayerVisible(..)
+                | S::SetLayerLocked(..)
+                | S::SetLayerOpacity(..)
+                | S::SetLayerBlend(..)
+                | S::RenameLayer(..)
+                | S::SetLayerPosition(..)
+                | S::Nudge(..)
+                | S::Rename(_)
+                | S::SetLayerStyles(..)
+                | S::ApplyLayerPreset(_)
+                | S::PasteStyle(StyleTarget::Layers)
+                | S::ClearStyle(StyleTarget::Layers)
+        )
     }
 }
 
@@ -181,6 +281,12 @@ pub struct StickerUi {
     pub(crate) layer_name_edit: Option<(StickerLayerId, String)>,
     /// Pictures uploaded to the canvas texture so far (tests: the canvas re-renders only on a change).
     pub(crate) canvas_uploads: u64,
+    /// Stickers P6b: the content edit waiting for the answer to the shared-picture question (E6).
+    pub(crate) shared_pending: Option<StickerAction>,
+    /// The tray item last clicked (its buttons act on it).
+    pub(crate) tray_selected: Option<StickerId>,
+    /// Thumbnails of the Sticker tab (tray items and the selected stamp's picture) and the document they belong to.
+    pub(crate) pictures: tray::PictureThumbs,
 }
 
 impl Default for StickerUi {
@@ -195,6 +301,9 @@ impl Default for StickerUi {
             name_edit: None,
             layer_name_edit: None,
             canvas_uploads: 0,
+            shared_pending: None,
+            tray_selected: None,
+            pictures: tray::PictureThumbs::default(),
         }
     }
 }
@@ -226,7 +335,6 @@ pub(crate) fn edit_ref(edit: &StickerEdit) -> Option<StickerRef> {
     match edit.target {
         StickerTarget::Stamp(stamp) => Some(StickerRef::OfStamp(stamp, edit.share_answer.unwrap_or(ShareScope::ThisStamp))),
         StickerTarget::Tray(id) => Some(StickerRef::Id(id)),
-        StickerTarget::ToolSource => None,
     }
 }
 
@@ -246,7 +354,6 @@ pub(crate) fn shown(doc: &mut Document, edit: &StickerEdit) -> Option<Shown> {
             }
         }
         StickerTarget::Tray(id) => Some(Shown::Sticker { id, doc: Arc::clone(doc.sticker(id)?) }),
-        StickerTarget::ToolSource => None,
     }
 }
 
@@ -264,11 +371,18 @@ fn first_active(doc: &Document, stamp: StampId) -> Option<StickerLayerId> {
 pub(crate) fn differs_from_entry(doc: &Document, edit: &StickerEdit) -> bool {
     let stamps = edit.entry.stamps();
     let stamp_changed = stamps.iter().any(|s| doc.stamp(s.id).is_some_and(|cur| cur != s));
-    let sticker_changed = stamps.iter().filter_map(|s| match s.source {
-        StampSource::Sticker { sticker } => Some(sticker),
-        _ => None,
-    });
-    let sticker_changed = sticker_changed.into_iter().any(|id| match (doc.sticker(id), edit.entry.sticker(id)) {
+    let mut stickers: Vec<StickerId> = stamps
+        .iter()
+        .filter_map(|s| match s.source {
+            StampSource::Sticker { sticker } => Some(sticker),
+            _ => None,
+        })
+        .collect();
+    // Stickers P6b: a tray sticker has no stamp in the checkpoint.
+    if let StickerTarget::Tray(id) = edit.target {
+        stickers.push(id);
+    }
+    let sticker_changed = stickers.into_iter().any(|id| match (doc.sticker(id), edit.entry.sticker(id)) {
         (Some(cur), Some(old)) => !Arc::ptr_eq(cur, old) && **cur != **old,
         (None, Some(_)) => true,
         _ => false,
@@ -286,13 +400,26 @@ pub(crate) fn enter(app: &mut WteApp, stamp: Option<StampId>) {
 
 /// `enter` on the state alone (the tools' interaction is the caller's).
 pub(crate) fn enter_in(state: &mut AppState, stamp: Option<StampId>) {
-    cancel_drag(state);
     let Some(session) = state.session.as_mut() else { return };
     let Some(stamp) = stamp.or(session.selected_stamp).filter(|id| session.doc.stamp(*id).is_some()) else {
         state.status_hint = NO_STAMP_HINT.to_owned();
         return;
     };
-    if state.view_mode == ViewMode::Sticker && session.sticker_edit.as_ref().is_some_and(|e| e.target == StickerTarget::Stamp(stamp)) {
+    enter_target(state, StickerTarget::Stamp(stamp));
+}
+
+/// Opens the Sticker view on `target` (a stamp that exists, or a sticker of the document).
+pub(crate) fn enter_target(state: &mut AppState, target: StickerTarget) {
+    cancel_drag(state);
+    let Some(session) = state.session.as_mut() else { return };
+    let exists = match target {
+        StickerTarget::Stamp(stamp) => session.doc.stamp(stamp).is_some(),
+        StickerTarget::Tray(id) => session.doc.sticker(id).is_some(),
+    };
+    if !exists {
+        return;
+    }
+    if state.view_mode == ViewMode::Sticker && session.sticker_edit.as_ref().is_some_and(|e| e.target == target) {
         return;
     }
     session.doc.flush_pending_edit();
@@ -302,10 +429,15 @@ pub(crate) fn enter_in(state: &mut AppState, stamp: Option<StampId>) {
         (_, mode) => mode,
     };
     let tool = session.sticker_edit.as_ref().map_or(state.sticker_ui.last_tool, |e| e.tool);
-    let entry = session.doc.sticker_checkpoint(&[stamp], &[]);
-    let active_layer = first_active(&session.doc, stamp);
+    let (entry, active_layer) = match target {
+        StickerTarget::Stamp(stamp) => (session.doc.sticker_checkpoint(&[stamp], &[]), first_active(&session.doc, stamp)),
+        StickerTarget::Tray(id) => {
+            (session.doc.sticker_checkpoint(&[], &[id]), session.doc.sticker(id).and_then(|d| d.layers.last()).map(|l| l.id))
+        }
+    };
+    let unplaced = matches!(target, StickerTarget::Tray(id) if session.doc.sticker_users(id).is_empty());
     session.sticker_edit = Some(StickerEdit {
-        target: StickerTarget::Stamp(stamp),
+        target,
         active_layer,
         selected_layers: active_layer.into_iter().collect(),
         selection: None,
@@ -320,7 +452,16 @@ pub(crate) fn enter_in(state: &mut AppState, stamp: Option<StampId>) {
     state.status_hint.clear();
     state.sticker_ui.name_edit = None;
     state.sticker_ui.layer_name_edit = None;
-    crate::dispatch::select_stamp(state, Some(stamp));
+    state.sticker_ui.shared_pending = None;
+    match target {
+        StickerTarget::Stamp(stamp) => crate::dispatch::select_stamp(state, Some(stamp)),
+        StickerTarget::Tray(id) => {
+            state.sticker_ui.tray_selected = Some(id);
+            if unplaced {
+                state.status_hint = NOT_PLACED_HINT.to_owned();
+            }
+        }
+    }
 }
 
 /// Leaves the Sticker view (Done, Esc, another view mode): a pending edit is flushed, a drag on the canvas cancelled;
@@ -348,6 +489,7 @@ pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
         m => m,
     };
     state.sticker_canvas_rect = None;
+    state.sticker_ui.shared_pending = None;
     state.sticker_ui.name_edit = None;
     state.sticker_ui.layer_name_edit = None;
     // P6a check: the canvas texture (a whole sticker at scale 1, up to the artboard limit) and the layer thumbnails
@@ -481,9 +623,19 @@ pub(crate) fn run(app: &mut WteApp, action: StickerAction, frame: &eframe::Frame
             if let Some(path) = path
                 && let Some((blob, _)) = crate::dispatch::add_stamp_image(app, &path)
             {
-                add_picture_layer(&mut app.state, Some(blob));
+                // Through `run_in`: the shared-picture question (E6) comes first.
+                run_in(&mut app.state, S::AddPictureLayer(Some(blob)));
             }
         }
+        S::NewStickerFromPicture(path) => {
+            let path = crate::dispatch::resolve_path(app, path, |prefs| crate::io_flows::pick_image(frame, prefs));
+            if let Some(path) = path
+                && let Some((blob, name)) = crate::dispatch::add_stamp_image(app, &path)
+            {
+                tray::new_from_blob(&mut app.state, blob, &picture_name(&name));
+            }
+        }
+        S::ExportPicture(what, path) => tray::export_picture(app, what, path, frame),
         S::Escape => escape(app, frame),
         other => run_in(&mut app.state, other),
     }
@@ -493,10 +645,20 @@ pub(crate) fn run(app: &mut WteApp, action: StickerAction, frame: &eframe::Frame
 /// and Esc, which `run` handles).
 pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
     use StickerAction as S;
+    // Stickers P6b (E6): a content edit of a sticker or picture that several stamps show waits for the answer.
+    if action.is_content()
+        && !is_no_op(app_state, &action)
+        && let Some(users) = shared_users(app_state)
+    {
+        ask_shared(app_state, action, users);
+        return;
+    }
     match action {
         S::Enter(stamp) => enter_in(app_state, stamp),
         S::Leave => leave_in(app_state, None),
-        S::AddPictureFile(_) | S::Escape => log::debug!("{action:?} needs the app; dropped"),
+        S::AddPictureFile(_) | S::Escape | S::NewStickerFromPicture(_) | S::ExportPicture(..) => {
+            log::debug!("{action:?} needs the app; dropped");
+        }
         S::Revert => {
             let state = &mut *app_state;
             let Some(session) = state.session.as_mut() else { return };
@@ -644,6 +806,198 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
                 apply(app_state, RENAME_STICKER_LABEL, Commit::Final, move |d| d.name = name);
             }
         }
+        S::EnterTray(id) => enter_target(app_state, StickerTarget::Tray(id)),
+        S::EditBeforePlacing => tray::edit_before_placing(app_state),
+        S::AnswerShared(answer) => answer_shared(app_state, answer),
+        S::SetStampStyles(stamps, styles, commit) => {
+            let r = app_state.doc_mut().map(|d| d.set_styles_of(&stamps, &styles, commit));
+            if let Some(r) = r {
+                crate::dispatch::edited(app_state, r);
+            }
+        }
+        S::ApplyPreset(preset) => apply_preset(app_state, preset),
+        S::SetLayerStyles(id, styles, commit) => {
+            layer_edit(app_state, id, LAYER_STYLE_LABEL, commit, move |l| l.styles = *styles);
+        }
+        S::ApplyLayerPreset(preset) => {
+            let Some((doc, id)) = layered(app_state, None) else { return };
+            let styles = preset.styles(doc.size());
+            layer_edit(app_state, id, LAYER_STYLE_LABEL, Commit::Final, move |l| l.styles = styles);
+        }
+        S::CopyStyle(target) => copy_style(app_state, target),
+        S::PasteStyle(target) => {
+            let Some(styles) = app_state.style_clipboard.clone() else {
+                app_state.status_hint = "Copy a style first".to_owned();
+                return;
+            };
+            put_style(app_state, target, styles, "Paste Layer Style");
+        }
+        S::ClearStyle(target) => put_style(app_state, target, StyleStack::default(), "Clear Layer Style"),
+        S::NewSticker => tray::new_blank(app_state),
+        S::TrayUse(id) => tray::use_as_source(app_state, id),
+        S::TrayDuplicate(id) => tray::duplicate(app_state, id),
+        S::TrayDelete(id) => tray::delete(app_state, id),
+    }
+}
+
+/// Stickers P6b (E6): how many stamps show the sticker (or the image) of the open editor, when that is more than one
+/// and the question was not answered in this opening of the editor; `None` otherwise (a tray sticker, a text stamp).
+pub(crate) fn shared_users(state: &AppState) -> Option<usize> {
+    let session = state.session.as_ref()?;
+    let edit = session.sticker_edit.as_ref()?;
+    if edit.share_answer.is_some() {
+        return None;
+    }
+    let StickerTarget::Stamp(stamp) = edit.target else { return None };
+    let users = match session.doc.stamp(stamp)?.source {
+        StampSource::Sticker { sticker } => session.doc.sticker_users(sticker).len(),
+        StampSource::Image { blob } => session.doc.blob_users(blob).len(),
+        StampSource::Text(_) => return None,
+    };
+    (users > 1).then_some(users)
+}
+
+/// True for a content command that would change nothing (a name field that lost the focus with the same text): it
+/// must not ask the shared-picture question.
+fn is_no_op(state: &mut AppState, action: &StickerAction) -> bool {
+    match action {
+        StickerAction::RenameLayer(id, name) => {
+            let name = name.trim();
+            name.is_empty() || layered(state, Some(*id)).is_some_and(|(d, _)| d.layer(*id).is_some_and(|l| l.name == name))
+        }
+        StickerAction::Rename(name) => {
+            let name = name.trim().to_owned();
+            name.is_empty()
+                || state.session.as_mut().is_none_or(|s| {
+                    let Some(edit) = s.sticker_edit.clone() else { return true };
+                    !matches!(shown(&mut s.doc, &edit), Some(Shown::Sticker { doc, .. }) if doc.name != name)
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Opens the shared-picture question for `action` (a newer content edit replaces the waiting one). A drag on the
+/// canvas ends: nothing of it was applied.
+fn ask_shared(state: &mut AppState, action: StickerAction, users: usize) {
+    state.sticker_ui.drag = None;
+    state.sticker_ui.shared_pending = Some(action);
+    if matches!(state.dialog, Dialog::None | Dialog::StickerShared { .. }) {
+        state.dialog = Dialog::StickerShared { users };
+    }
+}
+
+/// The answer to the shared-picture question (E6). Edit all: the edit reaches every stamp (an image stamp is promoted
+/// with all the stamps that show its picture). Only this one: a sticker stamp first gets its own copy
+/// (`detach_sticker`, one entry), an image stamp is promoted alone. Cancel drops the waiting edit. The answer holds
+/// until the editor closes. The waiting edit runs after the answer, a Preview as a Final (its drag is over); a drag of
+/// the Move tool is not replayed (the user drags again).
+fn answer_shared(state: &mut AppState, answer: Option<ShareScope>) {
+    if matches!(state.dialog, Dialog::StickerShared { .. }) {
+        state.dialog = Dialog::None;
+    }
+    let pending = state.sticker_ui.shared_pending.take();
+    let Some(scope) = answer else { return };
+    let Some(session) = state.session.as_mut() else { return };
+    let Some(edit) = session.sticker_edit.as_mut() else { return };
+    edit.share_answer = Some(scope);
+    let StickerTarget::Stamp(stamp) = edit.target else { return };
+    if scope == ShareScope::ThisStamp && session.doc.stamp(stamp).is_some_and(|s| matches!(s.source, StampSource::Sticker { .. })) {
+        let r = session.doc.detach_sticker(stamp);
+        if crate::dispatch::edited(state, r).is_none() {
+            return;
+        }
+    }
+    let replay = match pending {
+        Some(StickerAction::SetLayerPosition(_, _, Commit::Preview)) | None => None,
+        Some(StickerAction::SetLayerOpacity(id, v, _)) => Some(StickerAction::SetLayerOpacity(id, v, Commit::Final)),
+        Some(StickerAction::SetLayerStyles(id, v, _)) => Some(StickerAction::SetLayerStyles(id, v, Commit::Final)),
+        Some(other) => Some(other),
+    };
+    if let Some(action) = replay {
+        run_in(state, action);
+    }
+}
+
+/// Stickers P6b (3.7): the stamps the Sticker tab's style commands act on: the selected stamp and every stamp linked to
+/// the selected layers of the Layers list; the selected stamp first (its values are the ones shown).
+pub(crate) fn selected_stamps(state: &AppState) -> Vec<StampId> {
+    let Some(session) = state.session.as_ref() else { return Vec::new() };
+    let mut out: Vec<StampId> = session.selected_stamp.filter(|id| session.doc.stamp(*id).is_some()).into_iter().collect();
+    for layer in session.layer_selection() {
+        if let Some(stamp) = session.doc.layer(layer).and_then(|l| l.stamp_id())
+            && !out.contains(&stamp)
+            && session.doc.stamp(stamp).is_some()
+        {
+            out.push(stamp);
+        }
+    }
+    out
+}
+
+/// A preset on the selected stamps, scaled to each stamp's picture; one entry.
+fn apply_preset(state: &mut AppState, preset: StylePreset) {
+    let stamps = selected_stamps(state);
+    if stamps.is_empty() {
+        state.status_hint = "Select a stamp or a text first".to_owned();
+        return;
+    }
+    let Some(doc) = state.doc_mut() else { return };
+    let mut each = Vec::with_capacity(stamps.len());
+    for id in stamps {
+        let size = doc.stamp_style_reference_size(id).unwrap_or([512, 512]);
+        each.push((id, preset.styles(size)));
+    }
+    let r = doc.set_styles_each(&each, Commit::Final);
+    crate::dispatch::edited(state, r);
+}
+
+/// Copy Style: the active sticker layer's styles (`Layers`) or the first selected stamp's (`Stamps`).
+fn copy_style(state: &mut AppState, target: StyleTarget) {
+    let styles = match target {
+        StyleTarget::Layers => layered(state, None).and_then(|(d, id)| d.layer(id).map(|l| l.styles.clone())),
+        StyleTarget::Stamps => {
+            let first = selected_stamps(state).first().copied();
+            first.and_then(|id| state.doc().and_then(|d| d.stamp(id)).map(|s| s.styles.clone()))
+        }
+    };
+    match styles {
+        Some(styles) => {
+            state.style_clipboard = Some(styles);
+            state.status_hint = "Style copied".to_owned();
+        }
+        None => state.status_hint = "Select a stamp or a layer first".to_owned(),
+    }
+}
+
+/// Paste Style / Clear Style: `styles` on every selected stamp (one entry, `set_stamps_styles`) or on the selected
+/// sticker layers (one entry `label`).
+fn put_style(state: &mut AppState, target: StyleTarget, styles: StyleStack, label: &str) {
+    match target {
+        StyleTarget::Stamps => {
+            let stamps = selected_stamps(state);
+            if stamps.is_empty() {
+                state.status_hint = "Select a stamp or a text first".to_owned();
+                return;
+            }
+            let r = state.doc_mut().map(|d| d.set_stamps_styles(&stamps, &styles));
+            if let Some(r) = r {
+                crate::dispatch::edited(state, r);
+            }
+        }
+        StyleTarget::Layers => {
+            let Some((doc, active)) = layered(state, None) else { return };
+            let mut ids: Vec<StickerLayerId> = edit_of(state).map(|e| e.selected_layers.clone()).unwrap_or_default();
+            ids.retain(|id| doc.layer(*id).is_some());
+            if ids.is_empty() {
+                ids.push(active);
+            }
+            apply(state, label, Commit::Final, move |d| {
+                for l in d.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+                    l.styles = styles.clone();
+                }
+            });
+        }
     }
 }
 
@@ -747,3 +1101,5 @@ fn add_picture_layer(state: &mut AppState, blob: Option<BlobId>) {
 
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod tests_p6b;

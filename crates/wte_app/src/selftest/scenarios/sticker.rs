@@ -328,7 +328,7 @@ fn doc_state_hash(doc: &Document) -> u64 {
 }
 
 /// The disc picture as PNG bytes.
-fn disc_png() -> Result<Vec<u8>, String> {
+pub(super) fn disc_png() -> Result<Vec<u8>, String> {
     let mut img = PixelBuf::new(DISC_SIDE, DISC_SIDE);
     let c = DISC_SIDE as f32 * 0.5;
     for y in 0..DISC_SIDE {

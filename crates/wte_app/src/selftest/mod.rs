@@ -82,6 +82,9 @@ pub enum Step {
     /// on a Layers row, a click on an item of the row's context menu.
     ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
     Scroll { view: Target, at: [f32; 2], notches: f32, mods: egui::Modifiers },
+    /// Stickers P6b: wheel notches at a screen position (points): scrolls a page of the side panel to a control a
+    /// scenario clicks next (`ScreenClick`).
+    ScreenScroll { at: egui::Pos2, notches: f32 },
     /// The pointer moves to `at` (normalized 0..1 in the view rect) without a button: one hover frame (round 4, for the
     /// Text tool's picture under the pointer and the brush cursor).
     #[allow(dead_code, reason = "round-4 contract: used by the wave-2 packages")]
@@ -142,6 +145,7 @@ impl Step {
             Step::ScreenPointer { path } => format!("ScreenPointer({} points from {:?})", path.len(), path.first()),
             Step::ScreenClick { at, button, mods } => format!("ScreenClick({at:?}, {button:?}, {mods:?})"),
             Step::Scroll { view, at, notches, .. } => format!("Scroll({view:?}, {at:?}, {notches})"),
+            Step::ScreenScroll { at, notches } => format!("ScreenScroll({at:?}, {notches})"),
             Step::Hover { view, at } => format!("Hover({view:?}, {at:?})"),
             Step::Key(mods, key) => format!("Key({mods:?}, {key:?})"),
             Step::Pen { view, samples, inverted, barrel, .. } => {
@@ -528,6 +532,10 @@ impl Runner {
             }
             Step::ScreenClick { at, button, mods } => {
                 self.inject.extend(click_frames(at, button, mods));
+                self.active = Some((Active::Input, name));
+            }
+            Step::ScreenScroll { at, notches } => {
+                self.inject.extend(scroll_frames(at, notches, egui::Modifiers::NONE));
                 self.active = Some((Active::Input, name));
             }
             Step::Scroll { view, at, notches, mods } => {
@@ -1040,6 +1048,8 @@ mod tests {
         assert_eq!(h[0].events, vec![egui::Event::PointerMoved(egui::pos2(5.0, 6.0))]);
         assert_eq!(Step::Hover { view: ViewId::Main3D.into(), at: [0.25, 0.5] }.describe(), "Hover(Main3D, [0.25, 0.5])");
         assert_eq!(Step::Hover { view: Target::StickerCanvas, at: [0.5, 0.5] }.describe(), "Hover(StickerCanvas, [0.5, 0.5])");
+        // Stickers P6b: a wheel step at a screen position (a page of the side panel).
+        assert_eq!(Step::ScreenScroll { at: egui::pos2(7.0, 8.0), notches: -2.5 }.describe(), "ScreenScroll([7.0 8.0], -2.5)");
     }
 
     #[test]

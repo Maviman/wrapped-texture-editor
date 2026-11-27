@@ -82,26 +82,31 @@ pub(crate) enum Hit {
     ReadOnly,
 }
 
+/// The key of sticker `id`'s picture, by value (no buffer kept; stickers P6b: also the tray thumbnails' key).
+pub(crate) fn sticker_key(id: StickerId, sticker: &wte_core::StickerDoc) -> CanvasKey {
+    CanvasKey::Sticker {
+        id,
+        artboard: sticker.artboard,
+        shape: sticker.shape,
+        layers: sticker
+            .layers
+            .iter()
+            .map(|l| LayerSig {
+                id: l.id,
+                visible: l.visible,
+                opacity: l.opacity.to_bits(),
+                blend: l.blend,
+                clip: l.clip,
+                key: LayerKey::of(l, sticker.artboard, 1.0, wte_core::RasterQuality::Full),
+            })
+            .collect(),
+    }
+}
+
 /// The canvas key of what is shown.
 fn key_of(shown: &Shown, doc: &Document, edit: &StickerEdit) -> Option<CanvasKey> {
     match shown {
-        Shown::Sticker { id, doc: sticker } => Some(CanvasKey::Sticker {
-            id: *id,
-            artboard: sticker.artboard,
-            shape: sticker.shape,
-            layers: sticker
-                .layers
-                .iter()
-                .map(|l| LayerSig {
-                    id: l.id,
-                    visible: l.visible,
-                    opacity: l.opacity.to_bits(),
-                    blend: l.blend,
-                    clip: l.clip,
-                    key: LayerKey::of(l, sticker.artboard, 1.0, wte_core::RasterQuality::Full),
-                })
-                .collect(),
-        }),
+        Shown::Sticker { id, doc: sticker } => Some(sticker_key(*id, sticker)),
         Shown::Image { blob, .. } => Some(CanvasKey::Image(*blob)),
         Shown::Text { stamp } => {
             let object = doc.stamp(*stamp)?;

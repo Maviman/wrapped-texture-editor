@@ -331,11 +331,18 @@ pub(crate) struct PanelApp {
     pub log: Vec<AppAction>,
     /// Apply the document-level actions after each frame (a minimal dispatch, so previews show up in the panels).
     pub apply: bool,
+    /// Stickers P6b: the side panel's first width (300 pt as in `App::ui`; wider for the one-row upper strip).
+    pub side_width: f32,
 }
 
 impl PanelApp {
     pub fn new(state: AppState) -> PanelApp {
-        let mut app = PanelApp { h: Harness::new(1280.0, 800.0), state, ps: PanelState::new(), log: Vec::new(), apply: false };
+        PanelApp::with_side_width(state, 300.0)
+    }
+
+    /// A panel app whose side panel starts `side_width` points wide (the user can widen the panel).
+    pub fn with_side_width(state: AppState, side_width: f32) -> PanelApp {
+        let mut app = PanelApp { h: Harness::new(1280.0, 800.0), state, ps: PanelState::new(), log: Vec::new(), apply: false, side_width };
         app.idle(3);
         app.log.clear();
         app
@@ -399,13 +406,14 @@ impl Drive for PanelApp {
 
 impl PanelApp {
     fn frame_inner(&mut self, events: Vec<Event>) {
-        let PanelApp { h, state, ps, .. } = self;
+        let PanelApp { h, state, ps, side_width, .. } = self;
+        let side_width = *side_width;
         h.pass(events, |ui| {
             let late = crate::shortcuts::handle(ui.ctx(), state);
             egui::Panel::top("menu").show(ui, |ui| panels::show_menu_bar(ui, state));
             egui::Panel::bottom("status").show(ui, |ui| panels::show_status_bar(ui, state));
             egui::Panel::left("tools").resizable(false).exact_size(44.0).show(ui, |ui| panels::show_toolbar(ui, state));
-            let side = egui::Panel::right("side").default_size(300.0).show(ui, |ui| panels::show_side_panel(ui, state, ps));
+            let side = egui::Panel::right("side").default_size(side_width).show(ui, |ui| panels::show_side_panel(ui, state, ps));
             // As `App::ui` records it (round 4: the Brush tab tests check the side panel's width).
             state.side_panel_rect = Some(side.response.rect);
             egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -419,5 +427,6 @@ impl PanelApp {
 }
 
 mod panel_tests;
+mod sticker_panel_tests;
 mod gpu_tests;
 mod text_panel_tests;

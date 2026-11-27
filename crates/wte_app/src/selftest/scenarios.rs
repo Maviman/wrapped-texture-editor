@@ -34,6 +34,7 @@ mod objects;
 mod pen;
 mod side_tabs;
 mod sticker;
+mod sticker_tab;
 
 /// Every scenario `scenario` accepts, in the order of the 8.11 table.
 const NAMES: &[&str] = &[
@@ -93,6 +94,9 @@ const NAMES: &[&str] = &[
     "companion_host",
     "sticker_view",
     "sticker_keys",
+    "sticker_styles",
+    "sticker_tray",
+    "sticker_controls",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -174,6 +178,9 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "companion_host" => companion::companion_host(),
         "sticker_view" => sticker::sticker_view(),
         "sticker_keys" => sticker::sticker_keys(),
+        "sticker_styles" => sticker_tab::sticker_styles(),
+        "sticker_tray" => sticker_tab::sticker_tray(),
+        "sticker_controls" => sticker_tab::sticker_controls(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -3835,7 +3842,7 @@ fn setup_stamp_image(state: &mut AppState, _scratch: &mut Scratch) -> Result<(),
     let png = wte_core::encode_png(img.width, img.height, &img.data, PngLevel::Fast).map_err(|e| e.to_string())?;
     let doc = state.doc_mut().ok_or("no session")?;
     let blob = doc.add_image_blob("logo.png", Arc::from(png)).map_err(|e| e.to_string())?;
-    state.tools.stamp.source = Some(blob);
+    state.tools.stamp.source = crate::state::StampToolSource::Blob(blob);
     state.tools.stamp.source_name = STAMP_NAME.to_owned();
     Ok(())
 }
@@ -3895,6 +3902,7 @@ fn dialog_name(dialog: &Dialog) -> &'static str {
         Dialog::TabletHelp => "TabletHelp",
         Dialog::Companion => "Companion",
         Dialog::CloseOpenings(_) => "CloseOpenings",
+        Dialog::StickerShared { .. } => "StickerShared",
     }
 }
 
@@ -8898,7 +8906,7 @@ fn ws_setup_cells(state: &mut AppState, _: &mut Scratch) -> Result<(), String> {
     let png = png_of(&samples::cells_picture(WS_PICTURE[0], WS_PICTURE[1]))?;
     let doc = state.doc_mut().ok_or("no session")?;
     let blob = doc.add_image_blob("cells.png", Arc::from(png)).map_err(|e| e.to_string())?;
-    state.tools.stamp.source = Some(blob);
+    state.tools.stamp.source = crate::state::StampToolSource::Blob(blob);
     state.tools.stamp.source_name = "cells".to_owned();
     Ok(())
 }
@@ -9292,7 +9300,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 56);
+        assert_eq!(scenario_names().len(), 59);
         // Stickers P6a (review B15): every shot of a sticker scenario says what it must show.
         for name in scenario_names().iter().filter(|n| n.starts_with("sticker")) {
             let steps = scenario(name, &args).unwrap();

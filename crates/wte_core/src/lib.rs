@@ -63,6 +63,8 @@ mod doc_stickers_tests;
 #[cfg(test)]
 mod doc_sticker_edits_tests;
 #[cfg(test)]
+mod doc_sticker_tab_tests;
+#[cfg(test)]
 mod wrap_tests;
 
 #[doc(hidden)]

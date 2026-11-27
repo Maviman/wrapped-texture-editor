@@ -107,6 +107,9 @@ pub struct PanelState {
     split_start: Option<f32>,
     /// UI state of the Objects tab (objects-tabs WP5).
     pub(crate) objects: objects::ObjectsTabState,
+    /// Stickers P6b: the rows of the upper tab strip in this frame (1 or 2) and the strip's height.
+    pub(crate) upper_rows: usize,
+    pub(crate) upper_strip_height: f32,
 }
 
 impl Default for PanelState {
@@ -142,6 +145,8 @@ impl PanelState {
             layers_user_sized: false,
             split_start: None,
             objects: objects::ObjectsTabState::default(),
+            upper_rows: 1,
+            upper_strip_height: side_groups::TAB_STRIP_HEIGHT,
         }
     }
 
@@ -835,7 +840,7 @@ mod tests {
         assert!(r.text_tab.is_none() && !state.panel_rects.contains_key(&PanelHit::LayersFooter), "no Layers rows");
         assert!(r.bottom_area.contains_rect(tab) && r.panel.contains_rect(r.upper_area), "{r:?}");
         // objects-tabs (WP4): the upper group keeps its strip and the taller of the brush rows and the Color page.
-        let expected = side_groups::tab_area_height(r.panel.height(), side_groups::upper_keep(ps.color_page_full_height()));
+        let expected = side_groups::tab_area_height(r.panel.height(), side_groups::upper_keep(ps.color_page_full_height(), ps.upper_strip_height), ps.upper_strip_height);
         assert!((r.bottom_area.height() - expected).abs() < 8.0, "computed height {expected}: {r:?}");
         assert!(r.bottom_area.height() > layers_area.height(), "two layers need less than a tab");
         assert!(r.tool_area.height() >= side_groups::BRUSH_OPTIONS_HEIGHT - 8.0, "the brush sliders keep their room: {r:?}");

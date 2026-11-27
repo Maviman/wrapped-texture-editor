@@ -13,7 +13,12 @@
 // Guarantees (tests in control_sweep/panel_tests.rs and the scenarios' `assert_side_panel_layout`): at 1280x800 and
 // above with the split automatic, G1 the whole Color page is on screen with a 140 pt square, G2 the five brush slider
 // rows are inside the Tool page with the Layers and with the Brush tab below, G3 the Layers footer and Delete stay
-// below the list inside the panel, G4 the four upper tab buttons fit in one row at 300 pt and the groups never overlap.
+// below the list inside the panel, G4 the upper tab buttons are fully visible inside the upper group and the groups
+// never overlap.
+//
+// Stickers P6b (STICKER_PLAN 3.9, review A13): the upper strip has five tabs (Sticker is the fifth). When their labels
+// do not fit one row of the panel's width, the strip has two rows, always `Tool | Color | Texture sets` and
+// `Objects | Sticker`; the layout below uses the strip's height (`upper_strip_height`) instead of one row's.
 
 use eframe::egui;
 use egui::{Rect, vec2};
@@ -21,6 +26,10 @@ use egui::{Rect, vec2};
 use crate::panels::{PanelState, brush_tab, color, layers, objects, shown_tab, text_tab, texture_sets, tool_options};
 use crate::panels::{brush_tab_enabled, text_tab_enabled};
 use crate::state::{AppState, PanelHit, SideRects, SideTab, ToolKind, UpperTab};
+
+/// Stickers P6b: the tabs of each row when the upper strip has two rows.
+pub(crate) const UPPER_ROWS: [&[UpperTab]; 2] =
+    [&[UpperTab::Tool, UpperTab::Color, UpperTab::TextureSets], &[UpperTab::Objects, UpperTab::Sticker]];
 
 /// Height of the tab strips of both groups (FEATURE_BRUSH 6.2).
 pub(crate) const TAB_STRIP_HEIGHT: f32 = 24.0;
@@ -35,8 +44,11 @@ pub(crate) const TAB_AREA_MAX: f32 = 420.0;
 pub(crate) const LAYERS_MIN_HEIGHT: f32 = 200.0;
 /// Height kept for the page of the upper group (about 96 pt of it stay visible once the spacing is taken off).
 pub(crate) const SETTINGS_MIN_HEIGHT: f32 = 112.0;
-/// Smallest height of the upper group: its strip and the page minimum. The split never takes more from it.
-pub(crate) const UPPER_MIN_HEIGHT: f32 = TAB_STRIP_HEIGHT + SETTINGS_MIN_HEIGHT;
+/// Smallest height of the upper group: its strip (`strip` points high; stickers P6b: one or two rows) and the page
+/// minimum. The split never takes more from it.
+pub(crate) fn upper_min_height(strip: f32) -> f32 {
+    strip.max(TAB_STRIP_HEIGHT) + SETTINGS_MIN_HEIGHT
+}
 /// Room the Color page needs beyond its content (6 pt of spacing plus 2 pt of slack: a page exactly as tall as its
 /// content could show the scroll bar on a rounding difference, which narrows the swatches, which shortens the content,
 /// which hides the bar again — a layout that flips every frame).
@@ -50,6 +62,11 @@ pub(crate) const COLOR_FIXED_HEIGHT_GUESS: f32 = 144.0;
 pub(crate) const LAYERS_FOOTER_HEIGHT_GUESS: f32 = 52.0;
 /// Space between the upper strip and its page.
 const UPPER_STRIP_GAP: f32 = 4.0;
+/// Stickers P6b: room left empty between the bottom of the upper page and the split edge. The resize handle of the
+/// lower group reaches `resize_grab_radius_side` (3 pt) above the edge; a page that overflowed (its scroll area senses
+/// drags) took a press there, so the split could not be dragged from the edge (seen at 640x480, where the two-row strip
+/// makes the Tool page overflow; the same happened with one row whenever the shown page overflowed).
+pub(crate) const SPLIT_CLEARANCE: f32 = 6.0;
 
 /// Default height of the lower group for a side panel of `height` points: about 40 %, at least room for three rows.
 pub(crate) fn layers_area_height(height: f32) -> f32 {
@@ -64,27 +81,48 @@ pub(crate) fn layers_area_fit(height: f32, natural: Option<f32>) -> f32 {
     natural.map_or(max, |n| n.clamp(LAYERS_MIN_HEIGHT.min(height * 0.5).min(max), max))
 }
 
-/// Largest height of the lower group: 85 % of the panel, and never so much that the upper group loses its minimum (a
-/// split dragged in a large window keeps its size when the window shrinks, clamped to this).
-pub(crate) fn layers_area_max(height: f32) -> f32 {
-    (height * 0.85).min(height - UPPER_MIN_HEIGHT).max(LAYERS_MIN_HEIGHT)
+/// Largest height of the lower group: 85 % of the panel, and never so much that the upper group (with a strip `strip`
+/// points high) loses its minimum (a split dragged in a large window keeps its size when the window shrinks, clamped to
+/// this).
+pub(crate) fn layers_area_max(height: f32, strip: f32) -> f32 {
+    (height * 0.85).min(height - upper_min_height(strip)).max(LAYERS_MIN_HEIGHT)
 }
 
 /// What the upper group keeps while the lower group shows the Brush or the Text tab: its strip, and a page as tall as
 /// the taller of the five brush slider rows and the whole Color page with a full-size square (`color_content`:
 /// `PanelState::color_page_full_height`; so G1 and G2 hold whichever upper tab is shown, switching upper tabs never
 /// moves the split, and the split does not depend on the window sizes seen before).
-pub(crate) fn upper_keep(color_content: f32) -> f32 {
+/// `strip` is the height of the upper strip (stickers P6b: one or two rows).
+pub(crate) fn upper_keep(color_content: f32, strip: f32) -> f32 {
     let color = if color_content.is_finite() { color_content + COLOR_AREA_MARGIN } else { 0.0 };
-    TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + BRUSH_OPTIONS_HEIGHT.max(color)
+    strip.max(TAB_STRIP_HEIGHT) + UPPER_STRIP_GAP + BRUSH_OPTIONS_HEIGHT.max(color) + SPLIT_CLEARANCE
+}
+
+/// Stickers P6b: whether the five upper tab labels fit one row `width` points wide (the button font, padding and
+/// spacing of `ui`).
+pub(crate) fn upper_tabs_fit_one_row(ui: &egui::Ui, width: f32) -> bool {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad = ui.spacing().button_padding.x * 2.0;
+    let gap = ui.spacing().item_spacing.x;
+    let labels: f32 = UpperTab::ALL
+        .iter()
+        .map(|t| ui.painter().layout_no_wrap(t.label().to_owned(), font.clone(), egui::Color32::WHITE).size().x + pad)
+        .sum();
+    labels + gap * (UpperTab::ALL.len() - 1) as f32 <= width
+}
+
+/// Stickers P6b: the height of an upper strip of `rows` rows (rows of `TAB_STRIP_HEIGHT`, the item spacing between).
+pub(crate) fn upper_strip_height(rows: usize, row_gap: f32) -> f32 {
+    let rows = rows.max(1) as f32;
+    rows * TAB_STRIP_HEIGHT + (rows - 1.0) * row_gap
 }
 
 /// Height of the lower group while the Brush or the Text tab is shown and the split is automatic, for a side panel of
 /// `height` points of which the upper group keeps `keep` (`upper_keep`): the rest, limited to `160..=420` and to
-/// `layers_area_max`.
-pub(crate) fn tab_area_height(height: f32, keep: f32) -> f32 {
+/// `layers_area_max` (for an upper strip `strip` points high).
+pub(crate) fn tab_area_height(height: f32, keep: f32, strip: f32) -> f32 {
     let wanted = if keep.is_finite() { height - keep } else { layers_area_height(height) };
-    wanted.clamp(TAB_AREA_MIN.min(height * 0.5), TAB_AREA_MAX).min(layers_area_max(height))
+    wanted.clamp(TAB_AREA_MIN.min(height * 0.5), TAB_AREA_MAX).min(layers_area_max(height, strip))
 }
 
 /// Side of the colour picker's square: as large as the panel width allows (at most `COLOR_SQUARE_MAX`) and as the
@@ -121,6 +159,11 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
         text_tab::clear_gap_status(state); // T6 (round 4): the status line of a selected gap goes with the Text tab
     }
     let height = ui.available_height().max(1.0);
+    // Stickers P6b: one or two rows of upper tabs, decided by the panel's width before the groups are laid out.
+    let rows = if upper_tabs_fit_one_row(ui, ui.available_width()) { 1 } else { 2 };
+    ps.upper_rows = rows;
+    ps.upper_strip_height = upper_strip_height(rows, ui.spacing().item_spacing.y);
+    rects.upper_strip_height = ps.upper_strip_height;
     split_input(ui, ps);
     lower_group(ui, state, ps, shown, height, &mut rects);
     upper_group(ui, state, ps, &mut rects);
@@ -155,12 +198,13 @@ fn split_input(ui: &egui::Ui, ps: &mut PanelState) {
 /// The lower group: today's resizable bottom panel with the strip Layers | Brush | Text.
 fn lower_group(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, shown: SideTab, height: f32, rects: &mut SideRects) {
     let min = LAYERS_MIN_HEIGHT.min(height * 0.5);
+    let strip = ps.upper_strip_height;
     let panel = egui::Panel::bottom("side_layers_area")
         .resizable(true)
         .frame(egui::Frame::new().inner_margin(egui::Margin { top: 4, ..egui::Margin::ZERO }));
     let panel = if ps.layers_user_sized {
         let start = ps.split_start.unwrap_or_else(|| layers_area_height(height));
-        panel.default_size(start).size_range(min..=layers_area_max(height))
+        panel.default_size(start).size_range(min..=layers_area_max(height, strip))
     } else if shown == SideTab::Layers {
         // Until the user sizes it, the group hugs its rows and footer, at most its default (40 %, R3-10 review): the
         // room a short list does not need goes to the upper page.
@@ -168,7 +212,7 @@ fn lower_group(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, sho
     } else {
         // The Brush and the Text tab: the upper group keeps its strip and the taller of the five brush slider rows and
         // the whole Color page (G1, G2), the tab gets the rest.
-        panel.exact_size(tab_area_height(height, upper_keep(ps.color_page_full_height())))
+        panel.exact_size(tab_area_height(height, upper_keep(ps.color_page_full_height(), strip), strip))
     };
     ps.layers_list_overflow = 0.0;
     ps.layers_content_bottom = None;
@@ -234,28 +278,40 @@ fn tab_content(ui: &mut egui::Ui, salt: &'static str, add: impl FnOnce(&mut egui
     out.inner_rect
 }
 
-/// The upper strip: four selectable buttons, always enabled; a click writes `state.upper_tab` (a setting). Returns the
-/// buttons' rects (indexed by `UpperTab::index`).
-fn upper_tab_strip(ui: &mut egui::Ui, state: &mut AppState) -> [Rect; 4] {
-    let mut rects = [Rect::NOTHING; 4];
-    ui.horizontal(|ui| {
-        ui.set_min_height(TAB_STRIP_HEIGHT);
-        for tab in UpperTab::ALL {
-            let button = egui::Button::selectable(state.upper_tab == tab, tab.label()).min_size(vec2(0.0, TAB_STRIP_HEIGHT - 4.0));
-            let resp = ui.add(button);
-            if resp.clicked() {
-                state.upper_tab = tab;
+/// The upper strip: five selectable buttons, always enabled, in one row or (stickers P6b) in the two rows of
+/// `UPPER_ROWS`; a click writes `state.upper_tab` (a setting). Returns the buttons' rects (indexed by
+/// `UpperTab::index`).
+fn upper_tab_strip(ui: &mut egui::Ui, state: &mut AppState, rows: usize) -> [Rect; 5] {
+    let mut rects = [Rect::NOTHING; 5];
+    let all: [&[UpperTab]; 1] = [&UpperTab::ALL];
+    let lines: &[&[UpperTab]] = if rows >= 2 { &UPPER_ROWS } else { &all };
+    for line in lines {
+        ui.horizontal(|ui| {
+            ui.set_min_height(TAB_STRIP_HEIGHT);
+            for &tab in *line {
+                let button = egui::Button::selectable(state.upper_tab == tab, tab.label()).min_size(vec2(0.0, TAB_STRIP_HEIGHT - 4.0));
+                let resp = ui.add(button);
+                if resp.clicked() {
+                    state.upper_tab = tab;
+                }
+                rects[tab.index()] = resp.rect;
             }
-            rects[tab.index()] = resp.rect;
-        }
-    });
+        });
+    }
     rects
 }
 
 /// A page of the upper group in its own scroll area; returns the scroll output.
 fn page<R>(ui: &mut egui::Ui, salt: &'static str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
     // No minimum height (accept_fixes item B): in a short window the page takes only the room that is left.
-    egui::ScrollArea::vertical().id_salt(salt).min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, add)
+    // Stickers P6b: the page ends `SPLIT_CLEARANCE` above the split edge (the resize handle's room).
+    let height = (ui.available_height() - SPLIT_CLEARANCE).max(0.0);
+    egui::ScrollArea::vertical()
+        .id_salt(salt)
+        .min_scrolled_height(0.0)
+        .max_height(height)
+        .auto_shrink([false, false])
+        .show(ui, add)
 }
 
 /// The upper group: the strip and the page of `state.upper_tab` in the room the lower group left.
@@ -268,7 +324,7 @@ fn upper_group(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, rec
     // grew the side panel by 6 pt, for good (egui keeps a side panel's width): the `text` and `text_tab` scenarios had
     // a 306 / 312 pt panel. The thin bar stays visible while the page overflows.
     ui.spacing_mut().scroll.floating_allocated_width = 0.0;
-    rects.upper_tab_buttons = upper_tab_strip(ui, state);
+    rects.upper_tab_buttons = upper_tab_strip(ui, state, ps.upper_rows);
     for tab in UpperTab::ALL {
         state.panel_rects.insert(PanelHit::UpperTabButton(tab), rects.upper_tab_buttons[tab.index()]);
     }
@@ -283,7 +339,7 @@ fn upper_group(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, rec
         }
         UpperTab::Color => {
             // The square as large as the page allows given the rest of the page (measured in the last frame).
-            let room = ui.available_height() - COLOR_AREA_MARGIN;
+            let room = ui.available_height() - SPLIT_CLEARANCE - COLOR_AREA_MARGIN;
             let square = color_square_side(ui.available_width(), room, ps.color_fixed_height);
             let out = page(ui, "side_color_scroll", |ui| color::show(ui, state, ps, square));
             let content = Rect::from_min_size(out.inner_rect.min - out.state.clamped_offset(), out.content_size);
@@ -306,6 +362,12 @@ fn upper_group(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, rec
             let rect = objects::show(ui, state, ps);
             rects.objects_tab = Some(rect);
             rects.upper_page = rect;
+        }
+        // Stickers P6b (STICKER_PLAN 3.9): the selected stamp, its style and the tray.
+        UpperTab::Sticker => {
+            let out = page(ui, "side_sticker_scroll", |ui| crate::sticker::panels::show(ui, state, ps));
+            rects.sticker_tab = Some(out.inner_rect);
+            rects.upper_page = out.inner_rect;
         }
     }
 }
@@ -330,19 +392,26 @@ mod tests {
         assert_eq!(layers_area_fit(h, None), 300.0);
         assert_eq!(layers_area_fit(h, Some(150.0)), 200.0, "never below the minimum");
         assert_eq!(layers_area_fit(h, Some(500.0)), 300.0, "never above the default");
-        assert_eq!(layers_area_max(h), (h - UPPER_MIN_HEIGHT).min(h * 0.85));
+        let one = TAB_STRIP_HEIGHT;
+        let two = upper_strip_height(2, 4.0);
+        assert_eq!(two, 2.0 * TAB_STRIP_HEIGHT + 4.0);
+        assert_eq!(upper_strip_height(1, 4.0), one);
+        assert_eq!(layers_area_max(h, one), (h - TAB_STRIP_HEIGHT - SETTINGS_MIN_HEIGHT).min(h * 0.85));
+        assert_eq!(layers_area_max(h, two), (h - two - SETTINGS_MIN_HEIGHT).min(h * 0.85), "a second row comes off the lower group's maximum");
         // 640x480: the minimum wins over 85 %.
-        assert_eq!(layers_area_max(230.0), LAYERS_MIN_HEIGHT);
-        // The upper group keeps the taller of the brush rows and the Color page.
-        assert_eq!(upper_keep(100.0), TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + BRUSH_OPTIONS_HEIGHT);
-        assert_eq!(upper_keep(300.0), TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + 300.0 + COLOR_AREA_MARGIN);
-        assert_eq!(upper_keep(f32::NAN), TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + BRUSH_OPTIONS_HEIGHT);
-        let keep = upper_keep(300.0);
-        assert_eq!(tab_area_height(h, keep), h - keep);
-        assert_eq!(tab_area_height(2000.0, keep), TAB_AREA_MAX);
-        assert_eq!(tab_area_height(430.0, keep), TAB_AREA_MIN, "at 640x480 the tab keeps its minimum");
-        assert_eq!(tab_area_height(h, f32::INFINITY), layers_area_height(h));
-        assert!(tab_area_height(300.0, keep) <= layers_area_max(300.0));
+        assert_eq!(layers_area_max(230.0, one), LAYERS_MIN_HEIGHT);
+        assert_eq!(layers_area_max(230.0, two), LAYERS_MIN_HEIGHT);
+        // The upper group keeps the taller of the brush rows and the Color page, below its strip.
+        assert_eq!(upper_keep(100.0, one), TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + BRUSH_OPTIONS_HEIGHT + SPLIT_CLEARANCE);
+        assert_eq!(upper_keep(300.0, one), TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + 300.0 + COLOR_AREA_MARGIN + SPLIT_CLEARANCE);
+        assert_eq!(upper_keep(300.0, two), two + UPPER_STRIP_GAP + 300.0 + COLOR_AREA_MARGIN + SPLIT_CLEARANCE);
+        assert_eq!(upper_keep(f32::NAN, one), TAB_STRIP_HEIGHT + UPPER_STRIP_GAP + BRUSH_OPTIONS_HEIGHT + SPLIT_CLEARANCE);
+        let keep = upper_keep(300.0, one);
+        assert_eq!(tab_area_height(h, keep, one), h - keep);
+        assert_eq!(tab_area_height(2000.0, keep, one), TAB_AREA_MAX);
+        assert_eq!(tab_area_height(430.0, keep, one), TAB_AREA_MIN, "at 640x480 the tab keeps its minimum");
+        assert_eq!(tab_area_height(h, f32::INFINITY, one), layers_area_height(h));
+        assert!(tab_area_height(300.0, keep, one) <= layers_area_max(300.0, one));
         // The square: full size when the room allows, never below the minimum.
         assert_eq!(color_square_side(284.0, 400.0, 150.0), COLOR_SQUARE_MAX);
         assert_eq!(color_square_side(284.0, 250.0, 150.0), 100.0);
@@ -356,8 +425,13 @@ mod tests {
             assert_eq!(SideTab::from_pref_name(tab.pref_name()), tab);
         }
         assert_eq!(SideTab::from_pref_name("objects"), SideTab::Layers);
-        assert_eq!(UpperTab::ALL.map(UpperTab::index), [0, 1, 2, 3]);
+        // Stickers P6b: five tabs, Sticker the fifth; the two rows hold each tab once, in strip order.
+        assert_eq!(UpperTab::ALL.map(UpperTab::index), [0, 1, 2, 3, 4]);
         assert_eq!(UpperTab::default(), UpperTab::Tool);
         assert_eq!(serde_json::to_value(UpperTab::TextureSets).unwrap(), "texture_sets");
+        assert_eq!(serde_json::to_value(UpperTab::Sticker).unwrap(), "sticker");
+        assert_eq!(UpperTab::Sticker.label(), "Sticker");
+        let rows: Vec<UpperTab> = UPPER_ROWS.iter().flat_map(|r| r.iter().copied()).collect();
+        assert_eq!(rows, UpperTab::ALL.to_vec());
     }
 }

@@ -216,8 +216,8 @@ Two features, planned 2026-11-24 (gate report `docs/reports/OBJECTS_TABS_GATE_RE
    the `Arc<Bvh>` it was made with. **Selecting never restricts painting**; a translucent tint marks the selection only
    while the Objects tab is shown or the Navigate tool is active (8.5).
 2. **Tab groups.** The right side panel is two Photoshop-style tab groups with a draggable split (8.7 "Side panel"):
-   upper **Tool | Color | Texture sets | Objects**, lower **Layers | Brush | Text** (the strip and one tab rule of round 4,
-   unchanged). A tool change never changes the upper tab; a click on the toolbar's primary colour chip shows the Color
+   upper **Tool | Color | Texture sets | Objects** (stickers P6b: **| Sticker**, in two rows when one does not fit),
+   lower **Layers | Brush | Text** (the strip and one tab rule of round 4, unchanged). A tool change never changes the upper tab; a click on the toolbar's primary colour chip shows the Color
    tab; the Text tool's focus request shows the Tool tab.
 
 The rules for hidden objects (the contract; 5.14 holds the same table):
@@ -423,6 +423,7 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `doc_stickers_tests.rs` | stickers P3a | the `k3a_*` tests of the sticker document (test-only child of the crate root) |
 | `doc_sticker_edits.rs` | stickers P3b | sticker pixel edits: strokes on pictures and masks, `replace_sticker_pixels`, promotion inside an edit, `convert_text_stamp`, Revert, the re-bake of users and the undo of `Edit::StickerPixels` (5.20 "Sticker pixel edits") |
 | `doc_sticker_edits_tests.rs` | stickers P3b | the `k3b_*` tests (test-only child of the crate root) |
+| `doc_sticker_tab_tests.rs` | stickers P6b | the `k6b_*` tests of `add_stamp_styled`, `set_styles_of` / `set_styles_each` and `stamp_style_reference_size` (test-only child of the crate root) |
 | `sticker/file.rs` | stickers P4 | the `.wtes` sticker file (7.8): `write_wtes`, `read_wtes`, `WtesManifest`, `WtesFile`; `Document::{saved_sticker_ids, sticker_extract_pictures, sticker_wtes, import_wtes}` |
 | `psd/mod.rs` | stickers P5a | the PSD reader's types: `PsdDoc`, `PsdLayer`, `PsdMask`, `PsdBlend`, `PsdFeatures`, `PsdSection`, `PsdColorMode`, `PsdLimits`, `PsdError`, `PsdRefusal` (sentences); `forcing`, `editor_native`, `profile_note` (5.28) |
 | `psd/read.rs` | stickers P5a | `psd::read` (7.9 "Reader"): header, resources 1057 / 1039, layer info (section or `Lr16`), records and tagged blocks (re-sync), channel decoding (raw, PackBits, ZIP, ZIP with prediction; 8 and 16 bit), the merged picture un-matted from white |
@@ -563,6 +564,13 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `sticker/layers_ui.rs` | stickers P6a | the Layers tab in the Sticker view (rows, thumbnails, drag reorder, footer) and the Tool tab's sticker page (`tool_page`) |
 | `sticker/tests.rs` | stickers P6a | the Sticker view's unit tests and test helpers (`image_stamp_state`, `canvas_state`, `canvas_pass`) |
 | `selftest/scenarios/sticker.rs` | stickers P6a | the scenarios `sticker_view` and (P6a check) `sticker_keys` (8.11) |
+| `sticker/panels.rs` | stickers P6b | the Sticker tab (the fifth upper tab, 8.7 / 8.15): the selected stamp, its style (presets, Copy / Paste / Clear, the style editor), the tray |
+| `sticker/styles_ui.rs` | stickers P6b | the `StyleStack` editor (one block per style with its on/off box; `BLOCKS`, `toggled`, `block_on`, `default_block`, `preset_row`), used for stamps (Sticker tab) and sticker layers (Tool tab in the view) |
+| `sticker/tray.rs` | stickers P6b | the tray (`tray_stickers`, `show`), its commands (New Sticker, from a picture, use as the Stamp tool's source, Duplicate, Delete), "Edit before placing", Export Picture (`write_picture`), the Sticker tab's thumbnails (`PictureThumbs`) |
+| `sticker/tests_p6b.rs` | stickers P6b | the unit tests of P6b's commands (8.15) |
+| `dialogs/sticker_shared.rs` | stickers P6b | the shared-picture question (E6): Edit all / Only this one / Cancel |
+| `selftest/scenarios/sticker_tab.rs` | stickers P6b | the scenarios `sticker_styles`, `sticker_tray`, `sticker_controls` (8.11) |
+| `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
 | `selftest/scenarios.rs` | A6 | canned scenarios (the scaffold stub already contains the action-only smoke scenarios of section 8.11) |
 
@@ -2848,6 +2856,16 @@ impl Document {
   `sticker::render::layer_alpha_at`), the Move tool's click. `sticker_layer_thumbnail(id, layer, side)`: one layer drawn
   alone (shown, opacity 1, Normal, not clipped; mask, adjustments and styles kept) over the whole artboard, the longer
   side `side` pixels (scale at most 1), for the Layers tab.
+- **Sticker tab commands (P6b).** `add_stamp_styled(name, source, placement, home, styles)`: `add_stamp` with stamp
+  styles in the same one entry ("Add Stamp" / "Add Text"); `placement` is the artwork box, an automatic depth of a
+  projected placement is refitted to the bake footprint (`refit_auto_depth_framed` from the unstyled to the styled
+  frame); with default styles exactly `add_stamp` (which now calls it). `set_styles_of(stamps, styles, commit)`: one
+  `StyleStack` on several stamps, `Commit::Preview` calls fold into one entry "Edit Sticker Style" (the label of
+  `set_stamp_styles`, which is now `set_styles_of(&[stamp], ..)`), Final re-bakes every changed stamp; a stamp named
+  twice counts once; `LayerLocked` / `UnknownStamp` before anything changes. `set_styles_each(&[(stamp, styles)],
+  commit)`: the same with styles of its own per stamp (a preset scaled to each picture). `stamp_style_reference_size(id)`:
+  the base picture at the reference scale of style lengths (2.3: image pixels, the text at 128 px per em, the sticker's
+  artboard): `stamp_source_frame2(id).content / ref_scale`, what the presets are scaled by.
 
 **Sticker pixel edits, conversion, Revert (P3b; `doc_sticker_edits.rs`, STICKER_PLAN 2.7, 2.8, 2.10).**
 
@@ -6226,6 +6244,24 @@ Down/Delete, StickerToolButton(StickerTool), StickerEditButton}`. `AppAction::Se
 DuplicateLayer, DeleteLayer, MoveLayer, MoveLayerTo, MergeDown, SetLayerVisible / Locked / Opacity / Blend, RenameLayer,
 SetLayerPosition, Nudge, DeleteKey, Escape, EnterKey, Fit, Zoom100, ConvertText, Rename; `None` layer = the active one).
 
+**Stickers P6b (STICKER_PLAN 3.6-3.9).** `UpperTab::Sticker` (the fifth tab, serde "sticker", `ALL: [UpperTab; 5]`,
+index 4, label "Sticker"; an older build reads "sticker" as its default tab through the lenient prefs).
+`SideRects::upper_tab_buttons: [Rect; 5]`, `upper_strip_height` (one row 24 pt, two rows 51 pt), `sticker_tab:
+Option<Rect>`. `StampToolSource { None (default), Blob(BlobId), Sticker(StickerId) }` (`blob`, `is_none`, `is_some`)
+replaces `StampSettings::source: Option<BlobId>`; `StampSettings::styles: StyleStack` (the styles new stamps of the
+Stamp tool get; default none); both `#[serde(skip)]` (session state bound to the document; `install_document` resets the
+source). `StickerTarget { Stamp(StampId), Tray(StickerId) }` (the plan's `ToolSource` is not built: "Edit before
+placing" makes the tool's picture a tray sticker first, so the tool's unplaced sticker is a `Tray` target).
+`Dialog::StickerShared { users }`. `AppState::style_clipboard: Option<StyleStack>` (Copy Style; app state, never the OS
+clipboard). `PanelHit` gains `StickerTabEdit`, `StickerTabExport`, `StylePresetButton(u8)`, `StyleCopy`, `StylePaste`,
+`StyleClear`, `StyleBlockToggle(u8)`, `StyleEditor`, `TrayItem(u64)`, `TrayNew`, `TrayNewFromPicture`, `TrayEdit`,
+`TrayDuplicate`, `TrayDelete`, `TrayExport`, `StampEditBeforePlacing`, `StampToolStyle`, `SharedEditAll`,
+`SharedOnlyThis`, `SharedCancel`, `StickerLayerStyles`. `StickerAction` gains `EnterTray`, `EditBeforePlacing`,
+`AnswerShared(Option<ShareScope>)`, `SetStampStyles(Vec<StampId>, StyleStack, Commit)`, `ApplyPreset(StylePreset)`,
+`SetLayerStyles(StickerLayerId, StyleStack, Commit)`, `ApplyLayerPreset`, `CopyStyle` / `PasteStyle` /
+`ClearStyle(StyleTarget { Stamps, Layers })`, `NewSticker`, `NewStickerFromPicture(Option<PathBuf>)`, `TrayUse`,
+`TrayDuplicate`, `TrayDelete`, `ExportPicture(PictureOf { Stamp, Sticker }, Option<PathBuf>)`.
+
 ### 8.3 `WteApp` and the frame (`app.rs`, `dispatch.rs`) [A1]
 
 ```rust
@@ -6524,6 +6560,13 @@ the selected stamp (`sticker::enter`), another mode leaves it first (`sticker::l
 `SetStickerTool` and `Sticker(..)` run in `sticker::run`; `validate` also runs `sticker::validate` (the view closes when
 its stamp is gone or the mode was changed under it; the active layer follows undo). `io_flows::install_document` leaves
 the view before a new document comes in.
+
+**Stickers P6b.** `close_dialog` (Esc, a click outside, Cancel) on `Dialog::StickerShared` runs
+`sticker::run_in(AnswerShared(None))`: the edit waiting for the answer is dropped. The P6b document commands
+(`StickerAction::changes_document`: Edit before placing, presets, Paste / Clear Style, the tray's New / From picture /
+Duplicate / Delete, an answer to the question, and the Final of `SetStampStyles` / `SetLayerStyles`) pass the interaction
+guard like the P6a ones. `AddPictureFile` registers the picture and then runs `AddPictureLayer` through `run_in`, so the
+shared-picture question comes first (8.15).
 
 ### 8.4 GPU layer (`gpu/*`) [A2]
 
@@ -7208,7 +7251,7 @@ carries a catalog face).
   round-3 rule "the whole colour picker is on screen whatever tool is active" (user decision 2026-11-24: Color is one tab
   of the upper group; mitigations below: the toolbar chip, tool changes keep the tab, G1).
   ```
-  | Tool | Color | Texture sets | Objects |   upper strip, 24 pt
+  | Tool | Color | Texture sets | Objects |   upper strip, 24 pt (stickers P6b: + Sticker; two rows, 51 pt, at 300 pt)
   | page of the shown upper tab           |   own vertical scroll area per page (thin visible bars)
   |=======================================|   the split: the lower group's resize edge
   | Layers | Brush | Text                 |   lower strip, 24 pt (one tab rule unchanged)
@@ -7217,12 +7260,12 @@ carries a catalog face).
   1. **Lower group** = the round-4 resizable bottom panel `egui::Panel::bottom("side_layers_area")`, unchanged rules:
      tab strip Layers | Brush | Text (`shown_tab`, below), default 40 % of the panel height (at most 420 pt), at least
      200 pt (`LAYERS_MIN_HEIGHT`), at most `layers_area_max = (h * 0.85).min(h - UPPER_MIN_HEIGHT).max(200)` with
-     `UPPER_MIN_HEIGHT = 24 + 112` (strip + page minimum; a size set in a large window is clamped to that when the window
-     shrinks). Until the user drags the edge (`PanelState::layers_user_sized`) its height is automatic: with the Layers tab
+     `upper_min_height(strip) = strip + 112` (strip + page minimum; stickers P6b: the strip has one or two rows; a size
+     set in a large window is clamped to that when the window shrinks). Until the user drags the edge (`PanelState::layers_user_sized`) its height is automatic: with the Layers tab
      it hugs its content (`layers_area_fit`: header + rows + footer measured in the last frame, between 200 pt and the
      default), so a short list gives its room to the upper page; with the Brush or the Text tab
-     `tab_area_height(h, upper_keep)` = `(h - upper_keep).clamp(160.min(h/2), 420).min(layers_area_max(h))` with
-     `upper_keep = 24 + 4 + max(144, Color page height + 8)` (`BRUSH_OPTIONS_HEIGHT` = heading + five brush slider rows;
+     `tab_area_height(h, upper_keep, strip)` = `(h - upper_keep).clamp(160.min(h/2), 420).min(layers_area_max(h, strip))` with
+     `upper_keep = strip + 4 + max(144, Color page height + 8) + 6` (the split clearance, below) (`BRUSH_OPTIONS_HEIGHT` = heading + five brush slider rows;
      the Color page height with a full-size square, `PanelState::color_page_full_height` = the page beside its square as
      measured when it was last shown + 140, first guess `COLOR_FIXED_HEIGHT_GUESS + 140` = 284 pt, the value measured at
      1280x800), so G1 and G2 hold whichever upper tab is shown and switching upper tabs never moves the split. (WP4/5
@@ -7235,7 +7278,7 @@ carries a catalog face).
      every lower tab, clamped to `200.min(h/2)..=layers_area_max(h)`, and is kept across documents. A **double-click on
      the edge** (`button_double_clicked` with the pointer on the edge) returns to automatic.
   3. **Upper group** = the room the lower group leaves: the strip (`upper_tab_strip`, same widget style as the lower
-     strip: `Button::selectable`, all four always enabled, a click writes `state.upper_tab`, a setting), 4 pt, then the
+     strip: `Button::selectable`, all five always enabled, a click writes `state.upper_tab`, a setting), 4 pt, then the
      page of `state.upper_tab`, each in its own scroll area with no minimum height. The pages' thin bars lie over the
      content's right edge (`floating_allocated_width = 0`; visible while the page overflows) instead of taking 6 pt of
      its width: egui reserves a bar's room only from the frame after it first shows it while the option grids keep
@@ -7250,6 +7293,21 @@ carries a catalog face).
        are measured while the page is shown.
      - Texture sets: `texture_sets::show` in `side_sets_scroll` (no collapsing header).
      - Objects: `objects::show` (WP5, below).
+     - Sticker (stickers P6b): `sticker::panels::show` in `side_sticker_scroll` (8.15).
+     **Two rows (stickers P6b, STICKER_PLAN 3.9, review A13).** At the start of `show_side_panel`
+     `upper_tabs_fit_one_row(ui, width)` measures the five labels with the button font, padding and item spacing; when
+     they do not fit the panel's width the strip has always the same two rows `UPPER_ROWS`: Tool | Color | Texture sets
+     and Objects | Sticker (measured at the 300 pt panel: buttons 41 / 47.2 / 86.8 / 60.4 / 55 pt, one row would need
+     322 pt of the 283 pt content; at 420 pt they fit one row). `PanelState::upper_rows` / `upper_strip_height` (=
+     `upper_strip_height(rows, item_spacing.y)`: 24 or 51 pt) are set before the lower group is laid out, which uses the
+     strip's height (`upper_keep(color, strip)`, `layers_area_max(h, strip)`, `tab_area_height(h, keep, strip)`), so the
+     second row comes off the lower group's room, never off the page minimum. No label is renamed, no icon-only tab.
+     **Split clearance (stickers P6b).** Every page made by `page()` (Tool, Color, Texture sets, Sticker) ends
+     `SPLIT_CLEARANCE` (6 pt) above the split edge, and `upper_keep` adds those 6 pt: the lower group's resize handle
+     reaches 3 pt above the edge, and the scroll area of a page that overflowed (it senses drags) took a press there, so
+     the split could not be dragged from its edge (found by `side_tabs` at 640x480, where the two-row strip makes the
+     Tool page overflow; the same held for one row whenever the shown page overflowed). Test
+     `the_split_drags_from_its_edge_while_the_upper_page_overflows`.
      Without a document each page shows what it showed before ("No document open" in Texture sets, Objects and Layers).
   **Tab behaviour** (plan 6.4). Lower group unchanged (the one tab rule; a tool change never writes `side_tab`). Upper
   group: a tool change never writes `upper_tab` (colour changes are the most frequent trip: a jump to the Tool tab on every
@@ -7263,17 +7321,21 @@ carries a catalog face).
   screen without scrolling (`ColorContent` inside `ColorSection`) and the square is 140 pt; **G2** with the Tool tab and the
   Brush or Eraser, the five slider rows (Size ... Spacing) are inside `tool_area`, with the Layers and with the Brush tab
   below; **G3** (unchanged) the Layers footer and Delete lie below the list, inside the panel; the Brush tab's rows inside
-  the lower area (A12); the side panel at most 300 pt wide; **G4** the four upper tab buttons fit in one row at 300 pt
-  (measured: 259.4 pt of the 283 pt content width, so "Texture sets" keeps its name), the groups never overlap, no strip
-  button lies outside its group. At 900x600 and 640x480 the groups stay inside the panel and apart, the upper page keeps
+  the lower area (A12); the side panel at most 300 pt wide; **G4** the upper tab buttons are whole inside the upper group
+  and none lies over another (stickers P6b: five buttons, one row in a wide panel, the two rows of `UPPER_ROWS` at
+  300 pt; objects-tabs measured the four in one row: 259.4 pt of the 283 pt content width), the groups never overlap, no
+  strip button lies outside its group. P6b re-proved G1-G4 with the two-row strip at 1280x800, 900x600 and 640x480
+  (`upper_tabs_show_one_page_each`, `the_two_row_strip_keeps_the_side_panel_guarantees`, scenario `side_tabs`): the
+  640x480 minimum of the upper page (90 pt) holds, so the plan's fallback (the lower split one row lower) is not needed. At 900x600 and 640x480 the groups stay inside the panel and apart, the upper page keeps
   at least 90 pt, the pages scroll, the Color square shrinks to 72 pt before the page scrolls.
   **Records.** `state.panel_rects` (cleared at the start of `show_side_panel`) holds, besides the layer row controls:
   `UpperTabButton(tab)`; `SettingsArea` (the visible Tool page) only while the Tool page is shown; `ColorSection` (the
   visible Color page) and `ColorContent` (its unclipped content) only while the Color page is shown; `LayersList`,
   `LayersFooter`, `LayersDelete`, `LayersArea`; the Objects tab's records (below). `state.side_rects` (`SideRects`):
-  `panel`; `upper_area` (strip + page), `upper_tab_buttons[UpperTab::index]`, `upper_page` (the visible page);
+  `panel`; `upper_area` (strip + page), `upper_tab_buttons[UpperTab::index]`, `upper_strip_height`, `upper_page` (the
+  visible page);
   `tool_area` (= `upper_page`) and `tool_options` (the Tool page's content as laid out) in frames where the Tool page is
-  shown, else `Rect::NOTHING`; `color` (= `upper_page`) likewise for the Color page; `sets_tab` / `objects_tab` = `Some(page)`
+  shown, else `Rect::NOTHING`; `color` (= `upper_page`) likewise for the Color page; `sets_tab` / `objects_tab` / `sticker_tab` = `Some(page)`
   in frames where that page is shown; `bottom_area`, `tab_buttons`, `brush_tab`, `brush_tab_content`, `text_tab` as in
   round 4.
   **Preferences** (8.9): `Prefs::side_upper_tab`, `side_lower_tab`, `side_split` are read at start (`AppState::new` copies
@@ -7634,7 +7696,39 @@ Ways in: "Edit Sticker" on the Tool page of a selected stamp (`PanelHit::Sticker
 the row menu of a stamp or text layer, a double-click on its thumbnail, Enter with a stamp selected, View > Sticker and
 the mode strip.
 
+**Stickers P6b (STICKER_PLAN 3.6-3.9).** The **Sticker tab** (`sticker::panels::show`, the fifth upper tab, always
+available): (1) the selected stamp: thumbnail (image: the blob; sticker: `sticker_picture` without stamp styles; text: a
+"T"), name, kind ("Image stamp", "Text stamp", "Sticker, N layers"), "Its picture is shown by N stamps", "N stamps
+selected: the style below goes to all of them", Edit Sticker, Export Picture... ("(on the PC)" with a tablet);
+(2) Sticker style: the preset row (`StylePreset::ALL`, one button each, `ApplyPreset`), Copy / Paste / Clear Style
+(`StyleTarget::Stamps`) and the style editor (`styles_ui::editor`) of the first selected stamp, its changes sent to every
+selected stamp (`SetStampStyles`; "mixed" hint when their styles differ); the Stroke block of a text stamp carries "Text
+also has its own Outline (Text tab). This stroke goes around it."; a locked stamp disables the block; (3) the tray
+(`tray::show`): one 52-pt thumbnail per sticker saved with the project (a stamp shows it or it is kept; the selected one
+framed), a click = `TrayUse`; New Sticker, From picture... ("(on the PC)"), Edit, Duplicate, Delete (only without
+stamps), Export Picture.... The library (P8) and the PhotoCraft link (P9) are not built here. Thumbnails: at most two
+per frame, never while an edit is dragged, keyed by value (`canvas::sticker_key`, pitfall 23), dropped at a document
+change (`PictureThumbs::begin`).
+**Style editor** (`styles_ui.rs`): nine blocks (`BLOCKS`: Die-cut contour, Stroke, Drop shadow, Inner shadow, Outer
+glow, Inner glow, Color overlay, Gradient overlay, Bevel), each a `CollapsingState` header with an on/off box (a click is
+one Final; a block never used is created with defaults scaled by `k = reference side / 512`, unticking keeps the
+numbers, 2.3) and a body with its numbers: lengths 0..=256 px, percentages, angles, colours, the stroke position as
+three buttons (no popup), the gradient's first and last stop. Every slider is `from_get_set` with
+`SliderClamping::Edits` (an idle slider never rewrites a value) and goes through `continuous_edit` (Preview while
+dragged, one Final). **Tool tab in the Sticker view** (`layers_ui::tool_page`): below X / Y the active layer's "Layer
+styles": preset row (`ApplyLayerPreset`, scaled to the artboard), Copy / Paste / Clear (`StyleTarget::Layers`) and the
+editor (`SetLayerStyles`: a content edit). **Stamp tool options**: the source thumbnail (an image or "Sticker: <name>"),
+Choose..., **Edit before placing** (`EditBeforePlacing`, disabled without a source) and **Style** (a list: None and the
+presets, scaled to the chosen picture; a setting, `tools.stamp.styles`; "Custom" when it matches no preset). The image
+row of a selected image stamp gains **Edit** (opens the Sticker view). **Edit menu**: Copy Style / Paste Style / Clear
+Style (`StyleTarget::Layers` in the Sticker view, else `Stamps`).
+
 ### 8.8 Dialogs (`dialogs/*`) [A5]
+
+**Stickers P6b.** `Dialog::StickerShared { users }` (`dialogs/sticker_shared.rs`, STICKER_PLAN 3.1 E6): "Shared
+picture" / "This picture is used by N stickers." / Edit all, Only this one, Cancel; the buttons push
+`Sticker(AnswerShared(Some(AllUsers | ThisStamp)))` or `CloseDialog`; Esc and a click outside are Cancel
+(`dispatch::close_dialog` runs `AnswerShared(None)`). It records `SharedEditAll` / `SharedOnlyThis` / `SharedCancel`.
 
 ```rust
 pub struct DialogsState { /* import: egui textures of the UV thumbnails; export: cached plan + the options it was built from */ }
@@ -7890,6 +7984,8 @@ pub fn pick_project(frame: &eframe::Frame, prefs: &Prefs) -> Option<PathBuf>;
 pub fn pick_save_project(frame: &eframe::Frame, prefs: &Prefs, default_name: &str) -> Option<PathBuf>;
 pub fn pick_image(frame: &eframe::Frame, prefs: &Prefs) -> Option<PathBuf>;
 pub fn pick_folder(frame: &eframe::Frame, prefs: &Prefs) -> Option<PathBuf>;
+/// Stickers P6b: "Export Picture" save dialog, PNG, default `<sanitized name>.png`; a picked name without `.png` gets it.
+pub fn pick_save_png(frame: &eframe::Frame, prefs: &Prefs, default_name: &str) -> Option<PathBuf>;
 // toasts.rs
 #[derive(Default)] pub struct Toasts { /* visible toasts, error counter */ }
 impl Toasts {
@@ -8211,6 +8307,9 @@ pub enum Step {
     /// and the right-click on a Layers row, a click on an item of the row's context menu.
     ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
     Scroll { view: Target, at: [f32; 2], notches: f32, mods: egui::Modifiers },
+    /// Stickers P6b: wheel notches (`scroll_frames`, Line unit, 40 pt per notch) at a screen position: a scenario scrolls
+    /// a page of the side panel to a control before it clicks it (`sticker_tab.rs` `tap!`).
+    ScreenScroll { at: egui::Pos2, notches: f32 },
     /// Round 4 (S2): one `Event::PointerMoved` to the point (normalized in the view rect), no button.
     Hover { view: Target, at: [f32; 2] },
     Key(egui::Modifiers, egui::Key),
@@ -8389,7 +8488,7 @@ counted down) instead of failing (`export_errors`).
 | `export_nouv` | fix_export item 9 (L3). The UV-less tetrahedron (generated layout), a stroke and a Project stamp; everything exported into `<out>_a`; Save As, Open; everything again into `<out>_b`; then as a zip into `<out>_zip` | the export holds flattened + every visible layer + ORA + PSD; `_a` and `_b` byte-identical; the zip's entries equal the loose files |
 | `export_checks` | accept_fixes item E. `default_content` (Base, Paint 1 with the red and blue strokes, the Logo stamp, the WTE text); Logo hidden, Paint 1 at 50 % opacity in Multiply. (E1) `RunExport` Visible into `<out>_ec_vis` and All (`include_hidden`) into `<out>_ec_all` (flattened PNG + per-layer PNGs, no seam padding); (E2) click Paint 1's name, Shift-click WTE's name, right-click, "Export selected layers... (3)", `Shot("hidden")`, the dialog's options into `<out>_ec_sel`; (E3) `SelectLayer(Base)` + `ToggleLayerSelected(WTE)`, `ShowExportLayers`, the flattened PNG ticked, into `<out>_ec_base` | every check reads the files (stack index from `_L<nn>_` in the name) and compares with `reference_composite`, ARCHITECTURE 6.6 written out in the test (f64, opacity and accumulator quantized to u8, alpha-0 rule) over the per-layer PNGs of `_ec_all`: (E1) Visible writes Base, Paint 1, WTE (no Logo), All also Logo (its layer's pixels); the shared files are equal; both flattened files are byte-identical and leave Logo out (the flattened texture is the visible layers under All too, `ExportOptions::include_hidden`): they differ from the reference with Logo in >= 50 % of its opaque texels; (E4) both flattened files equal the reference of the visible layers within 2/255 in every texel, and differ from the reference with Paint 1 as Normal 100 % in >= 100 texels; (E2) the selection is Paint 1, Logo, WTE; the dialog's list (`ToolProbe::export_files`) marks exactly Logo's line "(hidden)", the caption is the selection one without a flattened file; the folder holds the three layers' PNGs (their pixels, Logo with ink); (E3) the caption is the selection one with the flattened file; the folder holds Base's and WTE's PNGs and a flattened PNG equal to the reference of Base + WTE within 2/255, different from the visible stack (Paint 1 not in it) |
 | `export_errors` | fix_export item 9 (L1, L4). Sphere sample; three exports that cannot work: the folder path under a file, a planned file that is a folder (Files, an old file in the folder), the zip's name a folder; then a folder with a dead process's stage folder, temp zip and temp PNG plus `notes.txt`, exported as a zip | each failure: the "Export failed" message, an error toast (announced), nothing new written, the old file unchanged, no `.tmp-` entry; the last export removes the leftovers and keeps `notes.txt` |
-| `side_tabs` | objects-tabs WP4 / WP5 (plan 8.3; `selftest/scenarios/side_tabs.rs`). The Three Objects sample; the Cube selected and the Ball hidden; a click on each upper strip button (Color, Texture sets, Objects, Tool) with `Shot`s `tab_color`, `tab_sets`, `tab_objects`, `tab_tool`; G1 on the Color tab with the Text, Brush, Stamp tools, the Brush tab below (`tab_brush`), Eraser, Text: a click with no text typed (the focus request), then one placing the text "Tabs" on the Color tab; Transform with the text selected and the Text tab below (`tab_text`); G2 on the Tool tab with the Brush and the Layers (`tab_layers`) and the Brush tab below; Fill / Brush / a Layers tab click (one tab rule); the split dragged 80 pt up, the Brush tab, the Layers tab, a double-click on the edge; the Color tab at 900x600 (`small_900`) and 640x480 (`small_640`); back to 1280x800, the Objects tab | each tab click shows exactly its page (G4: the buttons in one row inside the upper group, the side panel at most 300 pt wide; the Objects page records the three rows and the footer); the Objects rows: Cube selected, Ball hidden; G1 (the whole Color page on screen, at a side panel of 740 pt and more) with every tool and lower tab; a tool change keeps the Color tab; the focus request shows the Tool tab and is served; placing a text keeps the Color tab and selects the text; G2 (the Brush options inside the Tool page) with both lower tabs; Fill shows Layers with `side_tab` kept, Brush brings the Brush tab back; the drag makes the lower group 80 pt taller (at most `layers_area_max`), the Brush tab keeps that height, the double-click returns to the automatic height; at every size the groups lie inside the panel and apart with an upper page of at least 90 pt. Also run started at 900x600 and 640x480 (G1 / G2 then not applied) |
+| `side_tabs` | objects-tabs WP4 / WP5 (plan 8.3; `selftest/scenarios/side_tabs.rs`). The Three Objects sample; the Cube selected and the Ball hidden; a click on each upper strip button (Color, Texture sets, Objects, Sticker (stickers P6b), Tool) with `Shot`s `tab_color`, `tab_sets`, `tab_objects`, `tab_sticker`, `tab_tool`; G1 on the Color tab with the Text, Brush, Stamp tools, the Brush tab below (`tab_brush`), Eraser, Text: a click with no text typed (the focus request), then one placing the text "Tabs" on the Color tab; Transform with the text selected and the Text tab below (`tab_text`); G2 on the Tool tab with the Brush and the Layers (`tab_layers`) and the Brush tab below; Fill / Brush / a Layers tab click (one tab rule); the split dragged 80 pt up, the Brush tab, the Layers tab, a double-click on the edge; the Color tab at 900x600 (`small_900`) and 640x480 (`small_640`); back to 1280x800, the Objects tab | each tab click shows exactly its page (G4: the buttons in their rows inside the upper group, no button over another (stickers P6b: one row, or the two rows Tool | Color | Texture sets and Objects | Sticker), the side panel at most 300 pt wide; the Objects page records the three rows and the footer, the Sticker page the tray's New Sticker); the Objects rows: Cube selected, Ball hidden; G1 (the whole Color page on screen, at a side panel of 740 pt and more) with every tool and lower tab; a tool change keeps the Color tab; the focus request shows the Tool tab and is served; placing a text keeps the Color tab and selects the text; G2 (the Brush options inside the Tool page) with both lower tabs; Fill shows Layers with `side_tab` kept, Brush brings the Brush tab back; the drag makes the lower group 80 pt taller (at most `layers_area_max`), the Brush tab keeps that height, the double-click returns to the automatic height; at every size the groups lie inside the panel and apart with an upper page of at least 90 pt. Also run started at 900x600 and 640x480 (G1 / G2 then not applied) |
 | `objects` | objects-tabs WP6 (plan 8.1; `selftest/scenarios/objects.rs`). The Three Objects sample (Floor 0, Cube 1, Ball 2; UV regions Floor u >= 0.5, Cube u < 0.5 / v < 0.5, Ball u < 0.5 / v >= 0.5); the Objects tab; Navigate click at the Cube's projected bounds centre (`Shot("selected")`); H; Wireframe on, `Shot("hidden")`, the 2D view `Shot("hidden_2d")`, back to 3D, Wireframe off; Brush (red) stroke along the floor points x -0.45..0.45, z 0 (the hidden Cube's footprint); an image stamp (Project) clicked at the Cube's point; Alt+H (`Shot("shown")`); a click on the Ball's row, Shift+H, Shift+F (`Shot("isolated")`); the Floor's eye; Ctrl-click the Cube's row, Shift-click the Floor's row, the footer's Show all; the Cube's row, H, Save As `<out>.wtep`, Open it; the Objects tab | three objects `Floor`, `Cube`, `Ball` whose counts add up, nothing hidden, the Tool tab; the click selects exactly the Cube and draws its row; the ray through the point hits the Cube, after H the Floor; H changes neither `revision()`, `is_modified()` nor the undo depth; the stroke changes the Floor's region and the 7x7 texels under the Cube (the floor UV of a ray down the Cube's axis), not the Cube's region, one undo entry "Brush Stroke"; the stamp's layer has ink in the Floor's region and none in the Cube's, the Cube's region of the composite is unchanged; Alt+H: nothing hidden, the ray hits the Cube again, the composite unchanged by showing; the Ball's row selects it; Shift+H hides Floor and Cube; Shift+F puts the camera target on the Ball's centre (1e-3 of the diagonal) and brings it closer; the eye shows the Floor and keeps the selection {Ball}; Ctrl gives {Cube, Ball}, Shift {Floor, Cube}; Show all shows everything and keeps the selection; after the reopen the Cube alone is hidden, the selection is empty, the document is not modified and exactly one toast about hidden objects names the Cube; the side panel layout (`assert_side_areas_apart`) |
 | `objects_path` PATH | objects-tabs WP6 (plan 8.2; `selftest/scenarios/objects.rs`). PATH = a model with several objects (gate: `ABeautifulGame.glb`); opened and accepted (`open_and_accept`); the Objects tab; a click on the first row; `object_reveal` of the last row, a Ctrl-click on it; the frame clock reset, Shift+H; Shift+F (`Shot("isolated")`); `object_reveal = Some(0)` (the list back at the top), Navigate, a click on the best-facing grid point (`best_spots`) whose ray hits the last object; Brush (green): a warm-up stroke and, with the frame clock reset, a second stroke (`hit_stroke` 0 and 1); Alt+H | at least two objects (a clear failure otherwise), unique non-empty names, counts add up (the count is logged); at most `list height / ROW_HEIGHT + 2` rows laid out, the footer drawn; the selection is the first and the last object; after Shift+H exactly those two are visible and no frame of UI work took 250 ms or more (`VISIBILITY_FRAME_MS`); Shift+F puts the camera target on the selection's centre; before the pick the last row is out of the list; the pick selects only the last object and its row lies inside the list (revealed); each stroke makes one undo entry, no frame of the second took more than 140 ms (`BRUSH_FRAME_MS`, ROUND5 B4); Alt+H shows everything |
 | `objects_flow_path` PATH | objects-tabs completeness critic (`selftest/scenarios/objects.rs`). PATH = a model with several objects whose largest-footprint object (the board) has a texture set of its own (gate: `ABeautifulGame.glb`). The user's workflow: the board (largest x/z footprint) hidden from its row (revealed) with H; the piece (first object named "pawn", else the largest other one) selected from its row, Shift+F; a Navigate click where only the hidden board is, then on the piece; Brush (green, +2 size steps): a stroke from the piece's centre out to a point whose ray hits the board when shown and nothing now (`Shot("piece_selected")`); a projected image stamp (size 0.4) on the piece; a wrapped stamp with "jump small gaps" low on the piece; a text on the piece; Navigate (`Shot("designed")`), Preview (`Shot("preview")`); Save As, reopen (`Shot("reopened")`); export the piece's paint layer (per-layer PNG) and every set's flattened PNG; Show all; then the piece hidden and a 6 px stroke on its screen centre | the board-only sets exist; rays straight down over the board hit it when shown, none while hidden (also after the reopen); hiding is view state; the miss deselects, the pick selects the piece; the stroke changes the piece's sets and one undo entry; every stamp / text inks the piece's sets and no layer of a board-only set; the wrapped stamp is a new Wrap placement with jump gaps; the board-only sets' composites never change while it is hidden; the tint is shown with Navigate; after the reopen: the board hidden, one toast names it, not modified, nothing selected, structure and composites as saved; the layer PNG equals the layer and has ink; 15 flattened PNGs verified (`verify_export`, the hidden board's set included); Show all brings the board's ray hits back; with the piece hidden the stroke paints the object behind it (sets disjoint from the piece's), leaves the piece's sets unchanged and ends with "Brush Stroke" |
@@ -8397,6 +8496,9 @@ counted down) instead of failing (`export_errors`).
 | `companion` | Branch companion (`selftest/scenarios/companion.rs`; loopback only, no Android). Sphere, 2D, brush as `pen`. `CompanionAction::StartTest` (127.0.0.1:0, auto-allow); a `TestClient` thread ("Galaxy Tab S8 Ultra (test)", USB, confirm mode) gets the KEY frame (= the window's surface size); shot `companion_dialog`; a 2D pen ramp 0.1 -> 1.0 (`assert_ramp`, contact frames); an eraser-flag stroke (centre erased, Eraser in every contact frame, Brush back); ACTION Undo (ramp whole); 3D barrel drag (camera turned, no paint); two-finger pinch (camera distance smaller); KEY H + TEXT "h", TEXT "i", Backspace into the Text tool's content field after TEXT_WANTED (content "h"); half a stroke and the cable pulled (no button down, no contact, one undo step, chip "Tablet: waiting"). Each input step waits with `Step::Until` until a FRAME's `last_input_seq` confirms it. Final screenshot: the ramp and the cut-off stroke. |
 | `sticker_view` | Stickers P6a (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; the key 4 opens the Sticker view (shot `sticker_enter`); a second picture layer (a red disc) added; the disc dragged on the canvas (`Step::Pointer` on `Target::StickerCanvas`, shot `sticker_moved`); its opacity 50 %; the Layers tab's Down button (shot `sticker_reordered`); Delete; 900x600 (shot `sticker_small`) and back; four undos and four redos; Revert (button) and its undo; Esc (shot `sticker_left`); four undos | opening changes nothing (image stamp, no entry, composite); the add promotes in one entry and changes the model; the drag moves the disc by the drag (+-1 px) in one entry; opacity and reorder one entry each, each changing the model; Delete leaves stamp and sticker with the status line; at 900x600 canvas, divider and 3D half are laid out and the 14 tool buttons fit; each undo restores the composite of the step before (one undo per step), the redos the last state; Revert gives the image stamp and the start picture in one entry "Revert Sticker", its undo the edited state; Esc returns to the 3D view with the Transform tool; undoing everything gives the start (history length, stamps, composite) |
 | `sticker_keys` | Stickers P6a check (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; outside the Sticker view B E G I X S V Shift+E Shift+G R, W twice, M L C U H; Enter opens the view; inside M L W C B E Shift+E G Shift+G I X U V H, S and R, V, F (after a 3x zoom), Delete Backspace Enter, Ctrl+J, Ctrl+[, Ctrl+] (shot `keys_inside`), Ctrl+M, the eight arrows, Shift+X twice, T twice, Shift+F, Ctrl+Z, Esc; then 4 + 1 / 2 / 3 / F5 and 3 | outside: each key's paint tool (Shift+E / Shift+G as E / G), W toggles the wireframe, M L C U H change no tool, view or document; Enter opens the view on the stamp without an entry; inside: each key's sticker tool with the paint tool and the wireframe untouched; S and R do nothing; F refits the camera; Delete / Backspace leave the stamp with the status line, Enter does nothing; Ctrl+J duplicates the sticker layer (promotion, one entry), Ctrl+[ / Ctrl+] move it (one entry each), Ctrl+M only says it is not available; Right / Shift+Down move the active layer by 1 / 10 and all eight arrows back to the start (one entry each); Shift+X and T run their global actions; Ctrl+Z undoes the last nudge; Esc and 1 / 2 / 3 / F5 leave to their mode with the paint tool kept, 4 opens the view again |
+| `sticker_styles` | Stickers P6b (`selftest/scenarios/sticker_tab.rs`). Sphere, 3D; the sample logo as an image stamp and the text "WTE" placed; the Sticker tab; the image selected, Classic sticker clicked (`ScreenClick` on `StylePresetButton(0)`, shot `styles_image`); the text selected, Classic sticker, its Stroke box (shot `styles_both`); three undos | the Sticker tab is the fifth tab in the second row of the strip; each click is one entry; the image stamp gets exactly `ClassicSticker.styles([256, 256])`, the text a contour and a shadow and then a stroke; neither is promoted (image / text sources), the view stays 3D; the stored placements' artwork box (depth excepted: an automatic depth refits to the shadow, 2.6) is unchanged; each linked layer grows (more than 5 % more texels); three undos give the start (history length, stamps and their stickers, composite) |
+| `sticker_tray` | Stickers P6b (`sticker_tab.rs`). Sphere, 3D; a picture file in the run's assets folder made a tray sticker (`NewStickerFromPicture`); the Stamp tool's "Edit before placing" clicked (Tool tab); the red disc added as a second layer (shot `tray_edit_before`); Done; the sticker placed twice (shot `tray_placed_twice`); the first stamp opened, Nudge(10, 0): the question (shot `tray_question`), Edit all clicked; Leave; the second stamp opened, Nudge(0, 12), Only this one clicked (shot `tray_only_this` after Leave); undo all, redo all; Save As, open the saved project | one tray sticker "badge" (kept), the Stamp tool's source, one entry; the view opens on `Tray(id)` with "Not placed yet", nothing placed, no entry; the add asks nothing (a tray target) and is one entry; Done returns to 3D with the Stamp tool and the sticker as its source; two sticker stamps share it, one entry each; the question says 2 and changes nothing; Edit all keeps both on the one sticker and changes the model in one entry; Only this one gives the second stamp its own sticker (detach + edit = two entries) and leaves the first one's layers unchanged; undo all = the start (no stamp, empty tray), redo all = the end; the saved and reopened project has no history, two sticker stamps with different stickers, two tray stickers and equals the saved one (composite, stamps, sticker layers, tray) |
+| `sticker_controls` | Stickers P6b (`sticker_tab.rs`). Sphere; the logo placed and a second stamp of the same picture (Setup); the first stamp opened, Nudge, the question's Cancel clicked; Leave; the Sticker tab: the six presets, Copy / Paste / Clear Style, the nine block boxes (shot `controls_tab`), Export Picture..., Edit Sticker; in the view's Tool tab the layer preset (Outline; the question answered Only this one), the layer's Stroke box, Copy Style (shot `controls_view`); Done; the tray's New Sticker, its item, Duplicate, Delete, Export Picture..., From picture..., the blank item, Edit, Done; the Stamp tool's Edit before placing, Done, the Style list opened and closed. Every control is clicked through `ScreenClick` after `ScreenScroll` brought it into the page | Cancel leaves no dialog, no entry, the image stamp; six presets = six entries (Clear last: no styles); Copy holds the Classic sticker stack, Paste of the same styles is no entry, Clear one; nine boxes = nine entries with every style on and the stamp still an image stamp; the export and From picture... without a path do nothing in a self-test; Edit Sticker opens the view; the layer preset promotes in one entry and the box toggles the stroke off in one more; New Sticker (one entry) becomes the Stamp tool's source; its item chooses the Stamp tool; Duplicate and Delete one entry each; Edit and Edit before placing open the view on the tray sticker |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
 
 Branch `companion`: `Step::Until(label, fn(&AppState, &Scratch) -> Result<bool, String>)` waits, one check per frame
@@ -8601,6 +8703,54 @@ locked layer and an unbuilt tool, Auto-select), `shortcuts.rs` (the sticker tabl
 modes), `pen/mod.rs` (the eraser end in the view), `companion/input.rs` (fingers over the canvas), `io_flows.rs` (never
 in `ui_state`), `dispatch.rs` (the menu commands in the view), `selftest/mod.rs` (`Target`, `WaitMs`, shots), the
 scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P6a check: scenario `sticker_keys` (8.11).
+
+**Stickers P6b: the Sticker tab, styles, tray (STICKER_PLAN 3.6-3.9).**
+- **Targets.** `enter_target(state, StickerTarget)`: `Stamp(id)` as before (`enter_in`), `Tray(id)` (the tray's Edit and
+  "Edit before placing"): entry = `sticker_checkpoint(&[], &[id])`, the top layer active, the tray item selected, and the
+  status line `NOT_PLACED_HINT` ("Not placed yet: ...") while no stamp shows it. `edit_ref` gives `StickerRef::Id`;
+  `differs_from_entry` also compares the tray sticker.
+- **Shared pictures (E6).** `StickerAction::is_content` (layer add / duplicate / delete / reorder / show / lock /
+  opacity / blend / rename / position / nudge, the sticker's name, layer styles and layer presets, Paste / Clear Style
+  on layers) runs through `run_in`'s gate: when the editor's stamp shows a sticker of more than one stamp
+  (`sticker_users`) or an image more than one image stamp shows (`blob_users`), `share_answer` is unset and the command
+  would change something (`is_no_op`: an unchanged name never asks), the command waits in `StickerUi::shared_pending`
+  (a newer one replaces it; a canvas drag ends, nothing of it was applied) and `Dialog::StickerShared { users }` opens.
+  `AnswerShared`: Edit all = `share_answer = AllUsers` (an image stamp is then promoted together with every stamp of its
+  picture); Only this one = `ThisStamp`, and a sticker stamp first gets its own copy (`detach_sticker`, entry "Detach
+  Sticker"); then the waiting command runs (a Preview as a Final; a Move drag's Preview is not replayed). Cancel drops
+  it and asks again next time. The answer holds until the view closes. Tray targets never ask (no stamp of theirs is
+  being edited); style commands on stamps never ask (they never promote, E3).
+- **Styles.** `SetStampStyles` -> `Document::set_styles_of` (one entry per drag, never a promotion); `ApplyPreset` ->
+  `set_styles_each` with each stamp's `stamp_style_reference_size`; `SetLayerStyles` / `ApplyLayerPreset` -> one
+  `set_sticker` entry "Sticker Layer Style"; `CopyStyle(Stamps)` copies the first selected stamp's stack, `(Layers)` the
+  active layer's; `PasteStyle(Stamps)` / `ClearStyle(Stamps)` -> `set_stamps_styles` (one entry "Paste Style"; a paste of
+  the same styles is none), `(Layers)` -> one `set_sticker` entry on the selected layers ("Paste Layer Style" / "Clear
+  Layer Style"). `selected_stamps`: the selected stamp first, then the stamps linked to the selected layers of the Layers
+  list (`Session::layer_selection`).
+- **Tray** (`tray.rs`). `tray_stickers`: stickers with `keep` or a user, ascending id. `NewSticker`: "Sticker N", 512 x
+  512 with one empty picture layer "Layer 1", `keep`, one entry "Add Sticker"; `NewStickerFromPicture(path)`: the image as
+  a blob (`add_stamp_image`), `StickerDoc::from_picture` named after the file stem, `keep`; both become the selected tray
+  item and the Stamp tool's source. `TrayUse`: selected item and source; outside the view also `SetTool(Stamp)` and
+  "Click on the model to place the sticker" (inside the view a status line says to leave it first). `TrayDuplicate`: a
+  copy "<name> copy" (pictures shared). `TrayDelete`: `remove_sticker` (refused while a stamp shows it, the warning
+  toast); a deleted source is forgotten. `ExportPicture(Stamp)`: `stamp_picture(id, true)` ("what you see": styles and
+  tint); `(Sticker)`: `sticker_picture(id, None, 1.0)`; PNG through the save dialog `io_flows::pick_save_png` (default
+  `<name>.png`; never in a self-test run: `resolve_path`), an Info toast "Exported <file> (W x H pixels)".
+- **Placing** (`tools/stamp_place.rs`, 3.6). `SourceKey::Sticker(id, artboard size)`; a `Sticker` source places
+  `StampSource::Sticker` named after the sticker (two placements share it); every new stamp of the Stamp tool goes through
+  `Document::add_stamp_styled` with `tools.stamp.styles` (default none: exactly today's image stamp); the Text tool keeps
+  default styles. **Edit before placing** (`tray::edit_before_placing`): an image source becomes a kept tray sticker (one
+  entry "Add Sticker") and the tool's source; the view opens on it (`Tray`); Done returns with the Stamp tool and the
+  sticker as its source.
+- **Tests.** `sticker/tests_p6b.rs` (a style edit on an image stamp never promotes, a drag one entry, presets scaled; a
+  style drag on a stamp with an automatic depth ends with the refitted depth; Paste onto three selected stamps one entry,
+  the one-slider edit of three stamps one entry, Clear; the E6 question with Cancel, Only this one (image and sticker
+  stamp), Edit all, an unchanged name never asks; layer styles a content edit with Copy / Paste / Clear / preset; the
+  tray; Edit before placing with Revert and Done; Export Picture writes the finished picture; the guard and content
+  lists), `styles_ui.rs`, `dialogs/sticker_shared.rs`, `tools/stamp_place.rs`
+  (`the_stamp_tool_places_images_with_their_styles_and_tray_stickers`), `panels/side_groups.rs`, `prefs.rs`,
+  `control_sweep/sticker_panel_tests.rs`, `control_sweep/panel_tests.rs` (9.2); scenarios `sticker_styles`,
+  `sticker_tray`, `sticker_controls` (8.11); core `k6b_*` (9.1).
 
 ---
 
@@ -9211,8 +9361,28 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `sticker::tests::{an_unchanged_layer_name_is_no_edit_and_does_not_promote, a_drag_is_finished_by_save_and_undone_alone_by_undo,
   leaving_the_view_frees_the_canvas_and_thumbnail_caches}`, and the Layer-menu mapping in
   `dispatch::tests::the_sticker_view_maps_the_layer_commands_to_the_sticker` (Delete in the view leaves the stamp).
+- Branch `stickers`, P6b (`doc_sticker_tab_tests.rs`): `k6b_1` (`add_stamp_styled` with default styles is `add_stamp`:
+  pixels, object, history), `k6b_2` (styled: one entry, the stored placement keeps the artwork box, the automatic depth
+  covers the shadow and is the bake footprint's, the shadow is baked, one undo removes it), `k6b_3` (`set_styles_of` on
+  three stamps: a Preview, Preview, Final drag is one entry, no promotion, one undo; a duplicate id counts once, nothing
+  to change is no entry; a locked stamp refuses everything; unknown stamp), `k6b_4` (`stamp_style_reference_size`: image
+  pixels; a text about one line at 128 px per em at two on-model sizes (within 15 %: hinting and padding); a sticker's
+  artboard; the presets scale with it). App tests of P6b: 8.15 and 9.2.
 
 ### 9.2 `wte_app` tests
+
+Stickers P6b (app, besides `sticker/tests_p6b.rs` of 8.15): `control_sweep/sticker_panel_tests.rs`
+(`every_control_of_the_sticker_tab_is_laid_out_and_queues_its_action`: every control's rect and the action it queues,
+idle queues nothing; `an_open_style_block_sends_previews_and_one_final`; `the_stamp_tool_options_and_the_edit_menu_style_items`;
+`the_sticker_view_tool_tab_has_the_layer_styles_and_the_menu_targets_layers`), `control_sweep/panel_tests.rs`
+(`upper_tabs_show_one_page_each` with five tabs in two rows and in one row, `the_two_row_strip_keeps_the_side_panel_guarantees`:
+G1-G3 with the second row, the page minimum at 900x600 / 640x480 for every tab), `panels::side_groups::tests`
+(the sizing with a one- and a two-row strip; `UpperTab::ALL` indices 0..=4, "sticker", the two rows hold every tab once),
+`prefs::tests::side_panel_tabs_and_split_round_trip_and_read_leniently` ("sticker" reads back; an unknown name, as
+"sticker" is for an older build, gives Tool), `state::tests` (the Stamp tool's source and styles are never serialized),
+`styles_ui::tests`, `dialogs::sticker_shared::tests`, `tools::stamp_place::tests::the_stamp_tool_places_images_with_their_styles_and_tray_stickers`
+(a `Blob` source with default styles is an image stamp; with the tool's styles one entry; a tray sticker placed twice),
+`selftest::tests::scroll_and_key_frames` (`ScreenScroll`), the scenario count (59).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`
@@ -9507,7 +9677,7 @@ selected text), `a_short_layer_list_gives_its_room_to_the_tool_options` (+ the d
 `idle_panels_with_every_kind_of_selection_queue_nothing` (each upper tab; a tool change keeps it),
 `toolbar_buttons_select_tools_and_colour_chips_swap_and_reset` (the primary chip shows the Color tab),
 `upper_tabs_show_one_page_each` (a strip click through AccessKit draws exactly that page; G4 at 1280x800, 900x600 and
-640x480), `a_tool_change_keeps_the_upper_tab_and_text_focus_shows_the_tool_tab` (toolbar and keys keep Color; the Text
+640x480; stickers P6b: five tabs, two rows at 300 pt and one row in a 420 pt panel, no button over another), `a_tool_change_keeps_the_upper_tab_and_text_focus_shows_the_tool_tab` (toolbar and keys keep Color; the Text
 focus request shows Tool and focuses the field; a stale request changes nothing; Object > Objects Panel),
 `the_split_is_dragged_kept_and_reset}` (drag 80 pt, kept for every lower tab, clamped at 900x600 / 640x480, double-click =
 automatic, `sync_prefs`, a start from a stored split); `control_sweep::text_panel_tests::{text_rows_fit_the_panel,

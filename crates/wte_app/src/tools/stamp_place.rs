@@ -15,7 +15,7 @@ use wte_core::{
 use wte_core::text::place_anchor_at_centre;
 
 use crate::action::AppAction;
-use crate::state::{AppState, TextSettings, ToolKind, ViewId};
+use crate::state::{AppState, StampToolSource, TextSettings, ToolKind, ViewId};
 use crate::tools::{NO_UV_TEXT, Surface, Tool, ViewPointer, ViewXform, error_text, set_size};
 use crate::view::draw_quad;
 
@@ -44,6 +44,8 @@ enum PreviewOutline {
 enum SourceKey {
     Image(wte_core::BlobId),
     Text(TextSettings),
+    /// Stickers P6b: a tray sticker, with its artboard size (an edit before placing can change it).
+    Sticker(wte_core::StickerId, [u32; 2]),
 }
 
 /// The measured source: its pixel size and, for a text, its frame (anchor and pixels per em).
@@ -188,7 +190,11 @@ impl StampPlaceTool {
     fn source_key(state: &AppState) -> Option<SourceKey> {
         match state.tool {
             ToolKind::Text if !state.tools.text.content.trim().is_empty() => Some(SourceKey::Text(state.tools.text.clone())),
-            ToolKind::Stamp => state.tools.stamp.source.map(SourceKey::Image),
+            ToolKind::Stamp => match state.tools.stamp.source {
+                StampToolSource::None => None,
+                StampToolSource::Blob(blob) => Some(SourceKey::Image(blob)),
+                StampToolSource::Sticker(id) => Some(SourceKey::Sticker(id, state.doc()?.sticker(id)?.size())),
+            },
             _ => None,
         }
     }
@@ -201,10 +207,16 @@ impl StampPlaceTool {
                 let name = wte_core::text_stamp_name(&state.tools.text.content);
                 text_source(state, warn).map(|s| (s, name))
             }
-            ToolKind::Stamp => {
-                let blob = state.tools.stamp.source?;
-                Some((StampSource::Image { blob }, image_stamp_name(&state.tools.stamp.source_name)))
-            }
+            ToolKind::Stamp => match state.tools.stamp.source {
+                StampToolSource::None => None,
+                StampToolSource::Blob(blob) => Some((StampSource::Image { blob }, image_stamp_name(&state.tools.stamp.source_name))),
+                // Stickers P6b (3.6): a tray sticker; the stamp is named after the sticker.
+                StampToolSource::Sticker(sticker) => {
+                    let name = state.doc()?.sticker(sticker)?.name.trim().to_owned();
+                    let name = if name.is_empty() { "Sticker".to_owned() } else { name };
+                    Some((StampSource::Sticker { sticker }, name))
+                }
+            },
             _ => None,
         }
     }
@@ -504,8 +516,10 @@ impl Tool for StampPlaceTool {
             return false;
         };
         let what = Self::what(state);
+        // Stickers P6b (3.6): new stamps of the Stamp tool get the tool's styles (none by default: exactly `add_stamp`).
+        let styles = if state.tool == ToolKind::Stamp { state.tools.stamp.styles.clone() } else { wte_core::StyleStack::default() };
         let Some(doc) = state.doc_mut() else { return false };
-        match doc.add_stamp(&name, source, placement, home) {
+        match doc.add_stamp_styled(&name, source, placement, home, styles) {
             Ok(id) if doc.stamp_is_unbaked(id) => {
                 // Round 5 (R5-1): the bake runs on a worker; the warning below comes when it lands (`stamp_bakes`).
                 // The gizmo frame shows at once where the decal will appear.
@@ -579,7 +593,7 @@ mod tests {
         let img = samples::sample_stamp_image(64);
         let png = encode_png(img.width, img.height, &img.data, wte_core::PngLevel::Fast).unwrap();
         let blob = state.doc_mut().unwrap().add_image_blob("ring.png", Arc::from(png)).unwrap();
-        state.tools.stamp.source = Some(blob);
+        state.tools.stamp.source = crate::state::StampToolSource::Blob(blob);
         state.tools.stamp.source_name = "ring.png".to_owned();
     }
 
@@ -619,6 +633,59 @@ mod tests {
         assert_eq!(set.layers.len(), 3);
         assert!(matches!(set.layers[2].kind, LayerKind::Stamp { .. }));
         assert_eq!(session.doc.history.undo_len(), 1);
+    }
+
+    /// Stickers P6b (STICKER_PLAN 3.6): a `Blob` source with default styles is exactly an image stamp; with the tool's
+    /// styles the stamp gets them in the same one entry; a tray sticker places a sticker stamp (twice: both show it).
+    #[test]
+    fn the_stamp_tool_places_images_with_their_styles_and_tray_stickers() {
+        let mut state = state_with(SampleKind::Sphere);
+        with_image(&mut state);
+        state.tool = ToolKind::Stamp;
+        let xf = xf_3d(&mut state);
+        let mut tools = ToolController::new();
+        let p = pointer(&state, &xf, xf.rect.center(), egui::Modifiers::NONE);
+        tools.press(&mut state, &xf, &p, egui::PointerButton::Primary);
+        let plain = state.session.as_ref().unwrap().selected_stamp.unwrap();
+        let object = state.doc().unwrap().stamp(plain).unwrap().clone();
+        assert!(matches!(object.source, StampSource::Image { .. }) && object.styles.is_default(), "{object:?}");
+
+        // With the tool's styles: one entry, the styles on the stamp, the source an image.
+        let styles = wte_core::StylePreset::ClassicSticker.styles([64, 64]);
+        state.tools.stamp.styles = styles.clone();
+        state.tool = ToolKind::Stamp;
+        let undo = state.doc().unwrap().history.undo_len();
+        let p = pointer(&state, &xf, at(&xf, 0.45, 0.45), egui::Modifiers::NONE);
+        tools.press(&mut state, &xf, &p, egui::PointerButton::Primary);
+        let styled = state.session.as_ref().unwrap().selected_stamp.unwrap();
+        assert_ne!(styled, plain);
+        let object = state.doc().unwrap().stamp(styled).unwrap().clone();
+        assert!(matches!(object.source, StampSource::Image { .. }));
+        assert_eq!(object.styles, styles.sanitized());
+        assert_eq!(state.doc().unwrap().history.undo_len(), undo + 1, "one entry");
+
+        // A tray sticker, placed twice: two sticker stamps showing the same sticker.
+        let blob = state.tools.stamp.source.blob().unwrap();
+        let size = state.doc_mut().unwrap().image_size(blob).unwrap();
+        let mut sticker = wte_core::StickerDoc::from_picture("Tray one", wte_core::PicturePixels::Blob(blob), size);
+        sticker.keep = true;
+        let id = state.doc_mut().unwrap().add_sticker(sticker).unwrap();
+        state.tools.stamp.source = crate::state::StampToolSource::Sticker(id);
+        state.tools.stamp.styles = wte_core::StyleStack::default();
+        let mut placed = Vec::new();
+        for x in [0.4, 0.6] {
+            state.tool = ToolKind::Stamp;
+            let p = pointer(&state, &xf, at(&xf, x, 0.55), egui::Modifiers::NONE);
+            tools.press(&mut state, &xf, &p, egui::PointerButton::Primary);
+            placed.push(state.session.as_ref().unwrap().selected_stamp.unwrap());
+        }
+        let doc = state.doc().unwrap();
+        for s in &placed {
+            let object = doc.stamp(*s).unwrap();
+            assert_eq!(object.source, StampSource::Sticker { sticker: id });
+            assert_eq!(object.name, "Tray one");
+        }
+        assert_eq!(doc.sticker_users(id), placed);
     }
 
     #[test]
@@ -862,7 +929,7 @@ mod tests {
     fn an_empty_bake_is_reported() {
         let mut state = state_with(SampleKind::Sphere);
         with_image(&mut state);
-        let blob = state.tools.stamp.source.unwrap();
+        let blob = state.tools.stamp.source.blob().unwrap();
         let doc = state.doc_mut().unwrap();
         let c = doc.mesh.bounds.center();
         let r = doc.mesh.bounds.diagonal() * 0.29;

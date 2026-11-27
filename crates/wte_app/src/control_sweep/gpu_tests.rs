@@ -102,6 +102,7 @@ impl FullApp {
             Dialog::TabletHelp => "TabletHelp",
             Dialog::Companion => "Companion",
             Dialog::CloseOpenings(_) => "CloseOpenings",
+            Dialog::StickerShared { .. } => "StickerShared",
         }
     }
 

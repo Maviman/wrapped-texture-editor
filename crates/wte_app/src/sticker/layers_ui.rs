@@ -365,6 +365,7 @@ pub(crate) fn tool_page(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelS
             }
             help(ui, "Right or middle drag: pan  |  Wheel: zoom  |  Esc or Done: back");
             position_fields(ui, state, ps, &mut actions);
+            layer_styles(ui, state, ps, &mut actions);
         });
     });
     state.actions.extend(actions);
@@ -393,4 +394,29 @@ fn position_fields(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState,
             continuous_edit(ps, actions, ui, &ry, |commit| sticker(StickerAction::SetLayerPosition(id, [t.x, y], commit)));
         });
     });
+}
+
+/// Stickers P6b (STICKER_PLAN 3.2): the active layer's styles (the preset row scaled to the artboard, Copy / Paste /
+/// Clear for the selected layers, and the style editor); each change is a content edit of the sticker.
+fn layer_styles(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>) {
+    let Some(edit) = edit_of(state).cloned() else { return };
+    let Some(session) = state.session.as_mut() else { return };
+    let Some(shown) = shown(&mut session.doc, &edit) else { return };
+    let Some(doc) = shown.layers() else { return };
+    let Some(layer) = edit.active_layer.and_then(|id| doc.layer(id)).cloned() else { return };
+    let [w, h] = doc.size();
+    let k = w.max(h).max(1) as f32 / 512.0;
+    let mut hits = Vec::new();
+    ui.separator();
+    let head = ui.label(egui::RichText::new("Layer styles").strong());
+    hits.push((PanelHit::StickerLayerStyles, head.rect));
+    if let Some(preset) = crate::sticker::styles_ui::preset_row(ui, &mut hits, !layer.locked) {
+        actions.push(sticker(StickerAction::ApplyLayerPreset(preset)));
+    }
+    crate::sticker::panels::copy_paste_row(ui, state, crate::sticker::StyleTarget::Layers, !layer.locked, actions, &mut hits);
+    let id = layer.id;
+    let make = move |styles: wte_core::StyleStack, commit: wte_core::Commit| sticker(StickerAction::SetLayerStyles(id, Box::new(styles), commit));
+    let mut cx = crate::sticker::styles_ui::EditorCx { ps, out: actions, hits: &mut hits, make: &make, k, text_note: false, mixed: false };
+    crate::sticker::styles_ui::editor(ui, "layer", &layer.styles, !layer.locked, &mut cx);
+    state.panel_rects.extend(hits);
 }

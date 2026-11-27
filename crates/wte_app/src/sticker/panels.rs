@@ -1,0 +1,168 @@
+// Owner: stickers P6b (STICKER_PLAN 3.7, 3.8, 3.9; ARCHITECTURE 8.7, 8.15). The Sticker tab, the fifth tab of the side
+// panel's upper group, always available (also outside the Sticker view). Top to bottom: (1) the selected stamp
+// (thumbnail, name, kind, Edit Sticker, Export Picture...), (2) Sticker style: the preset row, Copy / Paste / Clear and
+// the stamp-level style editor for image, text and sticker stamps without opening the editor (E3); with several stamp
+// layers selected it edits all of them (3.7), (3) the tray (`tray.rs`). The library (P8) and the PhotoCraft link
+// (P9) come later. Every command is an `AppAction`; every control has a button (tablet rule of 3.10) and a rect in
+// `state.panel_rects`.
+
+use eframe::egui;
+use egui::{Rect, Sense, vec2};
+use wte_core::{StampSource, StyleStack};
+
+use crate::action::AppAction;
+use crate::panels::{PanelState, paint_thumb};
+use crate::state::{AppState, PanelHit};
+use crate::sticker::styles_ui::{self, EditorCx};
+use crate::sticker::{PictureOf, StickerAction, StyleTarget, selected_stamps, tray};
+
+/// Side of the selected stamp's thumbnail.
+const STAMP_THUMB: f32 = 56.0;
+
+fn sticker(action: StickerAction) -> AppAction {
+    AppAction::Sticker(action)
+}
+
+/// A bold section heading.
+fn heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(text).strong());
+}
+
+/// The Sticker page. Returns the rect of its content.
+pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState) -> Rect {
+    let generation = state.session.as_ref().map(|s| s.scene_generation);
+    state.sticker_ui.pictures.begin(generation);
+    let mut actions = Vec::new();
+    let mut hits = Vec::new();
+    let out = ui.vertical(|ui| {
+        if state.session.is_none() {
+            ui.weak("Open a model first.");
+            return;
+        }
+        selected_block(ui, state, ps, &mut actions, &mut hits);
+        ui.separator();
+        heading(ui, "Sticker tray");
+        tray::show(ui, state, &mut actions, &mut hits);
+    });
+    state.actions.extend(actions);
+    state.panel_rects.extend(hits);
+    out.response.rect
+}
+
+/// (1) the selected stamp and (2) its style.
+fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>, hits: &mut Vec<(PanelHit, Rect)>) {
+    let stamps = selected_stamps(state);
+    let Some(first) = stamps.first().copied() else {
+        heading(ui, "Selected stamp");
+        ui.weak("Select a stamp or a text (Transform tool, or its layer) to style it or edit it as a sticker.");
+        return;
+    };
+    let Some(object) = state.doc().and_then(|d| d.stamp(first)).cloned() else { return };
+    let locked = stamps.iter().any(|id| state.doc().is_some_and(|d| d.stamp_locked(*id)));
+    heading(ui, if stamps.len() > 1 { "Selected stamps" } else { "Selected stamp" });
+    let (kind, users) = match &object.source {
+        StampSource::Image { blob } => ("Image stamp".to_owned(), state.doc().map_or(0, |d| d.blob_users(*blob).len())),
+        StampSource::Text(_) => ("Text stamp".to_owned(), 1),
+        StampSource::Sticker { sticker } => {
+            let layers = state.doc().and_then(|d| d.sticker(*sticker)).map_or(0, |d| d.layers.len());
+            let s = if layers == 1 { "" } else { "s" };
+            (format!("Sticker, {layers} layer{s}"), state.doc().map_or(0, |d| d.sticker_users(*sticker).len()))
+        }
+    };
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(STAMP_THUMB, STAMP_THUMB), Sense::hover());
+        let thumb = match &object.source {
+            StampSource::Image { blob } => tray::blob_thumb(ui.ctx(), state, *blob),
+            StampSource::Sticker { sticker } => tray::sticker_thumb(ui.ctx(), state, *sticker),
+            StampSource::Text(_) => None,
+        };
+        let aspect = thumb.map_or(1.0, |(_, [w, h])| w as f32 / h.max(1) as f32);
+        paint_thumb(ui.painter(), rect, thumb.map(|(t, _)| t), aspect);
+        if matches!(object.source, StampSource::Text(_)) {
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "T", egui::FontId::proportional(28.0), egui::Color32::from_gray(60));
+        }
+        ui.vertical(|ui| {
+            ui.label(object.name.clone());
+            ui.weak(kind);
+            if users > 1 {
+                ui.weak(format!("Its picture is shown by {users} stamps"));
+            }
+            if stamps.len() > 1 {
+                ui.weak(format!("{} stamps selected: the style below goes to all of them", stamps.len()));
+            }
+        });
+    });
+    let on_pc = if state.companion.session.is_some() { " (on the PC)" } else { "" };
+    ui.horizontal_wrapped(|ui| {
+        let key = crate::shortcuts::shortcut_text(ui.ctx(), "Sticker");
+        let resp = ui.button("Edit Sticker").on_hover_text(format!("Open the stamp in the Sticker view ({key})"));
+        hits.push((PanelHit::StickerTabEdit, resp.rect));
+        if resp.clicked() {
+            actions.push(sticker(StickerAction::Enter(Some(first))));
+        }
+        let resp = ui
+            .button(format!("Export Picture...{on_pc}"))
+            .on_hover_text("Save the finished picture of the stamp (with its border and shadow) as a PNG");
+        hits.push((PanelHit::StickerTabExport, resp.rect));
+        if resp.clicked() {
+            actions.push(sticker(StickerAction::ExportPicture(PictureOf::Stamp(first), None)));
+        }
+    });
+
+    heading(ui, "Sticker style");
+    if locked {
+        ui.colored_label(ui.visuals().warn_fg_color, "A selected stamp's layer is locked: unlock it to change its style.");
+    }
+    if let Some(preset) = styles_ui::preset_row(ui, hits, !locked) {
+        actions.push(sticker(StickerAction::ApplyPreset(preset)));
+    }
+    copy_paste_row(ui, state, StyleTarget::Stamps, !locked, actions, hits);
+    let mixed = stamps.iter().any(|id| state.doc().and_then(|d| d.stamp(*id)).is_some_and(|s| s.styles != object.styles));
+    let k = reference_k(state, first);
+    let make_stamps = stamps.clone();
+    let make = move |styles: StyleStack, commit: wte_core::Commit| sticker(StickerAction::SetStampStyles(make_stamps.clone(), Box::new(styles), commit));
+    let text_note = matches!(object.source, StampSource::Text(_));
+    let mut cx = EditorCx { ps, out: actions, hits, make: &make, k, text_note, mixed };
+    styles_ui::editor(ui, "stamp", &object.styles, !locked, &mut cx);
+}
+
+/// Copy / Paste / Clear Style for `target`.
+pub(crate) fn copy_paste_row(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    target: StyleTarget,
+    enabled: bool,
+    actions: &mut Vec<AppAction>,
+    hits: &mut Vec<(PanelHit, Rect)>,
+) {
+    let has_copy = state.style_clipboard.is_some();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let resp = ui.button("Copy Style").on_hover_text("Remember these styles to paste them onto other stamps or layers");
+        hits.push((PanelHit::StyleCopy, resp.rect));
+        if resp.clicked() {
+            actions.push(sticker(StickerAction::CopyStyle(target)));
+        }
+        let resp = ui
+            .add_enabled(enabled && has_copy, egui::Button::new("Paste Style"))
+            .on_hover_text("Give the selection the copied styles")
+            .on_disabled_hover_text("Copy a style first");
+        hits.push((PanelHit::StylePaste, resp.rect));
+        if resp.clicked() {
+            actions.push(sticker(StickerAction::PasteStyle(target)));
+        }
+        let resp = ui.add_enabled(enabled, egui::Button::new("Clear Style")).on_hover_text("Remove every style");
+        hits.push((PanelHit::StyleClear, resp.rect));
+        if resp.clicked() {
+            actions.push(sticker(StickerAction::ClearStyle(target)));
+        }
+    });
+}
+
+/// The scale of the default numbers of a newly ticked style block for stamp `id` (reference side / 512, as the
+/// presets).
+fn reference_k(state: &mut AppState, id: wte_core::StampId) -> f32 {
+    let size = state.doc_mut().and_then(|d| d.stamp_style_reference_size(id).ok()).unwrap_or([512, 512]);
+    size[0].max(size[1]).max(1) as f32 / 512.0
+}

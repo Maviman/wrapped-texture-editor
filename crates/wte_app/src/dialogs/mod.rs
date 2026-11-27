@@ -14,6 +14,7 @@ pub mod export;
 pub mod import;
 pub mod message;
 pub mod progress;
+pub mod sticker_shared;
 pub mod tablet;
 pub mod unsaved;
 
@@ -56,6 +57,7 @@ pub fn show(ctx: &egui::Context, cx: &mut ViewCx<'_>, ds: &mut DialogsState) {
         Dialog::TabletHelp => tablet::show(ctx, cx),
         Dialog::Companion => companion::show(ctx, cx),
         Dialog::CloseOpenings(st) => crate::brush_flows::show_openings_dialog(ctx, cx, st),
+        Dialog::StickerShared { users } => sticker_shared::show(ctx, cx, *users),
     }
     // Always put back: dialogs never assign `state.dialog` themselves, they push actions.
     cx.state.dialog = dialog;

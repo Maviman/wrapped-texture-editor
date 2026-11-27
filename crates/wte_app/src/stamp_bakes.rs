@@ -570,7 +570,7 @@ mod tests {
         let doc = state.doc_mut().unwrap();
         doc.set_defer_final_bakes(deferred);
         let blob = doc.add_image_blob("ring.png", Arc::from(png)).unwrap();
-        state.tools.stamp.source = Some(blob);
+        state.tools.stamp.source = crate::state::StampToolSource::Blob(blob);
         state.tools.stamp.source_name = "ring.png".to_owned();
         state
     }
@@ -751,7 +751,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut jobs = Jobs::new();
         let mut state = stamp_state(true);
-        let blob = state.tools.stamp.source.unwrap();
+        let blob = state.tools.stamp.source.blob().unwrap();
         let doc = state.doc_mut().unwrap();
         let c = doc.mesh.bounds.center();
         let r = doc.mesh.bounds.diagonal() * 0.29;

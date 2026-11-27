@@ -25,6 +25,19 @@ Silent install: `Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART [/COMPONENTS
 [`.github/workflows/installer.yml`](.github/workflows/installer.yml) when a `v<version>` tag matching `Cargo.toml` is
 pushed; the installer script is [`installer/WrappedTextureEditor.iss`](installer/WrappedTextureEditor.iss).
 
+## Stickers (in progress, branch `stickers`)
+
+- Every image, text and sticker stamp can have **layer styles**: a die-cut contour (the white sticker border), stroke,
+  drop shadow, inner shadow, outer and inner glow, colour and gradient overlay, bevel, with presets (Classic sticker,
+  Outline, Glow, Badge, Shadow only). The **Sticker** tab of the side panel styles the selected stamps without opening
+  an editor; Copy / Paste / Clear Style (also in the Edit menu) move a style between stamps.
+- A **sticker** is a small layered picture: open a stamp in the **Sticker view** (key 4, or Edit Sticker) to change its
+  layers with the model beside it. The **sticker tray** keeps the project's stickers: make one from a picture or blank,
+  place it with the Stamp tool (several stamps can share one; editing a shared one asks "Edit all / Only this one"),
+  "Edit before placing", Export Picture as PNG.
+- Coming in this branch: painting, selections and cut-out in the sticker editor, text and shape layers, and editing a
+  sticker in PhotoCraft or Photoshop with Ctrl+S updating the model.
+
 ## Pen tablets
 
 - Graphics tablets and pen displays (Wacom, Huion, XP-Pen, Surface) work through **Windows Ink**: keep it on in the

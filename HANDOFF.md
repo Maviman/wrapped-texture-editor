@@ -81,11 +81,15 @@ import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_p
 brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
-companion_host sticker_view sticker_keys` (56; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
+companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls` (59; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
-`sticker_keys` = the P6a check: every key of the Sticker view's table pressed in both modes, shot `keys_inside`)
+`sticker_keys` = the P6a check: every key of the Sticker view's table pressed in both modes, shot `keys_inside`;
+P6b: `sticker_styles` (Classic sticker on an image and a text stamp from the Sticker tab, shots `styles_image`,
+`styles_both`), `sticker_tray` (a tray sticker from a picture file, Edit before placing, placed twice, the shared-picture
+question with Edit all and Only this one, save / reopen; shots `tray_edit_before`, `tray_placed_twice`, `tray_question`,
+`tray_only_this`), `sticker_controls` (every new P6b control clicked once; shots `controls_tab`, `controls_view`))
 
 `*_path` scenarios need a PATH argument (a model); `objects_path` needs a model with **several objects** (gate:
 `ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model; `objects_flow_path` (the whole user workflow: hide the board,
@@ -151,6 +155,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
+| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P6b built and checked up to P6a; P7a-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
 | companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -193,6 +198,25 @@ the app is unchanged (regression shots identical to the e9c6567 exe). No new cra
 tablet (`dist/HOW_TO_TEST.txt` "Tablet companion" + the tablet repo's `docs/HOW_TO_TEST.md`), incl. Bluetooth (never
 run by agents), the Windows Firewall prompt for Wi-Fi, the Samsung USB driver and Air command on the S Pen button.
 
+### 5.4 Stickers (branch `stickers`)
+
+Plan `docs/plans/STICKER_PLAN.md` (revision 3; section 7 = the packages, 8.7 = the hand tests, 11 / 13.8 = the defaults
+the user accepted), ARCHITECTURE 1.12, 5.27, 5.28, 8.15. Built so far (one builder and one checker per package, notes
+`docs/notes/sticker/`): P0 baseline and fixtures, P1 styles maths, P2 selection / cut-out maths, P3a / P3b the sticker
+document in the core, P4 project format 4 and `.wtes`, P5a / P5b / P5c the PSD reader, writer and link logic, P6a the
+Sticker view (canvas, layers, Move / Hand, keys), **P6b** the Sticker tab (fifth upper tab, two rows of tabs at the
+default panel width), stamp styles for image, text and sticker stamps with presets, Copy / Paste / Clear Style, the
+sticker tray, "Edit before placing", Export Picture, and the "Edit all / Only this one" question for shared pictures.
+Next: P7a painting, P7b selections and cut-out, P8 layout / text / shapes / library, P9a / P9b the editor link in the
+app, P10a / P10b / P11 drop, clipboard, drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if
+everything is green; then the gate.
+
+**Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
+hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open
+ones listed here. **Owed so far:** all of them (none can be run yet: the link, drop and clipboard come with P9-P11);
+the "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b part) can be tried now: styles, tray, Edit before placing, the
+shared-picture question, Export Picture, the five tabs.
+
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 
 Plan `docs/plans/ROUND8_PLAN.md` (user answers in its section 12), report `docs/reports/ROUND8_GATE_REPORT.md`,
@@ -222,7 +246,8 @@ shares texels with its mirror half); ABeautifulGame's blobs on other pieces come
   shows the Color tab, a tool change never leaves the Color tab, and at 1280x800 and above the whole picker is on
   screen whenever the Color tab is shown (ARCHITECTURE 1.9, 8.7 guarantee G1).
 - No support for pre-round-2 projects or the legacy no-UV layout.
-- No image editor needed for PSD / ORA: validate exports with Pillow (`tools/round3/check_exports.py`).
+- No image editor needed for PSD / ORA: validate exports with Pillow (`tools/round3/check_exports.py`). (This is
+  about checking exports. Since 2026-11-25 stickers have their own editor in the app, decision below.)
 - Round 4 (`docs/plans/ROUND4_PLAN.md` section 7): no "connected surface" checkbox; opening an open shape file asks
   how to close its openings; fonts from the Windows fonts folder; "segmented" text = per-gap character spacing.
 - Round 6 (`docs/plans/ROUND6_PLAN.md` section 11): new stamps start in **Project**; Wrap folds over every edge;
@@ -237,6 +262,16 @@ shares texels with its mirror half); ABeautifulGame's blobs on other pieces come
   **selecting never restricts painting**; hiding / selecting is view state (no undo entry, not "modified"); hidden
   object names are saved in the project, the selection is not. Keys H / Shift+H / Alt+H / Shift+F (Alt+H to be tried
   by hand on Windows; fallback Ctrl+Shift+H). Stamps bake against what is visible when they are baked.
+- Stickers (2026-11-25/26, `docs/plans/STICKER_PLAN.md` 0.1, 11, 13.8): WTE gets its **own sticker editor** (modelled on
+  PhotoCraft's tools, clean reimplementation, no new crates) **plus "Edit in PhotoCraft"** and (rev 3, "Yes, add
+  Photoshop") **"Edit in Photoshop"** for anything bigger (Ctrl+S there updates the sticker in place, keeping its
+  placement; placement edits in WTE never touch the link); a sticker is a **layered** mini document (picture, text and
+  shape layers with their own styles), project format 4; support PhotoCraft v0.2.0 and the latest; the editor also
+  works from the tablet companion. Defaults taken (section 11): styles stay in WTE (not written into the PSD), a link
+  needs a saved project and WTE never rewrites the linked file by itself, a "PSD" drag handle, **Sticker is the fifth
+  upper tab** (Tool | Color | Texture sets | Objects | Sticker; two rows when one does not fit the panel), linked texture
+  paint layers built (P12), paste follows the pointer, Sticker-view keys with X for Text, S1 / S2 only if P0-P13 are
+  green, version 0.4.0 but no tag / release / merge until the user's hand tests (5.4).
 - Brush speed (after round 7): on the old CPU-only laptop the remaining lag (Size 50 trails 0.5-0.8 s, Size 512
   keeps painting 2-4 s after release on ABeautifulGame) was accepted ("only so much you can do without a GPU").
   **The new machine has a GPU — ask the user whether a GPU brush is now wanted** before planning one.

@@ -310,6 +310,21 @@ impl Document {
     /// or a UV placement in another set than `home_set`, `UnknownBlob` / `Image` for an image source that is missing or
     /// does not decode, `Text` when the text cannot be rasterized.
     pub fn add_stamp(&mut self, name: &str, source: StampSource, placement: Placement, home_set: TextureSetId) -> Result<StampId, EditError> {
+        self.add_stamp_styled(name, source, placement, home_set, StyleStack::default())
+    }
+
+    /// `add_stamp` with stamp-level styles (stickers P6b, STICKER_PLAN 3.6: the Stamp tool's styles for new stamps),
+    /// one entry. `placement` is the stored placement (the artwork box); with styles that draw outside the artwork an
+    /// automatic depth of a projected placement is refitted to the bake footprint (2.6 "Auto depth"). With default
+    /// styles exactly `add_stamp`.
+    pub fn add_stamp_styled(
+        &mut self,
+        name: &str,
+        source: StampSource,
+        placement: Placement,
+        home_set: TextureSetId,
+        styles: StyleStack,
+    ) -> Result<StampId, EditError> {
         self.guard_no_stroke()?;
         self.flush_pending_edit();
         if self.set(home_set).is_none() {
@@ -364,7 +379,17 @@ impl Document {
 
         let before = self.snapshot_structure(&[]);
         let id = StampId(self.alloc_id());
-        let object = StampObject { id, name: name.to_owned(), source, placement, tint: [255; 4], home_set, styles: StyleStack::default() };
+        let styles = styles.sanitized();
+        let placement = if styles.is_default() {
+            placement
+        } else {
+            // The artwork box is the stored placement; its automatic depth is measured on the bake footprint.
+            let plain = StampObject { id, name: String::new(), source: source.clone(), placement, tint: [255; 4], home_set, styles: StyleStack::default() };
+            let styled_object = StampObject { styles: styles.clone(), ..plain.clone() };
+            let (old_frame, new_frame) = (self.styled_frame(&plain), self.styled_frame(&styled_object));
+            self.refit_auto_depth_framed(&placement, &old_frame, placement, &new_frame)
+        };
+        let object = StampObject { id, name: name.to_owned(), source, placement, tint: [255; 4], home_set, styles };
         let at = self.stamps.partition_point(|s| s.id < id);
         self.stamps.insert(at, object);
         let is_text = text.is_some();

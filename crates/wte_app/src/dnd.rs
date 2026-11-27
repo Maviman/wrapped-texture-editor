@@ -314,17 +314,18 @@ fn start_drop(ctx: &egui::Context, state: &mut AppState, pos: egui::Pos2, items:
         return;
     }
     let spot = spot_at(state, pos);
-    start_items(ctx, state, spot, items);
+    start_items(ctx, state, spot, items, DROP_LABEL);
 }
 
 /// Prepares `items` on a worker for `spot` (the drop's spot, or stickers P10b: the spot of a Paste) and hands them to
-/// `apply` through `AppAction::DropReady` when they are ready. A project must be open.
-pub(crate) fn start_items(ctx: &egui::Context, state: &mut AppState, spot: Spot, items: Vec<DropItem>) {
+/// `apply` through `AppAction::DropReady` when they are ready. A project must be open. `label` names the one undo
+/// step (check P10b: "Paste" for a paste, `DROP_LABEL` for a drop).
+pub(crate) fn start_items(ctx: &egui::Context, state: &mut AppState, spot: Spot, items: Vec<DropItem>, label: &'static str) {
     let generation = state.session.as_ref().map(|s| s.scene_generation);
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let prepared = Prepared { generation, ..prepare(spot, items) };
+        let prepared = Prepared { generation, label, ..prepare(spot, items) };
         let _ = tx.send(prepared);
         ctx.request_repaint();
     });
@@ -357,6 +358,9 @@ pub(crate) enum Ready {
     Psd { file: String, stem: String, stamp: wte_core::link::FileStamp, psd: Box<wte_core::psd::PsdDoc> },
 }
 
+/// The label of a drop's one undo step.
+pub(crate) const DROP_LABEL: &str = "Drop";
+
 /// A drop, prepared: where it lands, the things to use (in drop order), and the sentences of those that could not be
 /// read.
 pub struct Prepared {
@@ -365,6 +369,8 @@ pub struct Prepared {
     /// prepared while another document was opened is not placed: its spot (a stamp id, a canvas point) belongs to
     /// the old one.
     pub(crate) generation: Option<u64>,
+    /// The label of the drop's one undo step (`DROP_LABEL`; check P10b: "Paste" for a paste).
+    pub(crate) label: &'static str,
     pub(crate) ready: Vec<Ready>,
     pub(crate) failed: Vec<String>,
 }
@@ -387,7 +393,7 @@ impl std::fmt::Debug for Prepared {
 /// Reads and converts the items (on the worker): files by extension, picture data as is or (a DIB) made a PNG,
 /// sticker data and PSDs parsed.
 pub(crate) fn prepare(spot: Spot, items: Vec<DropItem>) -> Prepared {
-    let mut out = Prepared { spot, generation: None, ready: Vec::new(), failed: Vec::new() };
+    let mut out = Prepared { spot, generation: None, label: DROP_LABEL, ready: Vec::new(), failed: Vec::new() };
     for item in items {
         match prepare_item(item) {
             Ok(r) => out.ready.push(r),
@@ -469,7 +475,7 @@ pub(crate) fn apply(state: &mut AppState, p: &Prepared) {
         }
     }
     if let Some(doc) = state.doc_mut() {
-        doc.end_edit_group(group, "Drop");
+        doc.end_edit_group(group, p.label);
     }
     if to_tray > 0 {
         state.toasts.info(format!("{to_tray} more added to the tray"));

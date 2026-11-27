@@ -211,6 +211,9 @@ pub(super) fn sticker_clip() -> Vec<Step> {
             if off > 1e-3 * doc_of(s)?.mesh.bounds.diagonal() {
                 return Err(format!("centred {off} away from the view's centre"));
             }
+            if doc_of(s)?.undo_label() != Some(crate::clip::PASTE_LABEL) {
+                return Err(format!("undo label {:?}", doc_of(s)?.undo_label()));
+            }
             undo_since(s, sc, 1)
         }),
         Step::Shot {

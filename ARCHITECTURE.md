@@ -9725,7 +9725,7 @@ without styles and a text stamp offer no sticker (a paste in WTE gives the same 
 the active paint layer at texture size (`PNG` + `CF_DIBV5`; an unpainted layer: "Select a stamp, or a paint layer with
 pixels, to copy"). The pixels are taken on the UI thread (shared buffers: `Arc`s, a `StickerDoc` clone, the blob store's
 `Arc`s) and a worker thread renders the selection, encodes the PNG (`PngLevel::Fast`) and the DIB and writes the
-`.wtes`; `clip::poll` (every `ui`) writes finished copies to the clipboard (status line "Copied the stamp "Badge" (70 x
+`.wtes`; only the latest Copy counts (check P10b: a new copy supersedes one still being encoded, whose worker stops before its next encoding step and whose result is never written, so a slow earlier copy cannot overwrite a later one and a held Ctrl+C does not encode many pictures at once); `clip::poll` (every `ui`) writes the finished copy to the clipboard (status line "Copied the stamp "Badge" (70 x
 70 pixels)"; a failure is a warning toast "Nothing was copied: ..."). The log names the formats. *Cut* (Sticker view
 only, Edit > Cut, Ctrl+X): a selection is needed ("Select an area first: Cut takes the selected pixels"); the copy as
 above, then `StickerAction::DeleteSelected` (its own entry "Delete Selected Pixels", with the shared-sticker question of
@@ -9739,7 +9739,7 @@ this one included: unlike a drag, a paste of one's own copy is the point), `PNG`
 `CF_DIBV5`, `CF_DIB` (decoded on the worker by `formats::dib_to_pixels`: a 32-bit DIB whose alpha is zero everywhere is
 opaque, 13.5; mixed alpha is straight alpha), the first picture / PSD / `.wtes` file of `CF_HDROP`. Nothing usable: the
 info toast "Nothing WTE can paste. The clipboard offers: <names>." (or "nothing"). The item goes through the drop
-pipeline (`dnd::start_items`: the worker, `DropReady`, `dnd::apply`, one undo step) with the spot of `paste_spot`:
+pipeline (`dnd::start_items`: the worker, `DropReady`, `dnd::apply`, one undo step, labelled "Paste" where a drop's is "Drop" when it groups several edits) with the spot of `paste_spot`:
 outside the Sticker view `Elsewhere` - the picture (as "Pasted picture.png") becomes the Stamp tool's source and the
 Stamp tool is chosen (its usual placement outline under the pointer; **nothing is placed until a click**), a sticker
 becomes a kept tray sticker and the source (one entry "Add Sticker"), a picture file goes the way of Import Stamp Image;

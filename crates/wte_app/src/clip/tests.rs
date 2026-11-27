@@ -165,6 +165,21 @@ fn paste_at_view_centre_places_one_stamp() {
     settle(&ctx, &mut state);
     assert_eq!(state.doc().unwrap().stamps.len(), 1, "one stamp placed");
     assert_eq!(undo_len(&state), 1, "one undo step");
+    assert_eq!(state.doc().unwrap().undo_label(), Some("Add Stamp"), "one edit keeps its own label");
+    // Check P10b: a sticker pasted at the centre is two edits (the tray sticker, the stamp) in one step, labelled
+    // "Paste" (it said "Drop").
+    let sticker = wte_core::StickerDoc::from_picture(
+        "Pasted",
+        wte_core::PicturePixels::Owned { pixels: Arc::new(PixelBuf::new(8, 8)), version: 0 },
+        [8, 8],
+    );
+    let wtes = wte_core::write_wtes(&sticker, None, &wte_core::BlobStore::default(), None).unwrap();
+    state.clipboard.write(vec![(ClipFormat::Sticker, crate::ole::formats::wrap_sticker(1, &wtes))]).unwrap();
+    run_with(&ctx, &mut state, ClipAction::PasteAtViewCentre);
+    settle(&ctx, &mut state);
+    assert_eq!(state.doc().unwrap().stamps.len(), 2);
+    assert_eq!(undo_len(&state), 2, "one more undo step");
+    assert_eq!(state.doc().unwrap().undo_label(), Some(PASTE_LABEL));
     // No 3D view laid out: a plain Paste.
     state.view_rects.clear();
     assert_eq!(paste_spot(&state, true), Spot::Elsewhere);
@@ -305,4 +320,62 @@ fn nothing_to_paste_and_the_contents_dialog() {
     run_with(&ctx, &mut state, ClipAction::ShowContents);
     let Some(AppAction::ShowDialog(Dialog::Message { lines, .. })) = state.actions.last() else { panic!() };
     assert_eq!(lines, &["The clipboard is empty."]);
+}
+
+/// Check P10b: a later Copy wins over an earlier one still being encoded. Before the fix `poll` wrote every finished
+/// copy in the order the workers finished, so a slow first copy (a 4096 x 4096 paint layer) that finished after a quick
+/// second one (a stamp) put the older picture on the clipboard; and every repeat of a held Ctrl+C encoded at once.
+#[test]
+fn check_p10b_a_later_copy_wins_over_a_slower_earlier_one() {
+    let ctx = egui::Context::default();
+    let mut state = AppState::new(Prefs::default(), true);
+    let solid = |w: u32, h: u32, rgba: [u8; 4]| {
+        let mut p = PixelBuf::new(w, h);
+        for px in p.data.as_chunks_mut::<4>().0 {
+            px.copy_from_slice(&rgba);
+        }
+        p
+    };
+    // The first copy's worker waits until the test lets it go.
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let slow = solid(6, 4, [255, 0, 0, 255]);
+    start_copy(
+        &ctx,
+        &mut state,
+        "slow".into(),
+        Box::new(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            Ok((Arc::new(slow), None))
+        }),
+    );
+    started_rx.recv().unwrap();
+    // The second copy is quick and is written first.
+    let fast = solid(2, 3, [0, 255, 0, 255]);
+    let expected = fast.clone();
+    start_copy(&ctx, &mut state, "fast".into(), Box::new(move || Ok((Arc::new(fast), None))));
+    let pasted = |state: &AppState| {
+        let png = state.clipboard.read(ClipFormat::Png).unwrap().unwrap();
+        wte_core::decode_image(&png, Some("x.png"), 64).unwrap().pixels
+    };
+    for _ in 0..400 {
+        poll(&mut state);
+        if state.clip_ui.copies > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(state.clip_ui.copies, 1, "the quick copy is written");
+    assert_eq!(pasted(&state), expected);
+    assert!(!state.clip_ui.busy(), "the superseded copy is not waited for");
+    // The first worker finishes now: nothing of it reaches the clipboard.
+    release_tx.send(()).unwrap();
+    for _ in 0..20 {
+        poll(&mut state);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    finish_copies(&mut state);
+    assert_eq!(state.clip_ui.copies, 1, "the older copy is never written");
+    assert_eq!(pasted(&state), expected, "the clipboard holds the latest copy");
 }

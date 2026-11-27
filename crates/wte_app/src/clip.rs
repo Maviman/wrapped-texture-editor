@@ -21,6 +21,7 @@
 // new layer centred in the visible canvas.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use eframe::egui;
@@ -60,18 +61,27 @@ pub(crate) const COPY_PICTURE_HINT: &str = "Copy takes a picture layer's pixels:
 /// What a copy worker hands back: what was copied (for the status line) and the clipboard entries.
 type CopyDone = Result<(String, Vec<(ClipFormat, Vec<u8>)>), String>;
 
-/// The copies being encoded (`AppState::clip_ui`).
+/// The copy being encoded (`AppState::clip_ui`). Only the latest Copy counts (check P10b): a new copy supersedes
+/// one still being encoded - its result is never written (a slow 4096 x 4096 layer finishing after a quick stamp copy
+/// would otherwise put the older picture on the clipboard), and its worker stops before the next encoding step (a held
+/// Ctrl+C repeats `Event::Copy`; without this every repeat encoded the whole picture at the same time).
 #[derive(Default)]
 pub struct ClipUi {
-    jobs: Vec<mpsc::Receiver<CopyDone>>,
+    job: Option<CopyJob>,
     /// Copies written to the clipboard so far (the self-test's and the tests' counter).
     pub(crate) copies: u64,
+}
+
+/// One copy on its worker: its result, and the flag that tells the worker it was superseded.
+struct CopyJob {
+    rx: mpsc::Receiver<CopyDone>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl ClipUi {
     /// True while a copy is being encoded (the self-test's idle check).
     pub(crate) fn busy(&self) -> bool {
-        !self.jobs.is_empty()
+        self.job.is_some()
     }
 }
 
@@ -160,28 +170,25 @@ pub fn after_ui(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
-/// Writes the copies whose encoding is done (every frame, `App::ui`).
+/// Writes the copy when its encoding is done (every frame, `App::ui`).
 pub fn poll(state: &mut AppState) {
-    let mut done = Vec::new();
-    state.clip_ui.jobs.retain(|rx| match rx.try_recv() {
+    let Some(job) = &state.clip_ui.job else { return };
+    match job.rx.try_recv() {
         Ok(d) => {
-            done.push(d);
-            false
+            state.clip_ui.job = None;
+            write_copy(state, d);
         }
-        Err(mpsc::TryRecvError::Empty) => true,
-        Err(mpsc::TryRecvError::Disconnected) => false,
-    });
-    for d in done {
-        write_copy(state, d);
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => state.clip_ui.job = None,
     }
 }
 
-/// Waits for every copy still being encoded and writes it (before a Paste reads the clipboard).
+/// Waits for the copy still being encoded and writes it (before a Paste reads the clipboard).
 pub(crate) fn finish_copies(state: &mut AppState) {
-    for rx in std::mem::take(&mut state.clip_ui.jobs) {
-        if let Ok(d) = rx.recv() {
-            write_copy(state, d);
-        }
+    if let Some(job) = state.clip_ui.job.take()
+        && let Ok(d) = job.rx.recv()
+    {
+        write_copy(state, d);
     }
 }
 
@@ -221,18 +228,39 @@ pub(crate) fn run_with(ctx: &egui::Context, state: &mut AppState, action: ClipAc
 type Take = Box<dyn FnOnce() -> Result<(Arc<PixelBuf>, Option<Vec<u8>>), String> + Send>;
 
 fn start_copy(ctx: &egui::Context, state: &mut AppState, what: String, take: Take) {
+    // The copy being encoded is superseded: its result is dropped with its receiver, and its worker stops early.
+    if let Some(old) = state.clip_ui.job.take() {
+        old.cancel.store(true, Ordering::Release);
+    }
     let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&cancel);
     let ctx = ctx.clone();
     std::thread::spawn(move || {
+        let superseded = || stop.load(Ordering::Acquire);
+        if superseded() {
+            return;
+        }
         let done = take().and_then(|(pixels, wtes)| {
+            if superseded() {
+                return Err(SUPERSEDED.to_owned());
+            }
             let png = wte_core::encode_png(pixels.width, pixels.height, &pixels.data, wte_core::PngLevel::Fast).map_err(|e| e.to_string())?;
+            if superseded() {
+                return Err(SUPERSEDED.to_owned());
+            }
             Ok((what, clipboard::picture_entries(png, &pixels, wtes.as_deref())))
         });
-        let _ = tx.send(done);
-        ctx.request_repaint();
+        if !superseded() {
+            let _ = tx.send(done);
+            ctx.request_repaint();
+        }
     });
-    state.clip_ui.jobs.push(rx);
+    state.clip_ui.job = Some(CopyJob { rx, cancel });
 }
+
+/// What a superseded copy's worker ends with (never shown: its receiver is gone).
+const SUPERSEDED: &str = "a later copy replaced this one";
 
 fn copy(ctx: &egui::Context, state: &mut AppState, cut: bool) {
     if state.session.is_none() {
@@ -384,6 +412,9 @@ fn crop(p: &PixelBuf, r: IRect) -> PixelBuf {
     out
 }
 
+/// The label of a paste's one undo step (check P10b: it was "Drop").
+pub(crate) const PASTE_LABEL: &str = "Paste";
+
 /// The sentence of a paste that finds nothing usable (13.5).
 pub(crate) fn nothing_text(names: &[String]) -> String {
     let offers = if names.is_empty() { "nothing".to_owned() } else { names.join(", ") };
@@ -431,7 +462,7 @@ fn paste(ctx: &egui::Context, state: &mut AppState, at_centre: bool) {
                 return;
             }
             let spot = paste_spot(state, at_centre);
-            crate::dnd::start_items(ctx, state, spot, vec![item]);
+            crate::dnd::start_items(ctx, state, spot, vec![item], PASTE_LABEL);
         }
     }
 }

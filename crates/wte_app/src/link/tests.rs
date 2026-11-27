@@ -297,6 +297,35 @@ fn wtes_own_write_is_not_reported_even_with_the_old_list() {
     assert_eq!(repaints.load(Ordering::SeqCst), 0);
 }
 
+/// Check-P9b: the first write of a new link (or a restored file) is never judged: the watcher's first look finds the
+/// synced stamp and stops there. Its registration must still be used up, or an editor's later save of exactly those
+/// bytes (after another save moved the synced content on) is taken for WTE's write and never reported.
+#[test]
+fn a_new_links_first_write_is_used_up_at_the_first_look() {
+    let dir = tmp("watch_own_first_look");
+    let file = dir.join("a_k7.psd");
+    let first = small_psd([10, 20, 30, 255]);
+    let (w, _, own) = watcher();
+    // WTE makes the link: the file written through the registration, then the new entry with that stamp as synced.
+    let mut io = super::watch::OwnWritesIo(own.clone());
+    let stamp = wte_core::link::write_link_file(&file, &first, &mut io).unwrap();
+    assert_eq!(own.len(), 1);
+    let mut e = WatchEntry { id: StickerId(7), path: file.clone(), alias: None, synced: stamp };
+    w.set_list(vec![e.clone()]);
+    assert!(collect(&w, 250).is_empty(), "the link's own first file was reported");
+    assert_eq!(own.len(), 0, "the first write's registration stayed");
+    // The editor saves a change (applied: the synced content moves on), then exactly the first file's bytes again.
+    let other = small_psd([90, 90, 90, 255]);
+    testkit::save_bytes(&file, &other).unwrap();
+    let LinkEvent::Changed { stamp, .. } = first_event(&w) else { panic!("not a change") };
+    assert_eq!(stamp.crc32, super::watch::crc(&other));
+    e.synced = stamp;
+    w.set_list(vec![e]);
+    std::thread::sleep(Duration::from_millis(80));
+    testkit::save_bytes(&file, &first).unwrap();
+    assert!(matches!(first_event(&w), LinkEvent::Changed { stamp, .. } if stamp.crc32 == super::watch::crc(&first)));
+}
+
 /// Stickers P9b (check-P9a open item 1, met by the Photoshop pass of `sticker_link`): a registration of WTE's own write
 /// is used up when the watcher sees it settle, so the editor saving the very same bytes later (another link of the
 /// same picture, an undo back to what WTE sent) is reported instead of being taken for WTE's write for the session.

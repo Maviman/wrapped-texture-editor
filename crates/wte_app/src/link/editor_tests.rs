@@ -396,16 +396,25 @@ fn an_old_prefs_file_loads_and_the_editor_prefs_round_trip() {
 #[cfg(windows)]
 #[test]
 fn a_locked_file_gives_the_could_not_be_replaced_message_and_changes_nothing() {
+    // Check-P9b: also for another program, whose message names its exe's stem (it read "program").
+    for (key, name) in [(EDITOR_PHOTOSHOP, "Photoshop"), (EDITOR_OTHER, "gimp-2.10")] {
+        locked_file_case(key, name);
+    }
+}
+
+#[cfg(windows)]
+fn locked_file_case(key: &str, name: &str) {
     use std::os::windows::fs::OpenOptionsExt;
-    let (mut state, stamp, _dir) = two_editors("locked");
-    state.prefs.default_editor = Some(EDITOR_PHOTOSHOP.to_owned());
+    let (mut state, stamp, dir) = two_editors(&format!("locked_{key}"));
+    state.prefs.other_editor_exe = Some(fake_exe(&dir, "gimp", "gimp-2.10.exe"));
+    state.prefs.default_editor = Some(key.to_owned());
     edit(&mut state, stamp);
     let id = sticker_id(&state, stamp);
     let path = link_path(&state, id).unwrap();
     let before = std::fs::read(&path).unwrap();
     state.doc_mut().unwrap().set_sticker(StickerRef::Id(id), |d| d.layers[0].opacity = 0.5, "Opacity", Commit::Final).unwrap();
     assert_eq!(badge_text(&mut state, id), "changed in WTE");
-    // Photoshop holds the file without sharing (what A8 fears).
+    // The editor holds the file without sharing (what A8 fears).
     let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
     flows::run_in(&mut state, LinkAction::Send(SendRequest { anyway: true, ..SendRequest::new(id) }));
     let q = open_question(&state).expect("a message");
@@ -413,7 +422,7 @@ fn a_locked_file_gives_the_could_not_be_replaced_message_and_changes_nothing() {
     assert_eq!(q.kind, QuestionKind::Info);
     assert_eq!(
         q.lines[0],
-        format!("{file} could not be replaced because another program has it open. Close it in Photoshop (or save it there), then choose Send to Photoshop again.")
+        format!("{file} could not be replaced because another program has it open. Close it in {name} (or save it there), then choose Send to {name} again.")
     );
     drop(lock);
     // Nothing changed: the file, no .bak.psd, the badge, the stale flag, no temp file.

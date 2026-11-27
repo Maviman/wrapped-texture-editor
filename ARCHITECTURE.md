@@ -9421,7 +9421,10 @@ sticker in place on the model, keeping every stamp's placement.
   frame from the document's links and the project path and sent only when it changed. Poll every 1 s, at once on a
   `Poke` (the window gained focus, "Update now"), every 250 ms while a change settles: two polls must agree and
   `psd::read` must accept the bytes (`Truncated` waits; after 30 s one `Unreadable`); a settled content whose CRC is the
-  synced one or in `own_writes` (at most 64, oldest dropped) only updates "last seen". Events `Changed { psd, stamp,
+  synced one or in `own_writes` (at most 64, oldest dropped) only updates "last seen". A registration is used up when
+  the watcher sees that content settle (stickers P9b) or, for the main path, when a first look finds the file at the
+  synced stamp (a new link's first file, a restored one: never judged; check-P9b), so an editor's later save of the
+  same bytes is reported. Events `Changed { psd, stamp,
   from_alias }`, `Refused`, `Unreadable`, `Missing`; one repaint request per poll round that sent events, counted in
   `LinkUi::repaints`. An alias change is first copied over the link's file (temp + rename), then reported. Parsing and
   CRC happen on the thread; the UI thread only drains.

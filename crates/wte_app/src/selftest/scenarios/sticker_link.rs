@@ -912,8 +912,9 @@ fn photoshop_pass() -> Vec<Step> {
         Step::Shot {
             name: "link_merged_ps",
             expect: "toasts \"Updated from Photoshop\" (counted) and \"This sticker now uses smart objects, which only Photoshop \
-                     can show. WTE shows the finished picture; keep editing its layers in Photoshop.\"; the small sticker at \
-                     the upper left of the sphere shows Photoshop's smart object picture",
+                     can show. WTE shows the finished picture; keep editing its layers in Photoshop.\"; the selected \
+                     shape-layer sticker (its frame left of or at the sphere's centre, over a logo) shows Photoshop's smart \
+                     object picture (a red A), its placement unchanged since it was placed",
         },
         Step::Setup("remember; Photoshop saves a shape layer with Maximize Compatibility off (layers-minimal\\shape-layer.psd)", |s, sc| {
             remember_link(s, sc)?;

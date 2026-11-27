@@ -509,7 +509,8 @@ fn wte_changed(state: &mut AppState, id: StickerId) -> bool {
 /// Writes sticker `id`'s link file (a new link or a send): the PSD of the sticker, atomically, registered with the
 /// watcher before the rename; the link is in sync afterwards. `Err` = the sentence the user sees; nothing changed.
 pub(crate) fn write_file(state: &mut AppState, id: StickerId, file: LinkFile, editor_key: &str) -> Result<FileStamp, String> {
-    let editor = super::editor::name_of_key(editor_key, None);
+    // The other program's texts name its exe's stem ("could not be replaced ... Close it in gimp-2.10"), check-P9b.
+    let editor = super::editor::name_of_key(editor_key, state.prefs.other_editor_exe.as_deref());
     let project = state.session.as_ref().and_then(|s| s.path.clone());
     let path = file.path(project.as_deref()).ok_or_else(|| texts::SAVE_FIRST.to_owned())?;
     if let Some(dir) = path.parent() {

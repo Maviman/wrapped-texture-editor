@@ -240,8 +240,11 @@ fn meta_of(path: &Path) -> std::io::Result<Meta> {
     Ok((m.len(), m.modified().ok().and_then(wte_core::link::unix_ns)))
 }
 
-/// One poll of `path`: `None` while nothing is to be reported or a change is still settling.
-fn poll_path(path: &Path, st: &mut PathState, synced: &FileStamp) -> Option<Found> {
+/// One poll of `path`: `None` while nothing is to be reported or a change is still settling. `own` (the link's main
+/// path only): a first look that finds the synced stamp uses up one registration of the synced content (check-P9b:
+/// the first write of a new link, or a restored file, is never judged, so its registration would otherwise stay and
+/// hide an editor's later save of the same bytes).
+fn poll_path(path: &Path, st: &mut PathState, synced: &FileStamp, own: Option<&OwnWrites>) -> Option<Found> {
     let meta = match meta_of(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             st.settle = None;
@@ -261,6 +264,9 @@ fn poll_path(path: &Path, st: &mut PathState, synced: &FileStamp) -> Option<Foun
     }
     if st.settle.is_none() && st.last_seen.is_none() && meta == (synced.size, synced.modified_ns) {
         st.last_seen = Some(meta);
+        if let Some(own) = own {
+            own.take(synced.crc32);
+        }
         return None;
     }
     match st.settle {
@@ -357,7 +363,7 @@ impl Worker {
             let w = &self.entries[i];
             (w.e.id, w.e.path.clone(), w.e.synced)
         };
-        let found = poll_path(&path, &mut self.entries[i].main, &synced);
+        let found = poll_path(&path, &mut self.entries[i].main, &synced, Some(&self.own_writes));
         match found {
             Some(Found::Missing) => sent += self.send(LinkEvent::Missing { id }),
             Some(Found::Read(bytes, meta, since)) => match self.judge(&bytes, meta, since, &synced) {
@@ -380,7 +386,7 @@ impl Worker {
         }
         let Some(alias) = self.entries[i].e.alias.clone() else { return sent };
         // The alias is judged against the same synced content (it was a copy of it at the Save As).
-        let found = poll_path(&alias, &mut self.entries[i].alias, &synced);
+        let found = poll_path(&alias, &mut self.entries[i].alias, &synced, None);
         if let Some(Found::Read(bytes, meta, since)) = found {
             match self.judge(&bytes, meta, since, &synced) {
                 Judged::Own => self.settled(i, true, meta),

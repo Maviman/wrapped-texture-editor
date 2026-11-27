@@ -432,6 +432,15 @@ pub struct Entry {
     pub state: u64,
 }
 
+/// Stickers P10a: a group of history entries opened by `Document::begin_edit_group`; `end_edit_group` merges them.
+#[derive(Debug)]
+#[must_use = "end the group with Document::end_edit_group"]
+pub struct EditGroup {
+    start: usize,
+    max_entries: usize,
+    budget_bytes: usize,
+}
+
 /// The open `Commit::Preview` edit: its label and the structure from before the first Preview call.
 pub(crate) struct PendingEdit {
     pub label: String,
@@ -929,6 +938,40 @@ impl Document {
         let live = self.live_buffers();
         self.history.evict(&live);
         result
+    }
+
+    /// Stickers P10a: opens a group like `group_edits` for commands the app runs one by one (a drop: import a sticker,
+    /// then place it; the commands need the app's state between them). Every history entry pushed until
+    /// `end_edit_group` becomes one entry. The caller must end the group (the entry limit and budget are lifted
+    /// while it is open).
+    pub fn begin_edit_group(&mut self) -> EditGroup {
+        self.flush_pending_edit();
+        let group = EditGroup {
+            start: self.history.undo.len(),
+            max_entries: self.history.max_entries,
+            budget_bytes: self.history.budget_bytes,
+        };
+        self.history.max_entries = usize::MAX;
+        self.history.budget_bytes = usize::MAX;
+        group
+    }
+
+    /// Ends a group of `begin_edit_group`: two or more entries pushed since then become one entry named `label`
+    /// (`Edit::Multi`, as `group_edits`); a single entry keeps its own label; none stays none. The limits apply again.
+    pub fn end_edit_group(&mut self, group: EditGroup, label: &str) {
+        self.flush_pending_edit();
+        self.history.max_entries = group.max_entries;
+        self.history.budget_bytes = group.budget_bytes;
+        let added = self.history.undo.split_off(group.start.min(self.history.undo.len()));
+        if added.len() > 1 {
+            let state = added[0].state;
+            let edits: Vec<Edit> = added.into_iter().map(|e| e.edit).collect();
+            self.history.undo.push(Entry { label: label.to_owned(), edit: Edit::Multi(edits), state });
+        } else {
+            self.history.undo.extend(added);
+        }
+        let live = self.live_buffers();
+        self.history.evict(&live);
     }
 
     /// `history.push` + `touch()` + `debug_check_structure`.

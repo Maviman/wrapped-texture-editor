@@ -132,6 +132,8 @@ pub enum PanelHit {
     /// Picture.
     StickerTabEdit,
     StickerTabExport,
+    /// Stickers P10a: the selected stamp's thumbnail in the Sticker tab (a drop target, 6.2).
+    StickerTabThumb,
     /// A preset button of the Sticker tab's style row (by its index in `StylePreset::ALL`).
     StylePresetButton(u8),
     /// Copy / Paste / Clear Style of the Sticker tab.
@@ -1665,6 +1667,8 @@ pub struct AppState {
     pub sticker_canvas_rect: Option<egui::Rect>,
     /// Stickers P6a: UI state of the Sticker view (canvas texture, thumbnails, the running drag, tool options).
     pub sticker_ui: crate::sticker::StickerUi,
+    /// Stickers P10a (STICKER_PLAN 6.1, 6.2): the drag over the window and the drops being prepared (`dnd.rs`).
+    pub drop_ui: crate::dnd::DropUi,
     /// Stickers P6b (STICKER_PLAN 3.7): the styles of Copy Style (app state, never the OS clipboard).
     pub style_clipboard: Option<StyleStack>,
     /// Stickers P9a (STICKER_PLAN 5.3, 5.6, 5.7): the editor link's sessions, watcher, launcher (the stub in a self-test
@@ -1768,6 +1772,7 @@ impl AppState {
             pen: crate::pen::PenState::default(),
             sticker_canvas_rect: None,
             sticker_ui: crate::sticker::StickerUi::default(),
+            drop_ui: crate::dnd::DropUi::default(),
             style_clipboard: None,
             link_ui: crate::link::LinkUi::new(selftest),
         }

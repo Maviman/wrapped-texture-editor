@@ -177,6 +177,8 @@ pub enum AppAction {
     SetStickerTool(StickerTool),
     /// Every other command of the Sticker view.
     Sticker(crate::sticker::StickerAction),
+    /// Stickers P10a (STICKER_PLAN 6.2): a drop of WTE's drop target, prepared on a worker (`dnd::apply` places it).
+    DropReady(std::sync::Arc<crate::dnd::Prepared>),
     /// Stickers P9a (STICKER_PLAN 5): the editor link (logic in `link/flows.rs`).
     Link(crate::link::LinkAction),
 }

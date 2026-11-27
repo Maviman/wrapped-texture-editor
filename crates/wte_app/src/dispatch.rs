@@ -109,6 +109,8 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
         | A::ImportStampImage(_)
         | A::ReplaceStampImage(..)
         | A::DeleteStamp(_)
+        // Stickers P10a: a drop adds stamps, layers or stickers.
+        | A::DropReady(_)
         // Round 4: these start a modal bake that takes the pointer away from a held stroke (FEATURE_BRUSH 7.3).
         | A::LoadBrushShape(_)
         | A::AnswerOpenings(Some(_))
@@ -690,6 +692,14 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
             } else if crate::dnd::is_psd_path(&path) {
                 // Stickers P9a (STICKER_PLAN 5.8): a PSD becomes a tray sticker, the Stamp tool's source.
                 crate::link::flows::run(app, crate::link::LinkAction::ImportPsd { path: Some(path), keep_linked: false }, frame);
+            } else if crate::dnd::is_wtes_path(&path) {
+                // Stickers P10a (6.2): a sticker file is added to the tray as the Stamp tool's source.
+                if app.state.session.is_none() {
+                    app.state.toasts.warn("Open a model first");
+                } else {
+                    crate::sticker::library::add(&mut app.state, &path);
+                    app.state.push(A::SetTool(ToolKind::Stamp));
+                }
             } else {
                 app.state.toasts.warn(format!("Cannot open {}: unsupported file type", file_name_of(&path)));
             }
@@ -1095,6 +1105,7 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
             }
         }
         A::Sticker(s) => crate::sticker::run(app, s, frame),
+        A::DropReady(p) => crate::dnd::apply(&mut app.state, &p),
     }
 }
 

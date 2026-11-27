@@ -51,6 +51,8 @@ pub struct Scratch {
 pub enum Target {
     View(ViewId),
     StickerCanvas,
+    /// Stickers P10a: `at` is a screen position in points (a drop on a Layers row or the Sticker tab).
+    Screen,
 }
 
 impl From<ViewId> for Target {
@@ -65,6 +67,7 @@ impl std::fmt::Debug for Target {
         match self {
             Target::View(view) => write!(f, "{view:?}"),
             Target::StickerCanvas => write!(f, "StickerCanvas"),
+            Target::Screen => write!(f, "Screen"),
         }
     }
 }
@@ -128,6 +131,15 @@ pub enum Step {
     /// and on again (`true`, the default). With it off the next step starts while a bake still runs (the scenario
     /// `final_bake_async`); `WaitIdle` always waits for the bakes.
     BakeWait(bool),
+    /// Stickers P10a (STICKER_PLAN 8.2): another program's drag of `payload`, let go at `at` (normalized in the target's
+    /// rect; `Target::Screen`: points): `DragEnter`, `DragOver` and `Drop` of a drop target object with WTE's own data
+    /// object (`ole::TestDrag`), whose events reach the queue the window's drop target feeds; never the OS. The step
+    /// waits until the drop is placed (prepared on its worker and applied) and its bakes have landed.
+    Drop { payload: Vec<crate::ole::DropItem>, target: Target, at: [f32; 2] },
+    /// The same drag hovering at `at` (`DragEnter`, `DragOver`) until `DragLeave` (the overlay's shot in between).
+    DragHover { payload: Vec<crate::ole::DropItem>, target: Target, at: [f32; 2] },
+    /// `DragLeave` of the drag of `DragHover`.
+    DragLeave,
     Exit,
 }
 
@@ -163,6 +175,9 @@ impl Step {
             Step::Screenshot => "Screenshot".to_owned(),
             Step::Shot { name, .. } => format!("Shot({name})"),
             Step::BakeWait(on) => format!("BakeWait({on})"),
+            Step::Drop { payload, target, at } => format!("Drop({} item(s), {target:?}, {at:?})", payload.len()),
+            Step::DragHover { payload, target, at } => format!("DragHover({} item(s), {target:?}, {at:?})", payload.len()),
+            Step::DragLeave => "DragLeave".to_owned(),
             Step::Exit => "Exit".to_owned(),
         }
     }
@@ -198,6 +213,8 @@ enum Active {
     Until(&'static str, fn(&AppState, &Scratch) -> Result<bool, String>),
     /// Stickers P6a: `Step::WaitMs`, until this wall-clock instant.
     WaitUntil(Instant),
+    /// Stickers P10a: `Step::Drop`, until the drop is placed and its bakes have landed.
+    Dropping,
 }
 
 /// Drives a scenario: injects input, waits, asserts, captures the screenshot and writes the report.
@@ -233,6 +250,8 @@ pub struct Runner {
     bake_wait: bool,
     /// Stickers P6a (review B15): the named shots taken, with what each must show (`"shots"` of `OUT.json`).
     shots: Vec<(&'static str, &'static str)>,
+    /// Stickers P10a: the drag of `Step::DragHover`, until `Step::DragLeave` (or the next drop).
+    drag: Option<crate::ole::TestDrag>,
 }
 
 impl Runner {
@@ -295,6 +314,7 @@ impl Runner {
             exited_at: None,
             bake_wait: true,
             shots: Vec::new(),
+            drag: None,
         })
     }
 
@@ -477,6 +497,11 @@ impl Runner {
             },
             Active::Frames(n) => (n > 1).then_some(Active::Frames(n - 1)),
             Active::WaitUntil(at) => wait_until(at),
+            Active::Dropping => {
+                // The actions a drop pushed (an import, a tool change) are dispatched in the next frame's `ui`.
+                let busy = crate::ole::pending() || state.drop_ui.busy() || !state.actions.is_empty() || self.waits_for_bakes(state);
+                busy.then_some(Active::Dropping)
+            }
             Active::Idle { count } => {
                 let idle = is_idle(state, tools_busy) && state.view_rects == self.last_rects;
                 let count = if idle { count + 1 } else { 0 };
@@ -600,6 +625,32 @@ impl Runner {
                 self.capture(ctx, Some(shot), name);
             }
             Step::BakeWait(on) => self.bake_wait = on,
+            Step::Drop { payload, target, at } => {
+                if let Some(rect) = self.view_rect(state, target, &name) {
+                    let pos = self.client_px(ctx, to_screen(rect, at));
+                    // A drag still hovering from `DragHover` is the one that is let go.
+                    let drag = self.drag.take().unwrap_or_else(|| crate::ole::TestDrag::enter(&payload, pos));
+                    drag.over(pos);
+                    drag.drop_at(pos);
+                    self.active = Some((Active::Dropping, name));
+                }
+            }
+            Step::DragHover { payload, target, at } => {
+                if let Some(rect) = self.view_rect(state, target, &name) {
+                    let pos = self.client_px(ctx, to_screen(rect, at));
+                    if let Some(old) = self.drag.take() {
+                        old.leave();
+                    }
+                    let drag = crate::ole::TestDrag::enter(&payload, pos);
+                    drag.over(pos);
+                    self.drag = Some(drag);
+                }
+            }
+            Step::DragLeave => {
+                if let Some(drag) = self.drag.take() {
+                    drag.leave();
+                }
+            }
             Step::Exit => self.finish(ctx, state, frame),
         }
     }
@@ -610,6 +661,8 @@ impl Runner {
         let rect = match view {
             Target::View(v) => state.view_rects.get(&v).copied(),
             Target::StickerCanvas => state.sticker_canvas_rect,
+            // `at` is already in points: the unit rect at the origin maps it to itself.
+            Target::Screen => Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0))),
         };
         match rect {
             Some(r) if r.width() > 0.0 && r.height() > 0.0 => Some(r),
@@ -618,6 +671,12 @@ impl Runner {
                 None
             }
         }
+    }
+
+    /// A position in points as the drop target gets it after `ScreenToClient`: client pixels (physical).
+    fn client_px(&self, ctx: &egui::Context, pos: egui::Pos2) -> [f32; 2] {
+        let ppp = ctx.pixels_per_point();
+        [pos.x * ppp, pos.y * ppp]
     }
 
     /// Records a failure; the remaining steps are skipped and a capture is still attempted.
@@ -751,6 +810,8 @@ fn is_idle(state: &AppState, tools_busy: bool) -> bool {
         && !state.wrap_jobs_pending
         && !state.gpu_mips_stale
         && !crate::sticker::live::pending(state)
+        && !crate::ole::pending()
+        && !state.drop_ui.busy()
         && state.doc().is_none_or(|d| !d.has_pending_edit() && !d.has_pending_composite())
 }
 

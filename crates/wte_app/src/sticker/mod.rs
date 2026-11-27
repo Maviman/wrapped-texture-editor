@@ -1648,6 +1648,43 @@ fn add_picture_layer(state: &mut AppState, blob: Option<BlobId>) {
     }
 }
 
+/// Stickers P10a (6.2, a drop on the canvas): the layers of `source` above the active layer of the open editor, moved
+/// so that the centre of `source`'s artboard lands at `at` (layer space; `None`: the artboard's centre), in one entry
+/// `label`; the top one of them becomes the active layer. The pictures and fonts `source` refers to must be in the
+/// document already. False when nothing was added (no editor, a text stamp, a limit: the toast says which).
+pub(crate) fn add_layers_at(state: &mut AppState, source: StickerDoc, at: Option<glam::Vec2>, label: &str) -> bool {
+    let Some(session) = state.session.as_mut() else { return false };
+    let Some(edit) = session.sticker_edit.clone() else { return false };
+    let Some(shown) = shown(&mut session.doc, &edit) else { return false };
+    let Some(current) = shown.layers() else {
+        state.status_hint = "Convert the text to a layered sticker first".to_owned();
+        return false;
+    };
+    if source.layers.is_empty() {
+        return false;
+    }
+    let a = current.artboard;
+    let centre = glam::Vec2::new(a.x0 as f32 + a.width() as f32 * 0.5, a.y0 as f32 + a.height() as f32 * 0.5);
+    let s = source.artboard;
+    let source_centre = glam::Vec2::new(s.x0 as f32 + s.width() as f32 * 0.5, s.y0 as f32 + s.height() as f32 * 0.5);
+    let offset = (at.unwrap_or(centre) - source_centre).round();
+    let above = edit.active_layer.and_then(|l| index_of(current, l));
+    let first_new = current.next_layer;
+    let count = source.layers.len() as u32;
+    let done = apply(state, label, Commit::Final, move |d| {
+        let at = above.map_or(d.layers.len(), |i| (i + 1).min(d.layers.len()));
+        for (k, mut layer) in source.layers.into_iter().enumerate() {
+            layer.id = d.alloc_layer();
+            layer.transform.translate += offset;
+            d.layers.insert(at + k, layer);
+        }
+    });
+    if done {
+        set_active(state, StickerLayerId(first_new + count - 1));
+    }
+    done
+}
+
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]

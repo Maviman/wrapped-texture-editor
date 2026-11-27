@@ -204,6 +204,17 @@ pub(crate) fn refresh(ctx: &egui::Context, state: &mut AppState) {
     crate::sticker::popover::frame(ctx, state);
 }
 
+/// Stickers P10a (6.2): the layer-space point of the open editor under screen position `pos` (points), for a drop
+/// on the canvas; `None` outside the canvas or without a layered sticker (a text stamp).
+pub(crate) fn layer_point(state: &mut AppState, pos: Pos2) -> Option<Vec2> {
+    let rect = state.sticker_canvas_rect.filter(|r| r.contains(pos))?;
+    let edit = edit_of(state)?.clone();
+    let session = state.session.as_mut()?;
+    let shown = shown(&mut session.doc, &edit)?;
+    shown.layers()?;
+    Some(geom_of(&shown, [1, 1]).to_layer(&edit.camera, rect, pos))
+}
+
 /// The central area in the Sticker view: canvas, divider, 3D view. Without an open editor (a document replaced
 /// underneath it) the 3D view alone.
 pub fn show(ui: &mut egui::Ui, cx: &mut ViewCx<'_>, area: Rect) {

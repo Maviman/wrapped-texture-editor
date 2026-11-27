@@ -850,44 +850,74 @@ pub(crate) fn import_psd(state: &mut AppState, path: &Path, keep_linked: bool) {
     };
     let modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     let stamp = FileStamp::of_bytes(&bytes, modified);
-    let psd = match wte_core::psd::read(&bytes, &PsdLimits::default()) {
+    let psd = match parse_psd(&bytes, &file) {
         Ok(p) => p,
-        Err(PsdError::Unsupported(r)) => {
-            state.toasts.warn(r.sentence(&file));
-            return;
-        }
-        Err(e) => {
-            state.toasts.warn(format!("Cannot open {file}: {e}"));
+        Err(text) => {
+            state.toasts.warn(text);
             return;
         }
     };
     let stem = path.file_stem().map_or_else(|| "Sticker".to_owned(), |s| s.to_string_lossy().into_owned());
+    if let Some((id, toast)) = psd_sticker(state, &psd, stamp, &file, &stem, keep_linked.then_some(path)) {
+        psd_as_source(state, id, &file, &stem, toast);
+    }
+}
+
+/// Reads a PSD for an import (Import Sticker from PSD..., a drop): the refusal sentence of 13.2 or "Cannot open".
+pub(crate) fn parse_psd(bytes: &[u8], file: &str) -> Result<PsdDoc, String> {
+    match wte_core::psd::read(bytes, &PsdLimits::default()) {
+        Ok(p) => Ok(p),
+        Err(PsdError::Unsupported(r)) => Err(r.sentence(file)),
+        Err(e) => Err(format!("Cannot open {file}: {e}")),
+    }
+}
+
+/// A read PSD as a new tray sticker (5.8): the layers, or one merged picture when something forces it; with
+/// `keep_linked` an `External` link to that file. Returns the sticker and the merged toast, if any; a refusal is a
+/// warning toast and `None`. Stickers P10a: also for a PSD dropped without a file (`keep_linked` `None`).
+pub(crate) fn psd_sticker(
+    state: &mut AppState,
+    psd: &PsdDoc,
+    stamp: FileStamp,
+    file: &str,
+    stem: &str,
+    keep_linked: Option<&Path>,
+) -> Option<(StickerId, Option<String>)> {
     // The editor a kept link follows: the default editor, else the only known one, else PhotoCraft (13.1). A file
     // imported without a link counts as "not PhotoCraft" for smart objects (13.2): with PhotoCraft as that editor the
     // key passed is "other" (the generic sentences), the name stays.
     let editor = editor::quiet_editor(state).unwrap_or(ExternalEditor::PhotoCraft);
-    let key = if !keep_linked && editor.key() == EDITOR_PHOTOCRAFT { EDITOR_OTHER } else { editor.key() };
-    let Some(doc) = state.doc_mut() else { return };
-    let made = doc.add_sticker_from_psd(&psd, &stem, stamp, keep_linked.then(|| path.to_path_buf()), key, &editor.name(), &file);
+    let key = if keep_linked.is_none() && editor.key() == EDITOR_PHOTOCRAFT { EDITOR_OTHER } else { editor.key() };
+    let doc = state.doc_mut()?;
+    let made = doc.add_sticker_from_psd(psd, stem, stamp, keep_linked.map(Path::to_path_buf), key, &editor.name(), file);
     match made {
         Ok(made) => {
-            let layers = state.doc().and_then(|d| d.sticker(made.id)).map_or(0, |d| d.layers.len());
-            state.tools.stamp.source = crate::state::StampToolSource::Sticker(made.id);
-            state.tools.stamp.source_name = stem.clone();
-            state.sticker_ui.tray_selected = Some(made.id);
             if made.linked {
                 state.link_ui.session(made.id).observed = Some(Some(stamp));
             }
-            let s = if layers == 1 { "" } else { "s" };
-            state.toasts.info(format!("Imported {file} as a sticker ({layers} layer{s}); click on the model to place it"));
-            if let Some(t) = made.toast {
-                state.toasts.info(t);
-            }
-            state.push(AppAction::SetTool(crate::state::ToolKind::Stamp));
-            state.status_hint = "Click on the model to place the sticker".to_owned();
+            Some((made.id, made.toast))
         }
-        Err(text) => state.toasts.warn(text),
+        Err(text) => {
+            state.toasts.warn(text);
+            None
+        }
     }
+}
+
+/// An imported PSD sticker becomes the selected tray item and the Stamp tool's source (5.8); `toast` is the merged
+/// toast of the import.
+pub(crate) fn psd_as_source(state: &mut AppState, id: StickerId, file: &str, stem: &str, toast: Option<String>) {
+    let layers = state.doc().and_then(|d| d.sticker(id)).map_or(0, |d| d.layers.len());
+    state.tools.stamp.source = crate::state::StampToolSource::Sticker(id);
+    state.tools.stamp.source_name = stem.to_owned();
+    state.sticker_ui.tray_selected = Some(id);
+    let s = if layers == 1 { "" } else { "s" };
+    state.toasts.info(format!("Imported {file} as a sticker ({layers} layer{s}); click on the model to place it"));
+    if let Some(t) = toast {
+        state.toasts.info(t);
+    }
+    state.push(AppAction::SetTool(crate::state::ToolKind::Stamp));
+    state.status_hint = "Click on the model to place the sticker".to_owned();
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

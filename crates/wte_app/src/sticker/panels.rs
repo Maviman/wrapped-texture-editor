@@ -76,6 +76,8 @@ fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, 
     };
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(STAMP_THUMB, STAMP_THUMB), Sense::hover());
+        // Stickers P10a (6.2): a picture dropped here replaces the stamp's picture or becomes a layer of its sticker.
+        hits.push((PanelHit::StickerTabThumb, rect));
         let thumb = match &object.source {
             StampSource::Image { blob } => tray::blob_thumb(ui.ctx(), state, *blob),
             StampSource::Sticker { sticker } => tray::sticker_thumb(ui.ctx(), state, *sticker),

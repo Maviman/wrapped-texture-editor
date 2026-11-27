@@ -968,3 +968,31 @@ fn k6a_layer_at_and_layer_thumbnail() {
     assert!(doc.sticker_layer_thumbnail(StickerId(9_999), top, 20).is_none());
     assert_eq!(doc.history.undo_len(), 3, "read-outs make no entry");
 }
+
+/// Stickers P10a: `begin_edit_group` / `end_edit_group` make the commands of one drop one undo step (import a
+/// sticker, then show it on a stamp), keep a single entry's own label, and lift the entry limit only while open.
+#[test]
+fn k10a_an_edit_group_is_one_undo_step() {
+    let mut doc = doc_from_raw(samples::flat_quad(), 64);
+    let before = doc.history.undo_len();
+    let picture = owned(&mut doc, noise(32, 32, 7));
+    let g = doc.begin_edit_group();
+    let a = doc.add_sticker(StickerDoc::from_picture("a", picture.clone(), [32, 32])).unwrap();
+    let b = doc.add_sticker(StickerDoc::from_picture("b", picture.clone(), [32, 32])).unwrap();
+    doc.end_edit_group(g, "Drop");
+    assert_eq!(doc.history.undo_len(), before + 1);
+    assert_eq!(doc.undo_label(), Some("Drop"));
+    doc.undo().unwrap();
+    assert!(doc.sticker(a).is_none() && doc.sticker(b).is_none(), "one undo takes back both");
+    doc.redo().unwrap();
+    assert!(doc.sticker(a).is_some() && doc.sticker(b).is_some(), "one redo repeats both");
+    // One entry keeps its label; an empty group adds nothing.
+    let g = doc.begin_edit_group();
+    doc.add_sticker(StickerDoc::from_picture("c", picture, [32, 32])).unwrap();
+    doc.end_edit_group(g, "Drop");
+    assert_eq!(doc.undo_label(), Some("Add Sticker"));
+    let n = doc.history.undo_len();
+    let g = doc.begin_edit_group();
+    doc.end_edit_group(g, "Drop");
+    assert_eq!(doc.history.undo_len(), n);
+}

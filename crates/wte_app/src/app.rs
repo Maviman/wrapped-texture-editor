@@ -164,6 +164,13 @@ impl WteApp {
             let installed = crate::pen::install(cc);
             state.pen.router.touch_is_pen = !installed && !selftest_mode;
         }
+        // Stickers P10a (STICKER_PLAN 6.1): WTE's own OLE drop target in place of winit's (drops at a point, picture
+        // data, virtual files); in a self-test run only with WTE_OLE=1 (it must do no harm; what it queues is dropped).
+        let ole = std::env::var("WTE_OLE").is_ok_and(|v| v.trim() == "1");
+        if !selftest_mode || ole {
+            crate::ole::install(cc);
+            log::info!("drop target: {}", if crate::ole::installed() { "WTE's (OLE)" } else { "winit's (file paths only)" });
+        }
         let runner = selftest::Runner::new(&args, Arc::clone(&exit_code));
         if let Some(path) = args.path.clone() {
             state.push(AppAction::OpenPath(path));
@@ -302,6 +309,9 @@ impl eframe::App for WteApp {
             self.state.pen.feed.extend(records);
             // A real pen must not reach a scenario (`WTE_PEN_SUBCLASS=1` installs the subclass in a self-test run).
             crate::pen::discard_window_records();
+            // Stickers P10a: nor a real drag (`WTE_OLE=1`); the runner's `Step::Drop` queues its events later in the
+            // frame (`Runner::tick`), and `dnd::handle` takes them in this frame's `ui`.
+            crate::ole::discard();
         } else {
             crate::pen::drain_window_records(&mut self.state.pen.feed);
         }

@@ -322,6 +322,41 @@ groups and other blend modes make the sticker one finished picture; 16-bit
 files come back as 8-bit; parts outside the canvas are cut off. There is
 no drag from PhotoCraft into WTE: use Ctrl+S on a linked sticker.
 
+Drag, drop, copy, paste (new in this build)
+-------------------------------------------
+WTE now takes drops itself, so a picture lands where you let it go.
+  1. Drag a PNG or JPG from Explorer onto the model in the 3D view: while
+     you hover, the 3D view gets a frame and a note "Drop to place the
+     picture here"; let go and a stamp sits exactly under the pointer at
+     the Stamp tool's size (one Undo step), selected with the Transform
+     handles. Over the 2D view it lands on that spot of the texture.
+  2. Let go beside the model (or over the side panel): nothing is placed;
+     the picture becomes the Stamp tool's picture ("Drop to use the
+     picture with the Stamp tool"), as before.
+  3. Drag three pictures at once onto the model: the first is placed, the
+     other two are in the Sticker tab's tray ("2 more added to the tray").
+  4. Drag a picture onto a stamp's row in the Layers list (or onto the
+     stamp's picture at the top of the Sticker tab): an image stamp gets
+     the new picture; a sticker stamp gets it as a new top layer.
+  5. In the Sticker view, drop a picture on the canvas: a new layer
+     centred where you let go (also a .psd: its layers; a .wtes: its
+     layers).
+  6. Drag an image from a web browser (Chrome, Edge, Firefox) onto the
+     model: it lands like a file (the browser hands over the picture or a
+     file without a path). Note the browser and what happened.
+  7. Drop a .wtes sticker file or a .psd on the model: a sticker stamp
+     there; anywhere else: a tray sticker for the Stamp tool.
+  8. Drag a .wtep project or a model over the window: the whole window
+     darkens with "Drop to open", as before; let go and it opens.
+  9. Drop a file WTE cannot use (a .txt): a note "Not opened: <name> (not
+     a model, project, image, PSD or sticker file)"; nothing changes.
+ 10. In PhotoCraft, use File > Save As, then drag that file from Explorer
+     onto the model (there is no drag out of PhotoCraft itself).
+If dropping does nothing at all, the log says "drop target" near the top
+(copy %APPDATA%\WrappedTextureEditor\log.txt) and a note says that
+dropping files does not work in this run. If Photoshop or another program
+runs "as administrator" and WTE does not, Windows blocks drops between them.
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

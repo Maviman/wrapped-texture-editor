@@ -82,7 +82,7 @@ brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_wa
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
 companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen
-sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path` (67; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
+sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path sticker_drop` (68; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -111,7 +111,11 @@ again with the stub as Photoshop, found through an injected registry: the choose
 layer spliced into the linked file, `effects\outside-stroke.psd` and `layers\smartobject-layer.psd` merged,
 `layers-minimal\shape-layer.psd` "needs a merged picture" with Photoshop's sentence; shots `link_chooser`,
 `link_made_ps`, `link_editor_list`, `link_merged_ps`, `link_needs_merged_ps`), `sticker_link_path` (PATH = a `.psd`: a
-tray sticker layer by layer, placed; shot `psd_placed`).
+tray sticker layer by layer, placed; shot `psd_placed`); P10a: `sticker_drop` (drops from another program through a drop
+target object and WTE's own data object, never the OS: a PNG on the model, on the 2D view and on a miss, a `.wtes` file,
+three files at once, a DIB on a stamp's Layers row, a virtual file on the sticker canvas, a `.wtep` hover; all undone;
+shots `drop_hover_picture`, `drop_model`, `drop_three`, `drop_canvas`, `drop_hover_project`; run it with `WTE_OLE=1`
+too).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
@@ -141,6 +145,7 @@ flattened, 50 % Multiply within 2/255. `tools/round3_audit/sweep.ps1` runs a job
 | `WTE_STAMP_MODE=wrap` | new stamps start in Wrap (for like-for-like timing runs) |
 | `WTE_COMPANION_PORT`, `WTE_COMPANION_TEST_CODE`, `WTE_COMPANION_AUTO_ALLOW=1`, `WTE_COMPANION_EXPECT_SESSIONS`, `WTE_COMPANION_ADB_SERIAL`, `WTE_COMPANION_LINGER_MS` | branch `companion`, scenario `companion_host` only (`--screenshot` runs): test port (47811), fixed pairing code, allow confirm requests at once, sessions to wait for, the one adb serial the watcher may address, ms to keep serving after the asserts (`docs/notes/companion/desktop.md`) |
 | `WTE_PEN_SUBCLASS=1` | branch `pen-input`: installs the pen window-procedure subclass in a self-test run too (it is always installed in a normal run); proves it does no harm; what it queues is dropped |
+| `WTE_OLE=1` | stickers P10a: registers WTE's own OLE drop target on the window in a self-test run too (it replaces winit's in every normal run); proves it does no harm; what a real drag queues is dropped (the scenario's `Step::Drop` still works) |
 | `RAYON_NUM_THREADS=n` | pool size; brush and wrap results must be identical for any n |
 | `WGPU_BACKEND=dx12` / Vulkan | renderer choice (see `dist/*.cmd`) |
 
@@ -179,7 +184,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
-| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P9a built and checked; P9b built (Photoshop's discovery, the editor list, the chooser, the default editor, Help > Editor locations...); P10a-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
+| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P9b built and checked; P10a built (WTE's own drop target: drops at a point, picture data, virtual files); P10b-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
 | companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -249,13 +254,18 @@ list (Photoshop found in the registry, read only: App Paths and its `Application
 chooser "Edit in which program?" with "Always use this one" while two editors are known and none is the default; the
 "Edit in..." list beside every "Edit in <editor>" and as a submenu in the Layer and row menus; Other program...; Help >
 Editor locations...; no already-open question for Photoshop; a question before a link opens in a second editor; the
-"could not be replaced" message when an editor holds the file).
-Next: P10a / P10b / P11 drop, clipboard, drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if
+"could not be replaced" message when an editor holds the file), **P10a** WTE's own Windows drop target (`ole/`,
+hand-written OLE: a picture file, picture data from a browser or a virtual file lands where it is let go: a stamp on the
+model or the texture, a layer on the sticker canvas, a new picture or layer on a stamp's Layers row; `.wtes` and `.psd`
+as stickers; several pictures: the rest to the tray; one undo step per drop; the "Drop to open" overlay for projects and
+models as before; `WTE_OLE=1` in a self-test run).
+Next: P10b / P11 clipboard, drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if
 everything is green; then the gate.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open
-ones listed here. **Owed so far:** all of them (drop and clipboard come with P10-P11; Photoshop with P9b); the
+ones listed here. **Owed so far:** all of them (the drop part of hand test 7 can be tried now: `dist/HOW_TO_TEST.txt` "Drag, drop, copy,
+paste"; clipboard and drag out come with P10b-P11; Photoshop with P9b); the
 "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b, P7a, P7b and P8 parts) can be tried now: styles, tray, Edit
 before placing, the shared-picture question, Export Picture, the five tabs; painting with the mouse and a pen (part 2);
 selections and cut-out (part 3); layout, text, shapes, adjustments and the library (part 4); and the chapter "Working

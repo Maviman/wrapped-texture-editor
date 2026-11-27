@@ -25,6 +25,7 @@ mod io_flows;
 mod jobs;
 mod link;
 mod object_ops;
+mod ole;
 mod panels;
 mod pen;
 mod prefs;

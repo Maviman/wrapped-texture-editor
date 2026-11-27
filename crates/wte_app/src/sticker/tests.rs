@@ -378,9 +378,10 @@ fn a_locked_layer_and_an_unbuilt_tool_do_nothing() {
     canvas_pass(&ctx, &mut state, geom, hit, vec![egui::Event::PointerMoved(at), button(at, egui::PointerButton::Primary, true)]);
     assert!(state.sticker_ui.drag.is_none() && state.status_hint.contains("locked"), "{}", state.status_hint);
     canvas_pass(&ctx, &mut state, geom, hit, vec![button(at, egui::PointerButton::Primary, false)]);
-    edit_mut(&mut state).unwrap().tool = StickerTool::Brush;
+    // Stickers P7a: the Brush works now; the Marquee comes with P7b.
+    edit_mut(&mut state).unwrap().tool = StickerTool::Marquee;
     canvas_pass(&ctx, &mut state, geom, hit, vec![button(at, egui::PointerButton::Primary, true)]);
-    assert!(state.status_hint.contains("Brush tool is not available yet"), "{}", state.status_hint);
+    assert!(state.status_hint.contains("Marquee tool is not available yet"), "{}", state.status_hint);
     assert!(state.sticker_ui.drag.is_none());
 }
 
@@ -476,7 +477,7 @@ fn leaving_the_view_frees_the_canvas_and_thumbnail_caches() {
     let ctx = egui::Context::default();
     enter_in(&mut state, None);
     let tex = ctx.load_texture("t", egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]), egui::TextureOptions::default());
-    state.sticker_ui.canvas = Some(CanvasTex { key: canvas::CanvasKey::Image(BlobId(1)), tex: tex.clone(), size: [1, 1] });
+    state.sticker_ui.canvas = Some(CanvasTex { key: canvas::CanvasKey::Image(BlobId(1)), tex: tex.clone(), size: [1, 1], exact: true });
     state.sticker_ui.thumbs.insert(1, ThumbTex { key: layers_ui::ThumbKey::Blob(BlobId(1)), tex: Some(tex) });
     leave_in(&mut state, None);
     assert!(state.sticker_ui.canvas.is_none() && state.sticker_ui.thumbs.is_empty());

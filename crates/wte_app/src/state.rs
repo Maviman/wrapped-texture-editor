@@ -160,6 +160,19 @@ pub enum PanelHit {
     SharedCancel,
     /// The Tool tab in the Sticker view: the heading of the active layer's style editor (Layer styles).
     StickerLayerStyles,
+    /// Stickers P7a: the Tool tab's mask block (Add / Invert / Apply / Delete, "Paint on mask") and the Rasterize
+    /// offer of the paint tools (the Tool tab's button and the canvas header's).
+    StickerMaskAdd,
+    StickerMaskInvert,
+    StickerMaskApply,
+    StickerMaskDelete,
+    StickerPaintOnMask,
+    StickerRasterize,
+    StickerHeaderRasterize,
+    /// Stickers P7a: the Gradient tool's options (the mode list, Reverse, Add stop).
+    StickerGradientMode,
+    StickerGradientReverse,
+    StickerGradientAddStop,
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
@@ -221,9 +234,25 @@ impl StickerTool {
         }
     }
 
-    /// The tool works on the canvas in this build (stickers P6a: Move and Hand; the others come with P7a, P7b and P8).
+    /// The tool works on the canvas in this build (stickers P6a: Move and Hand; P7a: Brush, Eraser, Fill, Eyedropper,
+    /// Gradient; the others come with P7b and P8).
     pub fn built(self) -> bool {
-        matches!(self, StickerTool::Move | StickerTool::Hand)
+        matches!(
+            self,
+            StickerTool::Move
+                | StickerTool::Hand
+                | StickerTool::Brush
+                | StickerTool::Eraser
+                | StickerTool::Fill
+                | StickerTool::Eyedropper
+                | StickerTool::Gradient
+        )
+    }
+
+    /// Stickers P7a (STICKER_PLAN 3.3 "Layer-kind rules"): the tools that change pixels of a picture layer (on a text or
+    /// shape layer they offer Rasterize instead).
+    pub fn paints(self) -> bool {
+        matches!(self, StickerTool::Brush | StickerTool::Eraser | StickerTool::Fill | StickerTool::Gradient)
     }
 }
 

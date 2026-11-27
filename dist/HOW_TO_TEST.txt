@@ -104,6 +104,44 @@ Sticker; widen the panel and they fit one row).
  10. A project made with v0.3.0 (no stickers) opens and exports exactly as
      before.
 
+Stickers, part 2: painting in the Sticker view (new in this build)
+------------------------------------------------------------------
+Select a placed image stamp and press 4 (or Edit Sticker) to open the
+Sticker view: the sticker on the left, the model on the right.
+  1. Layers tab: "New" adds an empty layer. Press B (Brush) and paint on
+     the canvas: the paint appears under the pointer without delay and the
+     model follows while you paint (a little behind). One Ctrl+Z takes the
+     whole stroke back. Size, hardness, opacity and flow are in the Tool
+     tab ([ and ] change the size); the colour is the primary colour.
+  2. E (Eraser) erases on the active layer. Esc while the button is still
+     down cancels the stroke; Ctrl+Z while painting takes back only that
+     stroke.
+  3. Give the layer "Classic sticker" (Tool tab > Layer styles) and paint
+     on it: while you paint the canvas shows the new paint without its
+     border and the header says "styles update when you lift"; when you
+     lift, the white border and the shadow appear around the new paint on
+     the canvas and on the model.
+  4. G (Fill): click on a colour area of the layer: it is filled with the
+     primary colour (Tolerance, Contiguous and Anti-alias in the Tool tab).
+     Shift+G (Gradient): drag across the layer; the options choose primary
+     to secondary, primary to transparent or your own stops, and Reverse.
+  5. I (Eyedropper): click on the sticker to take its colour.
+  6. Tool tab > Mask: "Add mask", then paint with black to hide and white
+     to show ("Paint on mask" is on); Invert, Apply and Delete do what they
+     say, each one Undo step.
+  7. Convert a text stamp to a layered sticker and try to paint on its
+     text layer: nothing is painted, a message says "Rasterize this layer
+     to paint on it" and the header offers "Rasterize"; after it the brush
+     paints on the text's pixels and it looks the same as before.
+  8. With a pen: pressure makes the stroke thinner or wider; the eraser end
+     erases (the tool goes back to the Brush when you turn the pen round
+     again); the lower pen button drags the canvas around. With the tablet
+     companion, one finger drags the canvas, two fingers zoom, the pen
+     paints.
+  9. A sticker of a large photo (e.g. 2000 x 2000 pixels): painting stays
+     smooth; on a layer with Classic sticker the border comes back within
+     about a second after you lift.
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

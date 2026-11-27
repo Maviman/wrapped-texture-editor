@@ -65,6 +65,15 @@ pub(crate) struct BrushTabState {
 /// Draws the Brush tab (settings of the Brush or the Eraser, whichever is active). Settings change `state` directly;
 /// commands are pushed to `state.actions`.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState) {
+    // Stickers P7a (STICKER_PLAN 3.2): in the Sticker view the tab edits the sticker Brush's or Eraser's tip; the
+    // sticker brush is always round, so the 3D brush objects (Type, Shape, Offset, ...) are greyed with a hint.
+    let sticker_tool = crate::sticker::edit_of(state).map(|e| e.tool);
+    if sticker_tool.is_some() {
+        ps.brush.preview = None;
+        sticker_view(ui, state, sticker_tool == Some(crate::state::StickerTool::Eraser));
+        ps.brush.content = Some(ui.min_rect());
+        return;
+    }
     let eraser = state.tool == ToolKind::Eraser;
     let old = if eraser { state.tools.eraser.clone() } else { state.tools.brush.clone() };
     let mut b = old.clone();
@@ -145,6 +154,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState) {
         }
     }
     state.actions.extend(actions);
+}
+
+/// Hint of the Brush tab in the Sticker view.
+pub(crate) const STICKER_TIP_HINT: &str = "The sticker brush is always round (Circular). Sphere and shapes are for the model.";
+
+/// The Brush tab in the Sticker view: the tip line and the greyed Type row with its hint (the size, hardness, opacity,
+/// flow, spacing and pen pressure are in the Tool tab).
+fn sticker_view(ui: &mut egui::Ui, state: &mut AppState, eraser: bool) {
+    ui.spacing_mut().item_spacing.y = ROW_SPACING;
+    let layer = crate::sticker::layered(state, None).and_then(|(d, id)| d.layer(id).map(|l| l.name.clone())).unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.set_min_height(ROW_HEIGHT);
+        let text = format!("Sticker {} tip - paints on: {layer}", if eraser { "Eraser" } else { "Brush" });
+        ui.add(egui::Label::new(text).truncate());
+    });
+    ui.add_enabled_ui(false, |ui| {
+        ui.horizontal(|ui| {
+            ui.set_min_height(ROW_HEIGHT);
+            row_label(ui, "Type", LABEL_WIDTH);
+            let _ = ui.add(egui::Button::selectable(true, "Circular")).on_disabled_hover_text(STICKER_TIP_HINT);
+            let _ = ui.add(egui::Button::selectable(false, "Sphere")).on_disabled_hover_text(STICKER_TIP_HINT);
+        });
+    });
+    ui.label(egui::RichText::new(STICKER_TIP_HINT).weak());
+    ui.label(egui::RichText::new("Size, hardness, opacity, flow and pen pressure: Tool tab.").weak());
 }
 
 /// The first note line by state (FEATURE_BRUSH 6.3).

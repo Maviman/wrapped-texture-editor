@@ -274,12 +274,12 @@ pub(super) fn sticker_view() -> Vec<Step> {
 }
 
 /// The open Sticker view.
-fn edit(s: &AppState) -> Result<&crate::state::StickerEdit, String> {
+pub(super) fn edit(s: &AppState) -> Result<&crate::state::StickerEdit, String> {
     session_of(s)?.sticker_edit.as_ref().ok_or_else(|| "the Sticker view is not open".to_owned())
 }
 
 /// The stamp of the open Sticker view (or the selected stamp).
-fn stamp(s: &AppState) -> Result<&wte_core::StampObject, String> {
+pub(super) fn stamp(s: &AppState) -> Result<&wte_core::StampObject, String> {
     let session = session_of(s)?;
     let id = match session.sticker_edit.as_ref().map(|e| e.target) {
         Some(crate::state::StickerTarget::Stamp(id)) => id,
@@ -289,7 +289,7 @@ fn stamp(s: &AppState) -> Result<&wte_core::StampObject, String> {
 }
 
 /// The sticker of the edited stamp.
-fn sticker_doc(s: &AppState) -> Result<&wte_core::StickerDoc, String> {
+pub(super) fn sticker_doc(s: &AppState) -> Result<&wte_core::StickerDoc, String> {
     match stamp(s)?.source {
         StampSource::Sticker { sticker } => doc_of(s)?.sticker(sticker).map(|d| &**d).ok_or_else(|| "no sticker".to_owned()),
         _ => Err("the stamp is not a sticker stamp".into()),
@@ -297,7 +297,7 @@ fn sticker_doc(s: &AppState) -> Result<&wte_core::StickerDoc, String> {
 }
 
 /// Layer-space point -> normalized canvas coordinates (the canvas camera of the last frame).
-fn canvas_norm(s: &AppState, p: Vec2) -> Result<[f32; 2], String> {
+pub(super) fn canvas_norm(s: &AppState, p: Vec2) -> Result<[f32; 2], String> {
     let rect = s.sticker_canvas_rect.ok_or("the canvas is not laid out")?;
     let doc = sticker_doc(s)?;
     let geom = crate::sticker::canvas::Geom { origin: Vec2::new(doc.artboard.x0 as f32, doc.artboard.y0 as f32), size: doc.size() };
@@ -306,13 +306,13 @@ fn canvas_norm(s: &AppState, p: Vec2) -> Result<[f32; 2], String> {
 }
 
 /// The composite equals the one remembered under `key`.
-fn same_composite(s: &AppState, sc: &Scratch, key: &str) -> Result<(), String> {
+pub(super) fn same_composite(s: &AppState, sc: &Scratch, key: &str) -> Result<(), String> {
     if composite_hash(doc_of(s)?) == remembered(sc, key)? { Ok(()) } else { Err(format!("the composite differs from \"{key}\"")) }
 }
 
 /// A hash of what the user can see change in the document: the composite, every stamp (source kind, placement, tint,
 /// styles) and the stickers the stamps show.
-fn doc_state_hash(doc: &Document) -> u64 {
+pub(super) fn doc_state_hash(doc: &Document) -> u64 {
     let mut h = composite_hash(doc);
     for stamp in &doc.stamps {
         h = wte_core::fnv1a64(h, format!("{:?}|{:?}|{:?}|{:?}", stamp.source, stamp.placement, stamp.tint, stamp.styles).as_bytes());

@@ -171,6 +171,17 @@ pub mod counters {
         static MAX_SIDE: Cell<u32> = const { Cell::new(0) };
         static MAX_PIXELS: Cell<u64> = const { Cell::new(0) };
         static BUFFER_COPIES: Cell<u64> = const { Cell::new(0) };
+        static REGIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Stickers P7a: records one `render::render_region` call (a dirty rectangle of the editor canvas).
+    pub(crate) fn region_rendered() {
+        REGIONS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// `render::render_region` calls on this thread so far (stickers P7a; `renders` counts only whole renders).
+    pub fn region_renders() -> u64 {
+        REGIONS.with(Cell::get)
     }
 
     /// Records one copy of a sticker picture or mask buffer that a snapshot, a cache or a job still shared

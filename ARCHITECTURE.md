@@ -346,8 +346,14 @@ PhotoCraft). (P6a): the Sticker view: `ViewMode::Sticker`, `StickerEdit` and its
 in the Tool tab, `STICKER_SHORTCUTS` and the routing rule, the pen's eraser end in the view, the canvas's rect for the
 companion's finger gestures, the self-test's `Target`, `Step::WaitMs` and shots with their expected content, the
 scenario `sticker_view`; core read-outs `Document::sticker_layer_at` / `sticker_layer_thumbnail` (2.2, 5.20, 8.2, 8.3,
-8.5, 8.7, 8.10, 8.11, 8.13, 8.15, 9.1). Still to come, each documented by its package: the Sticker tab, styles UI and tray
-(P6b: 8.7-8.9, 8.15), painting, selections and the layout / text / shape tools (P7a, P7b, P8: 8.6, 8.7, 8.15, 9.2), the
+8.5, 8.7, 8.10, 8.11, 8.13, 8.15, 9.1). (P6b): the Sticker tab, styles UI and tray (8.7-8.9, 8.15). (P7a): painting in
+the Sticker view: the sticker Brush and Eraser (pen pressure, the eraser end), Fill, Gradient and Eyedropper
+(`sticker/tools/`), layer masks and "Paint on mask", Rasterize of a text or shape layer (the paint tools offer it), the
+live canvas of a stroke (dirty rectangles, stroke mode on a styled layer, the canvas's restyle job and the model's
+Preview job: `sticker/live.rs`), core `render::render_region`, `doc_sticker_paint.rs` (the region read-out, the render
+jobs, the Eyedropper and layer read-outs, `rasterize_sticker_layer`), `select::selection_in_content`, the scenarios
+`sticker_edit` and `sticker_pen` (5.20, 5.27, 6.10, 6.11, 8.6, 8.7, 8.11, 8.15, 9.1, 9.2). Still to come, each
+documented by its package: selections and the layout / text / shape tools (P7b, P8: 8.6, 8.7, 8.15, 9.2), the
 editor link in the app (P9a, P9b: 8.16), drop target, clipboard and drag out (P10a, P10b, P11: 8.17), linked paint layers
 (P12: 8.16), docs and the version (P13).
 
@@ -417,13 +423,15 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `sticker/filter.rs` | stickers P2 | Gaussian `blur` / `blur_mask` (three boxes), `sharpen`, `draw_gradient` / `draw_gradient_mask` (5.27, 6.12) |
 | `sticker/bench.rs` | stickers P1, P2 | the ignored `perf_k1_*` and `perf_k2_*` timings (test-only) |
 | `sticker/model.rs` | stickers P3a | `StickerDoc`, `StickerLayer`, `StickerContent`, `PicturePixels`, `LayerMask`, `ArtboardShape`; limits check, the trivial-path test (5.27 part 3) |
-| `sticker/render.rs` | stickers P3a | `render` / `render_with` (6.10), `StickerRenderInput`, `LayerKey`, `LayerRaster`, `LayerCache`, `render_size`; P5c: `layer_content` / `mask_raster` (a layer's pixels and its mask for a linked PSD, 6.13); P6a: `layer_alpha_at` (the Move tool's hit test) |
+| `sticker/render.rs` | stickers P3a | `render` / `render_with` (6.10), `StickerRenderInput`, `LayerKey`, `LayerRaster`, `LayerCache`, `render_size`; P5c: `layer_content` / `mask_raster` (a layer's pixels and its mask for a linked PSD, 6.13); P6a: `layer_alpha_at` (the Move tool's hit test); P7a: `render_region` (the editor canvas during a stroke, 6.10) |
 | `sticker/pipeline.rs` | stickers P3a | `SourceFrame`, `bake_placement_of`, `Styling`, `work_level`, `styled_mips`, `styled_straight`, `sticker_scale` (6.5 "Stickers") |
 | `doc_stickers.rs` | stickers P3a; P6a | the sticker commands of `Document` (queries, add / remove / promote / detach, `set_sticker`, stamp styles, the two placements, finished pictures) and `StickerCaches` (5.20 "Stickers"); P6a: the editor read-outs `sticker_layer_at`, `sticker_layer_thumbnail` |
 | `doc_stickers_tests.rs` | stickers P3a | the `k3a_*` tests of the sticker document (test-only child of the crate root) |
 | `doc_sticker_edits.rs` | stickers P3b | sticker pixel edits: strokes on pictures and masks, `replace_sticker_pixels`, promotion inside an edit, `convert_text_stamp`, Revert, the re-bake of users and the undo of `Edit::StickerPixels` (5.20 "Sticker pixel edits") |
 | `doc_sticker_edits_tests.rs` | stickers P3b | the `k3b_*` tests (test-only child of the crate root) |
 | `doc_sticker_tab_tests.rs` | stickers P6b | the `k6b_*` tests of `add_stamp_styled`, `set_styles_of` / `set_styles_each` and `stamp_style_reference_size` (test-only child of the crate root) |
+| `doc_sticker_paint.rs` | stickers P7a | what the editor's painting needs from the document (5.20 "Painting"): `sticker_canvas_region` (a dirty rectangle with the stroke's layer unstyled), the render jobs `StickerRenderJob` / `StickerRenderOutput` (`sticker_canvas_job`, `sticker_preview_job`, `apply_sticker_preview`), `sticker_color_at`, `sticker_layer_pixels` / `sticker_layer_mask`, `rasterize_sticker_layer` |
+| `doc_sticker_paint_tests.rs` | stickers P7a | the `k7a_*` tests and `perf_k7a_*` (test-only child of the crate root) |
 | `sticker/file.rs` | stickers P4 | the `.wtes` sticker file (7.8): `write_wtes`, `read_wtes`, `WtesManifest`, `WtesFile`; `Document::{saved_sticker_ids, sticker_extract_pictures, sticker_wtes, import_wtes}` |
 | `psd/mod.rs` | stickers P5a | the PSD reader's types: `PsdDoc`, `PsdLayer`, `PsdMask`, `PsdBlend`, `PsdFeatures`, `PsdSection`, `PsdColorMode`, `PsdLimits`, `PsdError`, `PsdRefusal` (sentences); `forcing`, `editor_native`, `profile_note` (5.28) |
 | `psd/read.rs` | stickers P5a | `psd::read` (7.9 "Reader"): header, resources 1057 / 1039, layer info (section or `Lr16`), records and tagged blocks (re-sync), channel decoding (raw, PackBits, ZIP, ZIP with prediction; 8 and 16 bit), the merged picture un-matted from white |
@@ -568,8 +576,14 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `sticker/styles_ui.rs` | stickers P6b | the `StyleStack` editor (one block per style with its on/off box; `BLOCKS`, `toggled`, `block_on`, `default_block`, `preset_row`), used for stamps (Sticker tab) and sticker layers (Tool tab in the view) |
 | `sticker/tray.rs` | stickers P6b | the tray (`tray_stickers`, `show`), its commands (New Sticker, from a picture, use as the Stamp tool's source, Duplicate, Delete), "Edit before placing", Export Picture (`write_picture`), the Sticker tab's thumbnails (`PictureThumbs`) |
 | `sticker/tests_p6b.rs` | stickers P6b | the unit tests of P6b's commands (8.15) |
+| `sticker/live.rs` | stickers P7a | the live canvas of a stroke (8.15 "Painting"): `LiveStroke`, dirty rectangles uploaded with `set_partial`, stroke mode, the restyle and Preview jobs (`RenderJobs`, named threads), `LiveCounters`, `upload` |
+| `sticker/commands.rs` | stickers P7a | the mask commands (Add from selection / Add, Invert, Apply, Delete, "Paint on mask"), Rasterize, the rectangle selection command |
+| `sticker/tools/{mod,brush,fill,gradient,eyedropper}.rs` | stickers P7a | the paint tools of the Sticker view: `paint_target` (the layer-kind rules), `selection_for`; Brush and Eraser strokes (`brush.rs`), Fill, Gradient (`GradientOptions`), Eyedropper |
+| `sticker/tools/tests.rs` | stickers P7a | the unit tests of the paint tools and the live canvas (8.15) |
 | `dialogs/sticker_shared.rs` | stickers P6b | the shared-picture question (E6): Edit all / Only this one / Cancel |
 | `selftest/scenarios/sticker_tab.rs` | stickers P6b | the scenarios `sticker_styles`, `sticker_tray`, `sticker_controls` (8.11) |
+| `selftest/scenarios/sticker_paint.rs` | stickers P7a | the scenarios `sticker_edit` and `sticker_pen` (8.11) |
+| `tools/sticker/frame_spans.py` (repo root) | stickers P7a | the worst `sticker.*` / `link.*` / `ole.*` frame spans of a scenario's frame log (STICKER_PLAN 8.4; exit 1 over the limit) |
 | `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
 | `selftest/scenarios.rs` | A6 | canned scenarios (the scaffold stub already contains the action-only smoke scenarios of section 8.11) |
@@ -2943,6 +2957,44 @@ impl Document {
   artboard, 512 MiB of owned pictures (also when a stroke makes a blob picture owned), 4096 px a side for a picture an
   editor operation gives a new size (`MAX_CREATED_SIDE`); 8192 for imported pictures painted in place.
 
+**Painting (P7a; `doc_sticker_paint.rs`, STICKER_PLAN 3.3, 3.5, review A6).**
+
+```rust
+pub const RASTERIZE_LABEL: &str = "Rasterize Sticker Layer";
+pub enum StickerRenderPurpose { Canvas, Preview }
+pub struct StickerRenderJob { /* sticker, purpose, input: StickerRenderInput (a snapshot), scale, quality */ }  // Send + 'static
+impl StickerRenderJob { pub fn sticker(&self) -> StickerId; pub fn doc(&self) -> &Arc<StickerDoc>; pub fn run(self) -> StickerRenderOutput; }
+pub struct StickerRenderOutput { pub sticker: StickerId, pub purpose: StickerRenderPurpose, pub doc: Arc<StickerDoc>,
+                                 pub scale: f32, pub picture: Arc<PixelBuf>, pub mips: Option<Arc<PremulMips>>, pub elapsed: Duration }
+impl Document {
+    /// `render::render_region` with the document's layer cache: the pixels of `region` (artboard px, scale 1) with layer
+    /// `live` drawn without its styles. Read only.
+    pub fn sticker_canvas_region(&mut self, id: StickerId, region: IRect, live: Option<StickerLayerId>) -> Result<CroppedBuf, EditError>;
+    pub fn sticker_canvas_job(&mut self, id: StickerId) -> Result<StickerRenderJob, EditError>;        // scale 1, Full, styles on
+    pub fn sticker_preview_job(&mut self, id: StickerId) -> Result<Option<StickerRenderJob>, EditError>; // users' largest Preview scale; None without users
+    pub fn apply_sticker_preview(&mut self, out: StickerRenderOutput) -> bool;  // only while a stroke on that sticker is open
+    pub fn sticker_color_at(&mut self, on: StickerRef, p: Vec2) -> Option<[u8; 4]>;   // the finished sticker at scale 1; an image stamp's picture
+    pub fn sticker_layer_pixels(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<Arc<PixelBuf>, EditError>;
+    pub fn sticker_layer_mask(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<Option<Arc<AlphaBuf>>, EditError>;
+    pub fn rasterize_sticker_layer(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<StickerId, EditError>;
+}
+```
+
+- **Jobs take a snapshot** (an `Arc` clone of the sticker and its decoded pictures and fonts). The next dab of an open
+  stroke then copies the painted buffer once (copy-on-write; the app starts a Preview job at most every 100 ms, so a
+  stroke copies a buffer at most ten times a second). `run` is `sticker::render` (deterministic, any thread); a Preview
+  job also builds the picture's mips.
+- **`apply_sticker_preview`** bakes the users at Preview quality from the job's picture: it puts the picture into the
+  render cache under the sticker's **current** value, runs `rebake_sticker_users(id, Preview)` (the live Preview of
+  P3b, no history) and drops the entry right after (`forget_sticker_pictures`), so no later lookup takes a picture of an
+  earlier state (review A8). Nothing happens without an open stroke on that sticker (the stroke's end bakes the Final).
+- **Read-outs** never change the document and never promote: an image stamp that is not a sticker yet reads its blob as
+  the virtual layer 1 (`StickerLayerId(1)`), with no mask; a text stamp has none (`InvalidParam`).
+- **`rasterize_sticker_layer`**: a text or shape layer becomes a picture layer with the same look: its content at scale 1
+  (adjustments included and then cleared; `render::layer_content`), placed by a whole-pixel move, up to 1024 px beyond
+  the artboard (at most `MAX_CREATED_SIDE` a side, else the artboard); name, visibility, opacity, blend, clip and styles
+  kept; one `set_sticker` entry "Rasterize Sticker Layer". The finished picture is unchanged (test `k7a`).
+
 ### 5.21 `import/` [C5]
 
 ```rust
@@ -3536,6 +3588,10 @@ pub fn extract(src: &PixelBuf, sel: &AlphaBuf) -> PixelBuf;          // "Layer v
 pub fn mix_px(before: [u8; 4], after: [u8; 4], k: u8) -> [u8; 4];   // premultiplied (exact c * a); k 0 / 255 and before == after exact
 pub fn mix_selected(before: &PixelBuf, after: &mut PixelBuf, sel: &AlphaBuf);
 pub fn mix_selected_mask(before: &AlphaBuf, after: &mut AlphaBuf, sel: &AlphaBuf);
+/// Stickers P7a: the artboard selection seen from a layer's content pixels (nearest sample at each pixel centre's
+/// layer-space point; 0 outside the artboard; a whole-pixel move copies rows): what limits the paint tools and makes a
+/// new layer mask on a moved, scaled or turned layer.
+pub fn selection_in_content(sel: &AlphaBuf, artboard: IRect, transform: &LayerTransform, size: [u32; 2]) -> AlphaBuf;
 
 // sticker/cutout.rs
 pub const MAX_DEFRINGE: u32 = 10;  pub const DEFAULT_BG_TOLERANCE: u8 = 40;  pub const BG_SOFT_BAND: f32 = 2.0;
@@ -5007,6 +5063,15 @@ frame places it with the frame's em and anchor scaled by the same factor (check 
 value, pixels by version or blob id; never pixel bytes), so a style slider on one layer redraws that layer and the
 composite only. **Determinism:** layers are composited in order on the calling thread; only the resampler and
 `apply_styles` use rayon (thread-count independent; test k3a-11 with pools of 1 and 8).
+**Region render (P7a; the editor canvas during a stroke, STICKER_PLAN 3.5, review A6):** `render_region(input, region,
+live, cache)` draws only `region` (output pixels at scale 1, clipped to the artboard): every layer but `live` from its
+full raster (the layer cache, the same keys `render_with` uses at scale 1 and `RasterQuality::Full`), the live layer's
+content (steps a and b, mask included, **no styles**) computed in the region only and never cached (a picture moved by
+whole pixels is cut to the region before its adjustments and mask), then the same per-pixel composite with clipping and
+the artboard shape. With no live layer, or an unstyled one, every pixel that is seen equals the whole render's (a fully
+transparent pixel may carry another colour: a layer clipped to the live layer is left out where the live layer draws
+nothing in the region, while the whole render composites it there at alpha 0); the trivial fast path copies the
+picture's bytes as `render_with` does. Counted by `counters::region_renders` (`renders` counts whole renders only).
 **Placement refit (2.9):** `sticker::refit_placement(placement, old, new)` keeps the on-model size of a layer-space pixel
 (`k = host size / old artboard`) and the on-model position of every layer-space point (the centre moves by `(new centre -
 old centre) * k` along the placement's own axes, `HostFrame` with flips and rotation); an equal artboard changes nothing.
@@ -5095,7 +5160,9 @@ t - C)`; premultiplied bilinear, transparent outside; when the larger axis scale
 alpha 0 kept): rotation a multiple of 90 degrees within 1e-6 rad, `|scale * s| = 1` on both axes, and source pixel
 centres landing within 1e-4 of output pixel centres (moves by whole pixels, flips, grid-aligned quarter turns). Output
 rect = `transformed_bounds` (corners snapped within 1e-6 of an integer) intersected with the clip, at most
-`MAX_RESAMPLE_PIXELS`.
+`MAX_RESAMPLE_PIXELS`. Stickers P7a: a plain move (rotation exactly 0, both scales `+1` at the render scale) copies the
+rows of the part that lands in the clip (the same bytes as the per-pixel copy; time of the output, not of the source:
+the editor draws dirty rectangles of large layers, 8.4).
 
 ### 6.12 Sticker selection, cut-out and filters (`sticker/select.rs`, `cutout.rs`, `filter.rs`) [stickers P2]
 
@@ -7205,6 +7272,13 @@ stay (anchor rule), so the other points stay under their marks. A refused `Previ
 resolution) keeps the last accepted point: spec and picture stay, the status bar shows the reason once per drag, and
 release commits the last accepted point (no entry when none was accepted).
 
+**Stickers P7a: the sticker paint tools are not `ToolController` tools.** Brush, Eraser, Fill, Gradient and Eyedropper of
+the Sticker view live in `sticker/tools/` and are routed by the sticker canvas (`canvas::handle_input`, 8.15); the 3D
+half keeps the Navigate behaviour. They use the paint tools' settings: the sticker Brush paints with `tools.brush`, the
+sticker Eraser with `tools.eraser` (size = diameter in layer-space pixels; hardness, opacity, flow, spacing and the pen
+pressure options as they are), and the brush keys `[` `]` / Shift+`[` `]` change the sticker tool's settings in the view
+(`dispatch::active_brush`). Pen pressure reaches the canvas exactly as the views (`PenFrame::cursor` per event).
+
 ### 8.7 Panels (`panels/*`) [A4]
 
 ```rust
@@ -7722,6 +7796,17 @@ Choose..., **Edit before placing** (`EditBeforePlacing`, disabled without a sour
 presets, scaled to the chosen picture; a setting, `tools.stamp.styles`; "Custom" when it matches no preset). The image
 row of a selected image stamp gains **Edit** (opens the Sticker view). **Edit menu**: Copy Style / Paste Style / Clear
 Style (`StyleTarget::Layers` in the Sticker view, else `Stamps`).
+
+**Stickers P7a (STICKER_PLAN 3.2, 3.3).** The **Tool tab in the Sticker view** shows the paint tools' options: Brush /
+Eraser = the paint tools' Size, Hardness, Opacity, Flow, Spacing and Pen pressure (`tool_options::brush_options` on
+`tools.brush` / `tools.eraser`); Fill = Tolerance (0..=255), Contiguous, Anti-alias (`StickerUi::fill`); Gradient = what
+it draws (Primary to secondary, Primary to transparent, Custom stops), Opacity, Reverse and, for Custom, one row per stop
+(colour button, position, x) and Add stop (2..=8); Eyedropper = a help line. Below X / Y the **Mask** block of the active
+picture layer: "Add mask" ("Add from selection" with a selection), Invert, Apply, Delete (`PanelHit::StickerMask*`; the
+three need a mask) and "Paint on mask" (`StickerPaintOnMask`); a text or shape layer shows "Text or shape layer" and
+**Rasterize** instead (`StickerRasterize`). The **Brush tab in the Sticker view** names the sticker Brush or Eraser and the
+layer it paints, and shows the Type row greyed (Circular) with the hint "The sticker brush is always round (Circular).
+Sphere and shapes are for the model." (`brush_tab::STICKER_TIP_HINT`; the sphere and shape rows are not shown).
 
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
@@ -8499,6 +8584,8 @@ counted down) instead of failing (`export_errors`).
 | `sticker_styles` | Stickers P6b (`selftest/scenarios/sticker_tab.rs`). Sphere, 3D; the sample logo as an image stamp and the text "WTE" placed; the Sticker tab; the image selected, Classic sticker clicked (`ScreenClick` on `StylePresetButton(0)`, shot `styles_image`); the text selected, Classic sticker, its Stroke box (shot `styles_both`); three undos | the Sticker tab is the fifth tab in the second row of the strip; each click is one entry; the image stamp gets exactly `ClassicSticker.styles([256, 256])`, the text a contour and a shadow and then a stroke; neither is promoted (image / text sources), the view stays 3D; the stored placements' artwork box (depth excepted: an automatic depth refits to the shadow, 2.6) is unchanged; each linked layer grows (more than 5 % more texels); three undos give the start (history length, stamps and their stickers, composite) |
 | `sticker_tray` | Stickers P6b (`sticker_tab.rs`). Sphere, 3D; a picture file in the run's assets folder made a tray sticker (`NewStickerFromPicture`); the Stamp tool's "Edit before placing" clicked (Tool tab); the red disc added as a second layer (shot `tray_edit_before`); Done; the sticker placed twice (shot `tray_placed_twice`); the first stamp opened, Nudge(10, 0): the question (shot `tray_question`), Edit all clicked; Leave; the second stamp opened, Nudge(0, 12), Only this one clicked (shot `tray_only_this` after Leave); undo all, redo all; Save As, open the saved project | one tray sticker "badge" (kept), the Stamp tool's source, one entry; the view opens on `Tray(id)` with "Not placed yet", nothing placed, no entry; the add asks nothing (a tray target) and is one entry; Done returns to 3D with the Stamp tool and the sticker as its source; two sticker stamps share it, one entry each; the question says 2 and changes nothing; Edit all keeps both on the one sticker and changes the model in one entry; Only this one gives the second stamp its own sticker (detach + edit = two entries) and leaves the first one's layers unchanged; undo all = the start (no stamp, empty tray), redo all = the end; the saved and reopened project has no history, two sticker stamps with different stickers, two tray stickers and equals the saved one (composite, stamps, sticker layers, tray) |
 | `sticker_controls` | Stickers P6b (`sticker_tab.rs`). Sphere; the logo placed and a second stamp of the same picture (Setup); the first stamp opened, Nudge, the question's Cancel clicked; Leave; the Sticker tab: the six presets, Copy / Paste / Clear Style, the nine block boxes (shot `controls_tab`), Export Picture..., Edit Sticker; in the view's Tool tab the layer preset (Outline; the question answered Only this one), the layer's Stroke box, Copy Style (shot `controls_view`); Done; the tray's New Sticker, its item, Duplicate, Delete, Export Picture..., From picture..., the blank item, Edit, Done; the Stamp tool's Edit before placing, Done, the Style list opened and closed. Every control is clicked through `ScreenClick` after `ScreenScroll` brought it into the page | Cancel leaves no dialog, no entry, the image stamp; six presets = six entries (Clear last: no styles); Copy holds the Classic sticker stack, Paste of the same styles is no entry, Clear one; nine boxes = nine entries with every style on and the stamp still an image stamp; the export and From picture... without a path do nothing in a self-test; Edit Sticker opens the view; the layer preset promotes in one entry and the box toggles the stroke off in one more; New Sticker (one entry) becomes the Stamp tool's source; its item chooses the Stamp tool; Duplicate and Delete one entry each; Edit and Edit before placing open the view on the tray sticker |
+| `sticker_edit` | Stickers P7a (`selftest/scenarios/sticker_paint.rs`). Sphere, 3D; the sample logo placed as an image stamp; 4; a new empty picture layer; the sticker Brush (16 px, hard, red) dragged along y = 60 (shot `edit_brush`), undo, redo; the sticker Eraser (24 px) across it, undo, redo; ClassicSticker on the layer; a brush stroke along y = 180 (shot `edit_styled`); the logo layer selected, the Fill tool clicked at its corner (yellow); a new layer, `SelectRect` 40..216 x 204..240, the Gradient tool dragged across it (red to blue; shot `edit_final`); undo every step; Esc. Every stroke is a `Step::Pointer` on `Target::StickerCanvas` | each stroke one entry ("Sticker Brush" / "Sticker Eraser") with the paint where it went and the model changed; undo / redo give the composite of the step before / after; on the styled layer the header's "styles update when you lift" was drawn during the stroke (`LiveCounters::note_frames`) and is gone after it, one full recomposite entered stroke mode and the restyle job landed; the finished sticker has an opaque white contour pixel just below the new paint where the layer itself is transparent; Fill one entry, the logo's outside yellow and its inside kept; the new layer plus the gradient two entries, red at the start, blue at the end, nothing outside the selection; undoing everything gives the start (document state, the image stamp, composite) |
+| `sticker_pen` | Stickers P7a (`sticker_paint.rs`). The same start; the sticker Brush 24 px with pressure driving the size from 0; a pen stroke at pressure 0.2 along y = 70 and one at 1.0 along y = 170 (`Step::Pen` on the canvas); the inverted pen (eraser end) across both at x = 128 (shot `pen_canvas`); a barrel drag; Fit; undo every step; Esc | two "Sticker Brush" entries, the full stroke at least three times as wide as the light one in column 128 (and at least 20 px); the eraser end: one "Sticker Eraser" entry, both lines cut, the sticker Eraser in every contact frame (`pen_eraser_frames` counts the sticker tool in the view), the Brush back after the pen left; the barrel drag pans the canvas camera and changes nothing; undoing everything gives the start |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
 
 Branch `companion`: `Step::Until(label, fn(&AppState, &Scratch) -> Result<bool, String>)` waits, one check per frame
@@ -8753,6 +8840,70 @@ scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P
   (`the_stamp_tool_places_images_with_their_styles_and_tray_stickers`), `panels/side_groups.rs`, `prefs.rs`,
   `control_sweep/sticker_panel_tests.rs`, `control_sweep/panel_tests.rs` (9.2); scenarios `sticker_styles`,
   `sticker_tray`, `sticker_controls` (8.11); core `k6b_*` (9.1).
+
+**Stickers P7a: painting (STICKER_PLAN 3.3 rows Brush, Eraser, Fill, Gradient, Eyedropper; masks; 3.5; 3.10).**
+- **Routing** (`canvas::handle_input`). Every pointer event carries its pen pressure (`PenFrame::cursor`, as
+  `route_pointer`). A Primary press of Brush / Eraser opens a stroke (`tools::brush::press`); every motion event is one
+  sample (`Document::sticker_stroke_dab` at the layer-space point with its pressure; the core puts dabs between samples);
+  the release (also one not seen) ends it: one entry "Sticker Brush" / "Sticker Eraser" (an image stamp is promoted
+  inside it). Fill pushes `StickerAction::Fill(point)` at the press. Gradient keeps `CanvasDrag::Gradient { from, to }`
+  (the canvas draws the line) and pushes `StickerAction::Gradient(from, to)` at the release (a drag under 0.5 px draws
+  nothing). The Eyedropper picks at the press and while dragged (`CanvasDrag::Pick`; `Document::sticker_color_at`, the
+  finished sticker; taken opaque; a transparent point picks nothing and says so). Secondary / Middle / Hand / Space still
+  pan, so the pen's barrel button and the companion's one-finger drag pan with every tool.
+- **What a paint tool needs** (`tools::paint_target`): a layered sticker (a text stamp: "convert it first"), an active
+  picture layer that is unlocked and shown (status lines `LOCKED_HINT`, `HIDDEN_HINT`); on a text or shape layer the paint
+  tools never paint: the status line and a warning toast say "Rasterize this layer to paint on it" and the canvas header
+  offers **Rasterize** (`StickerUi::rasterize_offer`, `PanelHit::StickerHeaderRasterize`; also the Tool tab's button and
+  Layer > Rasterize in the view) = `Document::rasterize_sticker_layer`, one entry. A stroke on a shared sticker or picture
+  asks the E6 question first (`ask_shared_for` without a replay: the user paints again after answering). The buffer is
+  the picture, or with **Paint on mask** and a mask the mask (Brush paints the primary colour's grey, white shows, black
+  hides; the Eraser hides; Fill and Gradient write grey levels). The selection limits every tool
+  (`selection_for` = `select::selection_in_content`, so a moved, scaled or turned layer is limited where the selection
+  lies on the artboard).
+- **Fill** (`tools/fill.rs`): with a selection the selection is filled; else the colour region under the click
+  (`select::region` with `StickerUi::fill`; a mask's values as grey pixels); `select::fill` / `fill_mask`; one
+  `replace_sticker_pixels` entry "Fill"; a click outside the layer's pixels says so (`OUTSIDE_HINT`). **Gradient**
+  (`tools/gradient.rs`): `GradientOptions::gradient(primary, secondary)` (two stops, primary to transparent, or the
+  editor's 2..=8 stops; Reverse mirrors the positions) drawn with `filter::draw_gradient` / `draw_gradient_mask` between
+  the two points in content pixels, limited by the selection, opacity; one entry "Gradient".
+- **Masks** (`commands.rs`): Add ("Add from selection": `selection_in_content`; else all 255) turns Paint on mask on;
+  Invert (`replace_sticker_pixels` on the mask, a tile patch), Apply (alpha times mask, the mask removed, one structure
+  entry), Delete; labels "Add Layer Mask", "Invert Layer Mask", "Apply Layer Mask", "Delete Layer Mask". `SetPaintOnMask`
+  is app state and needs a mask. `SelectRect([x0, y0, x1, y1])` / `SelectNone` set the editor's selection (the Marquee of
+  P7b makes the same; the scenarios use it); `validate` drops a selection whose size is no longer the artboard's (3.4) and
+  a Rasterize offer whose layer is no longer the active text or shape layer. The canvas draws the selection's bounds as a
+  static two-colour dashed rectangle (the selection's own outline comes with the Marquee and Lasso of P7b).
+- **Live canvas** (`live.rs`, STICKER_PLAN 3.5, review A6). `live::start` when a stroke opens (`LiveStroke { sticker,
+  layer, styled, dirty, full_due, ended, painted }`); every dab maps its content rectangle through the layer transform to
+  artboard pixels (`note_dab`; 2 px more for a transform that is not a whole-pixel move); `live::frame` (after the
+  canvas's input, span `sticker.live`, its drawing `sticker.region`) draws only the dirty rectangle with
+  `Document::sticker_canvas_region(id, rect, Some(layer))` and uploads it with `TextureHandle::set_partial`.
+  **Stroke mode:** a layer with an enabled style is shown unstyled from the stroke's start: one full recomposite then
+  (also when the texture was not the sticker's finished picture before the stroke: `CanvasTex::exact`), dirty rectangles
+  after it, and the header shows "styles update when you lift" (`LiveCounters::note_frames`). At the end the canvas's
+  restyle runs on a job (`sticker_canvas_job`, a named thread); the unstyled picture stays until it lands, and it is
+  shown only when the sticker is still the value it drew (`canvas::sticker_key`), else dropped and the canvas draws the
+  document again. A layer **without** styles is exactly the finished picture after its dirty rectangles: the texture takes
+  the sticker's key at the end, no full recomposite at any time (`LiveCounters::full_composites`, `canvas_uploads`).
+  **The model:** while the stroke is open, at most every 100 ms (`PREVIEW_EVERY`) and only after new paint, a Preview job
+  (`sticker_preview_job`) renders the sticker with its styles at the users' Preview scale; `apply_sticker_preview` bakes
+  it (no history); a job still running is not started twice (`most_previews_running` = 1). The stroke's end bakes the
+  Final (deferred to the bake jobs). Jobs render snapshots and change nothing; results that no longer fit are dropped;
+  `live::pending` keeps the self-test's `WaitIdle` waiting until the live canvas and its jobs are done.
+- **Guard rules.** A stroke is `CanvasDrag::Stroke { painted }`: `drag_moved` is true once it painted, so the dispatch
+  guard's Undo takes back the stroke only (`sticker_stroke_cancel`, no entry); Save / Export finish it (one entry);
+  every other document command cancels it; Esc cancels it first; a sticker tool switch in mid-stroke keeps it
+  (`SetStickerTool` finishes a stroke, cancels other drags); leaving the view keeps it (like a pending edit) and frees the
+  live canvas and its jobs. The pen's eraser end waits for the stroke to end (`StickerUi::busy`).
+- **Tests.** `sticker/tools/tests.rs` (a brush stroke on an image stamp one entry with the promotion, the canvas = the
+  finished picture; stroke mode: the canvas equals "below + unstyled layer + above" after every dab, no restyle during
+  the stroke, at most one Preview job, the finished picture after the restyle, and no full recomposite or upload for an
+  unstyled layer; pressure changes the width and the Eraser erases; Esc / Save / Undo / a tool switch; locked, hidden and
+  text layers with the Rasterize offer for each paint tool; the E6 question before a stroke; Fill of a region and of a
+  selection; the gradient in a selection, Reverse and the stop editor; the Eyedropper; the mask commands and Paint on mask;
+  the selection dropped with the artboard), the updated `sticker::tests` (the unbuilt-tool status with the Marquee);
+  scenarios `sticker_edit`, `sticker_pen` (8.11); core `k7a_*` (9.1).
 
 ---
 
@@ -9370,6 +9521,20 @@ and text layers (exactly those two files, each = `dense(layer)`).
   to change is no entry; a locked stamp refuses everything; unknown stamp), `k6b_4` (`stamp_style_reference_size`: image
   pixels; a text about one line at 128 px per em at two on-model sizes (within 15 %: hinting and padding); a sticker's
   artboard; the presets scale with it). App tests of P6b: 8.15 and 9.2.
+- Branch `stickers`, P7a (`doc_sticker_paint_tests.rs`): `k7a_render_region_equals_the_whole_render_in_any_rectangle`
+  (a sticker with a styled whole-pixel picture, a scaled and turned masked picture with an adjustment, a layer clipped to
+  it with Screen, a styled star with Multiply, a text, a hidden layer, an ellipse artboard off the origin: 44 regions, with
+  and without the layer cache, no live layer = the whole render, a styled live layer = the render without its styles, a
+  turned live layer exact too; compared on the pixels that are seen), `k7a_render_region_of_a_trivial_sticker_is_the_picture`,
+  `k7a_the_canvas_region_during_a_stroke_shows_the_new_paint_unstyled` (no whole render for a dirty rectangle),
+  `k7a_the_canvas_job_draws_the_finished_sticker_from_its_snapshot` (the snapshot; the next dab copies the buffer once),
+  `k7a_a_preview_job_bakes_the_users_during_the_stroke_only` (no entry; no render of an earlier state left in the cache;
+  nothing without a stroke or after its end; no users = no job), `k7a_sticker_color_at_reads_the_finished_picture`,
+  `k7a_layer_pixels_and_masks_are_shared_read_outs` (never a promotion), `k7a_rasterize_keeps_the_picture_and_is_one_entry`,
+  `k7a_a_selection_seen_from_a_layer_follows_its_transform`, and in `sticker::resample`
+  `k7a_a_plain_move_copies_rows_with_the_per_pixel_bytes`. Ignored `perf_k7a_dab_region_and_restyle` (8.4: entering
+  stroke mode on a 2048-px styled sticker with a cold layer cache, one dab of size 64 plus its region, the Preview and the
+  end restyle jobs; numbers in `docs/notes/sticker/build-P7a.md`).
 
 ### 9.2 `wte_app` tests
 
@@ -9384,7 +9549,8 @@ G1-G3 with the second row, the page minimum at 900x600 / 640x480 for every tab),
 "sticker" is for an older build, gives Tool), `state::tests` (the Stamp tool's source and styles are never serialized),
 `styles_ui::tests`, `dialogs::sticker_shared::tests`, `tools::stamp_place::tests::the_stamp_tool_places_images_with_their_styles_and_tray_stickers`
 (a `Blob` source with default styles is an image stamp; with the tool's styles one entry; a tray sticker placed twice),
-`selftest::tests::scroll_and_key_frames` (`ScreenScroll`), the scenario count (59).
+`selftest::tests::scroll_and_key_frames` (`ScreenScroll`), the scenario count (59). Stickers P7a: the paint tools'
+tests of 8.15 (`sticker/tools/tests.rs`) and the scenario count (61: `sticker_edit`, `sticker_pen`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

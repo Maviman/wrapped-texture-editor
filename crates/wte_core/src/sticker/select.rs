@@ -583,6 +583,49 @@ pub fn mix_selected_mask(before: &AlphaBuf, after: &mut AlphaBuf, sel: &AlphaBuf
     });
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Stickers P7a: a selection seen from a layer's content pixels
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Stickers P7a (STICKER_PLAN 3.4): the artboard selection `sel` (artboard size; its pixel `(0, 0)` is the artboard's
+/// top-left corner `artboard.x0, artboard.y0` in layer space) as a mask over the content pixels of a picture of
+/// `size` placed by `transform`: each content pixel takes the selection value at the layer-space point its centre
+/// lands on (nearest pixel; 0 outside the artboard). A whole-pixel move copies rows. What the brush, the Fill tool,
+/// the gradient and a new layer mask use to honour the selection on a moved, scaled or turned layer.
+pub fn selection_in_content(sel: &AlphaBuf, artboard: IRect, transform: &crate::sticker::LayerTransform, size: [u32; 2]) -> AlphaBuf {
+    let (w, h) = (size[0], size[1]);
+    let mut out = AlphaBuf::new(w, h);
+    if w == 0 || h == 0 || sel.data.len() != sel.width as usize * sel.height as usize {
+        return out;
+    }
+    let origin = Vec2::new(artboard.x0 as f32, artboard.y0 as f32);
+    let t = *transform;
+    let shift = t.translate - origin;
+    let sample = |x: i64, y: i64| -> u8 {
+        if x < 0 || y < 0 || x >= sel.width as i64 || y >= sel.height as i64 {
+            0
+        } else {
+            sel.data[y as usize * sel.width as usize + x as usize]
+        }
+    };
+    if t.scale == Vec2::ONE && t.rotation == 0.0 && shift.fract() == Vec2::ZERO && shift.abs().max_element() < 1.0e6 {
+        let (dx, dy) = (shift.x as i64, shift.y as i64);
+        out.data.par_chunks_mut(w as usize).enumerate().for_each(|(y, row)| {
+            for (x, v) in row.iter_mut().enumerate() {
+                *v = sample(x as i64 + dx, y as i64 + dy);
+            }
+        });
+        return out;
+    }
+    out.data.par_chunks_mut(w as usize).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            let q = t.apply(size, Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) - origin;
+            *v = if q.is_finite() { sample(q.x.floor() as i64, q.y.floor() as i64) } else { 0 };
+        }
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

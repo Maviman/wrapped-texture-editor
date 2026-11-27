@@ -4,6 +4,11 @@
 // 800 %, the active layer's outline, and its own pointer routing: the Move tool (one history entry per drag), Hand /
 // Space / Secondary / Middle drags pan, the wheel (and the companion's pinch) zooms about the pointer. The 3D half is
 // the ordinary `ViewId::Main3D` with the Navigate behaviour only (`tools::active_tool`).
+//
+// Stickers P7a: the paint tools on the canvas (Brush and Eraser strokes with the pen's pressure, Fill, Gradient,
+// Eyedropper; `sticker/tools/`), the live canvas of a stroke (`live.rs`: dirty rectangles, stroke mode, the restyle
+// and Preview jobs), the stroke-mode note and the Rasterize offer in the header, the selection's outline, the
+// gradient's line and the brush ring.
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, vec2};
@@ -16,7 +21,7 @@ use wte_core::{
 
 use crate::app::frame_profile;
 use crate::state::{AppState, Canvas2D, PanelHit, StickerEdit, StickerTarget, StickerTool};
-use crate::sticker::{CanvasDrag, CanvasTex, Shown, StickerAction, edit_mut, edit_of, shown};
+use crate::sticker::{CanvasDrag, Shown, StickerAction, edit_mut, edit_of, shown};
 use crate::view::{ViewCx, view3d};
 
 /// Height of the canvas header (points).
@@ -27,6 +32,13 @@ const CHECKER_CELL: f32 = 8.0;
 const GRID_ZOOM: f32 = 8.0;
 /// Background of the canvas around the artboard.
 const CANVAS_BG: Color32 = Color32::from_gray(38);
+/// How the canvas texture is sampled: sticker pixels stay sharp when zoomed in.
+pub(crate) const TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
+    magnification: egui::TextureFilter::Nearest,
+    minification: egui::TextureFilter::Linear,
+    wrap_mode: egui::TextureWrapMode::ClampToEdge,
+    mipmap_mode: None,
+};
 
 /// What one layer looks like on the canvas, compared by value; pixels only by version or blob id (`LayerKey`), so
 /// building or comparing it never reads pixel bytes and holds no buffer.
@@ -46,6 +58,9 @@ pub(crate) enum CanvasKey {
     Sticker { id: StickerId, artboard: IRect, shape: ArtboardShape, layers: Vec<LayerSig> },
     Image(BlobId),
     Text(Box<StampSource>, Box<StyleStack>, [u8; 4]),
+    /// Stickers P7a: what the texture shows is not a finished picture of anything (a cancelled stroke, a new texture of
+    /// the live canvas): the next frame draws it again.
+    Stale,
 }
 
 /// The canvas's frame of reference: the artboard's top-left corner (layer space) and its size in pixels.
@@ -105,12 +120,17 @@ pub(crate) fn sticker_key(id: StickerId, sticker: &wte_core::StickerDoc) -> Canv
 
 /// The canvas key of what is shown.
 fn key_of(shown: &Shown, doc: &Document, edit: &StickerEdit) -> Option<CanvasKey> {
+    let _ = edit;
+    key_of_shown(shown, doc)
+}
+
+/// The canvas key of what is shown (stickers P7a: the brush asks whether the texture is the finished picture).
+pub(crate) fn key_of_shown(shown: &Shown, doc: &Document) -> Option<CanvasKey> {
     match shown {
         Shown::Sticker { id, doc: sticker } => Some(sticker_key(*id, sticker)),
         Shown::Image { blob, .. } => Some(CanvasKey::Image(*blob)),
         Shown::Text { stamp } => {
             let object = doc.stamp(*stamp)?;
-            let _ = edit;
             Some(CanvasKey::Text(Box::new(object.source.clone()), Box::new(object.styles.clone()), object.tint))
         }
     }
@@ -124,13 +144,16 @@ fn geom_of(shown: &Shown, picture: [u32; 2]) -> Geom {
     }
 }
 
-/// Brings the canvas texture up to date (draws the sticker again only when its key changed). Returns the texture and
-/// its size.
+/// Brings the canvas texture up to date (draws the sticker again only when its key changed; never while the live
+/// canvas of a stroke on that sticker owns the texture, `live.rs`). Returns the texture and its size.
 fn sync_texture(ctx: &egui::Context, state: &mut crate::state::AppState, shown: &Shown, edit: &StickerEdit) -> Option<(egui::TextureId, [u32; 2])> {
+    let live_owns = match (&state.sticker_ui.live, shown) {
+        (Some(live), Shown::Sticker { id, .. }) => live.sticker == *id,
+        _ => false,
+    };
     let session = state.session.as_mut()?;
     let key = key_of(shown, &session.doc, edit)?;
-    let ui_state = &mut state.sticker_ui;
-    if ui_state.canvas.as_ref().is_none_or(|c| c.key != key) {
+    if !live_owns && state.sticker_ui.canvas.as_ref().is_none_or(|c| c.key != key) {
         let _p = frame_profile::scope("sticker.render");
         let picture = match (shown, edit.target) {
             (Shown::Sticker { id, .. }, _) => session.doc.sticker_picture(*id, None, 1.0),
@@ -147,24 +170,26 @@ fn sync_texture(ctx: &egui::Context, state: &mut crate::state::AppState, shown: 
             }
         };
         let size = [picture.width, picture.height];
-        let image = egui::ColorImage::from_rgba_unmultiplied([size[0] as usize, size[1] as usize], &picture.data);
-        let options = egui::TextureOptions {
-            magnification: egui::TextureFilter::Nearest,
-            minification: egui::TextureFilter::Linear,
-            wrap_mode: egui::TextureWrapMode::ClampToEdge,
-            mipmap_mode: None,
-        };
-        let tex = match ui_state.canvas.take() {
-            Some(mut c) => {
-                c.tex.set(image, options);
-                c.tex
-            }
-            None => ctx.load_texture("sticker-canvas", image, options),
-        };
+        crate::sticker::live::upload(ctx, state, &IRect::from_size(size[0], size[1]), &picture.data, size, true);
+        let ui_state = &mut state.sticker_ui;
         ui_state.canvas_uploads += 1;
-        ui_state.canvas = Some(CanvasTex { key, tex, size });
+        if let Some(c) = ui_state.canvas.as_mut() {
+            c.key = key;
+            c.exact = true;
+        }
     }
-    ui_state.canvas.as_ref().map(|c| (c.tex.id(), c.size))
+    state.sticker_ui.canvas.as_ref().map(|c| (c.tex.id(), c.size))
+}
+
+/// Stickers P7a: what `canvas_side` does to the texture in a frame, without drawing (tests): the key-driven upload,
+/// then the live canvas's work (`live::frame`).
+#[cfg(test)]
+pub(crate) fn refresh(ctx: &egui::Context, state: &mut AppState) {
+    let Some(edit) = edit_of(state).cloned() else { return };
+    let Some(session) = state.session.as_mut() else { return };
+    let Some(shown) = shown(&mut session.doc, &edit) else { return };
+    sync_texture(ctx, state, &shown, &edit);
+    crate::sticker::live::frame(ctx, state);
 }
 
 /// The central area in the Sticker view: canvas, divider, 3D view. Without an open editor (a document replaced
@@ -219,7 +244,10 @@ fn canvas_side(ui: &mut egui::Ui, state: &mut AppState, left: Rect) {
         Shown::Text { .. } => Hit::ReadOnly,
     };
     handle_input(ui, state, rect, geom, hit, response.contains_pointer());
-    draw(ui, state, rect, geom, texture.map(|t| t.0), &shown);
+    // Stickers P7a: the dabs of this frame reach the texture in this frame.
+    crate::sticker::live::frame(ui.ctx(), state);
+    let texture = state.sticker_ui.canvas.as_ref().map(|c| c.tex.id()).or(texture.map(|t| t.0));
+    draw(ui, state, rect, geom, texture, &shown);
 }
 
 /// The canvas header (3.2): the sticker's name, Done, Revert, the zoom, Fit, 100 %; a text stamp's "Convert to layered
@@ -288,6 +316,20 @@ fn header_bar(ui: &mut egui::Ui, state: &mut AppState, header: Rect, shown: &Sho
                 actions.push(crate::action::AppAction::Sticker(StickerAction::ConvertText));
             }
         }
+        // Stickers P7a: stroke mode (3.5) and the Rasterize offer of the paint tools (3.3 "Layer-kind rules").
+        if state.sticker_ui.live.as_ref().is_some_and(|l| l.stroke_mode()) {
+            ui.colored_label(crate::theme::ACCENT, crate::sticker::live::STROKE_MODE_NOTE);
+            state.sticker_ui.counters.note_frames += 1;
+        } else if state.sticker_ui.rasterize_offer.is_some() {
+            if !narrow {
+                ui.weak(crate::sticker::tools::RASTERIZE_HINT);
+            }
+            let r = ui.button("Rasterize").on_hover_text("Make this text or shape layer a picture layer, so it can be painted");
+            hits.push((PanelHit::StickerHeaderRasterize, r.rect));
+            if r.clicked() {
+                actions.push(crate::action::AppAction::Sticker(StickerAction::Rasterize));
+            }
+        }
         let room = ui.available_width();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let fit_key = crate::shortcuts::sticker_shortcut_text(ui.ctx(), "Fit Sticker");
@@ -314,25 +356,33 @@ fn header_bar(ui: &mut egui::Ui, state: &mut AppState, header: Rect, shown: &Sho
     state.panel_rects.extend(hits);
 }
 
-/// A pointer event of this pass that the canvas needs.
+/// A pointer event of this pass that the canvas needs, with its pen pressure (1.0 for a mouse; stickers P7a).
 enum CanvasEvent {
-    Moved(Pos2),
-    Pressed(Pos2, egui::PointerButton),
-    Released(Pos2, egui::PointerButton),
+    Moved(Pos2, f32),
+    Pressed(Pos2, egui::PointerButton, f32),
+    Released(Pos2, egui::PointerButton, f32),
 }
 
 /// The canvas's pointer routing (3.3, 3.10): presses inside the canvas start a Move or a pan, motion continues it,
 /// the release (also one not seen: the button is up) ends it; the wheel zooms about the pointer. Gated like the views
 /// while a modal job runs or a dialog is open. Pure egui input + state: the unit tests drive it.
 pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, contains: bool) {
+    // Stickers P7a: every pointer event takes its pressure from this frame's pen notes, in order (as `route_pointer`).
+    let pen = &state.pen.frame;
+    let held = pen.held_pressure();
     let (events, space, latest, down) = ui.input(|i| {
+        let mut walk = pen.cursor();
         let events: Vec<CanvasEvent> = i
             .events
             .iter()
             .filter_map(|e| match e {
-                egui::Event::PointerMoved(pos) => Some(CanvasEvent::Moved(*pos)),
-                egui::Event::PointerButton { pos, button, pressed: true, .. } => Some(CanvasEvent::Pressed(*pos, *button)),
-                egui::Event::PointerButton { pos, button, pressed: false, .. } => Some(CanvasEvent::Released(*pos, *button)),
+                egui::Event::PointerMoved(pos) => Some(CanvasEvent::Moved(*pos, walk.take(*pos))),
+                egui::Event::PointerButton { pos, button, pressed: true, .. } => {
+                    Some(CanvasEvent::Pressed(*pos, *button, walk.take(*pos)))
+                }
+                egui::Event::PointerButton { pos, button, pressed: false, .. } => {
+                    Some(CanvasEvent::Released(*pos, *button, walk.take(*pos)))
+                }
                 _ => None,
             })
             .collect();
@@ -340,19 +390,20 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
             .map(|b| (b, i.pointer.button_down(b)));
         (events, i.key_down(egui::Key::Space), i.pointer.latest_pos(), down)
     });
+    state.sticker_ui.hover = latest.filter(|p| contains && rect.contains(*p));
     if crate::view::input_gated(state) {
         return;
     }
     for event in events {
         match event {
-            CanvasEvent::Pressed(pos, button) if contains && rect.contains(pos) && state.sticker_ui.drag.is_none() => {
-                press(state, rect, geom, hit, pos, button, space);
+            CanvasEvent::Pressed(pos, button, pressure) if contains && rect.contains(pos) && state.sticker_ui.drag.is_none() => {
+                press(state, rect, geom, hit, pos, button, space, pressure);
             }
             CanvasEvent::Pressed(..) => {}
-            CanvasEvent::Moved(pos) => motion(state, rect, geom, pos),
-            CanvasEvent::Released(pos, button) => {
+            CanvasEvent::Moved(pos, pressure) => motion(state, rect, geom, pos, pressure),
+            CanvasEvent::Released(pos, button, pressure) => {
                 if drag_button(state) == Some(button) {
-                    release(state, rect, geom, pos);
+                    release(state, rect, geom, pos, pressure);
                 }
             }
         }
@@ -361,7 +412,7 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
     if let (Some(button), Some(pos)) = (drag_button(state), latest)
         && !down.iter().any(|(b, d)| *b == button && *d)
     {
-        release(state, rect, geom, pos);
+        release(state, rect, geom, pos, held);
     }
     // Wheel (and the companion's pinch): zoom about the pointer.
     if let Some(pos) = latest.filter(|p| rect.contains(*p))
@@ -378,6 +429,7 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
     let icon = match &state.sticker_ui.drag {
         Some(CanvasDrag::Pan { .. }) => Some(egui::CursorIcon::Grabbing),
         Some(CanvasDrag::Move { .. }) => Some(egui::CursorIcon::Move),
+        Some(CanvasDrag::Stroke { .. } | CanvasDrag::Gradient { .. } | CanvasDrag::Pick { .. }) => Some(egui::CursorIcon::Crosshair),
         None if contains && (tool == StickerTool::Hand || space) => Some(egui::CursorIcon::Grab),
         None if contains && tool == StickerTool::Move && hit != Hit::ReadOnly => Some(egui::CursorIcon::Move),
         None if contains => Some(egui::CursorIcon::Crosshair),
@@ -391,12 +443,17 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
 /// The physical button of the running drag.
 fn drag_button(state: &AppState) -> Option<egui::PointerButton> {
     match state.sticker_ui.drag.as_ref()? {
-        CanvasDrag::Move { button, .. } | CanvasDrag::Pan { button, .. } => Some(*button),
+        CanvasDrag::Move { button, .. }
+        | CanvasDrag::Pan { button, .. }
+        | CanvasDrag::Stroke { button, .. }
+        | CanvasDrag::Gradient { button, .. }
+        | CanvasDrag::Pick { button } => Some(*button),
     }
 }
 
 /// A press in the canvas.
-fn press(state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, pos: Pos2, button: egui::PointerButton, space: bool) {
+#[allow(clippy::too_many_arguments)]
+fn press(state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, pos: Pos2, button: egui::PointerButton, space: bool, pressure: f32) {
     let tool = crate::sticker::tool_of(state);
     let pan = match button {
         egui::PointerButton::Secondary | egui::PointerButton::Middle => true,
@@ -405,6 +462,27 @@ fn press(state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, pos: Pos2, butt
     };
     if pan {
         state.sticker_ui.drag = Some(CanvasDrag::Pan { last: pos, button });
+        return;
+    }
+    // Stickers P7a: the paint tools.
+    if matches!(tool, StickerTool::Brush | StickerTool::Eraser | StickerTool::Fill | StickerTool::Gradient | StickerTool::Eyedropper) {
+        let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
+        let p = geom.to_layer(&cam, rect, pos);
+        match tool {
+            StickerTool::Brush | StickerTool::Eraser => {
+                crate::sticker::tools::brush::press(state, tool, p, pressure, button);
+            }
+            StickerTool::Fill => state.push(crate::action::AppAction::Sticker(StickerAction::Fill(p.to_array()))),
+            StickerTool::Gradient => {
+                if crate::sticker::tools::paint_target(state, tool, false).is_some() {
+                    state.sticker_ui.drag = Some(CanvasDrag::Gradient { from: p, to: p, button });
+                }
+            }
+            _ => {
+                crate::sticker::tools::eyedropper::pick(state, p);
+                state.sticker_ui.drag = Some(CanvasDrag::Pick { button });
+            }
+        }
         return;
     }
     if tool != StickerTool::Move {
@@ -451,10 +529,17 @@ fn press(state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, pos: Pos2, butt
 }
 
 /// Pointer motion during a drag: a Move sends a `Commit::Preview` position (whole pixels) when it changed; a pan moves
-/// the camera.
-fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2) {
+/// the camera; stickers P7a: a stroke paints a sample, a gradient drag follows, the Eyedropper picks.
+fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32) {
     let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
     match state.sticker_ui.drag.clone() {
+        Some(CanvasDrag::Stroke { .. }) => crate::sticker::tools::brush::sample(state, geom.to_layer(&cam, rect, pos), pressure),
+        Some(CanvasDrag::Gradient { from, button, .. }) => {
+            state.sticker_ui.drag = Some(CanvasDrag::Gradient { from, to: geom.to_layer(&cam, rect, pos), button });
+        }
+        Some(CanvasDrag::Pick { .. }) => {
+            crate::sticker::tools::eyedropper::pick(state, geom.to_layer(&cam, rect, pos));
+        }
         Some(CanvasDrag::Pan { last, button }) => {
             if let Some(e) = edit_mut(state) {
                 e.camera.pan(pos - last, geom.size, rect);
@@ -474,10 +559,18 @@ fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2) {
 }
 
 /// The end of a drag: a Move that moved ends with its `Commit::Final` (one history entry); a click moved nothing.
-fn release(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2) {
-    motion(state, rect, geom, pos);
-    if let Some(CanvasDrag::Move { layer, sent: Some(to), .. }) = state.sticker_ui.drag.take() {
-        state.push(crate::action::AppAction::Sticker(StickerAction::SetLayerPosition(layer, to.to_array(), Commit::Final)));
+/// Stickers P7a: a stroke ends (one entry), a gradient drag is applied (`StickerAction::Gradient`, one entry).
+fn release(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32) {
+    motion(state, rect, geom, pos, pressure);
+    match state.sticker_ui.drag.take() {
+        Some(CanvasDrag::Move { layer, sent: Some(to), .. }) => {
+            state.push(crate::action::AppAction::Sticker(StickerAction::SetLayerPosition(layer, to.to_array(), Commit::Final)));
+        }
+        Some(CanvasDrag::Stroke { .. }) => crate::sticker::tools::brush::end(state),
+        Some(CanvasDrag::Gradient { from, to, .. }) if from.distance(to) >= crate::sticker::tools::gradient::MIN_DRAG => {
+            state.push(crate::action::AppAction::Sticker(StickerAction::Gradient(from.to_array(), to.to_array())));
+        }
+        _ => {}
     }
 }
 
@@ -515,6 +608,33 @@ fn draw(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom: Geom, texture: Op
                 .map(|c| geom.to_screen(&cam, rect, layer.transform.apply(size, c)));
             crate::view::draw_quad(&painter, corners, crate::theme::ACCENT, 1.0);
         }
+    }
+    // Stickers P7a: the selection's bounds (a two-colour dashed outline, no animation: the frame loop stays idle;
+    // the Marquee and Lasso of P7b draw the selection's own outline), the gradient's line and the brush ring.
+    if let Some(sel) = edit.selection.as_ref().filter(|s| !s.is_empty()) {
+        let b = sel.bounds;
+        let a = geom.to_screen(&cam, rect, geom.origin + Vec2::new(b.x0 as f32, b.y0 as f32));
+        let z = geom.to_screen(&cam, rect, geom.origin + Vec2::new(b.x1 as f32, b.y1 as f32));
+        let r = Rect::from_two_pos(a, z);
+        painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Middle);
+        let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+        let dashes = egui::Shape::dashed_line(&corners, Stroke::new(1.0, Color32::BLACK), 4.0, 4.0);
+        painter.extend(dashes);
+    }
+    if let Some(CanvasDrag::Gradient { from, to, .. }) = state.sticker_ui.drag {
+        let (a, b) = (geom.to_screen(&cam, rect, from), geom.to_screen(&cam, rect, to));
+        painter.line_segment([a, b], Stroke::new(3.0, Color32::from_black_alpha(160)));
+        painter.line_segment([a, b], Stroke::new(1.0, Color32::WHITE));
+        painter.circle_stroke(a, 4.0, Stroke::new(1.0, Color32::WHITE));
+        painter.circle_filled(b, 3.0, Color32::WHITE);
+    }
+    if matches!(edit.tool, StickerTool::Brush | StickerTool::Eraser)
+        && let Some(at) = state.sticker_ui.hover
+    {
+        let b = crate::sticker::tools::brush::settings_of(state, edit.tool);
+        let radius = (b.size_px * 0.5 * cam.zoom).max(1.0);
+        painter.circle_stroke(at, radius + 1.0, Stroke::new(1.0, Color32::from_black_alpha(140)));
+        painter.circle_stroke(at, radius, Stroke::new(1.0, Color32::WHITE));
     }
 }
 

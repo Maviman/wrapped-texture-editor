@@ -81,7 +81,7 @@ import_tex import_nouv unsaved open_path import_save layers workflow_path fuzz_p
 brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_warp text_path text_tab text_fonts
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
-companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls` (59; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
+companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen` (61; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -89,7 +89,11 @@ what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-proce
 P6b: `sticker_styles` (Classic sticker on an image and a text stamp from the Sticker tab, shots `styles_image`,
 `styles_both`), `sticker_tray` (a tray sticker from a picture file, Edit before placing, placed twice, the shared-picture
 question with Edit all and Only this one, save / reopen; shots `tray_edit_before`, `tray_placed_twice`, `tray_question`,
-`tray_only_this`), `sticker_controls` (every new P6b control clicked once; shots `controls_tab`, `controls_view`))
+`tray_only_this`), `sticker_controls` (every new P6b control clicked once; shots `controls_tab`, `controls_view`);
+P7a: `sticker_edit` (brush, eraser, a stroke on a ClassicSticker layer in stroke mode, Fill, a gradient in a selection,
+all undone; shots `edit_brush`, `edit_styled`, `edit_final`), `sticker_pen` (pen pressure, the eraser end, a barrel pan
+on the canvas; shot `pen_canvas`). `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
+made with `WTE_FRAME_LOG=1`)
 
 `*_path` scenarios need a PATH argument (a model); `objects_path` needs a model with **several objects** (gate:
 `ABeautifulGame.glb`, 49 objects; also `Lantern.glb`, 3) and fails with a clear message on a one-object model; `objects_flow_path` (the whole user workflow: hide the board,
@@ -206,16 +210,19 @@ the user accepted), ARCHITECTURE 1.12, 5.27, 5.28, 8.15. Built so far (one build
 document in the core, P4 project format 4 and `.wtes`, P5a / P5b / P5c the PSD reader, writer and link logic, P6a the
 Sticker view (canvas, layers, Move / Hand, keys), **P6b** the Sticker tab (fifth upper tab, two rows of tabs at the
 default panel width), stamp styles for image, text and sticker stamps with presets, Copy / Paste / Clear Style, the
-sticker tray, "Edit before placing", Export Picture, and the "Edit all / Only this one" question for shared pictures.
-Next: P7a painting, P7b selections and cut-out, P8 layout / text / shapes / library, P9a / P9b the editor link in the
+sticker tray, "Edit before placing", Export Picture, and the "Edit all / Only this one" question for shared pictures,
+**P7a** painting in the Sticker view (Brush and Eraser with pen pressure and the eraser end, Fill, Gradient, Eyedropper,
+layer masks with "Paint on mask", Rasterize of text / shape layers; the canvas draws only what a dab changed and shows a
+styled layer unstyled until the stroke ends, the model follows the stroke).
+Next: P7b selections and cut-out, P8 layout / text / shapes / library, P9a / P9b the editor link in the
 app, P10a / P10b / P11 drop, clipboard, drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if
 everything is green; then the gate.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open
 ones listed here. **Owed so far:** all of them (none can be run yet: the link, drop and clipboard come with P9-P11);
-the "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b part) can be tried now: styles, tray, Edit before placing, the
-shared-picture question, Export Picture, the five tabs.
+the "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b and P7a parts) can be tried now: styles, tray, Edit before
+placing, the shared-picture question, Export Picture, the five tabs; painting with the mouse and a pen (part 2).
 
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 

@@ -26,6 +26,7 @@ pub mod doc_layers;
 pub mod doc_links;
 pub mod doc_stamps;
 pub mod doc_sticker_edits;
+pub mod doc_sticker_paint;
 pub mod doc_stickers;
 pub mod document;
 pub mod error;
@@ -65,6 +66,8 @@ mod doc_sticker_edits_tests;
 #[cfg(test)]
 mod doc_sticker_tab_tests;
 #[cfg(test)]
+mod doc_sticker_paint_tests;
+#[cfg(test)]
 mod wrap_tests;
 
 #[doc(hidden)]
@@ -82,6 +85,7 @@ pub use doc_sticker_edits::{
     CONVERT_LABEL, PixelData, PixelTarget, REVERT_LABEL, STICKER_BRUSH_LABEL, STICKER_ERASER_LABEL, StickerBrush,
     StickerCheckpoint, StickerPatch,
 };
+pub use doc_sticker_paint::{RASTERIZE_LABEL, StickerRenderJob, StickerRenderOutput, StickerRenderPurpose};
 pub use doc_stickers::{STYLE_LABEL, ShareScope, StickerCaches, StickerRef};
 pub use document::*;
 pub use error::*;

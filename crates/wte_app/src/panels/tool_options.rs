@@ -455,7 +455,7 @@ fn grid_label(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn brush_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings, pen_line: &str) {
+pub(crate) fn brush_options(ui: &mut egui::Ui, salt: &str, b: &mut BrushSettings, pen_line: &str) {
     egui::Grid::new(("brush_grid", salt)).num_columns(2).show(ui, |ui| {
         grid_label(ui, "Size");
         let keys = format!("{} / {}", shortcut_text(ui.ctx(), "Smaller Brush"), shortcut_text(ui.ctx(), "Larger Brush"));

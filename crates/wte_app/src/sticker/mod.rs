@@ -13,6 +13,11 @@
 // "Edit all / Only this one" (E6, `Dialog::StickerShared`); the stamp-level and layer-level style commands, Copy /
 // Paste / Clear Style (3.7) and the tray commands (3.8) are `StickerAction`s too (`styles_ui.rs`, `panels.rs`,
 // `tray.rs` draw them).
+//
+// Stickers P7a: painting. The Brush and Eraser strokes (on the picture or, with "Paint on mask", its mask; pen pressure
+// from the pen notes), Fill, Gradient and Eyedropper (`tools/`), the mask commands and Rasterize (`commands.rs`), the
+// live canvas of a stroke with its jobs (`live.rs`). A stroke is a drag of the canvas (`CanvasDrag::Stroke`): the
+// interaction guard ends it like a Move drag (Save keeps it, Undo takes it back, other commands cancel it).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,9 +33,12 @@ use crate::app::WteApp;
 use crate::state::{AppState, Canvas2D, Dialog, StickerEdit, StickerTarget, StickerTool, ViewMode};
 
 pub mod canvas;
+pub mod commands;
 pub mod layers_ui;
+pub mod live;
 pub mod panels;
 pub mod styles_ui;
+pub mod tools;
 pub mod tray;
 
 /// Status line when the Sticker view is asked for without a selected stamp.
@@ -154,6 +162,24 @@ pub enum StickerAction {
     TrayDelete(StickerId),
     /// "Export Picture...": a PNG (`None`: the save dialog, never in a self-test).
     ExportPicture(PictureOf, Option<PathBuf>),
+
+    // ---- stickers P7a ----
+    /// The Fill tool's click at this layer-space point (one entry "Fill").
+    Fill([f32; 2]),
+    /// The Gradient tool's drag from the first to the second layer-space point (one entry "Gradient").
+    Gradient([f32; 2], [f32; 2]),
+    /// Layer mask of the active picture layer: from the selection, or showing everything without one.
+    AddMask,
+    InvertMask,
+    /// The mask is applied to the picture's alpha and removed.
+    ApplyMask,
+    DeleteMask,
+    /// "Paint on mask": the paint tools change the active layer's mask (white shows, black hides).
+    SetPaintOnMask(bool),
+    /// A rectangle selection between two layer-space corners (the marquee tool of P7b makes the same; scenarios).
+    SelectRect([f32; 4]),
+    /// Drops the selection.
+    SelectNone,
 }
 
 impl StickerAction {
@@ -186,7 +212,14 @@ impl StickerAction {
             | S::NewStickerFromPicture(_)
             | S::TrayDuplicate(_)
             | S::TrayDelete(_)
-            | S::AnswerShared(Some(_)) => true,
+            | S::AnswerShared(Some(_))
+            | S::Fill(_)
+            | S::Gradient(..)
+            | S::AddMask
+            | S::InvertMask
+            | S::ApplyMask
+            | S::DeleteMask
+            | S::Rasterize => true,
             S::SetStampStyles(_, _, c) | S::SetLayerStyles(_, _, c) => *c == Commit::Final,
             _ => false,
         }
@@ -215,6 +248,13 @@ impl StickerAction {
                 | S::ApplyLayerPreset(_)
                 | S::PasteStyle(StyleTarget::Layers)
                 | S::ClearStyle(StyleTarget::Layers)
+                | S::Fill(_)
+                | S::Gradient(..)
+                | S::AddMask
+                | S::InvertMask
+                | S::ApplyMask
+                | S::DeleteMask
+                | S::Rasterize
         )
     }
 }
@@ -246,6 +286,8 @@ pub(crate) struct CanvasTex {
     pub(crate) key: canvas::CanvasKey,
     pub(crate) tex: egui::TextureHandle,
     pub(crate) size: [u32; 2],
+    /// Stickers P7a: the texture is exactly the finished picture of `key` (not a stroke's live picture).
+    pub(crate) exact: bool,
 }
 
 /// A layer thumbnail of the Layers tab and what it was made from.
@@ -262,6 +304,12 @@ pub(crate) enum CanvasDrag {
     Move { layer: StickerLayerId, start: glam::Vec2, from: glam::Vec2, sent: Option<glam::Vec2>, button: egui::PointerButton },
     /// Hand, Space + drag, a Secondary or Middle drag (the companion's one-finger drag): the last pointer position.
     Pan { last: egui::Pos2, button: egui::PointerButton },
+    /// Stickers P7a: a Brush or Eraser stroke is open in the document; `painted`: a dab changed pixels.
+    Stroke { button: egui::PointerButton, painted: bool },
+    /// Stickers P7a: the Gradient tool's drag (layer space); applied at the release.
+    Gradient { from: glam::Vec2, to: glam::Vec2, button: egui::PointerButton },
+    /// Stickers P7a: the Eyedropper keeps picking while the button is held.
+    Pick { button: egui::PointerButton },
 }
 
 /// UI state of the Sticker view (`AppState::sticker_ui`): caches and the running drag; nothing of it is saved.
@@ -287,6 +335,23 @@ pub struct StickerUi {
     pub(crate) tray_selected: Option<StickerId>,
     /// Thumbnails of the Sticker tab (tray items and the selected stamp's picture) and the document they belong to.
     pub(crate) pictures: tray::PictureThumbs,
+    /// Stickers P7a: the live canvas of a stroke, its render jobs and what they did.
+    pub(crate) live: Option<live::LiveStroke>,
+    pub(crate) jobs: live::RenderJobs,
+    pub counters: live::LiveCounters,
+    /// The Fill tool's options (Tolerance, Contiguous, Anti-alias).
+    pub fill: wte_core::RegionOptions,
+    /// The Gradient tool's options.
+    pub gradient: tools::gradient::GradientOptions,
+    /// "Paint on mask": the paint tools change the active layer's mask.
+    pub paint_on_mask: bool,
+    /// A paint tool met a text or shape layer: the header offers Rasterize for it (never a silent rasterize).
+    pub(crate) rasterize_offer: Option<StickerLayerId>,
+    /// The pointer over the canvas in the last frame (the brush ring).
+    pub(crate) hover: Option<egui::Pos2>,
+    /// Tests: a CPU copy of every upload to the canvas texture.
+    #[cfg(test)]
+    pub(crate) mirror: Option<PixelBuf>,
 }
 
 impl Default for StickerUi {
@@ -304,6 +369,16 @@ impl Default for StickerUi {
             shared_pending: None,
             tray_selected: None,
             pictures: tray::PictureThumbs::default(),
+            live: None,
+            jobs: live::RenderJobs::default(),
+            counters: live::LiveCounters::default(),
+            fill: wte_core::RegionOptions::default(),
+            gradient: tools::gradient::GradientOptions::default(),
+            paint_on_mask: false,
+            rasterize_offer: None,
+            hover: None,
+            #[cfg(test)]
+            mirror: None,
         }
     }
 }
@@ -475,6 +550,10 @@ pub(crate) fn leave(app: &mut WteApp, to: Option<ViewMode>) {
 
 /// `leave` on the state alone.
 pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
+    // Stickers P7a: an open stroke is kept (like a pending edit); every other drag is cancelled.
+    if matches!(state.sticker_ui.drag, Some(CanvasDrag::Stroke { .. })) {
+        finish_drag(state);
+    }
     cancel_drag(state);
     let edit = state.session.as_mut().and_then(|s| {
         s.doc.flush_pending_edit();
@@ -497,6 +576,9 @@ pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
     // (`Document::next_pixel_version`): kept across a document change they could match another document's sticker.
     state.sticker_ui.canvas = None;
     state.sticker_ui.thumbs.clear();
+    live::clear(state);
+    state.sticker_ui.rasterize_offer = None;
+    state.sticker_ui.hover = None;
     // The editor's status lines (Delete without a selection, a tool that is not built) end with it.
     state.status_hint.clear();
 }
@@ -542,29 +624,55 @@ pub(crate) fn validate_in(state: &mut AppState) {
     {
         state.sticker_ui.drag = None;
     }
+    // Stickers P7a: the selection is dropped when the artboard changes size (3.4); the Rasterize offer ends when its
+    // layer is no longer the active text or shape layer.
+    let size = shown.layers().map(|d| d.size());
+    let active = session.sticker_edit.as_ref().and_then(|e| e.active_layer);
+    let offer_stays = state.sticker_ui.rasterize_offer.is_some_and(|id| {
+        Some(id) == active
+            && shown.layers().and_then(|d| d.layer(id)).is_some_and(|l| !matches!(l.content, StickerContent::Picture(_)))
+    });
+    if !offer_stays {
+        state.sticker_ui.rasterize_offer = None;
+    }
+    if let Some(e) = session.sticker_edit.as_mut()
+        && e.selection.as_ref().is_some_and(|sel| Some(sel.size()) != size)
+    {
+        e.selection = None;
+    }
 }
 
-/// Ends a drag on the canvas: a moved layer goes back (`cancel_pending_edit` of its Move entry).
+/// Ends a drag on the canvas: a moved layer goes back (`cancel_pending_edit` of its Move entry); stickers P7a: an open
+/// stroke is taken back (no entry), a gradient drag applies nothing.
 pub(crate) fn cancel_drag(state: &mut AppState) {
-    if let Some(CanvasDrag::Move { sent: Some(_), .. }) = state.sticker_ui.drag.take()
-        && let Some(doc) = state.doc_mut()
-    {
-        doc.cancel_pending_edit();
+    match state.sticker_ui.drag.take() {
+        Some(CanvasDrag::Move { sent: Some(_), .. }) => {
+            if let Some(doc) = state.doc_mut() {
+                doc.cancel_pending_edit();
+            }
+        }
+        Some(CanvasDrag::Stroke { .. }) => tools::brush::cancel(state),
+        _ => {}
     }
 }
 
 /// P6a check: ends a drag on the canvas keeping what the user sees: a moved layer stays where the last Preview put
 /// it, as one entry (the dispatch guard for Save / Export, like `ToolController::finish`).
 pub(crate) fn finish_drag(state: &mut AppState) {
-    if let Some(CanvasDrag::Move { layer, sent: Some(to), .. }) = state.sticker_ui.drag.take() {
-        run_in(state, StickerAction::SetLayerPosition(layer, to.to_array(), Commit::Final));
+    match state.sticker_ui.drag.take() {
+        Some(CanvasDrag::Move { layer, sent: Some(to), .. }) => {
+            run_in(state, StickerAction::SetLayerPosition(layer, to.to_array(), Commit::Final));
+        }
+        // Stickers P7a: the stroke is kept as painted (one entry).
+        Some(CanvasDrag::Stroke { .. }) => tools::brush::end(state),
+        _ => {}
     }
 }
 
 /// P6a check: true while a Move drag on the canvas has changed the document (a Preview is pending): an Undo pressed
 /// then undoes the drag itself, as for the tools' interactions.
 pub(crate) fn drag_moved(state: &AppState) -> bool {
-    matches!(state.sticker_ui.drag, Some(CanvasDrag::Move { sent: Some(_), .. }))
+    matches!(state.sticker_ui.drag, Some(CanvasDrag::Move { sent: Some(_), .. }) | Some(CanvasDrag::Stroke { painted: true, .. }))
 }
 
 /// Runs a structural edit of the edited sticker (`Document::set_sticker`; an image stamp is promoted inside it). An
@@ -583,7 +691,7 @@ fn apply(state: &mut AppState, label: &str, commit: Commit, f: impl FnOnce(&mut 
 }
 
 /// The layered document of the open editor and the id of `layer` (the active layer for `None`).
-fn layered(state: &mut AppState, layer: Option<StickerLayerId>) -> Option<(StickerDoc, StickerLayerId)> {
+pub(crate) fn layered(state: &mut AppState, layer: Option<StickerLayerId>) -> Option<(StickerDoc, StickerLayerId)> {
     let session = state.session.as_mut()?;
     let edit = session.sticker_edit.clone()?;
     let shown = shown(&mut session.doc, &edit)?;
@@ -720,11 +828,8 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
                 app_state.status_hint = "Merge Down of sticker layers is not available yet".to_owned();
             }
         }
-        S::Rasterize => {
-            if layered(app_state, None).is_some() {
-                app_state.status_hint = "Rasterize of sticker layers is not available yet".to_owned();
-            }
-        }
+        // Stickers P7a: Rasterize of the active text or shape layer (pulled forward from P8: the paint tools offer it).
+        S::Rasterize => commands::rasterize(app_state),
         S::SetLayerVisible(id, on) => {
             let label = if on { "Show Sticker Layer" } else { "Hide Sticker Layer" };
             layer_edit(app_state, id, label, Commit::Final, move |l| l.visible = on);
@@ -837,6 +942,19 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
         S::TrayUse(id) => tray::use_as_source(app_state, id),
         S::TrayDuplicate(id) => tray::duplicate(app_state, id),
         S::TrayDelete(id) => tray::delete(app_state, id),
+        S::Fill(at) => tools::fill::fill(app_state, glam::Vec2::from_array(at)),
+        S::Gradient(from, to) => tools::gradient::apply(app_state, glam::Vec2::from_array(from), glam::Vec2::from_array(to)),
+        S::AddMask => commands::add_mask(app_state),
+        S::InvertMask => commands::invert_mask(app_state),
+        S::ApplyMask => commands::apply_mask(app_state),
+        S::DeleteMask => commands::delete_mask(app_state),
+        S::SetPaintOnMask(on) => commands::set_paint_on_mask(app_state, on),
+        S::SelectRect([x0, y0, x1, y1]) => commands::select_rect(app_state, glam::Vec2::new(x0, y0), glam::Vec2::new(x1, y1)),
+        S::SelectNone => {
+            if let Some(e) = edit_mut(app_state) {
+                e.selection = None;
+            }
+        }
     }
 }
 
@@ -880,8 +998,14 @@ fn is_no_op(state: &mut AppState, action: &StickerAction) -> bool {
 /// Opens the shared-picture question for `action` (a newer content edit replaces the waiting one). A drag on the
 /// canvas ends: nothing of it was applied.
 fn ask_shared(state: &mut AppState, action: StickerAction, users: usize) {
+    ask_shared_for(state, Some(action), users);
+}
+
+/// `ask_shared` for an edit that is not replayed after the answer (stickers P7a: a brush stroke; the user paints
+/// again).
+pub(crate) fn ask_shared_for(state: &mut AppState, action: Option<StickerAction>, users: usize) {
     state.sticker_ui.drag = None;
-    state.sticker_ui.shared_pending = Some(action);
+    state.sticker_ui.shared_pending = action;
     if matches!(state.dialog, Dialog::None | Dialog::StickerShared { .. }) {
         state.dialog = Dialog::StickerShared { users };
     }

@@ -71,6 +71,25 @@ fn copy_exact(src: &PixelBuf, t: &LayerTransform, s: f64, rect: IRect) -> Option
         return None;
     }
     let mut out = CroppedBuf::new(rect);
+    // Stickers P7a: a plain move (no turn, no flip) copies whole rows of the part that lands in `rect`: the same bytes
+    // as the per-pixel loop below (every pixel centre lands on `x + ox, y + oy`), in time of the output, not the source
+    // (the editor canvas draws dirty rectangles of large layers, STICKER_PLAN 8.4).
+    if t.rotation == 0.0 && ex > 0.0 && ey > 0.0 {
+        let (ox, oy) = (probe.x.round() as i64, probe.y.round() as i64);
+        let x0 = (rect.x0 as i64).max(ox);
+        let x1 = (rect.x1 as i64).min(ox + src.width as i64);
+        let rw = rect.width() as usize;
+        if x0 < x1 {
+            let n = (x1 - x0) as usize * 4;
+            for oyy in (rect.y0 as i64).max(oy)..(rect.y1 as i64).min(oy + src.height as i64) {
+                let sy = (oyy - oy) as usize;
+                let s0 = (sy * src.width as usize + (x0 - ox) as usize) * 4;
+                let d0 = ((oyy - rect.y0 as i64) as usize * rw + (x0 - rect.x0 as i64) as usize) * 4;
+                out.data[d0..d0 + n].copy_from_slice(&src.data[s0..s0 + n]);
+            }
+        }
+        return Some(out);
+    }
     let rw = rect.width() as i64;
     for y in 0..src.height {
         for x in 0..src.width {
@@ -241,6 +260,41 @@ mod tests {
         assert_eq!(clipped.get(3, 3), pic.get(3, 3));
         assert!(transform_picture(&pic, &LayerTransform::IDENTITY, 1.0, Some(IRect::new(50, 50, 60, 60))).is_empty());
         assert!(transform_picture(&PixelBuf::new(0, 4), &LayerTransform::IDENTITY, 1.0, None).is_empty());
+    }
+
+    /// Stickers P7a: the row copy of a plain move gives the bytes of the per-pixel copy (pixel `(x, y)` at `(x + dx,
+    /// y + dy)`) for every move, render scale and clip; a tiny turn still takes the per-pixel path.
+    #[test]
+    fn k7a_a_plain_move_copies_rows_with_the_per_pixel_bytes() {
+        let pic = random_picture(37, 23, 8);
+        let mut rng = XorShift::new(4);
+        for _ in 0..200 {
+            let d = Vec2::new((rng.next_u32() % 90) as f32 - 45.0, (rng.next_u32() % 60) as f32 - 30.0);
+            // Scale 0.5 at render scale 2 turns about the content centre (18.5, 11.5): it lands at `2 t + c`.
+            let (t, s) = if rng.next_u32().is_multiple_of(3) {
+                (LayerTransform { scale: Vec2::splat(0.5), translate: (d - Vec2::new(18.5, 11.5)) * 0.5, ..LayerTransform::IDENTITY }, 2.0)
+            } else {
+                (LayerTransform::moved(d.x, d.y), 1.0)
+            };
+            let x0 = (rng.next_u32() % 100) as i32 - 50;
+            let y0 = (rng.next_u32() % 70) as i32 - 35;
+            let clip = IRect::new(x0, y0, x0 + 1 + (rng.next_u32() % 60) as i32, y0 + 1 + (rng.next_u32() % 40) as i32);
+            let out = transform_picture(&pic, &t, s, Some(clip));
+            let want = IRect::new(d.x as i32, d.y as i32, d.x as i32 + 37, d.y as i32 + 23).intersect(&clip);
+            assert_eq!(out.rect, want, "{d:?} {clip:?}");
+            for y in want.y0..want.y1 {
+                for x in want.x0..want.x1 {
+                    assert_eq!(out.get(x, y), pic.get((x - d.x as i32) as u32, (y - d.y as i32) as u32));
+                }
+            }
+        }
+        let tiny = LayerTransform { rotation: 1e-7, ..LayerTransform::moved(3.0, 2.0) };
+        let out = transform_picture(&pic, &tiny, 1.0, None);
+        for y in 0..23 {
+            for x in 0..37 {
+                assert_eq!(out.get(x + 3, y + 2), pic.get(x as u32, y as u32), "the per-pixel copy");
+            }
+        }
     }
 
     #[test]

@@ -547,9 +547,14 @@ fn export_defaults(state: &AppState) -> Option<ExportDialogState> {
     })
 }
 
-/// The tool settings the brush keys change: the eraser's while the Eraser is active, else the brush's.
+/// The tool settings the brush keys change: the eraser's while the Eraser is active, else the brush's. Stickers P7a:
+/// in the Sticker view the sticker tool decides (the sticker Eraser uses the Eraser's settings).
 fn active_brush(state: &mut AppState) -> &mut crate::state::BrushSettings {
-    if state.tool == ToolKind::Eraser { &mut state.tools.eraser } else { &mut state.tools.brush }
+    let eraser = match crate::sticker::edit_of(state) {
+        Some(e) => e.tool == crate::state::StickerTool::Eraser,
+        None => state.tool == ToolKind::Eraser,
+    };
+    if eraser { &mut state.tools.eraser } else { &mut state.tools.brush }
 }
 
 /// Next brush diameter for `steps` key presses: x1.25 per step, at least one texel of change, clamped.
@@ -1052,6 +1057,10 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
 
         // ---- stickers (P6a) ----
         A::SetStickerTool(tool) => {
+            // Stickers P7a: a stroke is kept when the tool changes in mid-drag; every other drag is cancelled.
+            if matches!(app.state.sticker_ui.drag, Some(crate::sticker::CanvasDrag::Stroke { .. })) {
+                crate::sticker::finish_drag(&mut app.state);
+            }
             crate::sticker::cancel_drag(&mut app.state);
             if let Some(edit) = crate::sticker::edit_mut(&mut app.state) {
                 edit.tool = tool;

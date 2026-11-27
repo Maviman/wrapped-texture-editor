@@ -353,7 +353,9 @@ impl Runner {
             return;
         }
         *self.scratch.values.entry("pen_contact_frames").or_insert(0) += 1;
-        if state.tool == ToolKind::Eraser {
+        // Stickers P7a: in the Sticker view the eraser end selects the sticker Eraser.
+        let sticker_eraser = crate::sticker::edit_of(state).is_some_and(|e| e.tool == crate::state::StickerTool::Eraser);
+        if state.tool == ToolKind::Eraser || sticker_eraser {
             *self.scratch.values.entry("pen_eraser_frames").or_insert(0) += 1;
         }
         if f.readout().is_some_and(|t| t.starts_with("Pen ") && t.ends_with(" %")) {
@@ -748,6 +750,7 @@ fn is_idle(state: &AppState, tools_busy: bool) -> bool {
         && !state.final_bakes_pending
         && !state.wrap_jobs_pending
         && !state.gpu_mips_stale
+        && !crate::sticker::live::pending(state)
         && state.doc().is_none_or(|d| !d.has_pending_edit() && !d.has_pending_composite())
 }
 

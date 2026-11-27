@@ -361,15 +361,153 @@ pub(crate) fn tool_page(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelS
                     help(ui, "Drag a layer to move it. Arrow keys: 1 pixel, Shift+arrow: 10 pixels.");
                 }
                 StickerTool::Hand => help(ui, "Drag to pan, wheel to zoom. A right or middle drag pans with every tool."),
+                // Stickers P7a: the paint tools.
+                StickerTool::Brush | StickerTool::Eraser => {
+                    let pen_line = state.pen.status_line();
+                    let b = if tool == StickerTool::Eraser { &mut state.tools.eraser } else { &mut state.tools.brush };
+                    crate::panels::tool_options::brush_options(ui, if tool == StickerTool::Eraser { "sticker_eraser" } else { "sticker_brush" }, b, &pen_line);
+                    help(ui, if tool == StickerTool::Eraser {
+                        "Drag to erase. On a mask the eraser hides."
+                    } else {
+                        "Drag to paint the primary colour. On a mask: white shows, black hides."
+                    });
+                }
+                StickerTool::Fill => {
+                    fill_options(ui, state);
+                    help(ui, "Click to fill the colour region under the pointer (with a selection: the selection).");
+                }
+                StickerTool::Gradient => {
+                    gradient_options(ui, state, &mut actions);
+                    help(ui, "Drag from where the gradient starts to where it ends (limited by the selection).");
+                }
+                StickerTool::Eyedropper => help(ui, "Click or drag to pick a colour of the sticker into the primary colour."),
                 _ => help(ui, "This tool is not available yet."),
             }
             help(ui, "Right or middle drag: pan  |  Wheel: zoom  |  Esc or Done: back");
             position_fields(ui, state, ps, &mut actions);
+            mask_block(ui, state, &mut actions);
             layer_styles(ui, state, ps, &mut actions);
         });
     });
     state.actions.extend(actions);
     out.response.rect
+}
+
+/// Stickers P7a: the Fill tool's options (Tolerance, Contiguous, Anti-alias).
+fn fill_options(ui: &mut egui::Ui, state: &mut AppState) {
+    let opts = &mut state.sticker_ui.fill;
+    ui.horizontal(|ui| {
+        ui.label("Tolerance");
+        ui.add(egui::Slider::new(&mut opts.tolerance, 0..=255)).on_hover_text("How different a colour may be and still be filled");
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut opts.contiguous, "Contiguous").on_hover_text("Only the connected region; off: every matching pixel");
+        ui.checkbox(&mut opts.anti_alias, "Anti-alias").on_hover_text("A soft edge around the region");
+    });
+}
+
+/// Stickers P7a: the Gradient tool's options (what it draws, Opacity, Reverse, the stops of the custom gradient).
+fn gradient_options(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
+    use crate::sticker::tools::gradient::GradientMode;
+    let _ = actions;
+    let mut hits = Vec::new();
+    let g = &mut state.sticker_ui.gradient;
+    let combo = egui::ComboBox::from_id_salt("sticker_gradient_mode").selected_text(g.mode.label()).show_ui(ui, |ui| {
+        for m in GradientMode::ALL {
+            ui.selectable_value(&mut g.mode, m, m.label());
+        }
+    });
+    hits.push((PanelHit::StickerGradientMode, combo.response.rect));
+    ui.horizontal(|ui| {
+        ui.label("Opacity");
+        ui.add(crate::panels::percent_slider(&mut g.opacity, 1.0, 100.0).max_decimals(0));
+    });
+    let rev = ui.checkbox(&mut g.reverse, "Reverse").on_hover_text("The end colour where the drag starts");
+    hits.push((PanelHit::StickerGradientReverse, rev.rect));
+    if g.mode == GradientMode::Custom {
+        let mut remove = None;
+        let n = g.stops.len();
+        for (i, (t, c)) in g.stops.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.color_edit_button_srgba_unmultiplied(c);
+                ui.add(egui::Slider::new(t, 0.0..=1.0).max_decimals(2).text("at"));
+                if n > 2 && ui.small_button("x").on_hover_text("Remove this stop").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            g.remove_stop(i);
+        }
+        let add = ui
+            .add_enabled(g.stops.len() < wte_core::MAX_GRADIENT_STOPS, egui::Button::new("Add stop"))
+            .on_hover_text("A new stop in the widest gap (at most 8)");
+        hits.push((PanelHit::StickerGradientAddStop, add.rect));
+        if add.clicked() {
+            g.add_stop();
+        }
+    }
+    state.panel_rects.extend(hits);
+}
+
+/// Stickers P7a (STICKER_PLAN 3.2 "Mask"): the active picture layer's mask: Add (from the selection when there is
+/// one), Invert, Apply, Delete and "Paint on mask"; a text or shape layer gets the Rasterize button instead.
+fn mask_block(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
+    let Some(edit) = edit_of(state).cloned() else { return };
+    let Some(session) = state.session.as_mut() else { return };
+    let Some(shown) = shown(&mut session.doc, &edit) else { return };
+    let Some(layer) = shown.layers().and_then(|d| edit.active_layer.and_then(|id| d.layer(id))).cloned() else { return };
+    let mut hits = Vec::new();
+    ui.separator();
+    if !matches!(layer.content, wte_core::StickerContent::Picture(_)) {
+        ui.label(egui::RichText::new("Text or shape layer").strong());
+        ui.label(egui::RichText::new("The paint tools need a picture layer.").weak());
+        let r = ui.add_enabled(!layer.locked, egui::Button::new("Rasterize")).on_hover_text("Make this layer a picture layer, so it can be painted");
+        hits.push((PanelHit::StickerRasterize, r.rect));
+        if r.clicked() {
+            actions.push(sticker(StickerAction::Rasterize));
+        }
+        state.panel_rects.extend(hits);
+        return;
+    }
+    let has = layer.mask.is_some();
+    let selection = edit.selection.is_some();
+    ui.label(egui::RichText::new("Mask").strong());
+    ui.add_enabled_ui(!layer.locked, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let add_label = if selection { "Add from selection" } else { "Add mask" };
+            let add = ui
+                .add_enabled(!has, egui::Button::new(add_label))
+                .on_hover_text("A mask that shows the selected area (without a selection: everything)")
+                .on_disabled_hover_text("The layer has a mask already");
+            hits.push((PanelHit::StickerMaskAdd, add.rect));
+            if add.clicked() {
+                actions.push(sticker(StickerAction::AddMask));
+            }
+            let buttons = [
+                (PanelHit::StickerMaskInvert, "Invert", "What was hidden shows and what showed is hidden", StickerAction::InvertMask),
+                (PanelHit::StickerMaskApply, "Apply", "The mask becomes the picture's transparency", StickerAction::ApplyMask),
+                (PanelHit::StickerMaskDelete, "Delete", "Remove the mask (the picture is unchanged)", StickerAction::DeleteMask),
+            ];
+            for (hit, label, hover, action) in buttons {
+                let r = ui.add_enabled(has, egui::Button::new(label)).on_hover_text(hover).on_disabled_hover_text("Add a mask first");
+                hits.push((hit, r.rect));
+                if r.clicked() {
+                    actions.push(sticker(action));
+                }
+            }
+        });
+        let mut on = state.sticker_ui.paint_on_mask && has;
+        let r = ui
+            .add_enabled(has, egui::Checkbox::new(&mut on, "Paint on mask"))
+            .on_hover_text("Brush, Eraser, Fill and Gradient change the mask: white shows, black hides")
+            .on_disabled_hover_text("Add a mask first");
+        hits.push((PanelHit::StickerPaintOnMask, r.rect));
+        if r.changed() {
+            actions.push(sticker(StickerAction::SetPaintOnMask(on)));
+        }
+    });
+    state.panel_rects.extend(hits);
 }
 
 /// X / Y of the active layer (its translation in layer-space pixels).

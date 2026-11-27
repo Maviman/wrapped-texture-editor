@@ -25,6 +25,13 @@
 // `tools/move_selection.rs`); the selection commands (`commands.rs`), the Cut-out and Filter commands (`filters.rs`)
 // and the small popovers with a live preview (`popover.rs`); the selection's dashed outline (`outline.rs`); the
 // Sticker menu of the menu bar.
+//
+// Stickers P8: layout, text, shapes, clipping, adjustments, library. The Move tool's transform handles and numbers
+// (`tools/transform.rs`), the Crop tool with its artboard shapes (`tools/crop.rs`), the Text and Shape tools
+// (`tools/text.rs`, `tools/shape.rs`; text layers are edited by the Text block and Text tab, `TextTarget::Layer`), the
+// whole-sticker commands Trim, Add Padding, Canvas Size, Resize, Rotate, Flip, Flatten and the layer commands Merge
+// Down and Clip to Layer Below (`layout.rs`; the core's `doc_sticker_layout.rs`), the Adjustments block
+// (`adjust_ui.rs`), the sticker library of the Sticker tab (`library.rs`) and Export as PSD.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -39,10 +46,13 @@ use wte_core::{
 use crate::app::WteApp;
 use crate::state::{AppState, Canvas2D, Dialog, StickerEdit, StickerTarget, StickerTool, ViewMode};
 
+pub mod adjust_ui;
 pub mod canvas;
 pub mod commands;
 pub mod filters;
 pub mod layers_ui;
+pub mod layout;
+pub mod library;
 pub mod live;
 pub mod outline;
 pub mod panels;
@@ -112,7 +122,8 @@ pub enum StickerAction {
     MoveLayer(Option<StickerLayerId>, i32),
     /// A drop in the Layers list: the layer goes to this index (bottom = 0).
     MoveLayerTo(StickerLayerId, usize),
-    /// Ctrl+M on the active sticker layer (never on a texture layer). Merging comes with the layer commands of P8.
+    /// Ctrl+M on the active sticker layer (never on a texture layer): it and the layer below become one picture layer
+    /// (stickers P8).
     MergeDown(Option<StickerLayerId>),
     /// The Layer menu's Rasterize in the view (P6a check): rasterizing text / shape layers comes with P8; never the
     /// stamp's texture layer.
@@ -237,6 +248,41 @@ pub enum StickerAction {
     /// The Lasso's polygon: close it (Enter, double-click, the Tool tab's Close) or drop it.
     CloseLasso,
     CancelLasso,
+
+    // ---- stickers P8 ----
+    /// The Move tool's handles and the Tool tab's W / H / rotation: the layer's whole transform. Preview calls fold
+    /// into one entry "Transform Sticker Layer".
+    SetLayerTransform(StickerLayerId, wte_core::LayerTransform, Commit),
+    /// Flip Horizontal / Vertical or Reset of the active layer (about its box centre).
+    LayerTransform(layout::LayerTransformCmd),
+    /// Clip to Layer Below of this layer (`None`: the active one): a toggle.
+    ToggleClip(Option<StickerLayerId>),
+    /// The layer's adjustments (the Tool tab's Adjustments block; one entry per drag).
+    SetLayerAdjustments(StickerLayerId, Vec<wte_core::Adjustment>, Commit),
+    /// A text layer's text (the Text block and the Text tab; one entry per typing burst or drag).
+    SetLayerText(StickerLayerId, Box<wte_core::TextSpec>, Commit),
+    /// A shape layer's shape (the Shape tool's options with a shape layer active).
+    SetLayerShape(StickerLayerId, Box<wte_core::ShapeSpec>, Commit),
+    /// A new text layer with its anchor at this layer-space point (`None`: the artboard centre).
+    AddTextLayer(Option<[f32; 2]>),
+    /// A new shape layer filling this layer-space box `[x0, y0, x1, y1]` (`None`: half the artboard, centred).
+    AddShapeLayer(Option<[f32; 4]>),
+    /// The Crop tool's Apply (Enter) and Cancel (Esc).
+    ApplyCrop,
+    CancelCrop,
+    /// A whole-sticker command (Trim, Add Padding, Canvas Size, Resize, Rotate, Flip, Flatten).
+    Layout(layout::Layout),
+    /// "Export as PSD..." of the edited sticker (`None`: the save dialog, never in a self-test).
+    ExportPsd(Option<PathBuf>),
+    /// "Save to Library": a tray sticker, or (`None`) the edited sticker with its stamp's styles.
+    SaveToLibrary(Option<StickerId>),
+    /// A click on a library entry: its sticker into this project's tray.
+    LibraryAdd(PathBuf),
+    LibraryRefresh,
+    /// "Choose folder..." of the library (`None`: the folder dialog, never in a self-test).
+    ChooseLibraryFolder(Option<PathBuf>),
+    /// "Convert to layered sticker" of a text stamp from the Sticker tab (also outside the Sticker view).
+    ConvertTextStamp(StampId),
 }
 
 impl StickerAction {
@@ -245,7 +291,12 @@ impl StickerAction {
     pub(crate) fn changes_document(&self) -> bool {
         use StickerAction as S;
         match self {
-            S::SetLayerOpacity(_, _, c) | S::SetLayerPosition(_, _, c) => *c == Commit::Final,
+            S::SetLayerOpacity(_, _, c)
+            | S::SetLayerPosition(_, _, c)
+            | S::SetLayerTransform(_, _, c)
+            | S::SetLayerAdjustments(_, _, c)
+            | S::SetLayerText(_, _, c)
+            | S::SetLayerShape(_, _, c) => *c == Commit::Final,
             S::Revert
             | S::AddPictureLayer(_)
             | S::AddPictureFile(_)
@@ -289,7 +340,17 @@ impl StickerAction {
             | S::Blur(_)
             | S::Sharpen(..)
             // The popover's Apply runs one of the commands above.
-            | S::ApplyPopover => true,
+            | S::ApplyPopover
+            // Stickers P8.
+            | S::MergeDown(_)
+            | S::LayerTransform(_)
+            | S::ToggleClip(_)
+            | S::AddTextLayer(_)
+            | S::AddShapeLayer(_)
+            | S::ApplyCrop
+            | S::Layout(_)
+            | S::LibraryAdd(_)
+            | S::ConvertTextStamp(_) => true,
             S::SetStampStyles(_, _, c) | S::SetLayerStyles(_, _, c) | S::MoveSelection(_, _, c) => *c == Commit::Final,
             _ => false,
         }
@@ -337,6 +398,18 @@ impl StickerAction {
                 | S::Defringe(_)
                 | S::Blur(_)
                 | S::Sharpen(..)
+                // Stickers P8.
+                | S::MergeDown(_)
+                | S::SetLayerTransform(..)
+                | S::LayerTransform(_)
+                | S::ToggleClip(_)
+                | S::SetLayerAdjustments(..)
+                | S::SetLayerText(..)
+                | S::SetLayerShape(..)
+                | S::AddTextLayer(_)
+                | S::AddShapeLayer(_)
+                | S::ApplyCrop
+                | S::Layout(_)
         )
     }
 }
@@ -400,6 +473,21 @@ pub(crate) enum CanvasDrag {
     /// Stickers P7b: the Move tool's drag of the selected pixels of `source` (layer space; `sent`: the offset last
     /// sent, `None` while nothing was cut yet).
     MoveSelection { source: StickerLayerId, start: glam::Vec2, sent: Option<glam::Vec2>, button: egui::PointerButton },
+    /// Stickers P8: the Move tool's drag of a transform handle of `layer` (its box, the transform at the press, where
+    /// the press was in layer space, the transform last sent).
+    Transform {
+        layer: StickerLayerId,
+        handle: tools::transform::Handle,
+        b: wte_core::LayerBox,
+        from: wte_core::LayerTransform,
+        start: glam::Vec2,
+        sent: Option<wte_core::LayerTransform>,
+        button: egui::PointerButton,
+    },
+    /// Stickers P8: the Crop tool's drag (what it grabbed, the box at the press, where the press was).
+    Crop { grip: tools::crop::CropGrip, from: [f32; 4], start: glam::Vec2, button: egui::PointerButton },
+    /// Stickers P8: the Shape tool's drag between two layer-space corners; the layer is added at the release.
+    Shape { start: glam::Vec2, to: glam::Vec2, button: egui::PointerButton },
 }
 
 /// UI state of the Sticker view (`AppState::sticker_ui`): caches and the running drag; nothing of it is saved.
@@ -463,6 +551,20 @@ pub struct StickerUi {
     pub(crate) outline: outline::OutlineCache,
     /// A Move Selection drag that has cut its layer: the source, the new layer and where it was cut.
     pub(crate) moving_cut: Option<tools::move_selection::MovingCut>,
+    /// Stickers P8: the Crop tool's box (layer space; `None`: the artboard) and options, the Shape tool's options, the
+    /// Move tool's "Keep aspect" (corner handles; Shift inverts it), the active layer's box, the content field's focus
+    /// request after a new text layer, and the library.
+    pub(crate) crop: Option<[f32; 4]>,
+    pub crop_opts: tools::crop::CropOptions,
+    pub shape: tools::shape::ShapeOptions,
+    pub keep_aspect: bool,
+    pub(crate) layer_box: Option<tools::transform::BoxCache>,
+    pub(crate) focus_text: bool,
+    /// The text being typed into a text layer's content field (its layer).
+    pub(crate) text_edit: Option<(StickerLayerId, String)>,
+    /// The artboard size the canvas camera was fitted to (another size is fitted again).
+    pub(crate) fitted_size: Option<[u32; 2]>,
+    pub(crate) library: library::LibraryState,
     /// Tests: a CPU copy of every upload to the canvas texture.
     #[cfg(test)]
     pub(crate) mirror: Option<PixelBuf>,
@@ -503,6 +605,15 @@ impl Default for StickerUi {
             popover_alive: Default::default(),
             outline: outline::OutlineCache::default(),
             moving_cut: None,
+            crop: None,
+            crop_opts: tools::crop::CropOptions::default(),
+            shape: tools::shape::ShapeOptions::default(),
+            keep_aspect: true,
+            layer_box: None,
+            focus_text: false,
+            text_edit: None,
+            fitted_size: None,
+            library: library::LibraryState::default(),
             #[cfg(test)]
             mirror: None,
         }
@@ -657,6 +768,10 @@ pub(crate) fn enter_target(state: &mut AppState, target: StickerTarget) {
     // Stickers P7b: a popover and an open lasso belong to the sticker they were opened on.
     state.sticker_ui.popover = None;
     state.sticker_ui.lasso = None;
+    // Stickers P8: a crop box belongs to the sticker it was drawn on.
+    state.sticker_ui.crop = None;
+    state.sticker_ui.layer_box = None;
+    state.sticker_ui.fitted_size = None;
     match target {
         StickerTarget::Stamp(stamp) => crate::dispatch::select_stamp(state, Some(stamp)),
         StickerTarget::Tray(id) => {
@@ -714,6 +829,12 @@ pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
     state.sticker_ui.lasso = None;
     state.sticker_ui.moving_cut = None;
     state.sticker_ui.outline = outline::OutlineCache::default();
+    // Stickers P8.
+    state.sticker_ui.crop = None;
+    state.sticker_ui.layer_box = None;
+    state.sticker_ui.focus_text = false;
+    state.sticker_ui.fitted_size = None;
+    state.sticker_ui.text_edit = None;
     // The editor's status lines (Delete without a selection, a tool that is not built) end with it.
     state.status_hint.clear();
 }
@@ -797,6 +918,12 @@ pub(crate) fn cancel_drag(state: &mut AppState) {
         Some(CanvasDrag::Stroke { .. }) => tools::brush::cancel(state),
         // Stickers P7b: a Move Selection that cut its layer goes back to before the cut.
         Some(CanvasDrag::MoveSelection { sent: Some(_), .. }) => tools::move_selection::cancel(state),
+        // Stickers P8: a handle drag goes back.
+        Some(CanvasDrag::Transform { sent: Some(_), .. }) => {
+            if let Some(doc) = state.doc_mut() {
+                doc.cancel_pending_edit();
+            }
+        }
         _ => {}
     }
     state.sticker_ui.moving_cut = None;
@@ -815,6 +942,10 @@ pub(crate) fn finish_drag(state: &mut AppState) {
         Some(CanvasDrag::MoveSelection { source, sent: Some(d), .. }) => {
             run_in(state, StickerAction::MoveSelection(source, d.to_array(), Commit::Final));
         }
+        // Stickers P8: the transform stays where the last Preview put it (one entry).
+        Some(CanvasDrag::Transform { layer, sent: Some(t), .. }) => {
+            run_in(state, StickerAction::SetLayerTransform(layer, t, Commit::Final));
+        }
         _ => {}
     }
 }
@@ -827,11 +958,17 @@ pub(crate) fn drag_moved(state: &AppState) -> bool {
         Some(CanvasDrag::Move { sent: Some(_), .. })
             | Some(CanvasDrag::Stroke { painted: true, .. })
             | Some(CanvasDrag::MoveSelection { sent: Some(_), .. })
+            | Some(CanvasDrag::Transform { sent: Some(_), .. })
     )
 }
 
 /// Runs a structural edit of the edited sticker (`Document::set_sticker`; an image stamp is promoted inside it). An
 /// error becomes a warning toast. True when the edit was applied.
+pub(crate) fn apply_edit(state: &mut AppState, label: &str, commit: Commit, f: impl FnOnce(&mut StickerDoc)) -> bool {
+    apply(state, label, commit, f)
+}
+
+/// `apply` (the private name the P6a code uses).
 fn apply(state: &mut AppState, label: &str, commit: Commit, f: impl FnOnce(&mut StickerDoc)) -> bool {
     let Some(session) = state.session.as_mut() else { return false };
     let Some(r) = session.sticker_edit.as_ref().and_then(edit_ref) else { return false };
@@ -907,6 +1044,13 @@ pub(crate) fn run(app: &mut WteApp, action: StickerAction, frame: &eframe::Frame
             }
         }
         S::ExportPicture(what, path) => tray::export_picture(app, what, path, frame),
+        // Stickers P8: the dialogs of Export as PSD and of the library folder.
+        S::ExportPsd(path) => layout::export_psd(app, path, frame),
+        S::ChooseLibraryFolder(None) => {
+            if let Some(dir) = crate::dispatch::resolve_path(app, None, |prefs| crate::io_flows::pick_folder(frame, prefs)) {
+                run_in(&mut app.state, S::ChooseLibraryFolder(Some(dir)));
+            }
+        }
         S::Escape => escape(app, frame),
         other => run_in(&mut app.state, other),
     }
@@ -985,12 +1129,8 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
             }
         }
         S::MoveLayerTo(id, to) => move_layer_to(app_state, id, to),
-        S::MergeDown(layer) => {
-            // Stickers P8: Merge Down of sticker layers; never a texture layer (STICKER_PLAN 3.3).
-            if layered(app_state, layer).is_some() {
-                app_state.status_hint = "Merge Down of sticker layers is not available yet".to_owned();
-            }
-        }
+        // Stickers P8: Merge Down of sticker layers; never a texture layer (STICKER_PLAN 3.3).
+        S::MergeDown(layer) => layout::merge_down(app_state, layer),
         // Stickers P7a: Rasterize of the active text or shape layer (pulled forward from P8: the paint tools offer it).
         S::Rasterize => commands::rasterize(app_state),
         S::SetLayerVisible(id, on) => {
@@ -1047,6 +1187,9 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
         S::EnterKey => {
             if app_state.sticker_ui.lasso.is_some() {
                 tools::lasso::close(app_state);
+            } else if tool_of(app_state) == StickerTool::Crop {
+                // Stickers P8: Enter applies the crop.
+                tools::crop::apply(app_state);
             }
         }
         S::Fit => {
@@ -1153,6 +1296,64 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
         S::ApplyPopover => popover::apply(app_state),
         S::CloseLasso => tools::lasso::close(app_state),
         S::CancelLasso => app_state.sticker_ui.lasso = None,
+        // ---- stickers P8 ----
+        S::SetLayerTransform(id, mut t, commit) => {
+            t.sanitize();
+            if layered(app_state, Some(id)).is_some_and(|(d, _)| d.layer(id).is_some_and(|l| l.locked)) {
+                app_state.status_hint = "The layer is locked: unlock it first".to_owned();
+                return;
+            }
+            layer_edit(app_state, id, tools::transform::TRANSFORM_LABEL, commit, move |l| l.transform = t);
+        }
+        S::LayerTransform(what) => layout::layer_transform(app_state, what),
+        S::ToggleClip(layer) => layout::toggle_clip(app_state, layer),
+        S::SetLayerAdjustments(id, list, commit) => adjust_ui::set(app_state, id, list, commit),
+        S::SetLayerText(id, spec, commit) => {
+            let mut spec = *spec;
+            spec.sanitize_fx();
+            let name = tools::text::name_of(&spec.content);
+            layer_edit(app_state, id, tools::text::EDIT_TEXT_LABEL, commit, move |l| {
+                // The layer's name follows its text while it is the text's own name.
+                if let StickerContent::Text(old) = &l.content {
+                    if l.name == tools::text::name_of(&old.content) {
+                        l.name = name;
+                    }
+                    l.content = StickerContent::Text(Box::new(spec));
+                }
+            });
+        }
+        S::SetLayerShape(id, mut spec, commit) => {
+            spec.sanitize();
+            layer_edit(app_state, id, tools::shape::EDIT_SHAPE_LABEL, commit, move |l| {
+                if matches!(l.content, StickerContent::Shape(_)) {
+                    l.content = StickerContent::Shape(*spec);
+                }
+            });
+        }
+        S::AddTextLayer(at) => tools::text::add(app_state, at.map(glam::Vec2::from_array)),
+        S::AddShapeLayer(b) => tools::shape::add(app_state, b),
+        S::ApplyCrop => tools::crop::apply(app_state),
+        S::CancelCrop => app_state.sticker_ui.crop = None,
+        S::Layout(cmd) => layout::run(app_state, cmd),
+        S::SaveToLibrary(id) => library::save(app_state, id),
+        S::LibraryAdd(path) => library::add(app_state, &path),
+        S::LibraryRefresh => app_state.sticker_ui.library.refresh(),
+        S::ChooseLibraryFolder(Some(path)) => {
+            app_state.prefs.sticker_library_dir = Some(path);
+            app_state.sticker_ui.library.refresh();
+        }
+        S::ExportPsd(Some(path)) => {
+            if let Some(on) = edit_of(app_state).and_then(edit_ref) {
+                layout::write_psd(app_state, on, &path);
+            }
+        }
+        S::ChooseLibraryFolder(None) | S::ExportPsd(None) => log::debug!("a dialog request needs the app; dropped"),
+        S::ConvertTextStamp(stamp) => {
+            let r = app_state.doc_mut().map(|d| d.convert_text_stamp(stamp));
+            if let Some(r) = r {
+                crate::dispatch::edited(app_state, r);
+            }
+        }
     }
 }
 
@@ -1348,6 +1549,10 @@ fn escape(app: &mut WteApp, frame: &eframe::Frame) {
     if app.state.sticker_ui.popover.take().is_some() || app.state.sticker_ui.lasso.take().is_some() {
         return;
     }
+    // Stickers P8: a crop box in progress is dropped.
+    if app.state.sticker_ui.crop.take().is_some() {
+        return;
+    }
     let dialog = !matches!(app.state.dialog, crate::state::Dialog::None);
     let pending = app.state.doc().is_some_and(Document::has_pending_edit);
     if dialog || pending || app.tools.is_busy() || app.jobs.modal_running() {
@@ -1360,6 +1565,11 @@ fn escape(app: &mut WteApp, frame: &eframe::Frame) {
         return;
     }
     leave(app, None);
+}
+
+/// `layer_edit` for the other modules of the Sticker view (stickers P8).
+pub(crate) fn layer_edit_pub(state: &mut AppState, id: StickerLayerId, label: &str, commit: Commit, f: impl FnOnce(&mut StickerLayer)) {
+    layer_edit(state, id, label, commit, f);
 }
 
 /// Changes one layer of the edited sticker (`set_sticker`; Preview calls fold by label).
@@ -1442,3 +1652,5 @@ fn add_picture_layer(state: &mut AppState, blob: Option<BlobId>) {
 pub(crate) mod tests;
 #[cfg(test)]
 mod tests_p6b;
+#[cfg(test)]
+mod tests_p8;

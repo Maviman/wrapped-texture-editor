@@ -17,6 +17,11 @@
 // is missing), `resolve_font` turns a family and style into a `FontRef` (the project first, then the machine, then
 // the bundled font with a toast).
 //
+// Stickers P8: a third target, `TextTarget::Layer`, the active text layer of the Sticker view (STICKER_PLAN 3.2 "Text
+// tab"): the same rows and the Text tab edit its `TextSpec` through `StickerAction::SetLayerText` (Size is its em in
+// layer-space pixels, Angle its layer rotation); with the sticker Text tool and no text layer active the draft is
+// what the next click adds (only the rows are drawn, not the model-placement options).
+//
 // `GapBuffer` is the `egui::TextBuffer` of the content field of a placed text (TEXT 5.12): every edit moves the gap
 // values with their characters, and a history of (text, gaps) states lets the field's own undo and redo bring gap
 // values back. The scaffold's two egui proofs (`control_sweep::text_panel_tests`) show that egui reports every edit
@@ -69,12 +74,21 @@ pub enum TextTarget {
     Draft,
     /// The selected text stamp: `UpdateStampSource` / `UpdateStampPlacement` through `continuous_edit`.
     Stamp(StampId),
+    /// Stickers P8: the active text layer of the Sticker view: `StickerAction::SetLayerText`.
+    Layer(wte_core::StickerLayerId),
 }
 
 /// The target of the Text block: the Text tool always edits the draft (also while a text is selected); the Transform
 /// tool edits the selected stamp when it is a text; every other case has none (the block is not shown and the Text
 /// tab is not enabled, ROUND4_PLAN 2.2 item 10).
 pub fn target(state: &AppState) -> Option<TextTarget> {
+    // Stickers P8: in the Sticker view the active text layer, or the draft of the sticker Text tool.
+    if state.view_mode == crate::state::ViewMode::Sticker {
+        if let Some(id) = crate::sticker::tools::text::active_text_layer(state) {
+            return Some(TextTarget::Layer(id));
+        }
+        return (crate::sticker::tool_of(state) == crate::state::StickerTool::Text).then_some(TextTarget::Draft);
+    }
     match state.tool {
         ToolKind::Text => Some(TextTarget::Draft),
         // By reference: called several times per frame (tool options, tab rule, shown tab).
@@ -96,6 +110,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, target
         crate::panels::text_tab::clear_gap_status(state);
     }
     match target {
+        // Stickers P8: the draft of the sticker Text tool: the rows only (no model placement).
+        TextTarget::Draft if state.view_mode == crate::state::ViewMode::Sticker => {
+            rows(ui, state, ps, target, &spec, actions);
+            help(ui, "Click on the canvas to add the text as a text layer; click a text layer to edit it.");
+        }
+        TextTarget::Layer(id) => {
+            let locked = crate::sticker::layered(state, Some(id)).is_some_and(|(d, _)| d.layer(id).is_some_and(|l| l.locked));
+            ui.add_enabled_ui(!locked, |ui| rows(ui, state, ps, target, &spec, actions));
+            ui.separator();
+        }
         TextTarget::Draft => {
             rows(ui, state, ps, target, &spec, actions);
             // Round 6 (R6-2): Project | Wrap and the two Wrap options, next to "Project through" (shared with the
@@ -135,6 +159,7 @@ pub(crate) fn current_spec(state: &AppState, target: TextTarget) -> Option<TextS
             StampSource::Text(spec) => Some(spec.clone()),
             StampSource::Image { .. } | StampSource::Sticker { .. } => None,
         },
+        TextTarget::Layer(id) => crate::sticker::tools::text::spec_of(state, id),
     }
 }
 
@@ -196,7 +221,13 @@ pub(crate) fn live_edit(
         TextTarget::Stamp(id) => {
             value_edit(ps, actions, ui, resp, new != old, |commit| AppAction::UpdateStampSource(id, StampSource::Text(new.clone()), commit))
         }
+        TextTarget::Layer(id) => value_edit(ps, actions, ui, resp, new != old, |commit| layer_text(id, new, commit)),
     }
+}
+
+/// Stickers P8: the action that gives text layer `id` the text `spec`.
+fn layer_text(id: wte_core::StickerLayerId, spec: &TextSpec, commit: Commit) -> AppAction {
+    AppAction::Sticker(crate::sticker::StickerAction::SetLayerText(id, Box::new(spec.clone()), commit))
 }
 
 /// `continuous_edit` with the change decided by the value itself (`changed`) instead of `Response::changed`: a drag
@@ -241,6 +272,7 @@ pub(crate) fn click_edit(state: &mut AppState, target: TextTarget, old: &TextSpe
     match target {
         TextTarget::Draft => write_draft(&mut state.tools.text, new),
         TextTarget::Stamp(id) => actions.push(AppAction::UpdateStampSource(id, StampSource::Text(new.clone()), Commit::Final)),
+        TextTarget::Layer(id) => actions.push(layer_text(id, new, Commit::Final)),
     }
 }
 
@@ -262,7 +294,29 @@ fn content_row(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, tar
             }
         }
         TextTarget::Stamp(id) => stamp_content_field(ui, state, ps, id, spec, actions),
+        TextTarget::Layer(id) => layer_content_field(ui, state, ps, id, spec, actions),
     }
+}
+
+/// Stickers P8: the content field of a text layer (a plain text buffer while it has the focus; a new text layer asks
+/// for the focus once, `StickerUi::focus_text`). Gap values whose characters are gone are dropped by the spec's
+/// `sanitize_fx`.
+fn layer_content_field(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, id: wte_core::StickerLayerId, spec: &TextSpec, actions: &mut Vec<AppAction>) {
+    let field = egui::Id::unique(("sticker_text_layer", id.0));
+    let focused = ui.memory(|m| m.has_focus(field));
+    let mut text = match &state.sticker_ui.text_edit {
+        Some((l, t)) if *l == id && focused => t.clone(),
+        _ => spec.content.clone(),
+    };
+    let resp = ui.add(TextEdit::multiline(&mut text).id(field).desired_rows(2).desired_width(f32::INFINITY).hint_text("Type the text"));
+    state.panel_rects.insert(PanelHit::StickerTextField, resp.rect);
+    if std::mem::take(&mut state.sticker_ui.focus_text) {
+        resp.request_focus();
+    }
+    state.sticker_ui.text_edit = (resp.has_focus() || focused).then(|| (id, text.clone()));
+    let mut new = spec.clone();
+    new.content.clone_from(&text);
+    value_edit(ps, actions, ui, &resp, new.content != spec.content, |commit| layer_text(id, &new, commit));
 }
 
 /// The id of the content field of placed text `id`.
@@ -355,7 +409,7 @@ fn font_row(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, target
             (true, _, _) => (false, String::new()),
             (false, true, _) => (false, "Embedded in the project, not installed here".to_owned()),
             (false, false, TextTarget::Draft) => (true, "Font not installed: Ubuntu Light will be used".to_owned()),
-            (false, false, TextTarget::Stamp(_)) => (true, "Font not installed and not in this project".to_owned()),
+            (false, false, TextTarget::Stamp(_) | TextTarget::Layer(_)) => (true, "Font not installed and not in this project".to_owned()),
         };
         picked = font_picker::button(ui, state, ps, &family, font_width, warn, &why);
         // The style list: every face of the family, from the machine and from the project (TEXT 5.9 `candidates`).
@@ -397,6 +451,7 @@ fn target_salt(target: TextTarget) -> u64 {
     match target {
         TextTarget::Draft => u64::MAX,
         TextTarget::Stamp(id) => id.0,
+        TextTarget::Layer(id) => (1 << 62) | u64::from(id.0),
     }
 }
 
@@ -417,7 +472,7 @@ pub(crate) fn change_family(state: &mut AppState, ps: &mut PanelState, target: T
             // A family nobody has: the names are kept (the draft is placed with the bundled font and a warning).
             new.font.family = family.to_owned();
             new.font.style = pick_style(&state.fonts, family, &spec.font.style);
-            if let TextTarget::Stamp(_) = target
+            if matches!(target, TextTarget::Stamp(_) | TextTarget::Layer(_))
                 && let Some(font) = resolve_font(state, family, &new.font.style)
             {
                 new.font = font;
@@ -434,7 +489,7 @@ fn apply_face(state: &mut AppState, target: TextTarget, spec: &mut TextSpec, fac
             spec.font.family.clone_from(&face.family);
             spec.font.style.clone_from(&face.style);
         }
-        TextTarget::Stamp(_) => {
+        TextTarget::Stamp(_) | TextTarget::Layer(_) => {
             let font = match &face.source {
                 FaceSource::Project(font) => Some(font.clone()),
                 FaceSource::Catalog(_) => resolve_font(state, &face.family, &face.style),
@@ -586,6 +641,17 @@ fn size_field(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, targ
             let scaled = refit_auto_depth(state.doc(), &placement, scaled);
             value_edit(ps, actions, ui, &resp, scaled != placement, |commit| AppAction::UpdateStampPlacement(id, scaled, commit));
         }
+        // Stickers P8: a text layer's em in layer-space pixels.
+        TextTarget::Layer(id) => {
+            let Some(spec) = crate::sticker::tools::text::spec_of(state, id) else { return };
+            let mut px = spec.size_px;
+            let resp = ui
+                .add_sized([SIZE_WIDTH, ROW_HEIGHT], DragValue::new(&mut px).range(1.0..=4096.0).speed(0.5).max_decimals(1).suffix(" px"))
+                .on_hover_text("Text size: one em in sticker pixels");
+            let mut new = spec.clone();
+            new.size_px = if px.is_finite() { px.clamp(1.0, 4096.0) } else { spec.size_px };
+            value_edit(ps, actions, ui, &resp, new.size_px != spec.size_px, |commit| layer_text(id, &new, commit));
+        }
     }
 }
 
@@ -683,6 +749,18 @@ fn angle_field(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, tar
             };
             let turned = refit_auto_depth(state.doc(), &placement, turned);
             value_edit(ps, actions, ui, &resp, turned != placement, |commit| AppAction::UpdateStampPlacement(id, turned, commit));
+        }
+        // Stickers P8: a text layer's rotation (about its anchor).
+        TextTarget::Layer(id) => {
+            let Some((doc, _)) = crate::sticker::layered(state, Some(id)) else { return };
+            let Some(t) = doc.layer(id).map(|l| l.transform) else { return };
+            let deg = wrap_deg(t.rotation.to_degrees());
+            let mut new_deg = deg;
+            let resp = ui.add_sized([ANGLE_WIDTH, ROW_HEIGHT], angle_value(&mut new_deg)).on_hover_text("Angle: turns the text layer");
+            let turned = if new_deg != deg { wte_core::LayerTransform { rotation: wrap_deg(new_deg).to_radians(), ..t } } else { t };
+            value_edit(ps, actions, ui, &resp, turned != t, |commit| {
+                AppAction::Sticker(crate::sticker::StickerAction::SetLayerTransform(id, turned, commit))
+            });
         }
     }
 }

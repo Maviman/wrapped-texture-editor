@@ -38,6 +38,15 @@ pub const STYLE_LABEL: &str = "Edit Sticker Style";
 const RENDER_CACHE_ENTRIES: usize = 8;
 const RENDER_CACHE_BYTES: usize = 512 << 20;
 
+/// How `set_sticker_with` treats the users' placements (stickers P8).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum Refit {
+    /// The artboard changed by a crop, trim, padding, canvas size or rotation: 2.9 (`refit_placement`).
+    Artboard,
+    /// Resize by this mean factor: placements kept, stamp-level style lengths scaled.
+    Scaled(f32),
+}
+
 /// Which sticker a content command acts on (2.8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StickerRef {
@@ -333,6 +342,20 @@ impl Document {
         label: &str,
         commit: Commit,
     ) -> Result<StickerId, EditError> {
+        self.set_sticker_with(on, edit, label, commit, Refit::Artboard)
+    }
+
+    /// `set_sticker` with the placement rule of the edit (stickers P8): `Refit::Artboard` is the rule of 2.9;
+    /// `Refit::Scaled(f)` (Resize) keeps every user's placement and multiplies its stamp-level style lengths by `f`
+    /// (the artboard and everything on it were scaled by `f`, so the sticker keeps its size on the model).
+    pub(crate) fn set_sticker_with(
+        &mut self,
+        on: StickerRef,
+        edit: impl FnOnce(&mut StickerDoc),
+        label: &str,
+        commit: Commit,
+        refit_rule: Refit,
+    ) -> Result<StickerId, EditError> {
         self.guard_no_stroke()?;
         let mut promoted = None;
         let id = match self.promotion_of(on)? {
@@ -376,7 +399,7 @@ impl Document {
             None => self.begin_pending(label),
         }
         if changed {
-            let refit = old.artboard != new.artboard;
+            let refit = old.artboard != new.artboard && refit_rule == Refit::Artboard;
             let new = Arc::new(new);
             let mut placements = Vec::new();
             if refit {
@@ -395,6 +418,15 @@ impl Document {
                 let placement = self.refit_auto_depth_framed(&stamp.placement, &old_frame, placement, &new_frame);
                 if let Some(s) = self.stamps.iter_mut().find(|s| s.id == u) {
                     s.placement = placement;
+                }
+            }
+            if let Refit::Scaled(f) = refit_rule
+                && f.is_finite()
+                && f > 0.0
+                && f != 1.0
+            {
+                for s in self.stamps.iter_mut().filter(|s| users.contains(&s.id)) {
+                    s.styles = s.styles.scaled(f).sanitized();
                 }
             }
             for &u in &users {

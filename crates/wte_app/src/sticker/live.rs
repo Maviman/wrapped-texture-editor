@@ -110,7 +110,11 @@ pub struct LiveCounters {
 
 /// True while the live canvas or one of its jobs has work left (the self-test's idle check waits for it).
 pub(crate) fn pending(state: &AppState) -> bool {
-    state.sticker_ui.live.is_some() || state.sticker_ui.jobs.running() || crate::sticker::popover::pending(state)
+    state.sticker_ui.live.is_some()
+        || state.sticker_ui.jobs.running()
+        || crate::sticker::popover::pending(state)
+        // Stickers P8: the library's listing job.
+        || state.sticker_ui.library.busy()
 }
 
 /// A stroke was opened on `layer` of `sticker` (the layer has an enabled style: `styled`). `exact`: the canvas

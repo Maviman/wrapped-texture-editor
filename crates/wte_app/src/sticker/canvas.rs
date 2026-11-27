@@ -14,6 +14,9 @@
 // Magic Wand's click), the Magic Eraser, the Move tool's drag of the selected pixels, the selection's dashed outline
 // (`outline.rs`), and the popover of a command (`popover.rs`: its live preview in the canvas texture, a click on the
 // canvas that picks its colour).
+//
+// Stickers P8: the Move tool's transform handles (`tools/transform.rs`: a handle drag is one entry), the Crop tool's
+// box (`tools/crop.rs`), the Text tool's click (`tools/text.rs`) and the Shape tool's drag (`tools/shape.rs`).
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, vec2};
@@ -234,6 +237,13 @@ fn canvas_side(ui: &mut egui::Ui, state: &mut AppState, left: Rect) {
     let geom = geom_of(&shown, texture.map_or([1, 1], |t| t.1));
     header_bar(ui, state, header, &shown, &edit);
 
+    // Stickers P8: an artboard of another size (crop, trim, padding, resize, rotate) is fitted again.
+    if state.sticker_ui.fitted_size.is_some_and(|s| s != geom.size)
+        && let Some(e) = edit_mut(state)
+    {
+        e.camera = Canvas2D::default();
+    }
+    state.sticker_ui.fitted_size = Some(geom.size);
     // The camera: fitted on the first draw (and by Fit, which resets it), zoomed by "100 %".
     if let Some(e) = edit_mut(state)
         && e.camera == Canvas2D::default()
@@ -383,6 +393,7 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
     // Stickers P7a: every pointer event takes its pressure from this frame's pen notes, in order (as `route_pointer`).
     let pen = &state.pen.frame;
     let held = pen.held_pressure();
+    let shift = ui.input(|i| i.modifiers.shift);
     let (events, space, latest, down, double) = ui.input(|i| {
         let mut walk = pen.cursor();
         let events: Vec<CanvasEvent> = i
@@ -414,10 +425,10 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
                 press(state, rect, geom, hit, pos, button, space, pressure, mods);
             }
             CanvasEvent::Pressed(..) => {}
-            CanvasEvent::Moved(pos, pressure) => motion(state, rect, geom, pos, pressure),
+            CanvasEvent::Moved(pos, pressure) => motion(state, rect, geom, pos, pressure, shift),
             CanvasEvent::Released(pos, button, pressure) => {
                 if drag_button(state) == Some(button) {
-                    release(state, rect, geom, pos, pressure);
+                    release(state, rect, geom, pos, pressure, shift);
                 }
             }
         }
@@ -430,7 +441,7 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
     if let (Some(button), Some(pos)) = (drag_button(state), latest)
         && !down.iter().any(|(b, d)| *b == button && *d)
     {
-        release(state, rect, geom, pos, held);
+        release(state, rect, geom, pos, held, shift);
     }
     // Wheel (and the companion's pinch): zoom about the pointer.
     if let Some(pos) = latest.filter(|p| rect.contains(*p))
@@ -448,6 +459,9 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
         Some(CanvasDrag::Pan { .. }) => Some(egui::CursorIcon::Grabbing),
         Some(CanvasDrag::Move { .. }) => Some(egui::CursorIcon::Move),
         Some(CanvasDrag::MoveSelection { .. }) => Some(egui::CursorIcon::Move),
+        // Stickers P8.
+        Some(CanvasDrag::Transform { .. }) => Some(egui::CursorIcon::Move),
+        Some(CanvasDrag::Crop { .. } | CanvasDrag::Shape { .. }) => Some(egui::CursorIcon::Crosshair),
         Some(
             CanvasDrag::Stroke { .. } | CanvasDrag::Gradient { .. } | CanvasDrag::Pick { .. } | CanvasDrag::Marquee { .. } | CanvasDrag::Lasso { .. },
         ) => Some(egui::CursorIcon::Crosshair),
@@ -471,7 +485,10 @@ fn drag_button(state: &AppState) -> Option<egui::PointerButton> {
         | CanvasDrag::Pick { button }
         | CanvasDrag::Marquee { button, .. }
         | CanvasDrag::Lasso { button, .. }
-        | CanvasDrag::MoveSelection { button, .. } => Some(*button),
+        | CanvasDrag::MoveSelection { button, .. }
+        | CanvasDrag::Transform { button, .. }
+        | CanvasDrag::Crop { button, .. }
+        | CanvasDrag::Shape { button, .. } => Some(*button),
     }
 }
 
@@ -550,6 +567,25 @@ fn press(
         }
         return;
     }
+    // Stickers P8: the Crop, Text and Shape tools.
+    if matches!(tool, StickerTool::Crop | StickerTool::Text | StickerTool::Shape) {
+        if hit == Hit::ReadOnly {
+            state.status_hint = crate::sticker::tools::TEXT_STAMP_HINT.to_owned();
+            return;
+        }
+        let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
+        let p = geom.to_layer(&cam, rect, pos);
+        match tool {
+            StickerTool::Crop => {
+                if let Some((grip, from)) = crate::sticker::tools::crop::grip_at(state, geom, rect, pos, p) {
+                    state.sticker_ui.drag = Some(CanvasDrag::Crop { grip, from, start: p, button });
+                }
+            }
+            StickerTool::Text => crate::sticker::tools::text::click(state, p),
+            _ => state.sticker_ui.drag = Some(CanvasDrag::Shape { start: p, to: p, button }),
+        }
+        return;
+    }
     if tool != StickerTool::Move {
         state.status_hint = format!("The sticker {} tool is not available yet", tool.label());
         return;
@@ -560,6 +596,11 @@ fn press(
     }
     let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
     let p = geom.to_layer(&cam, rect, pos);
+    // Stickers P8: a press on a transform handle of the active layer scales or turns it (one entry).
+    if let Some((layer, handle, b, from)) = crate::sticker::tools::transform::handle_at(state, geom, rect, pos) {
+        state.sticker_ui.drag = Some(CanvasDrag::Transform { layer, handle, b, from, start: p, sent: None, button });
+        return;
+    }
     // Stickers P7b: a press inside the selection on a picture layer drags the selected pixels (cut into a new layer at
     // the first motion; one entry "Move Selection").
     if let Some(source) = crate::sticker::tools::move_selection::applies(state, p) {
@@ -601,9 +642,26 @@ fn press(
 
 /// Pointer motion during a drag: a Move sends a `Commit::Preview` position (whole pixels) when it changed; a pan moves
 /// the camera; stickers P7a: a stroke paints a sample, a gradient drag follows, the Eyedropper picks.
-fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32) {
+fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32, shift: bool) {
     let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
     match state.sticker_ui.drag.clone() {
+        // Stickers P8.
+        Some(CanvasDrag::Transform { layer, handle, b, from, start, sent, button }) => {
+            let p = geom.to_layer(&cam, rect, pos);
+            let keep = state.sticker_ui.keep_aspect;
+            let t = crate::sticker::tools::transform::dragged(&b, &from, handle, start, p, shift, keep);
+            if sent != Some(t) && (sent.is_some() || t != from) {
+                state.push(crate::action::AppAction::Sticker(StickerAction::SetLayerTransform(layer, t, Commit::Preview)));
+                state.sticker_ui.drag = Some(CanvasDrag::Transform { layer, handle, b, from, start, sent: Some(t), button });
+            }
+        }
+        Some(CanvasDrag::Crop { grip, from, start, .. }) => {
+            let aspect = state.sticker_ui.crop_opts.aspect;
+            state.sticker_ui.crop = Some(crate::sticker::tools::crop::dragged(grip, from, start, geom.to_layer(&cam, rect, pos), aspect));
+        }
+        Some(CanvasDrag::Shape { start, button, .. }) => {
+            state.sticker_ui.drag = Some(CanvasDrag::Shape { start, to: geom.to_layer(&cam, rect, pos), button });
+        }
         Some(CanvasDrag::Stroke { .. }) => crate::sticker::tools::brush::sample(state, geom.to_layer(&cam, rect, pos), pressure),
         Some(CanvasDrag::Gradient { from, button, .. }) => {
             state.sticker_ui.drag = Some(CanvasDrag::Gradient { from, to: geom.to_layer(&cam, rect, pos), button });
@@ -643,9 +701,17 @@ fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32
 
 /// The end of a drag: a Move that moved ends with its `Commit::Final` (one history entry); a click moved nothing.
 /// Stickers P7a: a stroke ends (one entry), a gradient drag is applied (`StickerAction::Gradient`, one entry).
-fn release(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32) {
-    motion(state, rect, geom, pos, pressure);
+fn release(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32, shift: bool) {
+    motion(state, rect, geom, pos, pressure, shift);
     match state.sticker_ui.drag.take() {
+        // Stickers P8: a handle drag ends with its Final (one entry); a shape is added (one entry).
+        Some(CanvasDrag::Transform { layer, sent: Some(t), .. }) => {
+            state.push(crate::action::AppAction::Sticker(StickerAction::SetLayerTransform(layer, t, Commit::Final)));
+        }
+        Some(CanvasDrag::Shape { start, to, .. }) => {
+            let b = crate::sticker::tools::shape::drag_box(start, to);
+            state.push(crate::action::AppAction::Sticker(StickerAction::AddShapeLayer(Some(b))));
+        }
         Some(CanvasDrag::Move { layer, sent: Some(to), .. }) => {
             state.push(crate::action::AppAction::Sticker(StickerAction::SetLayerPosition(layer, to.to_array(), Commit::Final)));
         }
@@ -682,8 +748,14 @@ fn draw(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom: Geom, texture: Op
     if cam.zoom >= GRID_ZOOM {
         paint_grid(&painter, board.intersect(rect), board.min, cam.zoom);
     }
+    // Stickers P8: the Move tool shows the active layer's transform box and handles; the Crop tool its box.
+    let move_box = edit.tool == StickerTool::Move && !matches!(state.sticker_ui.drag, Some(CanvasDrag::MoveSelection { .. })) && shown.layers().is_some();
+    if move_box {
+        crate::sticker::tools::transform::draw(&painter, state, geom, rect);
+    }
     // The active layer's outline (picture layers: the transformed picture rectangle).
-    if let (Some(doc), Some(active)) = (shown.layers(), edit.active_layer)
+    if !move_box
+        && let (Some(doc), Some(active)) = (shown.layers(), edit.active_layer)
         && let Some(layer) = doc.layer(active)
         && let StickerContent::Picture(picture) = &layer.content
     {
@@ -732,6 +804,15 @@ fn draw(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom: Geom, texture: Op
         if let Some(first) = lasso.points.first() {
             painter.circle_stroke(geom.to_screen(&cam, rect, *first), 4.0, Stroke::new(1.0, Color32::WHITE));
         }
+    }
+    if edit.tool == StickerTool::Crop && shown.layers().is_some() {
+        crate::sticker::tools::crop::draw(&painter, state, geom, rect);
+    }
+    if let Some(CanvasDrag::Shape { start, to, .. }) = state.sticker_ui.drag {
+        let b = crate::sticker::tools::shape::drag_box(start, to);
+        let r = Rect::from_two_pos(geom.to_screen(&cam, rect, Vec2::new(b[0], b[1])), geom.to_screen(&cam, rect, Vec2::new(b[2], b[3])));
+        painter.rect_stroke(r, 0.0, Stroke::new(3.0, Color32::from_black_alpha(140)), egui::StrokeKind::Middle);
+        painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Middle);
     }
     if let Some(CanvasDrag::Gradient { from, to, .. }) = state.sticker_ui.drag {
         let (a, b) = (geom.to_screen(&cam, rect, from), geom.to_screen(&cam, rect, to));

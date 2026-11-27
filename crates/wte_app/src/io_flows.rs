@@ -883,6 +883,21 @@ pub fn pick_save_png(frame: &eframe::Frame, prefs: &Prefs, default_name: &str) -
     dialog.save_file().map(|p| if crate::dnd::extension_of(&p) == "png" { p } else { p.with_extension("png") })
 }
 
+/// Stickers P8: native "save PSD" dialog (Export as PSD...): a `.psd` named after `default_name`.
+pub fn pick_save_psd(frame: &eframe::Frame, prefs: &Prefs, default_name: &str) -> Option<PathBuf> {
+    let stem = wte_core::export::sanitize_file_stem(default_name);
+    let stem = if stem.is_empty() { "sticker".to_owned() } else { stem };
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Export as PSD")
+        .add_filter("Photoshop document", &["psd"])
+        .set_file_name(format!("{stem}.psd"))
+        .set_parent(frame);
+    if let Some(dir) = dialog_dir(prefs) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file().map(|p| if crate::dnd::extension_of(&p) == "psd" { p } else { p.with_extension("psd") })
+}
+
 /// Native "choose folder" dialog.
 pub fn pick_folder(frame: &eframe::Frame, prefs: &Prefs) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new().set_title("Choose Folder").set_parent(frame);

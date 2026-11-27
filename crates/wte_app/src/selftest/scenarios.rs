@@ -35,6 +35,7 @@ mod pen;
 mod side_tabs;
 mod sticker;
 mod sticker_cutout;
+mod sticker_layout;
 mod sticker_paint;
 mod sticker_tab;
 
@@ -102,6 +103,9 @@ const NAMES: &[&str] = &[
     "sticker_edit",
     "sticker_pen",
     "sticker_cutout",
+    "sticker_text",
+    "sticker_layout",
+    "sticker_library",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -189,6 +193,9 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "sticker_edit" => sticker_paint::sticker_edit(),
         "sticker_pen" => sticker_paint::sticker_pen(),
         "sticker_cutout" => sticker_cutout::sticker_cutout(),
+        "sticker_text" => sticker_layout::sticker_text(),
+        "sticker_layout" => sticker_layout::sticker_layout(),
+        "sticker_library" => sticker_layout::sticker_library(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -9308,7 +9315,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 62);
+        assert_eq!(scenario_names().len(), 65);
         // Stickers P6a (review B15): every shot of a sticker scenario says what it must show.
         for name in scenario_names().iter().filter(|n| n.starts_with("sticker")) {
             let steps = scenario(name, &args).unwrap();

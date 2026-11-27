@@ -242,14 +242,15 @@ fn view_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
 /// Stickers P7b: the Sticker menu: the Selection, Cut-out and Filter commands of `sticker::filters::COMMANDS` as three
 /// submenus (shortcut texts from the Sticker view's table).
 fn sticker_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
-    use crate::sticker::filters::{COMMANDS, Group, available, enabled};
+    use crate::sticker::filters::{COMMANDS, Group, available, available_more, enabled_more};
     let have = available(state);
-    for group in Group::ALL {
+    let more = available_more(state);
+    for group in Group::MENU {
         ui.menu_button(group.label(), |ui| {
             for def in COMMANDS.iter().filter(|d| d.group == group) {
                 let key = if def.shortcut.is_empty() { String::new() } else { crate::shortcuts::sticker_shortcut_text(ui.ctx(), def.shortcut) };
                 let button = Button::new(def.label).shortcut_text(key);
-                if ui.add_enabled(enabled(def, have), button).on_hover_text(def.hover).clicked() {
+                if ui.add_enabled(enabled_more(def, have, more), button).on_hover_text(def.hover).clicked() {
                     actions.push(AppAction::Sticker((def.make)(state)));
                 }
             }

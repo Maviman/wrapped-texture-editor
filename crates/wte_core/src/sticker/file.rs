@@ -157,6 +157,23 @@ fn read_small<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, limit: u64) -
     Some(out)
 }
 
+/// Stickers P8 (3.8 "Library"): the preview picture of a `.wtes` file (its `preview.png`, at most 512 px) and the
+/// sticker's name, without reading the layers: what the library list shows. `None` when the bytes are not a sticker
+/// file; the picture is `None` when the file has no readable preview.
+pub fn read_wtes_preview(bytes: &[u8]) -> Option<(String, Option<PixelBuf>)> {
+    let mut zip = ZipArchive::new(Cursor::new(bytes)).ok()?;
+    if read_small(&mut zip, "mimetype", 64).as_deref() != Some(WTES_MIMETYPE.as_bytes()) {
+        return None;
+    }
+    let json = read_small(&mut zip, MANIFEST, MANIFEST_LIMIT)?;
+    let value: serde_json::Value = serde_json::from_slice(&json).ok()?;
+    let name = value.get("sticker").and_then(|s| s.get("name")).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let preview = read_small(&mut zip, "preview.png", 8 << 20)
+        .and_then(|png| decode_image(&png, Some("preview.png"), WTES_PREVIEW_SIDE).ok())
+        .map(|image| image.pixels);
+    Some((name, preview))
+}
+
 /// Reads the bytes of a `.wtes` file. Errors: `NotAZip`; `ManifestInvalid` when it is not a sticker file (no
 /// `mimetype` of `WTES_MIMETYPE`), when `sticker.json` is missing or does not parse, or when the sticker is invalid as a
 /// whole (`StickerLost`'s reason); `TooNew` for a format above `WTES_FORMAT`. A picture, mask or font that cannot be read

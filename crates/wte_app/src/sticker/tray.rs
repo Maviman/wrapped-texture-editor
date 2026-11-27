@@ -198,6 +198,15 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Ap
             "Save the selected sticker as a PNG picture",
             selected.map(|id| StickerAction::ExportPicture(PictureOf::Sticker(id), None)),
         );
+        // Stickers P8 (3.8): the selected tray sticker into the library folder.
+        button(
+            ui,
+            PanelHit::TraySaveLibrary,
+            sel,
+            "Save to Library".into(),
+            "Save the selected sticker into the sticker library (Library, below)",
+            selected.map(|id| StickerAction::SaveToLibrary(Some(id))),
+        );
     });
 }
 

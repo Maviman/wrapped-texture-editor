@@ -533,17 +533,18 @@ pub(super) fn sticker_keys() -> Vec<Step> {
         undo_since(s, sc, 3)
     }));
     steps.extend(key(CMD, K::M));
-    steps.push(Step::Assert("inside: Ctrl+M merges no texture layer (not available yet)", |s, sc| {
-        if sticker_doc(s)?.layers.len() != 2 || !s.status_hint.contains("Merge Down") {
-            return Err(format!("status \"{}\"", s.status_hint));
+    // Stickers P8: Ctrl+M merges the two sticker layers (one entry); no texture layer is merged.
+    steps.push(Step::Assert("inside: Ctrl+M merges the sticker layers, never a texture layer", |s, sc| {
+        if sticker_doc(s)?.layers.len() != 1 || doc_of(s)?.undo_label() != Some(wte_core::MERGE_DOWN_LABEL) {
+            return Err(format!("{} layers, last entry {:?}", sticker_doc(s)?.layers.len(), doc_of(s)?.undo_label()));
         }
-        undo_since(s, sc, 3)
+        undo_since(s, sc, 4)
     }));
     steps.push(Step::Shot {
         name: "keys_inside",
-        expect: "the Sticker view after the layer keys: the logo on the canvas (the copy exactly over the original), Move \
-                 highlighted in the sticker tool strip, the Layers tab with two rows (the copy on top, highlighted), the \
-                 status line \"Merge Down of sticker layers is not available yet\"",
+        expect: "the Sticker view after the layer keys: the logo on the canvas (the copy merged into the original: the same look), Move \
+                 highlighted in the sticker tool strip, the Layers tab with one row (highlighted), the \
+                 transform box with its handles around the logo",
     });
     // The arrows nudge the active layer.
     steps.push(Step::Setup("remember the active layer's position", |s, sc| {

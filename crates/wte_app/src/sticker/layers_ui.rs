@@ -4,6 +4,11 @@
 // Up / Down / Delete), and the Tool tab shows the options of the active sticker tool and the active layer's position.
 // Every change is a `StickerAction`; every feature has a button (tablet rule of 3.10: nothing only by drag, hover,
 // right click, double click or a key).
+//
+// Stickers P8: the Tool tab also has the Crop, Text and Shape tools' options, the Move tool's Keep aspect and the
+// active layer's W / H / Angle, Flip H / V and Reset, and the Adjustments block; the Layers footer gets Text, Shape,
+// Clip and Merge, the rows a context menu (Duplicate, Delete, Merge Down, Rasterize, Clip to Layer Below, Copy /
+// Paste Style: each also a button or menu item, the tablet rule).
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, vec2};
@@ -151,6 +156,25 @@ fn rows(
         if resp.clicked() && active != Some(layer.id) {
             actions.push(sticker(StickerAction::SelectLayer(layer.id)));
         }
+        // Stickers P8: the row's context menu.
+        let id = layer.id;
+        let (below, vector, clip) = (index > 0, !matches!(layer.content, StickerContent::Picture(_)), layer.clip);
+        resp.context_menu(|ui| {
+            let mut item = |ui: &mut egui::Ui, enabled: bool, label: &str, action: StickerAction| {
+                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                    actions.push(sticker(StickerAction::SelectLayer(id)));
+                    actions.push(sticker(action));
+                    ui.close();
+                }
+            };
+            item(ui, true, "Duplicate", StickerAction::DuplicateLayer(Some(id)));
+            item(ui, doc.layers.len() > 1, "Delete", StickerAction::DeleteLayer(Some(id)));
+            item(ui, below, "Merge Down", StickerAction::MergeDown(Some(id)));
+            item(ui, vector, "Rasterize", StickerAction::Rasterize);
+            item(ui, below || clip, if clip { "Release Clipping Mask" } else { "Clip to Layer Below" }, StickerAction::ToggleClip(Some(id)));
+            item(ui, true, "Copy Style", StickerAction::CopyStyle(crate::sticker::StyleTarget::Layers));
+            item(ui, state.style_clipboard.is_some(), "Paste Style", StickerAction::PasteStyle(crate::sticker::StyleTarget::Layers));
+        });
         hits.push((PanelHit::StickerLayerRow(layer.id.0), rect));
         rects.push((index, rect));
     }
@@ -324,7 +348,7 @@ fn footer(
             StickerAction::AddPictureFile(None),
         );
         let key = |label: &str| crate::shortcuts::sticker_shortcut_text(ui.ctx(), label);
-        let (dup, up, down) = (key("Duplicate Sticker Layer"), key("Move Sticker Layer Up"), key("Move Sticker Layer Down"));
+        let (dup, up, down, merge) = (key("Duplicate Sticker Layer"), key("Move Sticker Layer Up"), key("Move Sticker Layer Down"), key("Merge Sticker Layer Down"));
         button(ui, PanelHit::StickerLayerDuplicate, layer.is_some(), "Duplicate".into(), &format!("Duplicate the active layer ({dup})"), StickerAction::DuplicateLayer(None));
         let can_up = index.is_some_and(|i| i + 1 < doc.layers.len());
         button(ui, PanelHit::StickerLayerUp, can_up, "Up".into(), &format!("One step up ({up})"), StickerAction::MoveLayer(None, 1));
@@ -339,6 +363,15 @@ fn footer(
             "Delete the active layer (a sticker keeps at least one; a locked layer stays)",
             StickerAction::DeleteLayer(None),
         );
+        // Stickers P8.
+        button(ui, PanelHit::StickerLayerText, true, "Text".into(), "A new text layer in the middle of the artboard (or click with the Text tool, X)", StickerAction::AddTextLayer(None));
+        button(ui, PanelHit::StickerLayerShape, true, "Shape".into(), "A new shape layer with the Shape tool's options (or drag with the Shape tool, U)", StickerAction::AddShapeLayer(None));
+        let clipped = layer.is_some_and(|l| l.clip);
+        let can_clip = index.is_some_and(|i| i > 0 || clipped) && layer.is_some_and(|l| !l.locked);
+        let clip_label = if clipped { "Unclip" } else { "Clip" };
+        button(ui, PanelHit::StickerLayerClip, can_clip, clip_label.into(), "Clip to Layer Below: the layer shows only where the layer below shows (pattern inside text)", StickerAction::ToggleClip(None));
+        let can_merge = index.is_some_and(|i| i > 0) && layer.is_some_and(|l| !l.locked);
+        button(ui, PanelHit::StickerLayerMerge, can_merge, "Merge".into(), &format!("Merge Down: the layer and the one below become one picture ({merge})"), StickerAction::MergeDown(None));
     });
     Rect::from_min_max(egui::pos2(row.response.rect.left(), top), row.response.rect.max)
 }
@@ -358,7 +391,37 @@ pub(crate) fn tool_page(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelS
                 StickerTool::Move => {
                     ui.checkbox(&mut state.sticker_ui.auto_select, "Auto-select layer")
                         .on_hover_text("A click picks the top layer under the pointer; off: always the active layer");
-                    help(ui, "Drag a layer to move it. Arrow keys: 1 pixel, Shift+arrow: 10 pixels.");
+                    // Stickers P8: the corner handles keep the aspect (Shift frees it).
+                    ui.checkbox(&mut state.sticker_ui.keep_aspect, "Keep aspect")
+                        .on_hover_text("The corner handles keep the layer's proportions; Shift while dragging does the opposite");
+                    help(ui, "Drag a layer to move it; drag a handle to scale it, the round one to turn it (Shift: 15 degree steps). Arrow keys: 1 pixel, Shift+arrow: 10 pixels.");
+                }
+                // Stickers P8: the Crop, Text and Shape tools.
+                StickerTool::Crop => {
+                    let mut hits = Vec::new();
+                    crate::sticker::tools::crop::options(ui, state, &mut actions, &mut hits);
+                    state.panel_rects.extend(hits);
+                    help(ui, "Drag the box's handles, drag inside to move it, or drag outside for a new box. Enter applies.");
+                }
+                StickerTool::Text => {
+                    if let Some(target) = crate::panels::text_block::target(state) {
+                        crate::panels::text_block::show(ui, state, ps, target, &mut actions);
+                    }
+                    help(ui, "Click to add a text layer; click a text layer to edit it. Warp and path: the Text tab.");
+                }
+                StickerTool::Shape => {
+                    let active = crate::sticker::layered(state, None).and_then(|(d, id)| {
+                        let l = d.layer(id)?;
+                        match &l.content {
+                            StickerContent::Shape(s) => Some((id, s.clone(), l.locked)),
+                            _ => None,
+                        }
+                    });
+                    if active.is_some() {
+                        help(ui, "These options edit the active shape layer.");
+                    }
+                    crate::sticker::tools::shape::options(ui, state, ps, active, &mut actions);
+                    help(ui, "Drag to add a shape layer (a click: a 64-pixel shape). Fill: primary colour; outline: secondary colour.");
                 }
                 StickerTool::Hand => help(ui, "Drag to pan, wheel to zoom. A right or middle drag pans with every tool."),
                 // Stickers P7a: the paint tools.
@@ -405,12 +468,13 @@ pub(crate) fn tool_page(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelS
                         .on_hover_text("Hide the colour on the layer mask instead of erasing it (a mask is added when needed)");
                     help(ui, "Click a colour to make it transparent (limited by the selection).");
                 }
-                _ => help(ui, "This tool is not available yet."),
             }
             help(ui, "Right or middle drag: pan  |  Wheel: zoom  |  Esc or Done: back");
             position_fields(ui, state, ps, &mut actions);
             mask_block(ui, state, &mut actions);
             layer_styles(ui, state, ps, &mut actions);
+            // Stickers P8: the active layer's adjustments.
+            crate::sticker::adjust_ui::block(ui, state, ps, &mut actions);
             // Stickers P7b: the Selection, Cut-out and Filter commands at the end of the page (the controls above keep
             // their places).
             command_blocks(ui, state, &mut actions);
@@ -486,8 +550,9 @@ fn region_options(ui: &mut egui::Ui, id: &str, opts: &mut wte_core::RegionOption
 /// Stickers P7b (STICKER_PLAN 3.3 "Commands ... also in the Tool tab"): the Selection, Cut-out and Filter commands as
 /// buttons (the same list as the Sticker menu), with Remove Background's options above its button.
 fn command_blocks(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
-    use crate::sticker::filters::{COMMANDS, Group, available, enabled};
+    use crate::sticker::filters::{COMMANDS, Group, available, available_more, enabled_more};
     let have = available(state);
+    let more = available_more(state);
     if !have.0 {
         return;
     }
@@ -509,7 +574,7 @@ fn command_blocks(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<App
             }
             ui.horizontal_wrapped(|ui| {
                 for (i, def) in COMMANDS.iter().enumerate().filter(|(_, d)| d.group == group) {
-                    let r = ui.add_enabled(enabled(def, have), egui::Button::new(def.label)).on_hover_text(def.hover);
+                    let r = ui.add_enabled(enabled_more(def, have, more), egui::Button::new(def.label)).on_hover_text(def.hover);
                     hits.push((PanelHit::StickerCommand(i as u8), r.rect));
                     if r.clicked() {
                         actions.push(sticker((def.make)(state)));
@@ -660,6 +725,57 @@ fn position_fields(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState,
             continuous_edit(ps, actions, ui, &ry, |commit| sticker(StickerAction::SetLayerPosition(id, [t.x, y], commit)));
         });
     });
+    // Stickers P8: W, H, Angle, Flip and Reset (the transform box's numbers).
+    transform_fields(ui, state, ps, actions);
+}
+
+/// Stickers P8: the active layer's width and height (layer-space pixels), angle (degrees, clockwise), Flip H / V and
+/// Reset; each change one entry "Transform Sticker Layer" (the box centre kept).
+fn transform_fields(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &mut Vec<AppAction>) {
+    use crate::sticker::tools::transform;
+    let Some((id, b, t, locked)) = transform::active_box(state) else { return };
+    let keep = state.sticker_ui.keep_aspect;
+    let mut hits = Vec::new();
+    ui.add_enabled_ui(!locked, |ui| {
+        let size = transform::size_of(&b, &t);
+        ui.horizontal(|ui| {
+            let (mut w, mut h) = (size.x, size.y);
+            ui.label("W");
+            let rw = ui.add(egui::DragValue::new(&mut w).range(0.01..=100_000.0).speed(1.0).max_decimals(1).suffix(" px"));
+            ui.label("H");
+            let rh = ui.add(egui::DragValue::new(&mut h).range(0.01..=100_000.0).speed(1.0).max_decimals(1).suffix(" px"));
+            let want = if w != size.x {
+                if keep && size.x > 0.0 { glam::Vec2::new(w, size.y * w / size.x) } else { glam::Vec2::new(w, size.y) }
+            } else if h != size.y {
+                if keep && size.y > 0.0 { glam::Vec2::new(size.x * h / size.y, h) } else { glam::Vec2::new(size.x, h) }
+            } else {
+                size
+            };
+            let t2 = transform::with_size(&b, &t, want);
+            crate::panels::text_block::value_edit(ps, actions, ui, &rw.union(rh), t2 != t, |commit| sticker(StickerAction::SetLayerTransform(id, t2, commit)));
+        });
+        ui.horizontal(|ui| {
+            let deg = crate::panels::text_block::wrap_deg(t.rotation.to_degrees());
+            let mut new_deg = deg;
+            ui.label("Angle");
+            let r = ui.add(egui::DragValue::new(&mut new_deg).speed(0.5).max_decimals(1).suffix(" deg"));
+            let t2 = if new_deg != deg { b.with_rotation(&t, crate::panels::text_block::wrap_deg(new_deg).to_radians()) } else { t };
+            crate::panels::text_block::value_edit(ps, actions, ui, &r, t2 != t, |commit| sticker(StickerAction::SetLayerTransform(id, t2, commit)));
+            use crate::sticker::layout::LayerTransformCmd as C;
+            for (hit, label, tip, cmd) in [
+                (PanelHit::StickerFlipH, "Flip H", "Mirror the layer left to right", C::FlipH),
+                (PanelHit::StickerFlipV, "Flip V", "Mirror the layer top to bottom", C::FlipV),
+                (PanelHit::StickerTransformReset, "Reset", "Scale 100 %, no turn, no flip (the centre stays)", C::Reset),
+            ] {
+                let r = ui.button(label).on_hover_text(tip);
+                hits.push((hit, r.rect));
+                if r.clicked() {
+                    actions.push(sticker(StickerAction::LayerTransform(cmd)));
+                }
+            }
+        });
+    });
+    state.panel_rects.extend(hits);
 }
 
 /// Stickers P6b (STICKER_PLAN 3.2): the active layer's styles (the preset row scaled to the artboard, Copy / Paste /

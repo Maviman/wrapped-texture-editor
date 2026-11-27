@@ -28,6 +28,7 @@ pub mod doc_stamps;
 pub mod doc_sticker_edits;
 pub mod doc_sticker_paint;
 pub mod doc_sticker_cutout;
+pub mod doc_sticker_layout;
 pub mod doc_stickers;
 pub mod document;
 pub mod error;
@@ -71,6 +72,8 @@ mod doc_sticker_paint_tests;
 #[cfg(test)]
 mod doc_sticker_cutout_tests;
 #[cfg(test)]
+mod doc_sticker_layout_tests;
+#[cfg(test)]
 mod wrap_tests;
 
 #[doc(hidden)]
@@ -89,6 +92,10 @@ pub use doc_sticker_edits::{
     StickerCheckpoint, StickerPatch,
 };
 pub use doc_sticker_paint::{RASTERIZE_LABEL, StickerRenderJob, StickerRenderOutput, StickerRenderPurpose};
+pub use doc_sticker_layout::{
+    CANVAS_SIZE_LABEL, CROP_LABEL, FLATTEN_LABEL, FLIP_H_LABEL, FLIP_V_LABEL, MERGE_DOWN_LABEL, PADDING_LABEL, RESIZE_LABEL,
+    ROTATE_LABEL, TRIM_LABEL,
+};
 pub use doc_stickers::{STYLE_LABEL, ShareScope, StickerCaches, StickerRef};
 pub use document::*;
 pub use error::*;
@@ -107,8 +114,9 @@ pub use stamp::*;
 pub use stamp_bake::*;
 pub use stamp_job::{FinalBake, StampBakeJob, StampBakeOutput, StampJobKind, WrapPreview};
 pub use sticker::adjust::Adjustment;
+pub use sticker::layout::LayerBox;
 pub use sticker::cutout::{BackgroundCut, Matte, RemoveBgOptions, RemoveBgRefusal};
-pub use sticker::file::{WTES_EXTENSION, WTES_FORMAT, WTES_MIMETYPE, WtesFile, WtesManifest, read_wtes, write_wtes};
+pub use sticker::file::{WTES_EXTENSION, WTES_FORMAT, WTES_MIMETYPE, WtesFile, WtesManifest, read_wtes, read_wtes_preview, write_wtes};
 pub use sticker::select::{RegionOptions, SelectMode, Selection};
 pub use sticker::shape::{Paint, ShapeKind, ShapeSpec};
 pub use sticker::style::{

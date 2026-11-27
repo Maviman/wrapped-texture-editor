@@ -189,8 +189,11 @@ fn layer_commands_are_one_entry_each_and_keep_their_rules() {
     run_in(&mut state, StickerAction::SetLayerOpacity(StickerLayerId(1), 0.6, Commit::Preview));
     run_in(&mut state, StickerAction::SetLayerOpacity(StickerLayerId(1), 0.5, Commit::Final));
     assert_eq!((undo_len(&state), sticker_of(&state, stamp).layers[1].opacity), (undo + 1, 0.5));
+    // Stickers P8: Merge Down merges the sticker layers (one entry); the texture layers stay.
+    let sticker_layers = sticker_of(&state, stamp).layers.len();
     run_in(&mut state, StickerAction::MergeDown(None));
-    assert_eq!((undo_len(&state), doc(&state).sets[0].layers.len()), (undo + 1, layers_before));
+    assert_eq!((undo_len(&state), doc(&state).sets[0].layers.len()), (undo + 2, layers_before));
+    assert_eq!(sticker_of(&state, stamp).layers.len(), sticker_layers - 1);
 }
 
 /// Delete in the Sticker view (with the stamp selected) leaves the stamp, the sticker and the texture layers.
@@ -378,11 +381,11 @@ fn a_locked_layer_and_an_unbuilt_tool_do_nothing() {
     canvas_pass(&ctx, &mut state, geom, hit, vec![egui::Event::PointerMoved(at), button(at, egui::PointerButton::Primary, true)]);
     assert!(state.sticker_ui.drag.is_none() && state.status_hint.contains("locked"), "{}", state.status_hint);
     canvas_pass(&ctx, &mut state, geom, hit, vec![button(at, egui::PointerButton::Primary, false)]);
-    // Stickers P7a: the Brush works now; P7b: the Marquee too; the Crop comes with P8.
+    // Stickers P7a: the Brush works now; P7b: the Marquee too; P8: every tool (the Crop starts its box).
+    assert!(StickerTool::ALL.iter().all(|t| t.built()));
     edit_mut(&mut state).unwrap().tool = StickerTool::Crop;
     canvas_pass(&ctx, &mut state, geom, hit, vec![button(at, egui::PointerButton::Primary, true)]);
-    assert!(state.status_hint.contains("Crop tool is not available yet"), "{}", state.status_hint);
-    assert!(state.sticker_ui.drag.is_none());
+    assert!(matches!(state.sticker_ui.drag, Some(crate::sticker::CanvasDrag::Crop { .. })));
 }
 
 /// Auto-select: a click picks the top layer under the pointer; off, the active layer stays.

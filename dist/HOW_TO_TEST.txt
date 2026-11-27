@@ -185,6 +185,50 @@ tab's Selection, Cut-out and Filter blocks hold the same commands.
  12. From the tablet companion: every selection mode and command has a
      button (no key or Alt needed); the lasso closes with "Close lasso".
 
+Stickers, part 4: layout, text, shapes and the library (new in this build)
+--------------------------------------------------------------------------
+Select a stamp and press 4. The Sticker menu has two more groups, Sticker
+and Layer; the Tool tab has the same buttons at its end.
+  1. V (Move): the active layer has a box with eight square handles and a
+     round one above it. Drag a corner: the layer scales and keeps its
+     proportions (hold Shift to stretch it); drag an edge: one side only;
+     drag the round handle: it turns (Shift: 15 degree steps). Each drag is
+     one Undo step. The Tool tab shows W, H and Angle to type in, and Flip H,
+     Flip V and Reset.
+  2. X (Text): click on the canvas: a text layer appears there in the
+     primary colour and you can type right away (Esc stops typing). Font,
+     size, warp and path are in the Tool tab and the Text tab. Click a text
+     layer's letters to edit it again.
+  3. U (Shape): drag a box: a shape layer (rectangle, rounded, ellipse,
+     polygon, star or line, chosen in the Tool tab) filled with the primary
+     colour; Outline uses the secondary colour. With a shape layer active
+     the same options change it.
+  4. Put a picture layer above a text layer and press Clip in the Layers
+     footer (or right-click the row): the picture shows only inside the
+     letters.
+  5. C (Crop): drag the box's handles or draw a new box; choose Rectangle,
+     Rounded or Ellipse; Enter (or Apply crop) crops. The sticker on the
+     model stays where it was: only the part outside the box goes.
+  6. Sticker > Trim, Add Padding..., Canvas Size...: the artboard changes,
+     the artwork stays put on the model. Resize... 200 % makes the sticker
+     sharper without making it bigger on the model. Rotate 90 CW / CCW /
+     180 and Rotate... turn it on the model too; Flip mirrors it.
+  7. Layer > Merge Down (Ctrl+M) and Sticker > Flatten join layers; the
+     look does not change. Every one of these is one Undo step.
+  8. Adjustments (Tool tab, under Layer styles): Add adjustment... >
+     Brightness / Contrast, Hue / Saturation, Levels, Invert, Black & White,
+     Posterize or Threshold; the sliders change the layer's look live and
+     never its pixels; Remove takes it away again.
+  9. Sticker tab > Library: "Choose folder..." (or use the default folder
+     in %APPDATA%\WrappedTextureEditor\stickers). Select a tray sticker and
+     press "Save to Library": its thumbnail appears under Library. Open
+     another model and click the thumbnail: the sticker is in the tray and
+     the Stamp tool places it.
+ 10. Sticker > Export as PSD...: a .psd with the sticker's layers that
+     Photoshop or PhotoCraft opens (no link is made).
+ 11. A text stamp: the Sticker tab's "Convert to layered sticker" turns it
+     into a sticker whose text stays editable.
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

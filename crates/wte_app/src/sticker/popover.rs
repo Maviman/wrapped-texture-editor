@@ -12,6 +12,10 @@
 // and the styled render of the sticker) runs on a job thread, one at a time; the canvas keeps the last preview until
 // the next one lands (on the UI thread a 2048-px styled sticker took ~255 ms per update). The selection previews
 // stay on the UI thread (Color Range is the wand's work, Grow / Shrink a distance transform: within 8.4).
+//
+// Stickers P8: the whole-sticker commands with numbers have a popover too (Trim... padding, Add Padding... pixels,
+// Canvas Size... width / height / anchor, Resize... percent or pixels with Keep aspect, Rotate... degrees); they have
+// no preview (the artboard outline does not change until Apply).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -25,6 +29,7 @@ use wte_core::{PixelBuf, SelectMode, Selection, StickerLayerId};
 use crate::state::{AppState, PanelHit};
 use crate::sticker::commands::Modify;
 use crate::sticker::filters::{self, Change, CutOut};
+use crate::sticker::layout::Layout;
 use crate::sticker::{Shown, StickerAction, edit_of, edit_ref, shown};
 
 /// The shortest time between two previews while the pointer is held (a slider drag).
@@ -40,6 +45,13 @@ pub enum PopKind {
     Sharpen { amount: f32, radius: f32 },
     ColorRange { color: [u8; 4], tolerance: u8, all_layers: bool, mode: SelectMode },
     Modify { how: Modify, px: f32 },
+    /// Stickers P8 (0 sizes are filled with the artboard's when the popover opens).
+    Trim { padding: u32 },
+    Padding { px: u32 },
+    /// The anchor: 0, 1, 2 per axis (left / centre / right, top / middle / bottom).
+    CanvasSize { w: u32, h: u32, anchor: [u8; 2] },
+    Resize { w: u32, h: u32, keep: bool },
+    Rotate { deg: f32 },
 }
 
 impl PopKind {
@@ -54,6 +66,11 @@ impl PopKind {
             PopKind::Modify { how: Modify::Grow, .. } => "Grow Selection",
             PopKind::Modify { how: Modify::Shrink, .. } => "Shrink Selection",
             PopKind::Modify { how: Modify::Feather, .. } => "Feather Selection",
+            PopKind::Trim { .. } => "Trim",
+            PopKind::Padding { .. } => "Add Padding",
+            PopKind::CanvasSize { .. } => "Canvas Size",
+            PopKind::Resize { .. } => "Resize",
+            PopKind::Rotate { .. } => "Rotate",
         }
     }
 
@@ -68,6 +85,13 @@ impl PopKind {
             PopKind::Modify { how: Modify::Grow, px } => StickerAction::GrowSelection(px),
             PopKind::Modify { how: Modify::Shrink, px } => StickerAction::ShrinkSelection(px),
             PopKind::Modify { how: Modify::Feather, px } => StickerAction::FeatherSelection(px),
+            PopKind::Trim { padding } => StickerAction::Layout(Layout::Trim(padding)),
+            PopKind::Padding { px } => StickerAction::Layout(Layout::Padding(px)),
+            PopKind::CanvasSize { w, h, anchor } => {
+                StickerAction::Layout(Layout::CanvasSize([w, h], [anchor[0].min(2) as f32 * 0.5, anchor[1].min(2) as f32 * 0.5]))
+            }
+            PopKind::Resize { w, h, .. } => StickerAction::Layout(Layout::Resize([w, h])),
+            PopKind::Rotate { deg } => StickerAction::Layout(Layout::Rotate(deg)),
         }
     }
 
@@ -78,7 +102,7 @@ impl PopKind {
             PopKind::Defringe { width } => Some(CutOut::Defringe(width)),
             PopKind::Blur { radius } => Some(CutOut::Blur(radius)),
             PopKind::Sharpen { amount, radius } => Some(CutOut::Sharpen(amount, radius)),
-            PopKind::ColorRange { .. } | PopKind::Modify { .. } => None,
+            _ => None,
         }
     }
 
@@ -126,9 +150,13 @@ pub(crate) fn open(state: &mut AppState, kind: PopKind) {
         state.status_hint = crate::sticker::commands::NO_SELECTION_HINT.to_owned();
         return;
     }
-    if crate::sticker::tools::artboard_of(state).is_none() {
-        return;
-    }
+    let Some((_, size)) = crate::sticker::tools::artboard_of(state) else { return };
+    // Stickers P8: the size fields start at the artboard's size.
+    let kind = match kind {
+        PopKind::CanvasSize { w: 0, h: 0, anchor } => PopKind::CanvasSize { w: size[0], h: size[1], anchor },
+        PopKind::Resize { w: 0, h: 0, keep } => PopKind::Resize { w: size[0], h: size[1], keep },
+        other => other,
+    };
     state.sticker_ui.popover =
         Some(Popover { kind, layer: edit.active_layer, previewed: None, last: None, shows_picture: false, selection: None, previews: 0 });
 }
@@ -385,6 +413,55 @@ pub(crate) fn show(ui: &egui::Ui, state: &mut AppState, canvas: Rect) {
                 }
                 PopKind::Modify { px, .. } => {
                     ui.add(egui::Slider::new(px, 0.0..=wte_core::sticker::select::MAX_MODIFY).logarithmic(true).text("Pixels").max_decimals(1));
+                }
+                // Stickers P8.
+                PopKind::Trim { padding } => {
+                    ui.add(egui::DragValue::new(padding).range(0..=wte_core::sticker::layout::MAX_PADDING).suffix(" px").prefix("Padding "));
+                    ui.weak("The artboard becomes the bounds of what is visible.");
+                }
+                PopKind::Padding { px } => {
+                    ui.add(egui::DragValue::new(px).range(0..=wte_core::sticker::layout::MAX_PADDING).suffix(" px").prefix("Every side "));
+                }
+                PopKind::CanvasSize { w, h, anchor } => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(w).range(1..=wte_core::MAX_ARTBOARD).suffix(" px").prefix("W "));
+                        ui.add(egui::DragValue::new(h).range(1..=wte_core::MAX_ARTBOARD).suffix(" px").prefix("H "));
+                    });
+                    ui.label("Anchor (the part that stays put)");
+                    egui::Grid::new("sticker_canvas_anchor").spacing([2.0, 2.0]).show(ui, |ui| {
+                        for y in 0..3u8 {
+                            for x in 0..3u8 {
+                                let on = *anchor == [x, y];
+                                if ui.add(egui::Button::selectable(on, if on { "o" } else { " " }).min_size(vec2(24.0, 24.0))).clicked() {
+                                    *anchor = [x, y];
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+                PopKind::Resize { w, h, keep } => {
+                    let (w0, h0) = (*w, *h);
+                    let base = crate::sticker::tools::artboard_of(state).map_or([w0.max(1), h0.max(1)], |(_, s)| s);
+                    let mut pct = *w as f32 / base[0].max(1) as f32 * 100.0;
+                    let rp = ui.add(egui::DragValue::new(&mut pct).range(1.0..=10_000.0).speed(1.0).max_decimals(1).suffix(" %"));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(w).range(1..=wte_core::MAX_ARTBOARD).suffix(" px").prefix("W "));
+                        ui.add(egui::DragValue::new(h).range(1..=wte_core::MAX_ARTBOARD).suffix(" px").prefix("H "));
+                    });
+                    ui.checkbox(keep, "Keep aspect");
+                    if rp.changed() {
+                        *w = ((base[0] as f32 * pct / 100.0).round() as u32).clamp(1, wte_core::MAX_ARTBOARD);
+                        *h = ((base[1] as f32 * pct / 100.0).round() as u32).clamp(1, wte_core::MAX_ARTBOARD);
+                    } else if *keep && *w != w0 {
+                        *h = ((*w as f32 * base[1] as f32 / base[0].max(1) as f32).round() as u32).clamp(1, wte_core::MAX_ARTBOARD);
+                    } else if *keep && *h != h0 {
+                        *w = ((*h as f32 * base[0] as f32 / base[1].max(1) as f32).round() as u32).clamp(1, wte_core::MAX_ARTBOARD);
+                    }
+                    ui.weak("No picture is resampled; the sticker keeps its size on the model.");
+                }
+                PopKind::Rotate { deg } => {
+                    ui.add(egui::DragValue::new(deg).range(-360.0..=360.0).speed(0.5).max_decimals(1).suffix(" deg").prefix("Clockwise "));
                 }
             }
             ui.horizontal(|ui| {

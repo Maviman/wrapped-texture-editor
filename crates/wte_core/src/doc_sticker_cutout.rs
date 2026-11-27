@@ -94,7 +94,7 @@ impl Document {
     }
 
     /// Renders `doc` at scale 1, full quality, outside the caches.
-    fn render_unstored(&mut self, doc: StickerDoc) -> Result<PixelBuf, EditError> {
+    pub(crate) fn render_unstored(&mut self, doc: StickerDoc) -> Result<PixelBuf, EditError> {
         let input = self.sticker_render_input(&Arc::new(doc))?;
         Ok(render(&input, 1.0, RasterQuality::Full))
     }

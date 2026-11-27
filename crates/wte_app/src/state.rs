@@ -186,6 +186,31 @@ pub enum PanelHit {
     StickerPopoverApply,
     StickerPopoverCancel,
     StickerPopoverKey(u8),
+    /// Stickers P8: the sticker Layers footer's Text, Shape, Clip and Merge buttons; the Crop tool's shape buttons,
+    /// "Delete cropped pixels", Apply crop and Cancel; the Move tool's Flip H / Flip V / Reset; the Adjustments block
+    /// (its heading, the add list, a Remove button by index); the Sticker tab's library (an entry by index, Choose
+    /// folder, Refresh), the tray's Save to Library, the text stamp's Convert button.
+    StickerLayerText,
+    StickerLayerShape,
+    StickerLayerClip,
+    StickerLayerMerge,
+    StickerCropShape(u8),
+    StickerCropDelete,
+    StickerCropApply,
+    StickerCropCancel,
+    StickerFlipH,
+    StickerFlipV,
+    StickerTransformReset,
+    StickerAdjustments,
+    StickerAdjustAdd,
+    StickerAdjustRemove(u8),
+    LibraryItem(u32),
+    LibraryChoose,
+    LibraryRefresh,
+    TraySaveLibrary,
+    StickerTabConvertText,
+    /// The content field of a text layer (Text block in the Sticker view).
+    StickerTextField,
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
@@ -248,9 +273,9 @@ impl StickerTool {
     }
 
     /// The tool works on the canvas in this build (stickers P6a: Move and Hand; P7a: Brush, Eraser, Fill, Eyedropper,
-    /// Gradient; P7b: Marquee, Lasso, Magic Wand, Magic Eraser; Crop, Text and Shape come with P8).
+    /// Gradient; P7b: Marquee, Lasso, Magic Wand, Magic Eraser; P8: Crop, Text and Shape: every tool).
     pub fn built(self) -> bool {
-        !matches!(self, StickerTool::Crop | StickerTool::Text | StickerTool::Shape)
+        true
     }
 
     /// Stickers P7a (STICKER_PLAN 3.3 "Layer-kind rules"): the tools that change pixels of a picture layer (on a text or
@@ -1443,6 +1468,10 @@ pub struct Prefs {
     /// value that does not read is 0.55).
     #[serde(deserialize_with = "lenient_prefs_serde::sticker_split")]
     pub sticker_split: f32,
+    /// Stickers P8 (STICKER_PLAN 3.8): the sticker library folder; `None` = `%APPDATA%\WrappedTextureEditor\stickers`
+    /// (never used by a self-test or a unit test, `sticker::library::folder`). Not written when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sticker_library_dir: Option<PathBuf>,
 }
 
 impl Default for Prefs {
@@ -1467,6 +1496,7 @@ impl Default for Prefs {
             tablet_input: TabletInput::WindowsInk,
             companion: CompanionPrefs::default(),
             sticker_split: STICKER_SPLIT_DEFAULT,
+            sticker_library_dir: None,
         }
     }
 }

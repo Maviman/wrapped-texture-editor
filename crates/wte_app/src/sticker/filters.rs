@@ -7,6 +7,12 @@
 //
 // Also here: `COMMANDS`, the one list of the Selection, Cut-out and Filter commands that the Sticker menu and the Tool
 // tab's command blocks draw (label, shortcut, what it needs, the action).
+//
+// Stickers P8: the list also has the Sticker group (Trim..., Add Padding..., Canvas Size..., Resize..., Rotate 90 CW
+// / CCW / 180, Rotate..., Flip Horizontal / Vertical, Flatten, Export as PSD..., Save to Library) and the Layer group
+// (New Picture Layer, Add Picture..., Text, Shape, Duplicate, Delete, Merge Down, Rasterize, Clip to Layer Below,
+// Bring Forward / Send Backward, Copy / Paste / Clear Layer Style), appended after the P7b entries (their indexes
+// stay).
 
 use wte_core::sticker::{cutout, filter, select};
 use std::sync::Arc;
@@ -16,7 +22,8 @@ use wte_core::{AlphaBuf, Matte, PixelBuf, PixelData, PixelTarget, RemoveBgOption
 use crate::state::{AppState, StickerTool};
 use crate::sticker::popover::PopKind;
 use crate::sticker::tools::{self, PaintTarget};
-use crate::sticker::{StickerAction, commands::Modify, edit_of, layered};
+use crate::sticker::layout::Layout;
+use crate::sticker::{StickerAction, StyleTarget, commands::Modify, edit_of, layered};
 
 /// The largest picture side Blur and Sharpen work on (their intermediates are 8 bytes a pixel, three planes).
 pub(crate) const MAX_FILTER_SIDE: u32 = 4096;
@@ -197,16 +204,24 @@ pub(crate) enum Group {
     Selection,
     CutOut,
     Filter,
+    /// Stickers P8.
+    Sticker,
+    Layer,
 }
 
 impl Group {
-    pub(crate) const ALL: [Group; 3] = [Group::Selection, Group::CutOut, Group::Filter];
+    /// The Tool tab's blocks in order (the P7b blocks first: their places stay).
+    pub(crate) const ALL: [Group; 5] = [Group::Selection, Group::CutOut, Group::Filter, Group::Sticker, Group::Layer];
+    /// The Sticker menu's submenus in order.
+    pub(crate) const MENU: [Group; 5] = [Group::Sticker, Group::Layer, Group::Selection, Group::CutOut, Group::Filter];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Group::Selection => "Selection",
             Group::CutOut => "Cut-out",
             Group::Filter => "Filter",
+            Group::Sticker => "Sticker",
+            Group::Layer => "Layer",
         }
     }
 }
@@ -222,6 +237,10 @@ pub(crate) enum Needs {
     Picture,
     /// ... and both.
     PictureAndSelection,
+    /// Stickers P8: ... and a layer below the active one (Merge Down, Clip to Layer Below).
+    Below,
+    /// ... and a text or shape layer as the active layer (Rasterize).
+    Vector,
 }
 
 /// One entry of the Sticker menu / the Tool tab's command blocks.
@@ -240,7 +259,7 @@ const fn cmd(group: Group, label: &'static str, shortcut: &'static str, needs: N
 }
 
 /// Every Selection, Cut-out and Filter command, in menu order (`PanelHit::StickerCommand` takes the index).
-pub(crate) static COMMANDS: [CommandDef; 19] = [
+pub(crate) static COMMANDS: [CommandDef; 46] = [
     cmd(Group::Selection, "All", "Select All", Needs::Layers, "Select the whole artboard", |_| StickerAction::SelectAll),
     cmd(Group::Selection, "None", "Select None", Needs::Selection, "Drop the selection", |_| StickerAction::SelectNone),
     cmd(Group::Selection, "Invert", "Invert Selection", Needs::Layers, "Select what is not selected", |_| StickerAction::InvertSelection),
@@ -289,7 +308,75 @@ pub(crate) static COMMANDS: [CommandDef; 19] = [
     cmd(Group::Filter, "Sharpen...", "", Needs::Picture, "Unsharp mask (of the selection)", |_| {
         StickerAction::OpenPopover(PopKind::Sharpen { amount: 1.0, radius: 2.0 })
     }),
+    // ---- stickers P8: the Sticker group ----
+    cmd(Group::Sticker, "Trim...", "", Needs::Layers, "Make the artboard the bounds of what is visible (with padding)", |_| {
+        StickerAction::OpenPopover(PopKind::Trim { padding: 0 })
+    }),
+    cmd(Group::Sticker, "Add Padding...", "", Needs::Layers, "More room on every side of the artboard", |_| {
+        StickerAction::OpenPopover(PopKind::Padding { px: 16 })
+    }),
+    cmd(Group::Sticker, "Canvas Size...", "", Needs::Layers, "Another artboard size, the layers kept where they are", |_| {
+        StickerAction::OpenPopover(PopKind::CanvasSize { w: 0, h: 0, anchor: [1, 1] })
+    }),
+    cmd(Group::Sticker, "Resize...", "", Needs::Layers, "Scale the whole sticker (it keeps its size on the model)", |_| {
+        StickerAction::OpenPopover(PopKind::Resize { w: 0, h: 0, keep: true })
+    }),
+    cmd(Group::Sticker, "Rotate 90 CW", "", Needs::Layers, "Turn the sticker a quarter clockwise", |_| StickerAction::Layout(Layout::Rotate(90.0))),
+    cmd(Group::Sticker, "Rotate 90 CCW", "", Needs::Layers, "Turn the sticker a quarter counter-clockwise", |_| {
+        StickerAction::Layout(Layout::Rotate(-90.0))
+    }),
+    cmd(Group::Sticker, "Rotate 180", "", Needs::Layers, "Turn the sticker upside down", |_| StickerAction::Layout(Layout::Rotate(180.0))),
+    cmd(Group::Sticker, "Rotate...", "", Needs::Layers, "Turn the sticker by any angle (the artboard grows to fit)", |_| {
+        StickerAction::OpenPopover(PopKind::Rotate { deg: 15.0 })
+    }),
+    cmd(Group::Sticker, "Flip Horizontal", "", Needs::Layers, "Mirror the whole sticker left to right", |_| StickerAction::Layout(Layout::Flip(true))),
+    cmd(Group::Sticker, "Flip Vertical", "", Needs::Layers, "Mirror the whole sticker top to bottom", |_| StickerAction::Layout(Layout::Flip(false))),
+    cmd(Group::Sticker, "Flatten", "", Needs::Layers, "All layers become one picture (it looks the same)", |_| StickerAction::Layout(Layout::Flatten)),
+    cmd(Group::Sticker, "Export as PSD...", "", Needs::Layers, "Save the sticker's layers as a PSD file (no link)", |_| StickerAction::ExportPsd(None)),
+    cmd(Group::Sticker, "Save to Library", "", Needs::Layers, "Save the sticker into the sticker library folder", |_| StickerAction::SaveToLibrary(None)),
+    // ---- the Layer group ----
+    cmd(Group::Layer, "New Picture Layer", "", Needs::Layers, "An empty picture layer above the active layer", |_| StickerAction::AddPictureLayer(None)),
+    cmd(Group::Layer, "Add Picture...", "", Needs::Layers, "A picture file as a new layer", |_| StickerAction::AddPictureFile(None)),
+    cmd(Group::Layer, "Text", "", Needs::Layers, "A new text layer in the middle of the artboard", |_| StickerAction::AddTextLayer(None)),
+    cmd(Group::Layer, "Shape", "", Needs::Layers, "A new shape layer (the Shape tool's options)", |_| StickerAction::AddShapeLayer(None)),
+    cmd(Group::Layer, "Duplicate", "Duplicate Sticker Layer", Needs::Layers, "A copy of the active layer", |_| StickerAction::DuplicateLayer(None)),
+    cmd(Group::Layer, "Delete", "", Needs::Layers, "Delete the active layer", |_| StickerAction::DeleteLayer(None)),
+    cmd(Group::Layer, "Merge Down", "Merge Sticker Layer Down", Needs::Below, "The active layer and the one below become one picture", |_| {
+        StickerAction::MergeDown(None)
+    }),
+    cmd(Group::Layer, "Rasterize", "", Needs::Vector, "Make the text or shape layer a picture layer", |_| StickerAction::Rasterize),
+    cmd(Group::Layer, "Clip to Layer Below", "", Needs::Below, "Show the layer only where the layer below shows (a toggle)", |_| {
+        StickerAction::ToggleClip(None)
+    }),
+    cmd(Group::Layer, "Bring Forward", "Move Sticker Layer Up", Needs::Layers, "One step up", |_| StickerAction::MoveLayer(None, 1)),
+    cmd(Group::Layer, "Send Backward", "Move Sticker Layer Down", Needs::Layers, "One step down", |_| StickerAction::MoveLayer(None, -1)),
+    cmd(Group::Layer, "Copy Layer Style", "", Needs::Layers, "Remember the active layer's styles", |_| StickerAction::CopyStyle(StyleTarget::Layers)),
+    cmd(Group::Layer, "Paste Layer Style", "", Needs::Layers, "The remembered styles on the selected layers", |_| StickerAction::PasteStyle(StyleTarget::Layers)),
+    cmd(Group::Layer, "Clear Layer Style", "", Needs::Layers, "No styles on the selected layers", |_| StickerAction::ClearStyle(StyleTarget::Layers)),
 ];
+
+/// Stickers P8: what the Below and Vector commands need beside `available`: a layer below the active one, and a text
+/// or shape layer as the active one.
+pub(crate) fn available_more(state: &mut AppState) -> (bool, bool) {
+    match layered(state, None) {
+        Some((doc, id)) => {
+            let i = doc.layers.iter().position(|l| l.id == id);
+            let vector = doc.layer(id).is_some_and(|l| !matches!(l.content, StickerContent::Picture(_)));
+            (i.is_some_and(|i| i > 0), vector)
+        }
+        None => (false, false),
+    }
+}
+
+/// `enabled` with the Below and Vector needs looked at (`more` = `available_more`).
+pub(crate) fn enabled_more(def: &CommandDef, have: (bool, bool, bool), more: (bool, bool)) -> bool {
+    enabled(def, have)
+        && match def.needs {
+            Needs::Below => more.0,
+            Needs::Vector => more.1,
+            _ => true,
+        }
+}
 
 /// What the open editor has: a layered sticker, a selection, a picture layer as the active layer.
 pub(crate) fn available(state: &mut AppState) -> (bool, bool, bool) {
@@ -312,5 +399,7 @@ pub(crate) fn enabled(def: &CommandDef, have: (bool, bool, bool)) -> bool {
             Needs::Selection => selection,
             Needs::Picture => picture,
             Needs::PictureAndSelection => picture && selection,
+            // Stickers P8: looked at by `enabled_more`.
+            Needs::Below | Needs::Vector => true,
         }
 }

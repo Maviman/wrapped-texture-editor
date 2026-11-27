@@ -82,7 +82,7 @@ brush_types brush_shape brush_tab brush_types_path text_gaps text_styles text_wa
 text_preview_path brush_hover final_bake_async wrap_surface export_selected export_zip export_flow export_unsettled
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
 companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen
-sticker_cutout` (62; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
+sticker_cutout sticker_text sticker_layout sticker_library` (65; `scenarios::tests` checks the count and that every shot of a `sticker*` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -95,7 +95,12 @@ P7a: `sticker_edit` (brush, eraser, a stroke on a ClassicSticker layer in stroke
 all undone; shots `edit_brush`, `edit_styled`, `edit_final`), `sticker_pen` (pen pressure, the eraser end, a barrel pan
 on the canvas; shot `pen_canvas`); P7b: `sticker_cutout` (a generated disc on white: Marquee + Delete, the wand and Fill,
 the Magic Eraser, Remove Background, Color to Alpha and Blur through their popovers, Defringe, Move Selection, the
-ClassicSticker style, all undone; shots `cutout_delete`, `cutout_removed`, `cutout_color_to_alpha`, `cutout_die_cut`).
+ClassicSticker style, all undone; shots `cutout_delete`, `cutout_removed`, `cutout_color_to_alpha`, `cutout_die_cut`);
+P8: `sticker_text` (a text layer by a click, a star behind it, a stroke, a striped picture clipped to the text, the text
+changed and warped, a text stamp converted; shots `text_clipped`, `text_warped`, `text_converted`), `sticker_layout`
+(crop to an ellipse, trim, padding, rotate 90 and back, resize 200 %, flatten: a green mark stays on its texel; shots
+`layout_crop_box`, `layout_rotated`, `layout_done`), `sticker_library` (save to a library folder inside the run's
+folder, a new document, add from the library, place; shots `library_saved`, `library_placed`).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
@@ -163,7 +168,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
-| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P7b built (P7b not checked yet); P8-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
+| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P8 built (P8 not checked yet); P9a-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
 | companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -221,17 +226,20 @@ styled layer unstyled until the stroke ends, the model follows the stroke), **P7
 Lasso, Magic Wand with Shift / Alt modes or the Tool tab's mode row, the dashed outline, Ctrl+A / Ctrl+D /
 Ctrl+Shift+I, Delete of the selected pixels, Magic Eraser, Move Selection and Layer via Copy / Cut, Crop to Selection,
 Grow / Shrink / Feather / Color Range, Remove Background, Color to Alpha, Defringe, mattes, Blur and Sharpen with a live
-preview in small popovers, the Sticker menu in the Sticker view).
-Next: P8 layout / text / shapes / library, P9a / P9b the editor link in the
+preview in small popovers, the Sticker menu in the Sticker view), **P8** layout, text, shapes and the library (the Move
+tool's transform handles and W / H / Angle / Flip / Reset, the Crop tool with Rectangle / Rounded / Ellipse, Text and
+Shape layers, Trim / Add Padding / Canvas Size / Resize / Rotate / Flip / Flatten, Merge Down, Clip to Layer Below,
+adjustments, the sticker library in the Sticker tab, Save to Library, Export as PSD).
+Next: P9a / P9b the editor link in the
 app, P10a / P10b / P11 drop, clipboard, drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if
 everything is green; then the gate.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open
 ones listed here. **Owed so far:** all of them (none can be run yet: the link, drop and clipboard come with P9-P11);
-the "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b, P7a and P7b parts) can be tried now: styles, tray, Edit before
-placing, the shared-picture question, Export Picture, the five tabs; painting with the mouse and a pen (part 2);
-selections and cut-out (part 3).
+the "Stickers" chapter of `dist/HOW_TO_TEST.txt` (P6b, P7a, P7b and P8 parts) can be tried now: styles, tray, Edit
+before placing, the shared-picture question, Export Picture, the five tabs; painting with the mouse and a pen (part 2);
+selections and cut-out (part 3); layout, text, shapes, adjustments and the library (part 4).
 
 ### 5.1 Round 8 (branch `round8-wip`) — failed its gate, kept for a round 9
 

@@ -60,6 +60,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState) {
     let locked = match target {
         TextTarget::Stamp(id) => state.doc().is_some_and(|d| d.stamp_locked(id)),
         TextTarget::Draft => false,
+        // Stickers P8: a locked text layer.
+        TextTarget::Layer(id) => crate::sticker::layered(state, Some(id)).is_some_and(|(d, _)| d.layer(id).is_some_and(|l| l.locked)),
     };
     ui.add_enabled_ui(!locked, |ui| match state.text_page {
         TextPage::Character => character_page(ui, state, ps, target, &spec, &mut actions),
@@ -92,6 +94,7 @@ fn grid(ui: &mut egui::Ui, salt: &str, target: TextTarget, add: impl FnOnce(&mut
     let salt_id = match target {
         TextTarget::Draft => u64::MAX,
         TextTarget::Stamp(id) => id.0,
+        TextTarget::Layer(id) => (1 << 62) | u64::from(id.0),
     };
     ui.spacing_mut().slider_width = SLIDER_WIDTH;
     egui::Grid::new((salt, salt_id)).num_columns(2).spacing([6.0, 2.0]).show(ui, add);
@@ -242,9 +245,10 @@ fn fmt_pct(pct: f32) -> String {
 /// The gap controls of the Character page (TEXT 6.2 "The gap controls"): header with the line buttons, the strip, the
 /// value row.
 fn gap_controls(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, target: TextTarget, spec: &TextSpec, actions: &mut Vec<AppAction>) {
+    // Stickers P8: the per-gap selection belongs to placed texts (a text layer's gaps are edited as a whole).
     let stamp = match target {
         TextTarget::Stamp(id) => Some(id),
-        TextTarget::Draft => None,
+        TextTarget::Draft | TextTarget::Layer(_) => None,
     };
     let slots = gaps::slots(&spec.content, &spec.fx.gaps);
     let boxes = strip_boxes(&spec.content);
@@ -431,7 +435,7 @@ fn value_row(
 fn gap_status(state: &mut AppState, target: TextTarget, spec: &TextSpec) {
     let selected = match target {
         TextTarget::Stamp(id) => state.session.as_ref().and_then(|s| s.text_gap).filter(|g| g.stamp == id),
-        TextTarget::Draft => None,
+        TextTarget::Draft | TextTarget::Layer(_) => None,
     };
     let slot = selected.and_then(|sel| gaps::slots(&spec.content, &spec.fx.gaps).into_iter().flatten().find(|s| s.after == sel.after));
     match slot {
@@ -624,6 +628,8 @@ fn straight_frame(state: &mut AppState, target: TextTarget, spec: &TextSpec) -> 
 fn current_frame(state: &mut AppState, target: TextTarget, spec: &TextSpec) -> Option<wte_core::TextFrame> {
     match target {
         TextTarget::Stamp(id) => text_block::stamp_frame(state, id).map(|(_, f)| f),
+        // Stickers P8: a text layer's spec has a font of the document.
+        TextTarget::Layer(_) => state.doc_mut()?.stamp_source_frame(&StampSource::Text(spec.clone())).ok(),
         TextTarget::Draft => {
             let mut s = spec.clone();
             s.font = state.doc().and_then(|d| d.find_font(&spec.font.family, &spec.font.style))?;

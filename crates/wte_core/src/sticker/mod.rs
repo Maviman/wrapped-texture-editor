@@ -19,6 +19,7 @@ pub mod cutout;
 pub mod file;
 pub mod filter;
 pub mod fx;
+pub mod layout;
 pub mod model;
 pub mod pipeline;
 pub mod render;

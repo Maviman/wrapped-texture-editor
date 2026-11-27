@@ -44,6 +44,10 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState)
         ui.separator();
         heading(ui, "Sticker tray");
         tray::show(ui, state, &mut actions, &mut hits);
+        // Stickers P8 (STICKER_PLAN 3.8, 3.9 item 4): the library.
+        ui.separator();
+        heading(ui, "Library");
+        crate::sticker::library::show(ui, state, &mut actions, &mut hits);
     });
     state.actions.extend(actions);
     state.panel_rects.extend(hits);
@@ -107,6 +111,16 @@ fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, 
         hits.push((PanelHit::StickerTabExport, resp.rect));
         if resp.clicked() {
             actions.push(sticker(StickerAction::ExportPicture(PictureOf::Stamp(first), None)));
+        }
+        // Stickers P8: a text stamp becomes a layered sticker here too (its text stays editable as a text layer).
+        if matches!(object.source, StampSource::Text(_)) {
+            let resp = ui
+                .add_enabled(!locked, egui::Button::new("Convert to layered sticker"))
+                .on_hover_text("The text becomes a text layer of a sticker; it stays editable in the Text tab");
+            hits.push((PanelHit::StickerTabConvertText, resp.rect));
+            if resp.clicked() {
+                actions.push(sticker(StickerAction::ConvertTextStamp(first)));
+            }
         }
     });
 

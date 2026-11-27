@@ -25,6 +25,7 @@ use crate::state::{AppState, StickerTool};
 use crate::sticker::{Shown, edit_of, edit_ref, shown};
 
 pub mod brush;
+pub mod crop;
 pub mod eyedropper;
 pub mod fill;
 pub mod gradient;
@@ -32,6 +33,9 @@ pub mod lasso;
 pub mod magic_eraser;
 pub mod marquee;
 pub mod move_selection;
+pub mod shape;
+pub mod text;
+pub mod transform;
 pub mod wand;
 
 /// The words of the Rasterize offer (status line, toast and the header).

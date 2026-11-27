@@ -358,7 +358,13 @@ selection's dashed outline, Ctrl+A / Ctrl+D / Ctrl+Shift+I, Delete of the select
 Selection and Layer via Copy / Cut, Crop to Selection, Grow / Shrink / Feather / Color Range / From Layer Alpha, the
 Cut-out commands (Remove Background, Color to Alpha, Defringe, mattes) and the Filter commands (Blur, Sharpen) with
 their popovers and live preview, the Sticker menu; core `doc_sticker_cutout.rs` (5.20, 8.6, 8.7, 8.10, 8.11, 8.15, 9.1,
-9.2). Still to come, each documented by its package: the layout / text / shape tools (P8: 8.6, 8.7, 8.15, 9.2), the
+9.2). (P8): layout, text, shapes, clipping, adjustments, library: the Move tool's transform handles and numbers (W, H,
+Angle, Flip, Reset), the Crop tool with its artboard shapes, the Text and Shape tools (text layers edited by the Text
+block and Text tab, `TextTarget::Layer`), the Sticker and Layer commands (Trim, Add Padding, Canvas Size, Resize, Rotate
+90 / 180 / any angle, Flip, Flatten, Merge Down, Clip to Layer Below) in the Sticker menu, the Tool tab and popovers,
+the Adjustments block, the sticker library of the Sticker tab (`Prefs::sticker_library_dir`), Export as PSD and Save to
+Library; core `sticker/layout.rs` and `doc_sticker_layout.rs` (5.20, 5.27, 8.6, 8.7, 8.9, 8.10, 8.11, 8.15, 9.1, 9.2).
+Still to come, each documented by its package: the
 editor link in the app (P9a, P9b: 8.16), drop target, clipboard and drag out (P10a, P10b, P11: 8.17), linked paint layers
 (P12: 8.16), docs and the version (P13).
 
@@ -439,6 +445,9 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `doc_sticker_paint_tests.rs` | stickers P7a | the `k7a_*` tests and `perf_k7a_*` (test-only child of the crate root) |
 | `doc_sticker_cutout.rs` | stickers P7b | the read-outs of the selection and cut-out tools (5.20 "Selections and cut-out"): `sticker_layer_on_artboard`, `sticker_unstyled_composite`, `sticker_picture_with` |
 | `doc_sticker_cutout_tests.rs` | stickers P7b | the `k7b_*` tests (test-only child of the crate root) |
+| `doc_sticker_layout.rs` | stickers P8 | the layout commands (5.20 "Layout"): `trim_sticker`, `pad_sticker`, `canvas_size_sticker`, `crop_sticker`, `resize_sticker`, `rotate_sticker`, `flip_sticker`, `flatten_sticker`, `merge_down_sticker_layer`; the read-outs `sticker_layered`, `layer_box_of` / `sticker_layer_box`, `sticker_psd_bytes` |
+| `doc_sticker_layout_tests.rs` | stickers P8 | the `k8_*` tests (test-only child of the crate root) |
+| `sticker/layout.rs` | stickers P8 | the layout maths (5.27): `LayerBox` (where a layer's content box lands), `resize`, `rotate`, `flip`, `canvas_size`, `pad`, `limited` |
 | `sticker/file.rs` | stickers P4 | the `.wtes` sticker file (7.8): `write_wtes`, `read_wtes`, `WtesManifest`, `WtesFile`; `Document::{saved_sticker_ids, sticker_extract_pictures, sticker_wtes, import_wtes}` |
 | `psd/mod.rs` | stickers P5a | the PSD reader's types: `PsdDoc`, `PsdLayer`, `PsdMask`, `PsdBlend`, `PsdFeatures`, `PsdSection`, `PsdColorMode`, `PsdLimits`, `PsdError`, `PsdRefusal` (sentences); `forcing`, `editor_native`, `profile_note` (5.28) |
 | `psd/read.rs` | stickers P5a | `psd::read` (7.9 "Reader"): header, resources 1057 / 1039, layer info (section or `Lr16`), records and tagged blocks (re-sync), channel decoding (raw, PackBits, ZIP, ZIP with prediction; 8 and 16 bit), the merged picture un-matted from white |
@@ -596,6 +605,10 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `selftest/scenarios/sticker_tab.rs` | stickers P6b | the scenarios `sticker_styles`, `sticker_tray`, `sticker_controls` (8.11) |
 | `selftest/scenarios/sticker_paint.rs` | stickers P7a | the scenarios `sticker_edit` and `sticker_pen` (8.11) |
 | `selftest/scenarios/sticker_cutout.rs` | stickers P7b | the scenario `sticker_cutout` (8.11) |
+| `sticker/tools/{transform,crop,text,shape}.rs` | stickers P8 | the Move tool's transform handles (`Handle`, `dragged`, `BoxCache`), the Crop tool (`CropOptions`, `CropGrip`, `apply`), the Text tool (`click`, `add`, `spec_of`), the Shape tool (`ShapeOptions`, `drag_box`, `add`) |
+| `sticker/{layout,adjust_ui,library}.rs` | stickers P8 | the Sticker and Layer commands (`Layout`, `merge_down`, `toggle_clip`, `layer_transform`, `export_psd` / `write_psd`), the Adjustments block, the sticker library (`LibraryState`, the listing job, `save`, `add`) |
+| `sticker/tests_p8.rs` | stickers P8 | the unit tests of P8 (8.15) |
+| `selftest/scenarios/sticker_layout.rs` | stickers P8 | the scenarios `sticker_text`, `sticker_layout`, `sticker_library` (8.11) |
 | `tools/sticker/frame_spans.py` (repo root) | stickers P7a | the worst `sticker.*` / `link.*` / `ole.*` frame spans of a scenario's frame log (STICKER_PLAN 8.4; exit 1 over the limit) |
 | `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
@@ -3036,6 +3049,62 @@ impl Document {
   Selection changes the artboard, so the users' placements are refitted, 2.9). The `RemoveBgRefusal::NoPlainBackground`
   sentence names "Color to Alpha" (the UI's spelling).
 
+**Layout (P8; `doc_sticker_layout.rs`, STICKER_PLAN 3.3 "Sticker" and "Layer", 2.9, 2.10).** Every command is one entry
+through `set_sticker_with(on, edit, label, commit, Refit)`, the body `set_sticker` always had (`set_sticker` =
+`Refit::Artboard`): an image stamp is promoted inside the entry (2.10), the limits are checked before anything changes.
+
+```rust
+impl Document {
+    pub fn trim_sticker(&mut self, on: StickerRef, padding: u32) -> Result<StickerId, EditError>;        // "Trim Sticker"
+    pub fn pad_sticker(&mut self, on: StickerRef, px: u32) -> Result<StickerId, EditError>;              // "Add Padding"
+    pub fn canvas_size_sticker(&mut self, on: StickerRef, size: [u32; 2], anchor: [f32; 2]) -> Result<StickerId, EditError>; // "Canvas Size"
+    pub fn crop_sticker(&mut self, on: StickerRef, rect: IRect, shape: ArtboardShape, delete_pixels: bool) -> Result<StickerId, EditError>; // "Crop Sticker"
+    pub fn resize_sticker(&mut self, on: StickerRef, size: [u32; 2]) -> Result<StickerId, EditError>;    // "Resize Sticker"
+    pub fn rotate_sticker(&mut self, on: StickerRef, deg: f32) -> Result<StickerId, EditError>;          // "Rotate Sticker"
+    pub fn flip_sticker(&mut self, on: StickerRef, horizontal: bool) -> Result<StickerId, EditError>;    // "Flip Sticker Horizontal / Vertical"
+    pub fn flatten_sticker(&mut self, on: StickerRef) -> Result<StickerId, EditError>;                   // "Flatten Sticker"
+    pub fn merge_down_sticker_layer(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<StickerId, EditError>; // "Merge Down Sticker Layer"
+    pub fn sticker_layered(&mut self, on: StickerRef) -> Result<Arc<StickerDoc>, EditError>;  // the sticker or an image stamp's virtual one
+    pub fn layer_box_of(&mut self, layer: &StickerLayer) -> Option<LayerBox>;
+    pub fn sticker_layer_box(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<LayerBox, EditError>;
+    pub fn sticker_psd_bytes(&mut self, on: StickerRef) -> Result<Vec<u8>, EditError>;       // Export as PSD (no link)
+}
+```
+
+- **Trim / Add Padding / Canvas Size / Crop** change the artboard only (the layers keep their coordinates) and refit the
+  users' placements (2.9): a layer-space point stays on its texel. Trim = the bounds of the finished picture's pixels
+  with alpha above 0 inside the artboard, grown by the padding (`InvalidParam` when nothing shows). Crop also sets the
+  artboard shape (E2); with `delete_pixels` every picture layer that is only moved (scale 1, no turn, whole-pixel
+  position) keeps only its pixels inside (its mask with them). Every new artboard is cut to 4096 a side about its centre
+  (`sticker::layout::limited`, `pad` keeps the limit too).
+- **Resize** scales the artboard (its top-left corner kept) and everything on it (`sticker::layout::resize`: picture and
+  text transforms, text `size_px` by the mean factor with the axis ratio in the scale, shape sizes, outline widths and
+  radii, layer style lengths, a rounded artboard's radius); no picture is resampled. `Refit::Scaled(mean)`: the users
+  **keep** their placements (the sticker keeps its size on the model) and their stamp-level style lengths are multiplied
+  by the mean factor (the reference size of 2.3 is the artboard). 1 % ..= 10,000 % per axis, else `InvalidParam`.
+- **Rotate** turns every layer about a pivot at the artboard centre and the artboard becomes the turned artboard's
+  bounding box (`sticker::layout::rotate`). Quarter and half turns are exact: when the two sides differ in parity the
+  pivot is half a pixel off the centre (CW: (0, -0.5) for an odd width, (0, +0.5) for an odd height; CCW: (-0.5, 0) /
+  (+0.5, 0)), so the new artboard has whole-pixel corners, a pixel-aligned layer stays pixel-aligned, CW then CCW and
+  four quarter turns are the identity (tests). Any other angle turns about the exact centre, bounds rounded outwards.
+  The placements are refitted (2.9), so the sticker turns on the model about its centre.
+- **Flip** mirrors every layer at the artboard's centre line (`LayerBox::mirrored`: the pivot mirrored, the scale's sign
+  and the rotation negated); the artboard is unchanged.
+- **Flatten**: one `Owned` picture layer "Flattened" = the finished picture rendered without the artboard shape (hidden
+  layers left out, layer styles drawn in) at the artboard's corner; the shape stays, so the picture is unchanged (test).
+  Refused for a sticker that is one plain layer already.
+- **Merge Down**: the layer and the one below rendered alone together (the lower one unclipped, the upper one clipped to
+  it when it is clipped) over the artboard at scale 1 become one `Owned` picture layer with the lower layer's id, name,
+  place and clip flag (Normal, opacity 1, no mask or style). Content outside the artboard is not kept; a lower layer's
+  own blend mode and its clipping to a base further down are baked as drawn alone (documented approximations).
+- **Layer boxes** (`sticker::layout::LayerBox { size, pivot, text }`): a picture its pixels, a shape its size (pivot =
+  centre, at `translate + pivot`), a text its frame at `size_px` (pivot = the anchor, at `translate`; a size above the
+  text engine's 512 px is the 512-px frame scaled, as `render` draws it). `to_layer`, `to_content`, `corners`, `bounds`,
+  `centre`, `with_rotation` / `with_scale` (a fixed point kept), `rotated_about`, `mirrored`, `flipped`. The editor's
+  handles and numbers use them; they are exactly the placement `render` draws (test).
+- **Export as PSD** (`sticker_psd_bytes`): `link::export` at the link scale of 5.4 and `psd::write_sticker_to_vec`, with no
+  previous link and nothing stored (`Document::link` stays `None`).
+
 ### 5.21 `import/` [C5]
 
 ```rust
@@ -3515,7 +3584,9 @@ never runs two parses at the same time.
 Every function is pure, headless and deterministic (any thread count gives the same bytes, 4.7). All colours straight
 sRGB RGBA8. Types are re-exported at the crate root; free functions are reached through their modules
 (`sticker::fx::apply_styles`, ...). P2 (selection, cut-out, filters), P3a (the sticker document, render, `Document`
-API) and P3b (pixel edits) extend this section.
+API) and P3b (pixel edits) extend this section. P8: `sticker/layout.rs` (the layout maths of 5.20 "Layout": `LayerBox`,
+`resize`, `rotate`, `flip`, `canvas_size`, `pad`, `limited`) and `file::read_wtes_preview` (a `.wtes` file's name and
+`preview.png` without its layers, for the library list).
 
 ```rust
 // sticker/mod.rs
@@ -7326,6 +7397,12 @@ and the Move tool's drag of selected pixels, live in `sticker/tools/` and are ro
 history, not saved); only what changes pixels or layers is a document command. The texture Fill tool keeps its own
 whole-region fill (1.3).
 
+**Stickers P8: the layout tools are canvas tools too** (`sticker/tools/{transform,crop,text,shape}.rs`, routed by the
+sticker canvas, 8.15 "Layout, text, shapes"): the Move tool's transform handles (a handle drag is
+`CanvasDrag::Transform`, Preview `SetLayerTransform` calls and one Final), the Crop tool's box (app state until Enter /
+Apply crop), the Text tool's click and the Shape tool's drag. Every tool of `StickerTool::ALL` is built
+(`StickerTool::built` is always true; the tool strip greys nothing).
+
 ### 8.7 Panels (`panels/*`) [A4]
 
 ```rust
@@ -7869,6 +7946,36 @@ opens its **popover** (`sticker/popover.rs`): a small `egui::Window` at the canv
 modal; Apply (`StickerPopoverApply`) and Cancel (`StickerPopoverCancel`); Color to Alpha and Color Range have a colour
 button and White / Black / Primary (`StickerPopoverKey(0..=2)`), and a click on the canvas picks the colour.
 
+**Stickers P8 (STICKER_PLAN 3.2, 3.3, 3.8, 3.9).** The Tool tab in the Sticker view: Move = Auto-select layer and **Keep
+aspect** (the corner handles; Shift inverts it while dragging); below the layer's X / Y the **W / H** (layer-space
+pixels, Keep aspect links them), **Angle** (degrees) and **Flip H** / **Flip V** / **Reset** (`StickerFlipH`,
+`StickerFlipV`, `StickerTransformReset`); each one entry "Transform Sticker Layer" through `text_block::value_edit`.
+Crop = Shape Rectangle / Rounded (with Radius) / Ellipse (`StickerCropShape(0..=2)`), Aspect Free / 1:1 / 4:3 / 16:9,
+"Delete cropped pixels" (`StickerCropDelete`, off by default), the box's size, **Apply crop** / **Cancel**
+(`StickerCropApply`, `StickerCropCancel`). Text = the Text block (`text_block::show` with `TextTarget::Layer` for the
+active text layer: the content field `StickerTextField`, font and style, B / I, Size in pixels per em, Angle = the layer's
+rotation, colour, Warp / Path / More; with no text layer active the draft rows of what the next click adds); the Text
+tab edits the same target (its per-gap selection is for placed texts only). Shape = Kind (Rectangle, Rounded, Ellipse,
+Polygon, Star, Line), Radius / Sides / Points and Inner / Width, Fill None / Color (primary) / Gradient (primary to
+secondary), Outline (secondary) and its width; with a shape layer active they edit it ("Edit Sticker Shape"). After
+Layer styles the **Adjustments** block (`sticker/adjust_ui.rs`: one entry per adjustment with its sliders and Up / Down
+/ Remove, `StickerAdjustRemove(i)`; "Add adjustment..." `StickerAdjustAdd`; heading `StickerAdjustments`), then the
+command blocks with two more groups after Filter: **Sticker** (Trim..., Add Padding..., Canvas Size..., Resize...,
+Rotate 90 CW / CCW / 180, Rotate..., Flip Horizontal / Vertical, Flatten, Export as PSD..., Save to Library) and
+**Layer** (New Picture Layer, Add Picture..., Text, Shape, Duplicate, Delete, Merge Down, Rasterize, Clip to Layer Below,
+Bring Forward, Send Backward, Copy / Paste / Clear Layer Style); `COMMANDS` has 46 entries (the P7b ones keep their
+indexes); `Needs::Below` (a layer below the active one) and `Needs::Vector` (a text or shape layer) are checked by
+`filters::enabled_more`. The Sticker menu shows the groups Sticker, Layer, Selection, Cut-out, Filter
+(`Group::MENU`). The popovers of the numbers commands (`PopKind::{Trim, Padding, CanvasSize, Resize, Rotate}`) start at
+the artboard's size and have no preview. The sticker Layers tab: the footer gets **Text**, **Shape**, **Clip** /
+**Unclip** and **Merge** (`StickerLayerText`, `StickerLayerShape`, `StickerLayerClip`, `StickerLayerMerge`); a row's
+context menu has Duplicate, Delete, Merge Down, Rasterize, Clip to Layer Below / Release Clipping Mask, Copy / Paste
+Style (each also a button or menu item: the tablet rule). The Sticker tab: the tray gets **Save to Library**
+(`TraySaveLibrary`); a text stamp gets **Convert to layered sticker** (`StickerTabConvertText`, also outside the
+view); a fourth section **Library** (`sticker/library.rs`): the folder, one 52-pt thumbnail per `.wtes` file
+(`LibraryItem(i)`; a click adds it to the tray), **Choose folder...** (`LibraryChoose`; "(on the PC)" while a
+companion is connected) and **Refresh** (`LibraryRefresh`).
+
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
 **Stickers P6b.** `Dialog::StickerShared { users }` (`dialogs/sticker_shared.rs`, STICKER_PLAN 3.1 E6): "Shared
@@ -8261,6 +8368,15 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
   runs. A pairing is saved at once; link switches and the port are saved when changed. The wire protocol is
   `docs/protocol/COMPANION_PROTOCOL.md`.
 
+Stickers P8: `prefs.json` has `sticker_library_dir` (the sticker library folder; written only when set: `None` means
+`%APPDATA%\WrappedTextureEditor\stickers`, never used by a self-test or a unit test, which have no library folder unless
+one is set: `sticker::library::folder`). The library is listed on a named thread ("Sticker library"): `.wtes` files of the
+folder by name (at most 500, files up to 1 GiB), each read with `wte_core::read_wtes_preview` (the name and
+`preview.png`, never the layers); the UI takes at most one listed file per frame (its thumbnail uploaded then) and the
+self-test's idle check waits for the job (`live::pending`). Save to Library writes `<name>.wtes` (characters Windows
+refuses replaced, ` (2)`, ` (3)` ... instead of overwriting); Export as PSD... writes the `.psd` of
+`Document::sticker_psd_bytes` (`io_flows::pick_save_psd`; no dialog in a self-test).
+
 Round 4 (S2): `prefs.json` (round 4): `brush`, `eraser`, `brush_shape_path`, `brush_shape_close` (B5 reads `brush` and `eraser`
 leniently and sanitized). `brush_flows::sync_prefs` copies the tool settings in directly before every write.
 
@@ -8385,8 +8501,8 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
 | V M L W C | `SetStickerTool(Move, Marquee, Lasso, Wand, Crop)` | B E G I | `SetStickerTool(Brush, Eraser, Fill, Eyedropper)` |
 | Shift+E / Shift+G | `SetStickerTool(MagicEraser / Gradient)` | X / U / H | `SetStickerTool(Text / Shape / Hand)` |
 | F | `Sticker(Fit)` (Shift+F stays Frame Selection) | S, R | blocked (`NOT_IN_STICKER`) |
-| Delete, Backspace | `Sticker(DeleteKey)`: with a selection `DeleteSelected` (the selected pixels of the active layer, P7b), else the status line "Select an area first, or use Delete Layer"; never the stamp | Esc | `Sticker(Escape)`: a canvas drag, then a popover, then an open lasso (P7b), then dialog / tool / pending edit (`Cancel`), then the selection, then leave |
-| Enter | `Sticker(EnterKey)`: closes an open lasso (P7b; a crop: P8) | Ctrl+J / Ctrl+M | `Sticker(DuplicateLayer(None) / MergeDown(None))` |
+| Delete, Backspace | `Sticker(DeleteKey)`: with a selection `DeleteSelected` (the selected pixels of the active layer, P7b), else the status line "Select an area first, or use Delete Layer"; never the stamp | Esc | `Sticker(Escape)`: a canvas drag, then a popover, then an open lasso (P7b), then a crop box (P8), then dialog / tool / pending edit (`Cancel`), then the selection, then leave |
+| Enter | `Sticker(EnterKey)`: closes an open lasso (P7b), else with the Crop tool applies the crop (P8) | Ctrl+J / Ctrl+M | `Sticker(DuplicateLayer(None) / MergeDown(None))` |
 | Ctrl+`]` / Ctrl+`[` | `Sticker(MoveLayer(None, +1 / -1))` | arrows / Shift+arrows | `Sticker(Nudge)` by 1 / 10 pixels |
 | T, 1 2 3 4 F5, `[` `]` Shift+`[` Shift+`]`, D, Shift+X, Ctrl+Z ... | the global bindings (fall through) | Ctrl+A / Ctrl+D / Ctrl+Shift+I | `Sticker(SelectAll / SelectNone / InvertSelection)` (P7b; unbound outside the view) |
 
@@ -8641,11 +8757,14 @@ counted down) instead of failing (`export_errors`).
 | `pen` | Branch pen-input (`selftest/scenarios/pen.rs`; recorded pen samples through `Step::Pen`, never OS input). The Sphere sample; the brush at 40 texels, hardness 1, flow 1, pressure Size on (min 0), Flow off; in 2D a pen stroke along the row v = 0.5 from u 0.15 to 0.85 with pressure 0.1 -> 1.0 (`Shot("pen_ramp")`); undo; the same path as a mouse `Pointer` and as a pen at pressure 1.0; Size off, Flow on (min 0), flow 0.5: pen strokes at constant 0.2 (v 0.3) and 1.0 (v 0.7); in 3D pen strokes at 0.25 and 1.0, the mouse stroke of the same path, a light stroke beside it (`Shot("pen_3d")`); in 2D a mouse patch, then the inverted pen (two hover samples, a stroke across the patch); a barrel drag in 3D; a pen tap on the name of the Base row; a 3D pen ramp 0.05 -> 1.0 for the final shot; Help > Tablet setup opened (`Shot("tablet_help")`) and closed | no readout before the pen; the 2D column near 20 % of the ramp is less than half as tall as near 90 % and the end column is 40 +- 3 texels; "Pen N %" was the readout in a contact frame; after the Leave no readout, the pen seen; 2D and 3D: pen at 1.0 == mouse (paint hash); the 0.2 row is fainter than the 1.0 row and not empty; 3D: 0 < texels(0.25) < texels(1.0) / 2; the eraser end: the patch centre has alpha 0, the tool was the Eraser in every contact frame, the history label is "Erase", one frame after the step the Brush is back; the barrel drag turned the camera and painted nothing; the tap selected Base; the dialog opens and closes |
 | `companion` | Branch companion (`selftest/scenarios/companion.rs`; loopback only, no Android). Sphere, 2D, brush as `pen`. `CompanionAction::StartTest` (127.0.0.1:0, auto-allow); a `TestClient` thread ("Galaxy Tab S8 Ultra (test)", USB, confirm mode) gets the KEY frame (= the window's surface size); shot `companion_dialog`; a 2D pen ramp 0.1 -> 1.0 (`assert_ramp`, contact frames); an eraser-flag stroke (centre erased, Eraser in every contact frame, Brush back); ACTION Undo (ramp whole); 3D barrel drag (camera turned, no paint); two-finger pinch (camera distance smaller); KEY H + TEXT "h", TEXT "i", Backspace into the Text tool's content field after TEXT_WANTED (content "h"); half a stroke and the cable pulled (no button down, no contact, one undo step, chip "Tablet: waiting"). Each input step waits with `Step::Until` until a FRAME's `last_input_seq` confirms it. Final screenshot: the ramp and the cut-off stroke. |
 | `sticker_view` | Stickers P6a (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; the key 4 opens the Sticker view (shot `sticker_enter`); a second picture layer (a red disc) added; the disc dragged on the canvas (`Step::Pointer` on `Target::StickerCanvas`, shot `sticker_moved`); its opacity 50 %; the Layers tab's Down button (shot `sticker_reordered`); Delete; 900x600 (shot `sticker_small`) and back; four undos and four redos; Revert (button) and its undo; Esc (shot `sticker_left`); four undos | opening changes nothing (image stamp, no entry, composite); the add promotes in one entry and changes the model; the drag moves the disc by the drag (+-1 px) in one entry; opacity and reorder one entry each, each changing the model; Delete leaves stamp and sticker with the status line; at 900x600 canvas, divider and 3D half are laid out and the 14 tool buttons fit; each undo restores the composite of the step before (one undo per step), the redos the last state; Revert gives the image stamp and the start picture in one entry "Revert Sticker", its undo the edited state; Esc returns to the 3D view with the Transform tool; undoing everything gives the start (history length, stamps, composite) |
-| `sticker_keys` | Stickers P6a check (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; outside the Sticker view B E G I X S V Shift+E Shift+G R, W twice, M L C U H; Enter opens the view; inside M L W C B E Shift+E G Shift+G I X U V H, S and R, V, F (after a 3x zoom), Delete Backspace Enter, Ctrl+J, Ctrl+[, Ctrl+] (shot `keys_inside`), Ctrl+M, the eight arrows, Shift+X twice, T twice, Shift+F, Ctrl+Z, Esc; then 4 + 1 / 2 / 3 / F5 and 3 | outside: each key's paint tool (Shift+E / Shift+G as E / G), W toggles the wireframe, M L C U H change no tool, view or document; Enter opens the view on the stamp without an entry; inside: each key's sticker tool with the paint tool and the wireframe untouched; S and R do nothing; F refits the camera; Delete / Backspace leave the stamp with the status line, Enter does nothing; Ctrl+J duplicates the sticker layer (promotion, one entry), Ctrl+[ / Ctrl+] move it (one entry each), Ctrl+M only says it is not available; Right / Shift+Down move the active layer by 1 / 10 and all eight arrows back to the start (one entry each); Shift+X and T run their global actions; Ctrl+Z undoes the last nudge; Esc and 1 / 2 / 3 / F5 leave to their mode with the paint tool kept, 4 opens the view again |
+| `sticker_keys` | Stickers P6a check (`selftest/scenarios/sticker.rs`). Sphere, 3D; the sample logo placed as an image stamp; outside the Sticker view B E G I X S V Shift+E Shift+G R, W twice, M L C U H; Enter opens the view; inside M L W C B E Shift+E G Shift+G I X U V H, S and R, V, F (after a 3x zoom), Delete Backspace Enter, Ctrl+J, Ctrl+[, Ctrl+] (shot `keys_inside`), Ctrl+M, the eight arrows, Shift+X twice, T twice, Shift+F, Ctrl+Z, Esc; then 4 + 1 / 2 / 3 / F5 and 3 | outside: each key's paint tool (Shift+E / Shift+G as E / G), W toggles the wireframe, M L C U H change no tool, view or document; Enter opens the view on the stamp without an entry; inside: each key's sticker tool with the paint tool and the wireframe untouched; S and R do nothing; F refits the camera; Delete / Backspace leave the stamp with the status line, Enter does nothing; Ctrl+J duplicates the sticker layer (promotion, one entry), Ctrl+[ / Ctrl+] move it (one entry each), Ctrl+M merges the two sticker layers (P8: one entry "Merge Down Sticker Layer", one row left); Right / Shift+Down move the active layer by 1 / 10 and all eight arrows back to the start (one entry each); Shift+X and T run their global actions; Ctrl+Z undoes the last nudge; Esc and 1 / 2 / 3 / F5 leave to their mode with the paint tool kept, 4 opens the view again |
 | `sticker_styles` | Stickers P6b (`selftest/scenarios/sticker_tab.rs`). Sphere, 3D; the sample logo as an image stamp and the text "WTE" placed; the Sticker tab; the image selected, Classic sticker clicked (`ScreenClick` on `StylePresetButton(0)`, shot `styles_image`); the text selected, Classic sticker, its Stroke box (shot `styles_both`); three undos | the Sticker tab is the fifth tab in the second row of the strip; each click is one entry; the image stamp gets exactly `ClassicSticker.styles([256, 256])`, the text a contour and a shadow and then a stroke; neither is promoted (image / text sources), the view stays 3D; the stored placements' artwork box (depth excepted: an automatic depth refits to the shadow, 2.6) is unchanged; each linked layer grows (more than 5 % more texels); three undos give the start (history length, stamps and their stickers, composite) |
 | `sticker_tray` | Stickers P6b (`sticker_tab.rs`). Sphere, 3D; a picture file in the run's assets folder made a tray sticker (`NewStickerFromPicture`); the Stamp tool's "Edit before placing" clicked (Tool tab); the red disc added as a second layer (shot `tray_edit_before`); Done; the sticker placed twice (shot `tray_placed_twice`); the first stamp opened, Nudge(10, 0): the question (shot `tray_question`), Edit all clicked; Leave; the second stamp opened, Nudge(0, 12), Only this one clicked (shot `tray_only_this` after Leave); undo all, redo all; Save As, open the saved project | one tray sticker "badge" (kept), the Stamp tool's source, one entry; the view opens on `Tray(id)` with "Not placed yet", nothing placed, no entry; the add asks nothing (a tray target) and is one entry; Done returns to 3D with the Stamp tool and the sticker as its source; two sticker stamps share it, one entry each; the question says 2 and changes nothing; Edit all keeps both on the one sticker and changes the model in one entry; Only this one gives the second stamp its own sticker (detach + edit = two entries) and leaves the first one's layers unchanged; undo all = the start (no stamp, empty tray), redo all = the end; the saved and reopened project has no history, two sticker stamps with different stickers, two tray stickers and equals the saved one (composite, stamps, sticker layers, tray) |
 | `sticker_controls` | Stickers P6b (`sticker_tab.rs`). Sphere; the logo placed and a second stamp of the same picture (Setup); the first stamp opened, Nudge, the question's Cancel clicked; Leave; the Sticker tab: the six presets, Copy / Paste / Clear Style, the nine block boxes (shot `controls_tab`), Export Picture..., Edit Sticker; in the view's Tool tab the layer preset (Outline; the question answered Only this one), the layer's Stroke box, Copy Style (shot `controls_view`); Done; the tray's New Sticker, its item, Duplicate, Delete, Export Picture..., From picture..., the blank item, Edit, Done; the Stamp tool's Edit before placing, Done, the Style list opened and closed. Every control is clicked through `ScreenClick` after `ScreenScroll` brought it into the page | Cancel leaves no dialog, no entry, the image stamp; six presets = six entries (Clear last: no styles); Copy holds the Classic sticker stack, Paste of the same styles is no entry, Clear one; nine boxes = nine entries with every style on and the stamp still an image stamp; the export and From picture... without a path do nothing in a self-test; Edit Sticker opens the view; the layer preset promotes in one entry and the box toggles the stroke off in one more; New Sticker (one entry) becomes the Stamp tool's source; its item chooses the Stamp tool; Duplicate and Delete one entry each; Edit and Edit before placing open the view on the tray sticker |
 | `sticker_edit` | Stickers P7a (`selftest/scenarios/sticker_paint.rs`). Sphere, 3D; the sample logo placed as an image stamp; 4; a new empty picture layer; the sticker Brush (16 px, hard, red) dragged along y = 60 (shot `edit_brush`), undo, redo; the sticker Eraser (24 px) across it, undo, redo; ClassicSticker on the layer; a brush stroke along y = 180 (shot `edit_styled`); the logo layer selected, the Fill tool clicked at its corner (yellow); a new layer, `SelectRect` 40..216 x 204..240, the Gradient tool dragged across it (red to blue; shot `edit_final`); undo every step; Esc. Every stroke is a `Step::Pointer` on `Target::StickerCanvas` | each stroke one entry ("Sticker Brush" / "Sticker Eraser") with the paint where it went and the model changed; undo / redo give the composite of the step before / after; on the styled layer the header's "styles update when you lift" was drawn during the stroke (`LiveCounters::note_frames`) and is gone after it, one full recomposite entered stroke mode and the restyle job landed; the finished sticker has an opaque white contour pixel just below the new paint where the layer itself is transparent; Fill one entry, the logo's outside yellow and its inside kept; the new layer plus the gradient two entries, red at the start, blue at the end, nothing outside the selection; undoing everything gives the start (document state, the image stamp, composite) |
+| `sticker_text` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; a generated 512 x 256 picture (transparent with a light grey 4-px frame) placed as an image stamp; 4; X and a click at (256, 150) (the Text tool's text "H I", letter spacing 0.3, navy); Esc (leaves the content field); U (a yellow star) and a canvas drag (20, 40)-(130, 150); Ctrl+[; the text layer selected and `SetLayerStyles` (a 2-px white outside stroke); a 512 x 256 striped picture (magenta / cyan, 16-px stripes) as a layer above the text; the Layers footer's Clip clicked (shot `text_clipped`); `SetLayerText` Preview ("H I !") and Final (warped: Arc, bend 0.5) (shot `text_warped`); Done; a text stamp "WTE" placed with the Text tool; the Sticker tab's Convert to layered sticker clicked (shot `text_converted`); undo every step | the text layer one entry (promotion inside), "H I" in navy at the click, active, its content field focused; the star one entry and the reorder one: picture, shape, text from the bottom; Clip one entry, the top layer clipped; pattern inside text: on the text's fullest row the pixel in the middle of the widest gap between letters is transparent in the finished picture, and a pixel with a 3 x 3 neighbourhood of full ink has a stripe colour (within 4); the text edit one entry with the new content, a warp and the layer's name following, still clipped; the conversion one entry, a sticker stamp with one text layer "WTE"; undoing everything gives the start |
+| `sticker_layout` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; a generated 200 x 120 picture (an orange box (20, 20)-(180, 100), a 12 x 12 green mark at (124, 52), transparent margin) placed as an image stamp; 4; C, the Ellipse shape (shot `layout_crop_box`), Enter; `Layout(Trim(0))`; the Add Padding popover (10 px) and its Apply; `Layout(Rotate(90))` (shot `layout_rotated`) and `Layout(Rotate(-90))`; the Resize popover at 200 % and its Apply; `Layout(Flatten)` (shot `layout_done`); undo every step; Esc twice | the green mark's texel centroid in the stamp's texture layers: within 1.5 texels of the start after the crop (one "Crop Sticker" entry with the promotion, an ellipse), the trim (one entry, 160 x 80), the padding (one entry, 180 x 100), the turn back (one entry each; after the CW turn the sides swap and the mark is at least 4 texels away), the resize (one entry, 360 x 200, the placement kept) and the flatten (one entry, one layer); undoing everything gives the start |
+| `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
 | `sticker_pen` | Stickers P7a (`sticker_paint.rs`). The same start; the sticker Brush 24 px with pressure driving the size from 0; a pen stroke at pressure 0.2 along y = 70 and one at 1.0 along y = 170 (`Step::Pen` on the canvas); the inverted pen (eraser end) across both at x = 128 (shot `pen_canvas`); a barrel drag; Fit; undo every step; Esc | two "Sticker Brush" entries, the full stroke at least three times as wide as the light one in column 128 (and at least 20 px); the eraser end: one "Sticker Eraser" entry, both lines cut, the sticker Eraser in every contact frame (`pen_eraser_frames` counts the sticker tool in the view), the Brush back after the pen left; the barrel drag pans the canvas camera and changes nothing; undoing everything gives the start |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
@@ -8817,7 +8936,7 @@ Layer", "Duplicate Sticker Layer", "Delete Sticker Layer", "Reorder Sticker Laye
 Blend", "Rename Sticker Layer", "Nudge Sticker Layer", "Rename Sticker", "Revert Sticker". Rules: a sticker keeps at
 least one layer; a locked layer is not moved or deleted; a new picture layer goes above the active layer, a blob picture
 centred on the artboard (whole pixels), an empty one of the artboard's size; the new or duplicated layer becomes active.
-Merge Down (Ctrl+M) only reports that it is not available yet (P8) and never touches a texture layer. Revert is enabled
+Merge Down (Ctrl+M) merges the sticker layer into the one below (P8; one entry) and never touches a texture layer. Revert is enabled
 while `differs_from_entry`.
 
 **Canvas** (`canvas.rs`). Header (28 pt): the sticker's name (a field; image / text stamps: the stamp's name),
@@ -9075,6 +9194,68 @@ selection; 3.4; the Cut-out, Filter and Selection commands).**
   lands, the landed preview equals the result), `k7b_check_another_tool_drops_an_open_lasso`,
   `k7b_check_delete_and_backspace_keys_with_a_stamp_selected` (both keys through `shortcuts::handle` in the view, with
   and without a selection).
+
+**Stickers P8: layout, text, shapes, clipping, adjustments, library (STICKER_PLAN 3.3 rows Move / Transform, Crop, Text,
+Shape; the Sticker and Layer commands; 3.2; 3.8).**
+- **Transform handles** (`tools/transform.rs`). With the Move tool the canvas draws the active layer's content box
+  (`Document::sticker_layer_box`, cached per layer content in `StickerUi::layer_box`) with eight square scale handles
+  and a round rotate handle 22 pt above the top edge (none on a locked layer). A press within 9 pt of a handle starts
+  `CanvasDrag::Transform` (before Move Selection and the layer move): a corner keeps the aspect when "Keep aspect" is on
+  and Shift is not held (or the reverse), an edge scales one axis, the opposite corner / edge stays put
+  (`LayerBox::with_scale`); a scale never becomes 0 (at least 0.001, a drag past the fixed side flips) and never exceeds
+  1000; the rotate handle turns about the box centre, Shift = 15-degree steps. Preview `SetLayerTransform` calls fold into
+  one entry "Transform Sticker Layer"; Esc / another command cancel it (`cancel_pending_edit`), Save keeps it
+  (`finish_drag`), Ctrl+Z during the drag undoes the drag only (`drag_moved`). `SetLayerTransform` sanitizes (a NaN
+  becomes the neutral value) and refuses a locked layer.
+- **Crop tool** (`tools/crop.rs`). `StickerUi::crop: Option<[f32; 4]>` (layer space; `None` = the artboard) and
+  `crop_opts`. A press within 9 pt of one of the box's eight handles drags that edge / corner, inside the box moves it,
+  outside draws a new box (`CropGrip`); whole pixels, at least 1 px, the aspect presets hold for a new box and the
+  corners. The canvas darkens what is outside the box and draws the shape the crop will cut. Enter / Apply crop =
+  `Document::crop_sticker(box, shape, delete_pixels)` (one entry); an unchanged box with an unchanged shape is no entry;
+  Esc / Cancel drop the box; another artboard (any command) drops it too.
+- **Text tool** (`tools/text.rs`). A click on a text layer's ink selects it (`sticker_layer_at`; no entry); elsewhere it
+  adds a text layer (`AddTextLayer`, one entry "Add Text Layer"): the Text tool's settings (`state.tools.text`: content,
+  family / style resolved to a font of the document, alignment, spacing, outline, B / I, warp, path), the primary colour,
+  an em of a quarter of the artboard's shorter side (12..=256 px), its anchor at the click; it becomes the active layer
+  and the content field asks for the focus once (`StickerUi::focus_text`; typing goes into the text, Esc leaves the
+  field). `SetLayerText` (Preview while typed or dragged, one Final "Edit Sticker Text") sanitizes the spec; the layer's
+  name follows its text while it was the text's own name (`name_of`: the first line, 24 characters).
+  `text_block::target` in the Sticker view: the active text layer (`TextTarget::Layer`), else the draft with the sticker
+  Text tool, else none (the Text tab is enabled by the same rule).
+- **Shape tool** (`tools/shape.rs`). A drag adds a shape layer filling the box (a click: 64 px centred there; one entry
+  "Add Shape Layer"), named after its kind; `ShapeOptions::spec` (sanitized); with a shape layer active the options edit
+  it, its own colours kept (`apply_to`; one entry "Edit Sticker Shape" per change).
+- **Commands** (`layout.rs`): `StickerAction::Layout(Layout::{Trim, Padding, CanvasSize, Resize, Rotate, Flip,
+  Flatten})` call the core commands of 5.20 "Layout" (one entry each; a crop box is dropped), `MergeDown(layer)` (the
+  layer below becomes the active one), `ToggleClip(layer)` ("Clip to Layer Below" / "Release Clipping Mask"; the bottom
+  layer cannot be clipped), `LayerTransform(FlipH / FlipV / Reset)` (about the box centre). `ExportPsd(path)` and
+  `ChooseLibraryFolder(path)` need the app for their dialogs (`run`); with a path they run in `run_in`. Every P8 command
+  that changes the sticker is a content edit (`is_content`): on a sticker or picture several stamps show it asks the
+  shared-picture question first (E6). `ConvertTextStamp(stamp)` = `convert_text_stamp` from the Sticker tab.
+- **Adjustments** (`adjust_ui.rs`): `SetLayerAdjustments(layer, list, commit)` (sanitized, at most 16; one entry
+  "Sticker Layer Adjustments" per drag or click).
+- **Library** (`library.rs`): `StickerUi::library` (`LibraryState`: the listed folder, the items with their thumbnails,
+  the listing job, a refresh flag); `SaveToLibrary(None)` saves the edited sticker with its stamp's styles,
+  `SaveToLibrary(Some(id))` a tray sticker; `LibraryAdd(path)` = `read_wtes` + `import_wtes` (one entry "Add Sticker",
+  kept), the tray's selected item and the Stamp tool's source, the file's stamp styles (if any) the Stamp tool's styles.
+- **Canvas camera**: an artboard of another size (crop, trim, padding, canvas size, resize, rotate) is fitted again
+  (`StickerUi::fitted_size`).
+- **Tests.** `sticker/tests_p8.rs` (`k8_*`: the handles scale with and without Keep aspect in one entry each, the image
+  stamp promoted inside, the opposite corner kept, the rotate handle stepped by Shift about the box centre; the handle
+  maths flips and never makes a zero scale, W / H with 0, negative, NaN, infinite and huge values, Reset; Flip H / V /
+  Reset and a NaN transform, a locked layer; the Crop tool's edge drag and Enter, the Ellipse shape, a new box and
+  Cancel, Delete cropped pixels, a NaN box; the Text tool's click, the draft spec and colour, the Text block's target,
+  typing as one entry, the name following, a click on a letter selecting; the Shape tool's drag, editing a shape layer,
+  the footer's Shape, SetLayerShape on a picture layer; every Sticker and Layer command one entry with its label, the
+  bottom layer's refusals, a resize below 1 %, a canvas of 0 and of `u32::MAX`, a NaN angle, undoing everything back to
+  the image stamp; the Resize and Canvas Size popovers; adjustments (Preview folding, clamping, 40 NaN entries cut to
+  16); the shared-picture question before Rotate, Text, Clip and Crop; Save to Library, the listing job, Add from the
+  library, a broken file, Export as PSD read back; the command list's Sticker and Layer groups and every one of their
+  commands run on an image stamp), `tools::crop::tests`, `tools::shape::tests`, `tools::text::tests`,
+  `adjust_ui::tests`, `library::tests` (free names, no library folder in a test); changed:
+  `sticker::tests::layer_commands_are_one_entry_each_and_keep_their_rules` (Ctrl+M merges the sticker layers) and
+  `a_locked_layer_and_an_unbuilt_tool_do_nothing` (every tool is built; the Crop starts its box); scenarios
+  `sticker_text`, `sticker_layout`, `sticker_library` and the updated `sticker_keys` (8.11); core `k8_*` (9.1).
 
 ---
 
@@ -9711,6 +9892,22 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `k7b_the_unstyled_composite_leaves_out_the_styles_only` (= the finished picture after clearing the style),
   `k7b_the_picture_with_replaced_pixels_is_what_the_edit_gives` (pixels and a mask; refusals),
   `k7b_an_image_stamp_answers_with_its_picture_and_stays_an_image`.
+- Branch `stickers`, P8: in `sticker::layout` `k8_a_box_maps_like_the_transform` (= `LayerTransform::apply`, round trips,
+  `with_rotation` / `with_scale` / `flipped` keep their point, a text's anchor at `translate`),
+  `k8_quarter_turns_keep_whole_pixels_and_undo_each_other` (sides of equal and of different parity: the picture fills
+  the turned artboard, CW then CCW, two half turns and four quarter turns are the start),
+  `k8_any_angle_bounds_the_turned_artboard` (45 degrees about the centre; the 4096 limit; NaN changes nothing),
+  `k8_resize_scales_everything_about_the_corner` (a content point, style lengths, shape size / radius / outline, a rounded
+  artboard; back again; clamped sizes), `k8_flip_canvas_size_and_padding`; in `doc_sticker_layout_tests.rs`
+  `k8_trim_padding_canvas_size_and_crop_keep_the_artwork_on_its_texel` (a layer-space point's texel unchanged through
+  each, one entry each), `k8_trim_of_nothing_is_refused_and_a_crop_can_delete_the_cropped_pixels` (the picture and its
+  mask cut), `k8_resize_keeps_the_placement_and_scales_the_stamp_styles`,
+  `k8_rotate_turns_about_the_centre_and_flip_mirrors` (the centre's texel kept, one layer-space pixel keeps its size, the
+  picture turned pixel for pixel, CW then CCW and two flips give the same bytes), `k8_flatten_and_merge_down_keep_the_look`
+  (byte-identical finished pictures, also with an ellipse artboard), `k8_an_image_stamp_is_promoted_inside_a_layout_command`,
+  `k8_layer_boxes_and_export_as_psd` (picture / shape / text boxes, a 1024-px text = the 512-px frame doubled; the PSD
+  passes the strict walker and reads back with three layers, no link made),
+  `k8_a_library_file_shows_its_name_and_preview_without_its_layers`.
 
 ### 9.2 `wte_app` tests
 
@@ -9729,6 +9926,8 @@ G1-G3 with the second row, the page minimum at 900x600 / 640x480 for every tab),
 tests of 8.15 (`sticker/tools/tests.rs`) and the scenario count (61: `sticker_edit`, `sticker_pen`). Stickers P7b: the
 selection and cut-out tests of 8.15 (`sticker/tools/tests_p7b.rs`), Ctrl+A / Ctrl+D / Ctrl+Shift+I in
 `shortcuts::tests::colliding_chords_run_the_action_of_their_mode`, and the scenario count (62: `sticker_cutout`).
+Stickers P8: the tests of 8.15 "Layout, text, shapes" (`sticker/tests_p8.rs` and the modules' own tests) and the
+scenario count (65: `sticker_text`, `sticker_layout`, `sticker_library`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

@@ -215,7 +215,7 @@ impl RemoveBgRefusal {
             RemoveBgRefusal::Empty => "This layer has no pixels",
             RemoveBgRefusal::AlreadyTransparent => "This picture already has a transparent background",
             RemoveBgRefusal::NoPlainBackground => {
-                "No plain background found along the edges. Try the Magic Eraser or Colour to Alpha"
+                "No plain background found along the edges. Try the Magic Eraser or Color to Alpha"
             }
         }
     }

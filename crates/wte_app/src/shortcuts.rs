@@ -133,8 +133,13 @@ const fn tool(label: &'static str, modifiers: Modifiers, key: Key, make: fn(&App
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the keys of the Sticker view, ordered most-specific-first. They win over the global
-/// table there (`sticker_order`). Ctrl+A / Ctrl+D / Ctrl+Shift+I (selections) come with P7b.
-static STICKER_SHORTCUTS: [ShortcutDef; 31] = [
+/// table there (`sticker_order`). Stickers P7b: Ctrl+A / Ctrl+D / Ctrl+Shift+I (Select All, Select None, Invert
+/// Selection).
+static STICKER_SHORTCUTS: [ShortcutDef; 34] = [
+    // selections (stickers P7b)
+    def("Invert Selection", CMD_SHIFT, Key::I, None, false, |_| sticker(StickerAction::InvertSelection)),
+    def("Select All", CMD, Key::A, None, false, |_| sticker(StickerAction::SelectAll)),
+    def("Select None", CMD, Key::D, None, false, |_| sticker(StickerAction::SelectNone)),
     // tools (X is the Text key of both modes)
     tool("Move", NONE, Key::V, |_| Some(AppAction::SetStickerTool(StickerTool::Move))),
     tool("Marquee", NONE, Key::M, |_| Some(AppAction::SetStickerTool(StickerTool::Marquee))),
@@ -469,6 +474,10 @@ mod tests {
             (CMD, Key::CloseBracket, one(AppAction::MoveActiveLayer(1)), one(AppAction::Sticker(S::MoveLayer(None, 1)))),
             (CMD, Key::OpenBracket, one(AppAction::MoveActiveLayer(-1)), one(AppAction::Sticker(S::MoveLayer(None, -1)))),
             (NONE, Key::M, none.clone(), one(AppAction::SetStickerTool(StickerTool::Marquee))),
+            // Stickers P7b: the selection chords (unbound outside the Sticker view; Ctrl+D is not D's Reset Colors).
+            (CMD, Key::A, none.clone(), one(AppAction::Sticker(S::SelectAll))),
+            (CMD, Key::D, none.clone(), one(AppAction::Sticker(S::SelectNone))),
+            (CMD_SHIFT, Key::I, none.clone(), one(AppAction::Sticker(S::InvertSelection))),
             // Outside the Sticker view Shift+E / Shift+G have no binding of their own; E / G match them logically (Shift
             // is ignored by a pattern without it), as before.
             (SHIFT, Key::E, one(AppAction::SetTool(ToolKind::Eraser)), one(AppAction::SetStickerTool(StickerTool::MagicEraser))),

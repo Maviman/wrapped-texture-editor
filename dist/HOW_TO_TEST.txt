@@ -142,6 +142,49 @@ Sticker view: the sticker on the left, the model on the right.
      smooth; on a layer with Classic sticker the border comes back within
      about a second after you lift.
 
+Stickers, part 3: selections and cut-out (new in this build)
+------------------------------------------------------------
+Place a photo of an object on a plain (white) background as a stamp, select
+it and press 4. The Sticker menu (only in the Sticker view) and the Tool
+tab's Selection, Cut-out and Filter blocks hold the same commands.
+  1. M (Marquee): drag a box; a dashed outline shows the selection. Shift
+     while pressing adds, Alt subtracts, both intersect (or pick New / Add /
+     Subtract / Intersect in the Tool tab). Ellipse, Feather and Fixed
+     aspect are in the Tool tab. A click without a drag drops the selection.
+  2. L (Lasso): drag to draw freehand; or click corners and close with a
+     double-click, a click on the first corner, Enter or "Close lasso".
+     Esc drops an open lasso.
+  3. W (Magic Wand): click the background: it is selected (Tolerance,
+     Contiguous, Anti-alias, "Sample all layers" in the Tool tab).
+     Ctrl+A selects all, Ctrl+D none, Ctrl+Shift+I inverts.
+  4. With a selection press Delete (or Backspace): the selected pixels of
+     the active layer go, one Ctrl+Z brings them back. The stamp itself is
+     never deleted. Without a selection Delete only says what to do.
+  5. Shift+E (Magic Eraser): click the background: it becomes transparent
+     ("Into mask" hides it on a layer mask and keeps the pixels).
+  6. Cut-out > Remove Background: a plain background goes in one click and
+     the object's soft edge keeps no white rim. On a picture that is
+     transparent around already it says so and changes nothing.
+  7. Cut-out > Color to Alpha...: a small window opens over the canvas;
+     the canvas shows the result while it is open. Pick the colour with
+     White / Black / Primary or by clicking the canvas; Apply makes it one
+     Undo step, Cancel or Esc changes nothing. Defringe..., Remove White
+     Matte and Remove Black Matte clean up edges.
+  8. Filter > Blur... and Sharpen...: the same small window with a live
+     preview; with a selection only the selected part changes.
+  9. Select part of a layer, press V (Move) and drag inside the selection:
+     the selected pixels move as a new layer ("Move Selection", one Undo
+     step that also brings back the hole). Selection > Layer via Copy /
+     Layer via Cut do the same without moving; Crop to Selection makes the
+     sticker the size of the selection.
+ 10. Selection > Grow..., Shrink..., Feather... and Color Range... (click
+     the canvas to pick the colour) show the new outline before Apply.
+ 11. Finally give the stamp "Classic sticker" in the Sticker tab: the model
+     shows the cut-out object as a die-cut sticker with a white border that
+     follows its edge.
+ 12. From the tablet companion: every selection mode and command has a
+     button (no key or Alt needed); the lasso closes with "Close lasso".
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

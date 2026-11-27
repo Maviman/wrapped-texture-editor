@@ -378,10 +378,10 @@ fn a_locked_layer_and_an_unbuilt_tool_do_nothing() {
     canvas_pass(&ctx, &mut state, geom, hit, vec![egui::Event::PointerMoved(at), button(at, egui::PointerButton::Primary, true)]);
     assert!(state.sticker_ui.drag.is_none() && state.status_hint.contains("locked"), "{}", state.status_hint);
     canvas_pass(&ctx, &mut state, geom, hit, vec![button(at, egui::PointerButton::Primary, false)]);
-    // Stickers P7a: the Brush works now; the Marquee comes with P7b.
-    edit_mut(&mut state).unwrap().tool = StickerTool::Marquee;
+    // Stickers P7a: the Brush works now; P7b: the Marquee too; the Crop comes with P8.
+    edit_mut(&mut state).unwrap().tool = StickerTool::Crop;
     canvas_pass(&ctx, &mut state, geom, hit, vec![button(at, egui::PointerButton::Primary, true)]);
-    assert!(state.status_hint.contains("Marquee tool is not available yet"), "{}", state.status_hint);
+    assert!(state.status_hint.contains("Crop tool is not available yet"), "{}", state.status_hint);
     assert!(state.sticker_ui.drag.is_none());
 }
 

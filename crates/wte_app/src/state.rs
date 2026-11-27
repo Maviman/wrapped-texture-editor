@@ -173,6 +173,19 @@ pub enum PanelHit {
     StickerGradientMode,
     StickerGradientReverse,
     StickerGradientAddStop,
+    /// Stickers P7b: the selection tools' mode row (by `SelectMode` index: New, Add, Subtract, Intersect), the Lasso's
+    /// Close / Cancel buttons, and the Tool tab's command blocks (Selection, Cut-out, Filter; by the command's index in
+    /// `sticker::filters::COMMANDS`).
+    StickerSelectMode(u8),
+    StickerLassoClose,
+    StickerLassoCancel,
+    StickerCommand(u8),
+    /// The open popover of a Sticker command (Color to Alpha..., Blur..., ...): its window, Apply and Cancel, and the
+    /// White / Black / Primary key buttons of Color to Alpha and Color Range.
+    StickerPopover,
+    StickerPopoverApply,
+    StickerPopoverCancel,
+    StickerPopoverKey(u8),
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
@@ -235,24 +248,15 @@ impl StickerTool {
     }
 
     /// The tool works on the canvas in this build (stickers P6a: Move and Hand; P7a: Brush, Eraser, Fill, Eyedropper,
-    /// Gradient; the others come with P7b and P8).
+    /// Gradient; P7b: Marquee, Lasso, Magic Wand, Magic Eraser; Crop, Text and Shape come with P8).
     pub fn built(self) -> bool {
-        matches!(
-            self,
-            StickerTool::Move
-                | StickerTool::Hand
-                | StickerTool::Brush
-                | StickerTool::Eraser
-                | StickerTool::Fill
-                | StickerTool::Eyedropper
-                | StickerTool::Gradient
-        )
+        !matches!(self, StickerTool::Crop | StickerTool::Text | StickerTool::Shape)
     }
 
     /// Stickers P7a (STICKER_PLAN 3.3 "Layer-kind rules"): the tools that change pixels of a picture layer (on a text or
     /// shape layer they offer Rasterize instead).
     pub fn paints(self) -> bool {
-        matches!(self, StickerTool::Brush | StickerTool::Eraser | StickerTool::Fill | StickerTool::Gradient)
+        matches!(self, StickerTool::Brush | StickerTool::Eraser | StickerTool::Fill | StickerTool::Gradient | StickerTool::MagicEraser)
     }
 }
 
@@ -279,8 +283,9 @@ pub struct StickerEdit {
     pub active_layer: Option<StickerLayerId>,
     #[allow(dead_code, reason = "stickers P7b / P8: multi-select")]
     pub selected_layers: Vec<StickerLayerId>,
-    /// The pixel selection (3.4; stickers P7b).
-    pub selection: Option<Selection>,
+    /// The pixel selection (3.4; stickers P7b). Shared (`Arc`): the canvas clones the editor every frame, and the
+    /// selection outline is cached by the pointer.
+    pub selection: Option<Arc<Selection>>,
     pub tool: StickerTool,
     pub camera: Canvas2D,
     /// The view mode the editor returns to.

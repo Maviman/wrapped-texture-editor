@@ -82,7 +82,7 @@ impl PixelData {
     }
 
     /// At least 1 x 1 and as many bytes as the size says.
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         let [w, h] = self.size();
         let bytes = match self {
             PixelData::Rgba(p) => p.data.len() == w as usize * h as usize * 4,

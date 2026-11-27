@@ -227,7 +227,7 @@ impl Document {
     }
 
     /// The sticker `on` names (`Ok(Ok(doc))`), or the blob of an image stamp that is not a sticker yet (`Ok(Err(blob))`).
-    fn sticker_or_image(&self, on: StickerRef) -> Result<Result<Arc<StickerDoc>, crate::ids::BlobId>, EditError> {
+    pub(crate) fn sticker_or_image(&self, on: StickerRef) -> Result<Result<Arc<StickerDoc>, crate::ids::BlobId>, EditError> {
         let id = match on {
             StickerRef::Id(id) => id,
             StickerRef::OfStamp(stamp, _) => match &self.stamp(stamp).ok_or(EditError::UnknownStamp)?.source {

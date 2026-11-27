@@ -27,6 +27,7 @@ pub mod doc_links;
 pub mod doc_stamps;
 pub mod doc_sticker_edits;
 pub mod doc_sticker_paint;
+pub mod doc_sticker_cutout;
 pub mod doc_stickers;
 pub mod document;
 pub mod error;
@@ -67,6 +68,8 @@ mod doc_sticker_edits_tests;
 mod doc_sticker_tab_tests;
 #[cfg(test)]
 mod doc_sticker_paint_tests;
+#[cfg(test)]
+mod doc_sticker_cutout_tests;
 #[cfg(test)]
 mod wrap_tests;
 

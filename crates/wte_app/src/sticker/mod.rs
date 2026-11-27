@@ -18,6 +18,13 @@
 // from the pen notes), Fill, Gradient and Eyedropper (`tools/`), the mask commands and Rasterize (`commands.rs`), the
 // live canvas of a stroke with its jobs (`live.rs`). A stroke is a drag of the canvas (`CanvasDrag::Stroke`): the
 // interaction guard ends it like a Move drag (Save keeps it, Undo takes it back, other commands cancel it).
+//
+// Stickers P7b: selections and cut-out. The Marquee, Lasso and Magic Wand make the selection (app state, Shift adds,
+// Alt subtracts, both intersect, or the Tool tab's mode row; `tools/{marquee,lasso,wand}.rs`); the Magic Eraser
+// (`tools/magic_eraser.rs`); the Move tool drags the selected pixels into a new layer ("Move Selection",
+// `tools/move_selection.rs`); the selection commands (`commands.rs`), the Cut-out and Filter commands (`filters.rs`)
+// and the small popovers with a live preview (`popover.rs`); the selection's dashed outline (`outline.rs`); the
+// Sticker menu of the menu bar.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,9 +41,12 @@ use crate::state::{AppState, Canvas2D, Dialog, StickerEdit, StickerTarget, Stick
 
 pub mod canvas;
 pub mod commands;
+pub mod filters;
 pub mod layers_ui;
 pub mod live;
+pub mod outline;
 pub mod panels;
+pub mod popover;
 pub mod styles_ui;
 pub mod tools;
 pub mod tray;
@@ -180,6 +190,53 @@ pub enum StickerAction {
     SelectRect([f32; 4]),
     /// Drops the selection.
     SelectNone,
+
+    // ---- stickers P7b ----
+    /// Ctrl+A: the whole artboard.
+    SelectAll,
+    /// Ctrl+Shift+I: `255 - m` (nothing selected: everything).
+    InvertSelection,
+    /// Grow / Shrink / Feather the selection by this many pixels.
+    GrowSelection(f32),
+    ShrinkSelection(f32),
+    FeatherSelection(f32),
+    /// "Selection from layer alpha": the active layer's alpha on the artboard.
+    SelectionFromAlpha,
+    /// Color Range: every pixel within `tolerance` of `color`, of the active layer or of all layers; combined by `mode`.
+    ColorRange { color: [u8; 4], tolerance: u8, all_layers: bool, mode: wte_core::SelectMode },
+    /// The Magic Wand's click at this layer-space point, combined by `mode`.
+    WandAt([f32; 2], wte_core::SelectMode),
+    /// Delete with a selection: the selected pixels of the active picture layer go (on its mask with "Paint on
+    /// mask": hidden). One entry; never the stamp or a layer.
+    DeleteSelected,
+    /// The artboard becomes the selection's bounds (one entry; the stamps keep showing the same pixels).
+    CropToSelection,
+    /// A new layer with the selected pixels of the active picture layer above it; Cut also clears them there.
+    LayerViaCopy,
+    LayerViaCut,
+    /// The Move tool's drag with a selection: the first call cuts the selected pixels of the layer into a new layer,
+    /// every call puts that layer at this offset from where it was cut (layer-space pixels). Preview calls and the
+    /// Final fold into one entry "Move Selection".
+    MoveSelection(StickerLayerId, [f32; 2], Commit),
+    /// The Magic Eraser's click at this layer-space point (one entry "Magic Eraser").
+    MagicErase([f32; 2]),
+    /// The Cut-out commands on the active picture layer (limited by the selection): Remove Background with the Tool
+    /// tab's options, Color to Alpha of this colour, Remove White / Black Matte, Defringe of this width.
+    RemoveBackground,
+    ColorToAlpha([u8; 3]),
+    RemoveMatte(wte_core::Matte),
+    Defringe(u32),
+    /// The Filter commands: Gaussian blur of this radius; unsharp mask of this amount (0..=3 = 300 %) and radius.
+    Blur(f32),
+    Sharpen(f32, f32),
+    /// The small window of a command with numbers (Color to Alpha..., Blur..., Grow..., ...): opens, closes without
+    /// a change, applies what it shows.
+    OpenPopover(popover::PopKind),
+    ClosePopover,
+    ApplyPopover,
+    /// The Lasso's polygon: close it (Enter, double-click, the Tool tab's Close) or drop it.
+    CloseLasso,
+    CancelLasso,
 }
 
 impl StickerAction {
@@ -219,8 +276,21 @@ impl StickerAction {
             | S::InvertMask
             | S::ApplyMask
             | S::DeleteMask
-            | S::Rasterize => true,
-            S::SetStampStyles(_, _, c) | S::SetLayerStyles(_, _, c) => *c == Commit::Final,
+            | S::Rasterize
+            | S::DeleteSelected
+            | S::CropToSelection
+            | S::LayerViaCopy
+            | S::LayerViaCut
+            | S::MagicErase(_)
+            | S::RemoveBackground
+            | S::ColorToAlpha(_)
+            | S::RemoveMatte(_)
+            | S::Defringe(_)
+            | S::Blur(_)
+            | S::Sharpen(..)
+            // The popover's Apply runs one of the commands above.
+            | S::ApplyPopover => true,
+            S::SetStampStyles(_, _, c) | S::SetLayerStyles(_, _, c) | S::MoveSelection(_, _, c) => *c == Commit::Final,
             _ => false,
         }
     }
@@ -255,6 +325,18 @@ impl StickerAction {
                 | S::ApplyMask
                 | S::DeleteMask
                 | S::Rasterize
+                | S::DeleteSelected
+                | S::CropToSelection
+                | S::LayerViaCopy
+                | S::LayerViaCut
+                | S::MoveSelection(..)
+                | S::MagicErase(_)
+                | S::RemoveBackground
+                | S::ColorToAlpha(_)
+                | S::RemoveMatte(_)
+                | S::Defringe(_)
+                | S::Blur(_)
+                | S::Sharpen(..)
         )
     }
 }
@@ -310,6 +392,14 @@ pub(crate) enum CanvasDrag {
     Gradient { from: glam::Vec2, to: glam::Vec2, button: egui::PointerButton },
     /// Stickers P7a: the Eyedropper keeps picking while the button is held.
     Pick { button: egui::PointerButton },
+    /// Stickers P7b: the Marquee's drag between two layer-space corners; the selection is made at the release.
+    Marquee { start: glam::Vec2, to: glam::Vec2, mode: wte_core::SelectMode, button: egui::PointerButton },
+    /// Stickers P7b: the button is held on the Lasso: a drag draws a freehand lasso (`freehand` once it moved), a
+    /// click adds a point of the polygon lasso (`StickerUi::lasso`).
+    Lasso { press: egui::Pos2, freehand: bool, button: egui::PointerButton },
+    /// Stickers P7b: the Move tool's drag of the selected pixels of `source` (layer space; `sent`: the offset last
+    /// sent, `None` while nothing was cut yet).
+    MoveSelection { source: StickerLayerId, start: glam::Vec2, sent: Option<glam::Vec2>, button: egui::PointerButton },
 }
 
 /// UI state of the Sticker view (`AppState::sticker_ui`): caches and the running drag; nothing of it is saved.
@@ -349,6 +439,26 @@ pub struct StickerUi {
     pub(crate) rasterize_offer: Option<StickerLayerId>,
     /// The pointer over the canvas in the last frame (the brush ring).
     pub(crate) hover: Option<egui::Pos2>,
+    /// Stickers P7b: the mode of a new selection when no key is held (the Tool tab's row: New, Add, Subtract,
+    /// Intersect).
+    pub select_mode: wte_core::SelectMode,
+    /// The Marquee's options (shape, feather, fixed aspect).
+    pub marquee: tools::marquee::MarqueeOptions,
+    /// The Lasso's feather (pixels) and its open polygon.
+    pub lasso_feather: f32,
+    pub(crate) lasso: Option<tools::lasso::LassoState>,
+    /// The Magic Wand's options (Tolerance, Contiguous, Anti-alias, Sample all layers).
+    pub wand: tools::wand::WandOptions,
+    /// The Magic Eraser's options (Tolerance, Contiguous, Anti-alias, Into mask).
+    pub magic_eraser: tools::magic_eraser::MagicEraserOptions,
+    /// Remove Background's options (Tolerance, Follow gradients, Also enclosed areas, Into mask).
+    pub remove_bg: filters::RemoveBgUi,
+    /// The open popover of a command (Color to Alpha..., Blur..., ...).
+    pub(crate) popover: Option<popover::Popover>,
+    /// The selection outline, computed once per selection.
+    pub(crate) outline: outline::OutlineCache,
+    /// A Move Selection drag that has cut its layer: the source, the new layer and where it was cut.
+    pub(crate) moving_cut: Option<tools::move_selection::MovingCut>,
     /// Tests: a CPU copy of every upload to the canvas texture.
     #[cfg(test)]
     pub(crate) mirror: Option<PixelBuf>,
@@ -377,6 +487,16 @@ impl Default for StickerUi {
             paint_on_mask: false,
             rasterize_offer: None,
             hover: None,
+            select_mode: wte_core::SelectMode::Replace,
+            marquee: tools::marquee::MarqueeOptions::default(),
+            lasso_feather: 0.0,
+            lasso: None,
+            wand: tools::wand::WandOptions::default(),
+            magic_eraser: tools::magic_eraser::MagicEraserOptions::default(),
+            remove_bg: filters::RemoveBgUi::default(),
+            popover: None,
+            outline: outline::OutlineCache::default(),
+            moving_cut: None,
             #[cfg(test)]
             mirror: None,
         }
@@ -528,6 +648,9 @@ pub(crate) fn enter_target(state: &mut AppState, target: StickerTarget) {
     state.sticker_ui.name_edit = None;
     state.sticker_ui.layer_name_edit = None;
     state.sticker_ui.shared_pending = None;
+    // Stickers P7b: a popover and an open lasso belong to the sticker they were opened on.
+    state.sticker_ui.popover = None;
+    state.sticker_ui.lasso = None;
     match target {
         StickerTarget::Stamp(stamp) => crate::dispatch::select_stamp(state, Some(stamp)),
         StickerTarget::Tray(id) => {
@@ -579,6 +702,11 @@ pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
     live::clear(state);
     state.sticker_ui.rasterize_offer = None;
     state.sticker_ui.hover = None;
+    // Stickers P7b.
+    state.sticker_ui.popover = None;
+    state.sticker_ui.lasso = None;
+    state.sticker_ui.moving_cut = None;
+    state.sticker_ui.outline = outline::OutlineCache::default();
     // The editor's status lines (Delete without a selection, a tool that is not built) end with it.
     state.status_hint.clear();
 }
@@ -640,6 +768,14 @@ pub(crate) fn validate_in(state: &mut AppState) {
     {
         e.selection = None;
     }
+    // Stickers P7b: a popover is for the layer it was opened on (another active layer, or a text stamp, closes it);
+    // an open lasso is dropped with the artboard size.
+    if state.sticker_ui.popover.as_ref().is_some_and(|p| p.layer != active || size.is_none()) {
+        state.sticker_ui.popover = None;
+    }
+    if state.sticker_ui.lasso.as_ref().is_some_and(|l| Some(l.size) != size) {
+        state.sticker_ui.lasso = None;
+    }
 }
 
 /// Ends a drag on the canvas: a moved layer goes back (`cancel_pending_edit` of its Move entry); stickers P7a: an open
@@ -652,8 +788,11 @@ pub(crate) fn cancel_drag(state: &mut AppState) {
             }
         }
         Some(CanvasDrag::Stroke { .. }) => tools::brush::cancel(state),
+        // Stickers P7b: a Move Selection that cut its layer goes back to before the cut.
+        Some(CanvasDrag::MoveSelection { sent: Some(_), .. }) => tools::move_selection::cancel(state),
         _ => {}
     }
+    state.sticker_ui.moving_cut = None;
 }
 
 /// P6a check: ends a drag on the canvas keeping what the user sees: a moved layer stays where the last Preview put
@@ -665,6 +804,10 @@ pub(crate) fn finish_drag(state: &mut AppState) {
         }
         // Stickers P7a: the stroke is kept as painted (one entry).
         Some(CanvasDrag::Stroke { .. }) => tools::brush::end(state),
+        // Stickers P7b: the selected pixels stay where they were dragged (one entry).
+        Some(CanvasDrag::MoveSelection { source, sent: Some(d), .. }) => {
+            run_in(state, StickerAction::MoveSelection(source, d.to_array(), Commit::Final));
+        }
         _ => {}
     }
 }
@@ -672,7 +815,12 @@ pub(crate) fn finish_drag(state: &mut AppState) {
 /// P6a check: true while a Move drag on the canvas has changed the document (a Preview is pending): an Undo pressed
 /// then undoes the drag itself, as for the tools' interactions.
 pub(crate) fn drag_moved(state: &AppState) -> bool {
-    matches!(state.sticker_ui.drag, Some(CanvasDrag::Move { sent: Some(_), .. }) | Some(CanvasDrag::Stroke { painted: true, .. }))
+    matches!(
+        state.sticker_ui.drag,
+        Some(CanvasDrag::Move { sent: Some(_), .. })
+            | Some(CanvasDrag::Stroke { painted: true, .. })
+            | Some(CanvasDrag::MoveSelection { sent: Some(_), .. })
+    )
 }
 
 /// Runs a structural edit of the edited sticker (`Document::set_sticker`; an image stamp is promoted inside it). An
@@ -702,7 +850,7 @@ pub(crate) fn layered(state: &mut AppState, layer: Option<StickerLayerId>) -> Op
 }
 
 /// Sets the active layer of the open editor.
-fn set_active(state: &mut AppState, id: StickerLayerId) {
+pub(crate) fn set_active(state: &mut AppState, id: StickerLayerId) {
     if let Some(e) = edit_mut(state) {
         e.active_layer = Some(id);
         e.selected_layers = vec![id];
@@ -873,13 +1021,19 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
         }
         S::DeleteKey => {
             if edit_of(app_state).is_some_and(|e| e.selection.is_some()) {
-                // Stickers P7b: clears the selected pixels of the active picture layer.
-                app_state.status_hint = "Clearing a selection comes with the selection tools".to_owned();
+                // Stickers P7b: clears the selected pixels of the active picture layer (through `run_in`: the
+                // shared-picture question comes first).
+                run_in(app_state, S::DeleteSelected);
             } else {
                 app_state.status_hint = DELETE_HINT.to_owned();
             }
         }
-        S::EnterKey => {}
+        // Stickers P7b: Enter closes an open lasso; otherwise nothing (P8: applies a crop).
+        S::EnterKey => {
+            if app_state.sticker_ui.lasso.is_some() {
+                tools::lasso::close(app_state);
+            }
+        }
         S::Fit => {
             if let Some(e) = edit_mut(app_state) {
                 e.camera = Canvas2D::default();
@@ -955,6 +1109,35 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
                 e.selection = None;
             }
         }
+        // ---- stickers P7b ----
+        S::SelectAll => commands::select_all(app_state),
+        S::InvertSelection => commands::invert_selection(app_state),
+        S::GrowSelection(n) => commands::modify_selection(app_state, commands::Modify::Grow, n),
+        S::ShrinkSelection(n) => commands::modify_selection(app_state, commands::Modify::Shrink, n),
+        S::FeatherSelection(n) => commands::modify_selection(app_state, commands::Modify::Feather, n),
+        S::SelectionFromAlpha => commands::selection_from_alpha(app_state),
+        S::ColorRange { color, tolerance, all_layers, mode } => tools::wand::color_range(app_state, color, tolerance, all_layers, mode),
+        S::WandAt(at, mode) => tools::wand::select_at(app_state, glam::Vec2::from_array(at), mode),
+        S::DeleteSelected => commands::delete_selected(app_state),
+        S::CropToSelection => commands::crop_to_selection(app_state),
+        S::LayerViaCopy => tools::move_selection::layer_via(app_state, false),
+        S::LayerViaCut => tools::move_selection::layer_via(app_state, true),
+        S::MoveSelection(source, offset, commit) => tools::move_selection::run(app_state, source, glam::Vec2::from_array(offset), commit),
+        S::MagicErase(at) => tools::magic_eraser::erase_at(app_state, glam::Vec2::from_array(at)),
+        S::RemoveBackground => {
+            let opts = app_state.sticker_ui.remove_bg;
+            filters::run(app_state, filters::CutOut::RemoveBackground(opts));
+        }
+        S::ColorToAlpha(key) => filters::run(app_state, filters::CutOut::ColorToAlpha(key)),
+        S::RemoveMatte(m) => filters::run(app_state, filters::CutOut::RemoveMatte(m)),
+        S::Defringe(width) => filters::run(app_state, filters::CutOut::Defringe(width)),
+        S::Blur(radius) => filters::run(app_state, filters::CutOut::Blur(radius)),
+        S::Sharpen(amount, radius) => filters::run(app_state, filters::CutOut::Sharpen(amount, radius)),
+        S::OpenPopover(kind) => popover::open(app_state, kind),
+        S::ClosePopover => app_state.sticker_ui.popover = None,
+        S::ApplyPopover => popover::apply(app_state),
+        S::CloseLasso => tools::lasso::close(app_state),
+        S::CancelLasso => app_state.sticker_ui.lasso = None,
     }
 }
 
@@ -1041,7 +1224,8 @@ fn answer_shared(state: &mut AppState, answer: Option<ShareScope>) {
         return;
     }
     let replay = match pending {
-        Some(StickerAction::SetLayerPosition(_, _, Commit::Preview)) | None => None,
+        // Stickers P7b: a Move Selection drag is not replayed either (the user drags again).
+        Some(StickerAction::SetLayerPosition(_, _, Commit::Preview)) | Some(StickerAction::MoveSelection(..)) | None => None,
         Some(StickerAction::SetLayerOpacity(id, v, _)) => Some(StickerAction::SetLayerOpacity(id, v, Commit::Final)),
         Some(StickerAction::SetLayerStyles(id, v, _)) => Some(StickerAction::SetLayerStyles(id, v, Commit::Final)),
         Some(other) => Some(other),
@@ -1143,6 +1327,10 @@ fn put_style(state: &mut AppState, target: StyleTarget, styles: StyleStack, labe
 fn escape(app: &mut WteApp, frame: &eframe::Frame) {
     if app.state.sticker_ui.drag.is_some() {
         cancel_drag(&mut app.state);
+        return;
+    }
+    // Stickers P7b: a popover closes, then an open lasso is dropped (a busy tool), before the selection.
+    if app.state.sticker_ui.popover.take().is_some() || app.state.sticker_ui.lasso.take().is_some() {
         return;
     }
     let dialog = !matches!(app.state.dialog, crate::state::Dialog::None);

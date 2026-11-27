@@ -9,6 +9,11 @@
 // Eyedropper; `sticker/tools/`), the live canvas of a stroke (`live.rs`: dirty rectangles, stroke mode, the restyle
 // and Preview jobs), the stroke-mode note and the Rasterize offer in the header, the selection's outline, the
 // gradient's line and the brush ring.
+//
+// Stickers P7b: the selection tools on the canvas (the Marquee's box and the Lasso's line while they are drawn, the
+// Magic Wand's click), the Magic Eraser, the Move tool's drag of the selected pixels, the selection's dashed outline
+// (`outline.rs`), and the popover of a command (`popover.rs`: its live preview in the canvas texture, a click on the
+// canvas that picks its colour).
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, vec2};
@@ -151,6 +156,8 @@ fn sync_texture(ctx: &egui::Context, state: &mut crate::state::AppState, shown: 
         (Some(live), Shown::Sticker { id, .. }) => live.sticker == *id,
         _ => false,
     };
+    // Stickers P7b: an open popover's preview picture owns the texture until it closes.
+    let live_owns = live_owns || state.sticker_ui.popover.as_ref().is_some_and(|p| p.shows_picture);
     let session = state.session.as_mut()?;
     let key = key_of(shown, &session.doc, edit)?;
     if !live_owns && state.sticker_ui.canvas.as_ref().is_none_or(|c| c.key != key) {
@@ -246,8 +253,11 @@ fn canvas_side(ui: &mut egui::Ui, state: &mut AppState, left: Rect) {
     handle_input(ui, state, rect, geom, hit, response.contains_pointer());
     // Stickers P7a: the dabs of this frame reach the texture in this frame.
     crate::sticker::live::frame(ui.ctx(), state);
+    // Stickers P7b: the open popover's live preview.
+    crate::sticker::popover::frame(ui.ctx(), state);
     let texture = state.sticker_ui.canvas.as_ref().map(|c| c.tex.id()).or(texture.map(|t| t.0));
     draw(ui, state, rect, geom, texture, &shown);
+    crate::sticker::popover::show(ui, state, rect);
 }
 
 /// The canvas header (3.2): the sticker's name, Done, Revert, the zoom, Fit, 100 %; a text stamp's "Convert to layered
@@ -359,7 +369,8 @@ fn header_bar(ui: &mut egui::Ui, state: &mut AppState, header: Rect, shown: &Sho
 /// A pointer event of this pass that the canvas needs, with its pen pressure (1.0 for a mouse; stickers P7a).
 enum CanvasEvent {
     Moved(Pos2, f32),
-    Pressed(Pos2, egui::PointerButton, f32),
+    /// Stickers P7b: with the keys held at the press (Shift adds to a selection, Alt subtracts).
+    Pressed(Pos2, egui::PointerButton, f32, egui::Modifiers),
     Released(Pos2, egui::PointerButton, f32),
 }
 
@@ -370,15 +381,15 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
     // Stickers P7a: every pointer event takes its pressure from this frame's pen notes, in order (as `route_pointer`).
     let pen = &state.pen.frame;
     let held = pen.held_pressure();
-    let (events, space, latest, down) = ui.input(|i| {
+    let (events, space, latest, down, double) = ui.input(|i| {
         let mut walk = pen.cursor();
         let events: Vec<CanvasEvent> = i
             .events
             .iter()
             .filter_map(|e| match e {
                 egui::Event::PointerMoved(pos) => Some(CanvasEvent::Moved(*pos, walk.take(*pos))),
-                egui::Event::PointerButton { pos, button, pressed: true, .. } => {
-                    Some(CanvasEvent::Pressed(*pos, *button, walk.take(*pos)))
+                egui::Event::PointerButton { pos, button, pressed: true, modifiers } => {
+                    Some(CanvasEvent::Pressed(*pos, *button, walk.take(*pos), *modifiers))
                 }
                 egui::Event::PointerButton { pos, button, pressed: false, .. } => {
                     Some(CanvasEvent::Released(*pos, *button, walk.take(*pos)))
@@ -388,7 +399,8 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
             .collect();
         let down = [egui::PointerButton::Primary, egui::PointerButton::Secondary, egui::PointerButton::Middle]
             .map(|b| (b, i.pointer.button_down(b)));
-        (events, i.key_down(egui::Key::Space), i.pointer.latest_pos(), down)
+        let double = i.pointer.button_double_clicked(egui::PointerButton::Primary);
+        (events, i.key_down(egui::Key::Space), i.pointer.latest_pos(), down, double)
     });
     state.sticker_ui.hover = latest.filter(|p| contains && rect.contains(*p));
     if crate::view::input_gated(state) {
@@ -396,8 +408,8 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
     }
     for event in events {
         match event {
-            CanvasEvent::Pressed(pos, button, pressure) if contains && rect.contains(pos) && state.sticker_ui.drag.is_none() => {
-                press(state, rect, geom, hit, pos, button, space, pressure);
+            CanvasEvent::Pressed(pos, button, pressure, mods) if contains && rect.contains(pos) && state.sticker_ui.drag.is_none() => {
+                press(state, rect, geom, hit, pos, button, space, pressure, mods);
             }
             CanvasEvent::Pressed(..) => {}
             CanvasEvent::Moved(pos, pressure) => motion(state, rect, geom, pos, pressure),
@@ -407,6 +419,10 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
                 }
             }
         }
+    }
+    // Stickers P7b: a double-click closes the polygon lasso.
+    if double && contains && state.sticker_ui.lasso.as_ref().is_some_and(|l| !l.freehand) {
+        crate::sticker::tools::lasso::close(state);
     }
     // The release happened where the canvas did not see it (outside the window).
     if let (Some(button), Some(pos)) = (drag_button(state), latest)
@@ -429,7 +445,10 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
     let icon = match &state.sticker_ui.drag {
         Some(CanvasDrag::Pan { .. }) => Some(egui::CursorIcon::Grabbing),
         Some(CanvasDrag::Move { .. }) => Some(egui::CursorIcon::Move),
-        Some(CanvasDrag::Stroke { .. } | CanvasDrag::Gradient { .. } | CanvasDrag::Pick { .. }) => Some(egui::CursorIcon::Crosshair),
+        Some(CanvasDrag::MoveSelection { .. }) => Some(egui::CursorIcon::Move),
+        Some(
+            CanvasDrag::Stroke { .. } | CanvasDrag::Gradient { .. } | CanvasDrag::Pick { .. } | CanvasDrag::Marquee { .. } | CanvasDrag::Lasso { .. },
+        ) => Some(egui::CursorIcon::Crosshair),
         None if contains && (tool == StickerTool::Hand || space) => Some(egui::CursorIcon::Grab),
         None if contains && tool == StickerTool::Move && hit != Hit::ReadOnly => Some(egui::CursorIcon::Move),
         None if contains => Some(egui::CursorIcon::Crosshair),
@@ -447,13 +466,26 @@ fn drag_button(state: &AppState) -> Option<egui::PointerButton> {
         | CanvasDrag::Pan { button, .. }
         | CanvasDrag::Stroke { button, .. }
         | CanvasDrag::Gradient { button, .. }
-        | CanvasDrag::Pick { button } => Some(*button),
+        | CanvasDrag::Pick { button }
+        | CanvasDrag::Marquee { button, .. }
+        | CanvasDrag::Lasso { button, .. }
+        | CanvasDrag::MoveSelection { button, .. } => Some(*button),
     }
 }
 
 /// A press in the canvas.
 #[allow(clippy::too_many_arguments)]
-fn press(state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, pos: Pos2, button: egui::PointerButton, space: bool, pressure: f32) {
+fn press(
+    state: &mut AppState,
+    rect: Rect,
+    geom: Geom,
+    hit: Hit,
+    pos: Pos2,
+    button: egui::PointerButton,
+    space: bool,
+    pressure: f32,
+    mods: egui::Modifiers,
+) {
     let tool = crate::sticker::tool_of(state);
     let pan = match button {
         egui::PointerButton::Secondary | egui::PointerButton::Middle => true,
@@ -462,6 +494,37 @@ fn press(state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, pos: Pos2, butt
     };
     if pan {
         state.sticker_ui.drag = Some(CanvasDrag::Pan { last: pos, button });
+        return;
+    }
+    // Stickers P7b: an open Color to Alpha / Color Range popover takes the click as its colour.
+    if let Some(cam) = edit_of(state).map(|e| e.camera)
+        && crate::sticker::popover::pick(state, geom.to_layer(&cam, rect, pos))
+    {
+        return;
+    }
+    // Stickers P7b: the selection tools and the Magic Eraser.
+    if matches!(tool, StickerTool::Marquee | StickerTool::Lasso | StickerTool::Wand | StickerTool::MagicEraser) {
+        let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
+        let p = geom.to_layer(&cam, rect, pos);
+        let mode = crate::sticker::tools::marquee::mode_of(mods, state.sticker_ui.select_mode);
+        if hit == Hit::ReadOnly {
+            state.status_hint = crate::sticker::tools::TEXT_STAMP_HINT.to_owned();
+            return;
+        }
+        match tool {
+            StickerTool::Marquee => state.sticker_ui.drag = Some(CanvasDrag::Marquee { start: p, to: p, mode, button }),
+            StickerTool::Lasso => {
+                let near_first = state
+                    .sticker_ui
+                    .lasso
+                    .as_ref()
+                    .and_then(|l| l.points.first())
+                    .is_some_and(|f| geom.to_screen(&cam, rect, *f).distance(pos) <= crate::sticker::tools::lasso::CLOSE_DISTANCE);
+                crate::sticker::tools::lasso::press(state, p, pos, mode, near_first, button);
+            }
+            StickerTool::Wand => state.push(crate::action::AppAction::Sticker(StickerAction::WandAt(p.to_array(), mode))),
+            _ => state.push(crate::action::AppAction::Sticker(StickerAction::MagicErase(p.to_array()))),
+        }
         return;
     }
     // Stickers P7a: the paint tools.
@@ -495,6 +558,12 @@ fn press(state: &mut AppState, rect: Rect, geom: Geom, hit: Hit, pos: Pos2, butt
     }
     let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
     let p = geom.to_layer(&cam, rect, pos);
+    // Stickers P7b: a press inside the selection on a picture layer drags the selected pixels (cut into a new layer at
+    // the first motion; one entry "Move Selection").
+    if let Some(source) = crate::sticker::tools::move_selection::applies(state, p) {
+        state.sticker_ui.drag = Some(CanvasDrag::MoveSelection { source, start: p, sent: None, button });
+        return;
+    }
     // Auto-select: the top layer under the pointer becomes the active one (nothing under it: the active layer stays).
     if state.sticker_ui.auto_select {
         let found = match hit {
@@ -540,6 +609,18 @@ fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32
         Some(CanvasDrag::Pick { .. }) => {
             crate::sticker::tools::eyedropper::pick(state, geom.to_layer(&cam, rect, pos));
         }
+        // Stickers P7b.
+        Some(CanvasDrag::Marquee { start, mode, button, .. }) => {
+            state.sticker_ui.drag = Some(CanvasDrag::Marquee { start, to: geom.to_layer(&cam, rect, pos), mode, button });
+        }
+        Some(CanvasDrag::Lasso { .. }) => crate::sticker::tools::lasso::motion(state, geom.to_layer(&cam, rect, pos), pos, cam.zoom),
+        Some(CanvasDrag::MoveSelection { source, start, sent, button }) => {
+            let delta = (geom.to_layer(&cam, rect, pos) - start).round();
+            if (sent.is_some() || delta != Vec2::ZERO) && sent != Some(delta) {
+                state.push(crate::action::AppAction::Sticker(StickerAction::MoveSelection(source, delta.to_array(), Commit::Preview)));
+                state.sticker_ui.drag = Some(CanvasDrag::MoveSelection { source, start, sent: Some(delta), button });
+            }
+        }
         Some(CanvasDrag::Pan { last, button }) => {
             if let Some(e) = edit_mut(state) {
                 e.camera.pan(pos - last, geom.size, rect);
@@ -569,6 +650,12 @@ fn release(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f3
         Some(CanvasDrag::Stroke { .. }) => crate::sticker::tools::brush::end(state),
         Some(CanvasDrag::Gradient { from, to, .. }) if from.distance(to) >= crate::sticker::tools::gradient::MIN_DRAG => {
             state.push(crate::action::AppAction::Sticker(StickerAction::Gradient(from.to_array(), to.to_array())));
+        }
+        // Stickers P7b.
+        Some(CanvasDrag::Marquee { start, to, mode, .. }) => crate::sticker::tools::marquee::finish(state, start, to, mode),
+        Some(CanvasDrag::Lasso { .. }) => crate::sticker::tools::lasso::release(state),
+        Some(CanvasDrag::MoveSelection { source, sent: Some(d), .. }) => {
+            state.push(crate::action::AppAction::Sticker(StickerAction::MoveSelection(source, d.to_array(), Commit::Final)));
         }
         _ => {}
     }
@@ -609,17 +696,40 @@ fn draw(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom: Geom, texture: Op
             crate::view::draw_quad(&painter, corners, crate::theme::ACCENT, 1.0);
         }
     }
-    // Stickers P7a: the selection's bounds (a two-colour dashed outline, no animation: the frame loop stays idle;
-    // the Marquee and Lasso of P7b draw the selection's own outline), the gradient's line and the brush ring.
-    if let Some(sel) = edit.selection.as_ref().filter(|s| !s.is_empty()) {
-        let b = sel.bounds;
-        let a = geom.to_screen(&cam, rect, geom.origin + Vec2::new(b.x0 as f32, b.y0 as f32));
-        let z = geom.to_screen(&cam, rect, geom.origin + Vec2::new(b.x1 as f32, b.y1 as f32));
-        let r = Rect::from_two_pos(a, z);
-        painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Middle);
-        let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
-        let dashes = egui::Shape::dashed_line(&corners, Stroke::new(1.0, Color32::BLACK), 4.0, 4.0);
-        painter.extend(dashes);
+    // Stickers P7b: the selection's outline (a static two-colour dashed line, no animation: the frame loop stays idle),
+    // or the one an open Color Range / Grow / Shrink / Feather popover would make; the Marquee's box and the Lasso's
+    // line while they are drawn. (P7a: the gradient's line and the brush ring.)
+    let preview = state.sticker_ui.popover.as_ref().and_then(|p| p.selection.clone());
+    if let Some(sel) = preview.or_else(|| edit.selection.clone()).filter(|s| !s.is_empty()) {
+        let _p = frame_profile::scope("sticker.outline");
+        let outline = state.sticker_ui.outline.get(&sel);
+        crate::sticker::outline::draw(&painter, &outline, geom, &cam, rect);
+    }
+    if let Some(CanvasDrag::Marquee { start, to, .. }) = state.sticker_ui.drag {
+        let (a, b) = crate::sticker::tools::marquee::drag_box(state, start, to);
+        let r = Rect::from_two_pos(geom.to_screen(&cam, rect, a), geom.to_screen(&cam, rect, b));
+        if state.sticker_ui.marquee.ellipse {
+            painter.add(egui::Shape::ellipse_stroke(r.center(), r.size() * 0.5, Stroke::new(3.0, Color32::from_black_alpha(140))));
+            painter.add(egui::Shape::ellipse_stroke(r.center(), r.size() * 0.5, Stroke::new(1.0, Color32::WHITE)));
+        } else {
+            painter.rect_stroke(r, 0.0, Stroke::new(3.0, Color32::from_black_alpha(140)), egui::StrokeKind::Middle);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Middle);
+        }
+    }
+    if let Some(lasso) = state.sticker_ui.lasso.as_ref() {
+        let mut points: Vec<Pos2> = lasso.points.iter().map(|p| geom.to_screen(&cam, rect, *p)).collect();
+        if !lasso.freehand
+            && let Some(at) = state.sticker_ui.hover
+        {
+            points.push(at);
+        }
+        if points.len() >= 2 {
+            painter.add(egui::Shape::line(points.clone(), Stroke::new(3.0, Color32::from_black_alpha(140))));
+            painter.add(egui::Shape::line(points, Stroke::new(1.0, Color32::WHITE)));
+        }
+        if let Some(first) = lasso.points.first() {
+            painter.circle_stroke(geom.to_screen(&cam, rect, *first), 4.0, Stroke::new(1.0, Color32::WHITE));
+        }
     }
     if let Some(CanvasDrag::Gradient { from, to, .. }) = state.sticker_ui.drag {
         let (a, b) = (geom.to_screen(&cam, rect, from), geom.to_screen(&cam, rect, to));

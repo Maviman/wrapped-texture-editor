@@ -381,16 +381,144 @@ pub(crate) fn tool_page(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelS
                     help(ui, "Drag from where the gradient starts to where it ends (limited by the selection).");
                 }
                 StickerTool::Eyedropper => help(ui, "Click or drag to pick a colour of the sticker into the primary colour."),
+                // Stickers P7b: the selection tools and the Magic Eraser.
+                StickerTool::Marquee => {
+                    select_mode_row(ui, state);
+                    marquee_options(ui, state);
+                    help(ui, "Drag a box. Shift adds, Alt subtracts, both intersect; a click drops the selection.");
+                }
+                StickerTool::Lasso => {
+                    select_mode_row(ui, state);
+                    lasso_options(ui, state, &mut actions);
+                    help(ui, "Drag to draw freehand, or click corners and close with a double-click, Enter or Close.");
+                }
+                StickerTool::Wand => {
+                    select_mode_row(ui, state);
+                    region_options(ui, "sticker_wand", &mut state.sticker_ui.wand.region);
+                    ui.checkbox(&mut state.sticker_ui.wand.all_layers, "Sample all layers")
+                        .on_hover_text("Look at every visible layer (without styles); off: the active layer alone");
+                    help(ui, "Click a colour to select it. Shift adds, Alt subtracts, both intersect.");
+                }
+                StickerTool::MagicEraser => {
+                    region_options(ui, "sticker_magic_eraser", &mut state.sticker_ui.magic_eraser.region);
+                    ui.checkbox(&mut state.sticker_ui.magic_eraser.into_mask, "Into mask (keep pixels)")
+                        .on_hover_text("Hide the colour on the layer mask instead of erasing it (a mask is added when needed)");
+                    help(ui, "Click a colour to make it transparent (limited by the selection).");
+                }
                 _ => help(ui, "This tool is not available yet."),
             }
             help(ui, "Right or middle drag: pan  |  Wheel: zoom  |  Esc or Done: back");
             position_fields(ui, state, ps, &mut actions);
             mask_block(ui, state, &mut actions);
             layer_styles(ui, state, ps, &mut actions);
+            // Stickers P7b: the Selection, Cut-out and Filter commands at the end of the page (the controls above keep
+            // their places).
+            command_blocks(ui, state, &mut actions);
         });
     });
     state.actions.extend(actions);
     out.response.rect
+}
+
+/// Stickers P7b: the mode of a new selection (New, Add, Subtract, Intersect), for a pen or a tablet without keys.
+fn select_mode_row(ui: &mut egui::Ui, state: &mut AppState) {
+    let mut hits = Vec::new();
+    crate::sticker::popover::mode_row(ui, &mut state.sticker_ui.select_mode, &mut hits);
+    state.panel_rects.extend(hits);
+}
+
+/// Stickers P7b: the Marquee's options (shape, feather, fixed aspect).
+fn marquee_options(ui: &mut egui::Ui, state: &mut AppState) {
+    let m = &mut state.sticker_ui.marquee;
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut m.ellipse, false, "Rectangle");
+        ui.selectable_value(&mut m.ellipse, true, "Ellipse");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Feather");
+        ui.add(egui::DragValue::new(&mut m.feather).range(0.0..=wte_core::sticker::select::MAX_MODIFY).speed(0.2).max_decimals(1).suffix(" px"));
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut m.fixed_aspect, "Fixed aspect");
+        ui.add_enabled(m.fixed_aspect, egui::DragValue::new(&mut m.aspect[0]).range(0.01..=100.0).speed(0.05).max_decimals(2));
+        ui.label(":");
+        ui.add_enabled(m.fixed_aspect, egui::DragValue::new(&mut m.aspect[1]).range(0.01..=100.0).speed(0.05).max_decimals(2));
+    });
+}
+
+/// Stickers P7b: the Lasso's feather and the buttons that close or drop an open polygon (also Enter / Esc).
+fn lasso_options(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
+    let mut hits = Vec::new();
+    ui.horizontal(|ui| {
+        ui.label("Feather");
+        ui.add(egui::DragValue::new(&mut state.sticker_ui.lasso_feather).range(0.0..=wte_core::sticker::select::MAX_MODIFY).speed(0.2).max_decimals(1).suffix(" px"));
+    });
+    let open = state.sticker_ui.lasso.as_ref().map_or(0, |l| l.points.len());
+    ui.horizontal(|ui| {
+        let close = ui.add_enabled(open >= 3, egui::Button::new("Close lasso")).on_hover_text("Close the polygon (Enter or a double-click)");
+        hits.push((PanelHit::StickerLassoClose, close.rect));
+        if close.clicked() {
+            actions.push(sticker(StickerAction::CloseLasso));
+        }
+        let cancel = ui.add_enabled(open > 0, egui::Button::new("Cancel")).on_hover_text("Drop the open polygon (Esc)");
+        hits.push((PanelHit::StickerLassoCancel, cancel.rect));
+        if cancel.clicked() {
+            actions.push(sticker(StickerAction::CancelLasso));
+        }
+    });
+    state.panel_rects.extend(hits);
+}
+
+/// Stickers P7b: Tolerance, Contiguous and Anti-alias of the Magic Wand and the Magic Eraser.
+fn region_options(ui: &mut egui::Ui, id: &str, opts: &mut wte_core::RegionOptions) {
+    ui.push_id(id, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Tolerance");
+            ui.add(egui::Slider::new(&mut opts.tolerance, 0..=255)).on_hover_text("How different a colour may be and still count");
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut opts.contiguous, "Contiguous").on_hover_text("Only the connected region; off: every matching pixel");
+            ui.checkbox(&mut opts.anti_alias, "Anti-alias").on_hover_text("A soft edge around the region");
+        });
+    });
+}
+
+/// Stickers P7b (STICKER_PLAN 3.3 "Commands ... also in the Tool tab"): the Selection, Cut-out and Filter commands as
+/// buttons (the same list as the Sticker menu), with Remove Background's options above its button.
+fn command_blocks(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
+    use crate::sticker::filters::{COMMANDS, Group, available, enabled};
+    let have = available(state);
+    if !have.0 {
+        return;
+    }
+    let mut hits = Vec::new();
+    for group in Group::ALL {
+        ui.separator();
+        egui::CollapsingHeader::new(egui::RichText::new(group.label()).strong()).id_salt(("sticker_commands", group.label())).default_open(true).show(ui, |ui| {
+            if group == Group::CutOut {
+                let bg = &mut state.sticker_ui.remove_bg;
+                ui.horizontal(|ui| {
+                    ui.label("Tolerance");
+                    ui.add(egui::Slider::new(&mut bg.opts.tolerance, 0..=255)).on_hover_text("How far from the background colour a pixel may be");
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut bg.opts.follow_gradients, "Follow gradients").on_hover_text("Also a background that changes slowly");
+                    ui.checkbox(&mut bg.opts.enclosed, "Also enclosed areas").on_hover_text("Also background colour inside the object (letter holes)");
+                    ui.checkbox(&mut bg.into_mask, "Into mask").on_hover_text("Hide the background on the layer mask; the pixels are kept");
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (i, def) in COMMANDS.iter().enumerate().filter(|(_, d)| d.group == group) {
+                    let r = ui.add_enabled(enabled(def, have), egui::Button::new(def.label)).on_hover_text(def.hover);
+                    hits.push((PanelHit::StickerCommand(i as u8), r.rect));
+                    if r.clicked() {
+                        actions.push(sticker((def.make)(state)));
+                    }
+                }
+            });
+        });
+    }
+    state.panel_rects.extend(hits);
 }
 
 /// Stickers P7a: the Fill tool's options (Tolerance, Contiguous, Anti-alias).

@@ -19,7 +19,7 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: &str, enabled: bool, selected:
     ui.add_enabled(enabled, button).clicked()
 }
 
-/// Draws the menu bar: File, Edit, View, Layer, Object, Help.
+/// Draws the menu bar: File, Edit, View, Layer, Object, (Sticker in the Sticker view), Help.
 pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let mut actions: Vec<AppAction> = Vec::new();
     egui::MenuBar::new().ui(ui, |ui| {
@@ -28,6 +28,11 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
         ui.menu_button("View", |ui| view_menu(ui, state, &mut actions));
         ui.menu_button("Layer", |ui| layer_menu(ui, state, &mut actions));
         ui.menu_button("Object", |ui| object_menu(ui, state, &mut actions));
+        // Stickers P7b (STICKER_PLAN 3.3 "Commands"): the Sticker menu, only in the Sticker view (outside it the menu bar
+        // is as before).
+        if state.view_mode == ViewMode::Sticker {
+            ui.menu_button("Sticker", |ui| sticker_menu(ui, state, &mut actions));
+        }
         ui.menu_button("Help", |ui| {
             if item(ui, "Shortcuts", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::Shortcuts));
@@ -232,6 +237,24 @@ fn view_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
             }
         }
     });
+}
+
+/// Stickers P7b: the Sticker menu: the Selection, Cut-out and Filter commands of `sticker::filters::COMMANDS` as three
+/// submenus (shortcut texts from the Sticker view's table).
+fn sticker_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {
+    use crate::sticker::filters::{COMMANDS, Group, available, enabled};
+    let have = available(state);
+    for group in Group::ALL {
+        ui.menu_button(group.label(), |ui| {
+            for def in COMMANDS.iter().filter(|d| d.group == group) {
+                let key = if def.shortcut.is_empty() { String::new() } else { crate::shortcuts::sticker_shortcut_text(ui.ctx(), def.shortcut) };
+                let button = Button::new(def.label).shortcut_text(key);
+                if ui.add_enabled(enabled(def, have), button).on_hover_text(def.hover).clicked() {
+                    actions.push(AppAction::Sticker((def.make)(state)));
+                }
+            }
+        });
+    }
 }
 
 fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppAction>) {

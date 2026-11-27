@@ -352,8 +352,13 @@ the Sticker view: the sticker Brush and Eraser (pen pressure, the eraser end), F
 live canvas of a stroke (dirty rectangles, stroke mode on a styled layer, the canvas's restyle job and the model's
 Preview job: `sticker/live.rs`), core `render::render_region`, `doc_sticker_paint.rs` (the region read-out, the render
 jobs, the Eyedropper and layer read-outs, `rasterize_sticker_layer`), `select::selection_in_content`, the scenarios
-`sticker_edit` and `sticker_pen` (5.20, 5.27, 6.10, 6.11, 8.6, 8.7, 8.11, 8.15, 9.1, 9.2). Still to come, each
-documented by its package: selections and the layout / text / shape tools (P7b, P8: 8.6, 8.7, 8.15, 9.2), the
+`sticker_edit` and `sticker_pen` (5.20, 5.27, 6.10, 6.11, 8.6, 8.7, 8.11, 8.15, 9.1, 9.2). (P7b): selections and
+cut-out in the Sticker view: the Marquee, Lasso and Magic Wand (Shift / Alt modes and the Tool tab's mode row), the
+selection's dashed outline, Ctrl+A / Ctrl+D / Ctrl+Shift+I, Delete of the selected pixels, the Magic Eraser, Move
+Selection and Layer via Copy / Cut, Crop to Selection, Grow / Shrink / Feather / Color Range / From Layer Alpha, the
+Cut-out commands (Remove Background, Color to Alpha, Defringe, mattes) and the Filter commands (Blur, Sharpen) with
+their popovers and live preview, the Sticker menu; core `doc_sticker_cutout.rs` (5.20, 8.6, 8.7, 8.10, 8.11, 8.15, 9.1,
+9.2). Still to come, each documented by its package: the layout / text / shape tools (P8: 8.6, 8.7, 8.15, 9.2), the
 editor link in the app (P9a, P9b: 8.16), drop target, clipboard and drag out (P10a, P10b, P11: 8.17), linked paint layers
 (P12: 8.16), docs and the version (P13).
 
@@ -432,6 +437,8 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `doc_sticker_tab_tests.rs` | stickers P6b | the `k6b_*` tests of `add_stamp_styled`, `set_styles_of` / `set_styles_each` and `stamp_style_reference_size` (test-only child of the crate root) |
 | `doc_sticker_paint.rs` | stickers P7a | what the editor's painting needs from the document (5.20 "Painting"): `sticker_canvas_region` (a dirty rectangle with the stroke's layer unstyled), the render jobs `StickerRenderJob` / `StickerRenderOutput` (`sticker_canvas_job`, `sticker_preview_job`, `apply_sticker_preview`), `sticker_color_at`, `sticker_layer_pixels` / `sticker_layer_mask`, `rasterize_sticker_layer` |
 | `doc_sticker_paint_tests.rs` | stickers P7a | the `k7a_*` tests and `perf_k7a_*` (test-only child of the crate root) |
+| `doc_sticker_cutout.rs` | stickers P7b | the read-outs of the selection and cut-out tools (5.20 "Selections and cut-out"): `sticker_layer_on_artboard`, `sticker_unstyled_composite`, `sticker_picture_with` |
+| `doc_sticker_cutout_tests.rs` | stickers P7b | the `k7b_*` tests (test-only child of the crate root) |
 | `sticker/file.rs` | stickers P4 | the `.wtes` sticker file (7.8): `write_wtes`, `read_wtes`, `WtesManifest`, `WtesFile`; `Document::{saved_sticker_ids, sticker_extract_pictures, sticker_wtes, import_wtes}` |
 | `psd/mod.rs` | stickers P5a | the PSD reader's types: `PsdDoc`, `PsdLayer`, `PsdMask`, `PsdBlend`, `PsdFeatures`, `PsdSection`, `PsdColorMode`, `PsdLimits`, `PsdError`, `PsdRefusal` (sentences); `forcing`, `editor_native`, `profile_note` (5.28) |
 | `psd/read.rs` | stickers P5a | `psd::read` (7.9 "Reader"): header, resources 1057 / 1039, layer info (section or `Lr16`), records and tagged blocks (re-sync), channel decoding (raw, PackBits, ZIP, ZIP with prediction; 8 and 16 bit), the merged picture un-matted from white |
@@ -577,12 +584,18 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `sticker/tray.rs` | stickers P6b | the tray (`tray_stickers`, `show`), its commands (New Sticker, from a picture, use as the Stamp tool's source, Duplicate, Delete), "Edit before placing", Export Picture (`write_picture`), the Sticker tab's thumbnails (`PictureThumbs`) |
 | `sticker/tests_p6b.rs` | stickers P6b | the unit tests of P6b's commands (8.15) |
 | `sticker/live.rs` | stickers P7a | the live canvas of a stroke (8.15 "Painting"): `LiveStroke`, dirty rectangles uploaded with `set_partial`, stroke mode, the restyle and Preview jobs (`RenderJobs`, named threads), `LiveCounters`, `upload` |
-| `sticker/commands.rs` | stickers P7a | the mask commands (Add from selection / Add, Invert, Apply, Delete, "Paint on mask"), Rasterize, the rectangle selection command |
-| `sticker/tools/{mod,brush,fill,gradient,eyedropper}.rs` | stickers P7a | the paint tools of the Sticker view: `paint_target` (the layer-kind rules), `selection_for`; Brush and Eraser strokes (`brush.rs`), Fill, Gradient (`GradientOptions`), Eyedropper |
+| `sticker/commands.rs` | stickers P7a | the mask commands (Add from selection / Add, Invert, Apply, Delete, "Paint on mask"), Rasterize, the rectangle selection command; P7b: the Selection commands (All, Invert, Grow / Shrink / Feather, From Layer Alpha, Delete Selected Pixels, Crop to Selection) |
+| `sticker/tools/{mod,brush,fill,gradient,eyedropper}.rs` | stickers P7a | the paint tools of the Sticker view: `paint_target` (the layer-kind rules), `selection_for`; Brush and Eraser strokes (`brush.rs`), Fill, Gradient (`GradientOptions`), Eyedropper; P7b: `artboard_of`, `set_selection`, `limit`, `put` / `put_new_mask` |
 | `sticker/tools/tests.rs` | stickers P7a | the unit tests of the paint tools and the live canvas (8.15) |
+| `sticker/tools/{marquee,lasso,wand,magic_eraser,move_selection}.rs` | stickers P7b | the Marquee (`MarqueeOptions`, `mode_of`), the Lasso (`LassoState`), the Magic Wand and Color Range (`WandOptions`, `sample_picture`), the Magic Eraser (`MagicEraserOptions`), Move Selection and Layer via Copy / Cut (`MovingCut`) |
+| `sticker/tools/tests_p7b.rs` | stickers P7b | the unit tests of the selection and cut-out tools (8.15) |
+| `sticker/filters.rs` | stickers P7b | the Cut-out and Filter commands (`CutOut`, `compute` shared with the popover preview, `RemoveBgUi`) and `COMMANDS`, the one list the Sticker menu and the Tool tab's command blocks draw |
+| `sticker/popover.rs` | stickers P7b | the small non-modal window of a command with numbers (`PopKind`, `Popover`): its live preview (the canvas texture or the selection outline), the canvas click that picks its colour, Apply / Cancel |
+| `sticker/outline.rs` | stickers P7b | the selection's outline: merged edge runs at 128 (`Outline`, `outline_of`), cached per selection (`OutlineCache`), drawn as a static two-colour dashed line |
 | `dialogs/sticker_shared.rs` | stickers P6b | the shared-picture question (E6): Edit all / Only this one / Cancel |
 | `selftest/scenarios/sticker_tab.rs` | stickers P6b | the scenarios `sticker_styles`, `sticker_tray`, `sticker_controls` (8.11) |
 | `selftest/scenarios/sticker_paint.rs` | stickers P7a | the scenarios `sticker_edit` and `sticker_pen` (8.11) |
+| `selftest/scenarios/sticker_cutout.rs` | stickers P7b | the scenario `sticker_cutout` (8.11) |
 | `tools/sticker/frame_spans.py` (repo root) | stickers P7a | the worst `sticker.*` / `link.*` / `ole.*` frame spans of a scenario's frame log (STICKER_PLAN 8.4; exit 1 over the limit) |
 | `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
@@ -2994,6 +3007,31 @@ impl Document {
   (adjustments included and then cleared; `render::layer_content`), placed by a whole-pixel move, up to 1024 px beyond
   the artboard (at most `MAX_CREATED_SIDE` a side, else the artboard); name, visibility, opacity, blend, clip and styles
   kept; one `set_sticker` entry "Rasterize Sticker Layer". The finished picture is unchanged (test `k7a`).
+
+**Selections and cut-out (P7b; `doc_sticker_cutout.rs`, STICKER_PLAN 3.3, 3.4, 4.4).**
+
+```rust
+impl Document {
+    /// One layer drawn alone over the artboard at scale 1 (shown, opacity 1, Normal, not clipped, no styles; content,
+    /// transform, mask and adjustments as they are): the wand's / Color Range's "active layer", From Layer Alpha.
+    pub fn sticker_layer_on_artboard(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<PixelBuf, EditError>;
+    /// Every visible layer without its styles (4.4 "Sample all layers"), scale 1, artboard size.
+    pub fn sticker_unstyled_composite(&mut self, on: StickerRef) -> Result<PixelBuf, EditError>;
+    /// The finished picture (scale 1, layer styles, no stamp styles) with one picture layer's pixels (`Rgba`) or mask
+    /// (`Alpha`) replaced; the document unchanged: a popover's live preview is what Apply gives.
+    pub fn sticker_picture_with(&mut self, on: StickerRef, layer: StickerLayerId, new: PixelData) -> Result<PixelBuf, EditError>;
+}
+```
+
+- Read only, never a promotion: an image stamp answers with its picture (its virtual layer 1; `sticker_picture_with`
+  returns `new` itself, and a mask is refused). They render outside the caches (`render`, no layer cache): a preview's
+  buffer is drawn once and must not push the document's cached layers out. Errors: as `sticker_layer_pixels`;
+  `InvalidParam` for empty data, a text or shape layer, a mask on a layer without one or of another size.
+- The edits themselves are the existing commands: the Magic Eraser, Delete, the Cut-out and Filter commands are
+  `replace_sticker_pixels` (one tile-patch entry), a mask added by "Into mask" and Layer via Copy / Cut, Move Selection
+  and Crop to Selection are `set_sticker` (Move Selection's Preview calls and its Final fold into one entry; Crop to
+  Selection changes the artboard, so the users' placements are refitted, 2.9). The `RemoveBgRefusal::NoPlainBackground`
+  sentence names "Color to Alpha" (the UI's spelling).
 
 ### 5.21 `import/` [C5]
 
@@ -7279,6 +7317,12 @@ sticker Eraser with `tools.eraser` (size = diameter in layer-space pixels; hardn
 pressure options as they are), and the brush keys `[` `]` / Shift+`[` `]` change the sticker tool's settings in the view
 (`dispatch::active_brush`). Pen pressure reaches the canvas exactly as the views (`PenFrame::cursor` per event).
 
+**Stickers P7b: the selection tools are not `ToolController` tools either.** Marquee, Lasso, Magic Wand and Magic Eraser,
+and the Move tool's drag of selected pixels, live in `sticker/tools/` and are routed by the sticker canvas (8.15
+"Selections and cut-out"). A selection is app state (`StickerEdit::selection: Option<Arc<Selection>>`, not in the
+history, not saved); only what changes pixels or layers is a document command. The texture Fill tool keeps its own
+whole-region fill (1.3).
+
 ### 8.7 Panels (`panels/*`) [A4]
 
 ```rust
@@ -7808,6 +7852,20 @@ three need a mask) and "Paint on mask" (`StickerPaintOnMask`); a text or shape l
 layer it paints, and shows the Type row greyed (Circular) with the hint "The sticker brush is always round (Circular).
 Sphere and shapes are for the model." (`brush_tab::STICKER_TIP_HINT`; the sphere and shape rows are not shown).
 
+**Stickers P7b (STICKER_PLAN 3.2, 3.3 "Commands").** The Tool tab in the Sticker view: Marquee = the mode row New / Add /
+Subtract / Intersect (`PanelHit::StickerSelectMode(i)`, the same as Shift / Alt, so a pen or the companion needs no key),
+Rectangle / Ellipse, Feather (px), Fixed aspect W : H; Lasso = the mode row, Feather, **Close lasso** / **Cancel**
+(`StickerLassoClose` / `StickerLassoCancel`); Magic Wand = the mode row, Tolerance, Contiguous, Anti-alias, "Sample all
+layers"; Magic Eraser = Tolerance, Contiguous, Anti-alias, "Into mask (keep pixels)". At the end of the page (after Layer
+styles, so the controls above keep their places), for a layered sticker, three collapsible blocks **Selection**, **Cut-out** (with Remove Background's Tolerance, Follow gradients, Also
+enclosed areas, Into mask above its buttons) and **Filter**: one button per entry of `sticker::filters::COMMANDS`
+(`PanelHit::StickerCommand(index)`; enabled by what it needs: a layered sticker, a selection, a picture layer). The menu
+bar gains a **Sticker** menu only while the Sticker view is shown (outside it the menu bar is unchanged): the submenus
+Selection, Cut-out and Filter with the same list, the shortcut texts from `STICKER_SHORTCUTS`. A command with numbers
+opens its **popover** (`sticker/popover.rs`): a small `egui::Window` at the canvas's top-left (`StickerPopover`), not
+modal; Apply (`StickerPopoverApply`) and Cancel (`StickerPopoverCancel`); Color to Alpha and Color Range have a colour
+button and White / Black / Primary (`StickerPopoverKey(0..=2)`), and a click on the canvas picks the colour.
+
 ### 8.8 Dialogs (`dialogs/*`) [A5]
 
 **Stickers P6b.** `Dialog::StickerShared { users }` (`dialogs/sticker_shared.rs`, STICKER_PLAN 3.1 E6): "Shared
@@ -8310,7 +8368,7 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
    `Key::CloseCurlyBracket` with `display: Some("Shift+[")` / `Some("Shift+]")`; size to `Key::OpenBracket` / `CloseBracket` with
    `Modifiers::NONE`; layer move to `Modifiers::COMMAND` + the square brackets.
 7. **Stickers P6a: the Sticker view** (STICKER_PLAN 3.3, reviews A12 / B6). A second static table `STICKER_SHORTCUTS`
-   (`sticker_table()`, 31 entries, labels for `sticker_shortcut_text`) and one routing rule: in `ViewMode::Sticker` a
+   (`sticker_table()`, 34 entries since P7b, labels for `sticker_shortcut_text`) and one routing rule: in `ViewMode::Sticker` a
    chord bound in `STICKER_SHORTCUTS` runs that binding and the global one does not; a chord not bound there runs the
    global binding unless its label is in `NOT_IN_STICKER` ("Stamp", "Transform": the key is consumed and nothing runs).
    Implemented as one list, `sticker_order()`: the sticker entries plus the global entries of unbound chords (with the
@@ -8324,10 +8382,10 @@ Rules for `handle` (one rule set; 8.3 and this section must agree):
 | V M L W C | `SetStickerTool(Move, Marquee, Lasso, Wand, Crop)` | B E G I | `SetStickerTool(Brush, Eraser, Fill, Eyedropper)` |
 | Shift+E / Shift+G | `SetStickerTool(MagicEraser / Gradient)` | X / U / H | `SetStickerTool(Text / Shape / Hand)` |
 | F | `Sticker(Fit)` (Shift+F stays Frame Selection) | S, R | blocked (`NOT_IN_STICKER`) |
-| Delete, Backspace | `Sticker(DeleteKey)`: clears a selection (P7b), else the status line "Select an area first, or use Delete Layer"; never the stamp | Esc | `Sticker(Escape)`: a canvas drag, then dialog / tool / pending edit (`Cancel`), then the selection, then leave |
-| Enter | `Sticker(EnterKey)` (crop, lasso: P7b, P8) | Ctrl+J / Ctrl+M | `Sticker(DuplicateLayer(None) / MergeDown(None))` |
+| Delete, Backspace | `Sticker(DeleteKey)`: with a selection `DeleteSelected` (the selected pixels of the active layer, P7b), else the status line "Select an area first, or use Delete Layer"; never the stamp | Esc | `Sticker(Escape)`: a canvas drag, then a popover, then an open lasso (P7b), then dialog / tool / pending edit (`Cancel`), then the selection, then leave |
+| Enter | `Sticker(EnterKey)`: closes an open lasso (P7b; a crop: P8) | Ctrl+J / Ctrl+M | `Sticker(DuplicateLayer(None) / MergeDown(None))` |
 | Ctrl+`]` / Ctrl+`[` | `Sticker(MoveLayer(None, +1 / -1))` | arrows / Shift+arrows | `Sticker(Nudge)` by 1 / 10 pixels |
-| T, 1 2 3 4 F5, `[` `]` Shift+`[` Shift+`]`, D, Shift+X, Ctrl+Z ... | the global bindings (fall through) | Ctrl+A, Ctrl+D, Ctrl+Shift+I | selections, added by P7b |
+| T, 1 2 3 4 F5, `[` `]` Shift+`[` Shift+`]`, D, Shift+X, Ctrl+Z ... | the global bindings (fall through) | Ctrl+A / Ctrl+D / Ctrl+Shift+I | `Sticker(SelectAll / SelectNone / InvertSelection)` (P7b; unbound outside the view) |
 
 | Keys | Action (`AppAction`) | Keys | Action (`AppAction`) |
 |---|---|---|---|
@@ -8585,6 +8643,7 @@ counted down) instead of failing (`export_errors`).
 | `sticker_tray` | Stickers P6b (`sticker_tab.rs`). Sphere, 3D; a picture file in the run's assets folder made a tray sticker (`NewStickerFromPicture`); the Stamp tool's "Edit before placing" clicked (Tool tab); the red disc added as a second layer (shot `tray_edit_before`); Done; the sticker placed twice (shot `tray_placed_twice`); the first stamp opened, Nudge(10, 0): the question (shot `tray_question`), Edit all clicked; Leave; the second stamp opened, Nudge(0, 12), Only this one clicked (shot `tray_only_this` after Leave); undo all, redo all; Save As, open the saved project | one tray sticker "badge" (kept), the Stamp tool's source, one entry; the view opens on `Tray(id)` with "Not placed yet", nothing placed, no entry; the add asks nothing (a tray target) and is one entry; Done returns to 3D with the Stamp tool and the sticker as its source; two sticker stamps share it, one entry each; the question says 2 and changes nothing; Edit all keeps both on the one sticker and changes the model in one entry; Only this one gives the second stamp its own sticker (detach + edit = two entries) and leaves the first one's layers unchanged; undo all = the start (no stamp, empty tray), redo all = the end; the saved and reopened project has no history, two sticker stamps with different stickers, two tray stickers and equals the saved one (composite, stamps, sticker layers, tray) |
 | `sticker_controls` | Stickers P6b (`sticker_tab.rs`). Sphere; the logo placed and a second stamp of the same picture (Setup); the first stamp opened, Nudge, the question's Cancel clicked; Leave; the Sticker tab: the six presets, Copy / Paste / Clear Style, the nine block boxes (shot `controls_tab`), Export Picture..., Edit Sticker; in the view's Tool tab the layer preset (Outline; the question answered Only this one), the layer's Stroke box, Copy Style (shot `controls_view`); Done; the tray's New Sticker, its item, Duplicate, Delete, Export Picture..., From picture..., the blank item, Edit, Done; the Stamp tool's Edit before placing, Done, the Style list opened and closed. Every control is clicked through `ScreenClick` after `ScreenScroll` brought it into the page | Cancel leaves no dialog, no entry, the image stamp; six presets = six entries (Clear last: no styles); Copy holds the Classic sticker stack, Paste of the same styles is no entry, Clear one; nine boxes = nine entries with every style on and the stamp still an image stamp; the export and From picture... without a path do nothing in a self-test; Edit Sticker opens the view; the layer preset promotes in one entry and the box toggles the stroke off in one more; New Sticker (one entry) becomes the Stamp tool's source; its item chooses the Stamp tool; Duplicate and Delete one entry each; Edit and Edit before placing open the view on the tray sticker |
 | `sticker_edit` | Stickers P7a (`selftest/scenarios/sticker_paint.rs`). Sphere, 3D; the sample logo placed as an image stamp; 4; a new empty picture layer; the sticker Brush (16 px, hard, red) dragged along y = 60 (shot `edit_brush`), undo, redo; the sticker Eraser (24 px) across it, undo, redo; ClassicSticker on the layer; a brush stroke along y = 180 (shot `edit_styled`); the logo layer selected, the Fill tool clicked at its corner (yellow); a new layer, `SelectRect` 40..216 x 204..240, the Gradient tool dragged across it (red to blue; shot `edit_final`); undo every step; Esc. Every stroke is a `Step::Pointer` on `Target::StickerCanvas` | each stroke one entry ("Sticker Brush" / "Sticker Eraser") with the paint where it went and the model changed; undo / redo give the composite of the step before / after; on the styled layer the header's "styles update when you lift" was drawn during the stroke (`LiveCounters::note_frames`) and is gone after it, one full recomposite entered stroke mode and the restyle job landed; the finished sticker has an opaque white contour pixel just below the new paint where the layer itself is transparent; Fill one entry, the logo's outside yellow and its inside kept; the new layer plus the gradient two entries, red at the start, blue at the end, nothing outside the selection; undoing everything gives the start (document state, the image stamp, composite) |
+| `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
 | `sticker_pen` | Stickers P7a (`sticker_paint.rs`). The same start; the sticker Brush 24 px with pressure driving the size from 0; a pen stroke at pressure 0.2 along y = 70 and one at 1.0 along y = 170 (`Step::Pen` on the canvas); the inverted pen (eraser end) across both at x = 128 (shot `pen_canvas`); a barrel drag; Fit; undo every step; Esc | two "Sticker Brush" entries, the full stroke at least three times as wide as the light one in column 128 (and at least 20 px); the eraser end: one "Sticker Eraser" entry, both lines cut, the sticker Eraser in every contact frame (`pen_eraser_frames` counts the sticker tool in the view), the Brush back after the pen left; the barrel drag pans the canvas camera and changes nothing; undoing everything gives the start |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
 
@@ -8909,8 +8968,99 @@ scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P
   the selection dropped with the artboard; P7a check `k7a_check_*`: quick strokes on a styled layer with the job threads
   held run one restyle at a time and end as a fresh full render, stroke mode on a turned / scaled layer and on a moved
   layer across the artboard edge, a selection that excludes the stroke, every paint tool on a shape layer), the updated
-  `sticker::tests` (the unbuilt-tool status with the Marquee);
+  `sticker::tests` (the unbuilt-tool status with the Marquee; since P7b with the Crop);
   scenarios `sticker_edit`, `sticker_pen` (8.11); core `k7a_*` (9.1).
+
+**Stickers P7b: selections and cut-out (STICKER_PLAN 3.3 rows Marquee, Lasso, Magic Wand, Magic Eraser, Move with a
+selection; 3.4; the Cut-out, Filter and Selection commands).**
+- **The selection** is `StickerEdit::selection: Option<Arc<Selection>>` (artboard size; `Arc` since P7b: the canvas
+  clones the editor every frame and the outline is cached by pointer). App state: no entry, never saved, never a
+  promotion. A new mask is combined by a mode (`tools::set_selection`): New replaces; Add, Subtract and Intersect with
+  the selection there is (without one, Add is the new mask and the others give nothing); a result with no selected pixel
+  drops the selection. The mode comes from the keys held at the press (`marquee::mode_of`: Shift adds, Alt subtracts,
+  both intersect; the press event's modifiers) or else the Tool tab's row (`StickerUi::select_mode`). Dropped with the
+  artboard's size (P7a), by Ctrl+D, by Esc (after a drag, a popover and an open lasso) and by Layer via Copy / Cut and
+  Crop to Selection.
+- **Marquee** (`tools/marquee.rs`): `CanvasDrag::Marquee { start, to, mode }`; the canvas draws the box (or the
+  inscribed ellipse) while dragging; at the release `Selection::rect` / `ellipse` of the box (fixed aspect: the box from
+  the longer side, `corner`), feathered by the option, combined by the mode. A box under 0.5 px is a click: in New mode
+  it drops the selection.
+- **Lasso** (`tools/lasso.rs`): the first press opens `StickerUi::lasso` (`LassoState { points, mode, size, freehand }`)
+  and holds `CanvasDrag::Lasso`. Travel over 4 points while the first press is held makes it freehand (a point every 2
+  screen points, at most 20,000) and the release closes it; otherwise each click adds a corner and the polygon closes by
+  a double-click, a click within 8 points of the first corner, Enter, or Close lasso; Esc / Cancel drop it. Closing:
+  `Selection::polygon` (non-zero rule, 4.8), the Lasso's feather, the mode of the first press; fewer than 3 points say so.
+- **Magic Wand** (`tools/wand.rs`): the press pushes `StickerAction::WandAt(point, mode)`: `select::region` (4.4, the
+  Tool tab's Tolerance / Contiguous / Anti-alias) on `Document::sticker_layer_on_artboard` (the active layer alone) or,
+  with "Sample all layers", `sticker_unstyled_composite`; a click outside the artboard says so. **Color Range** is
+  `select::color_range` on the same picture (`StickerAction::ColorRange { color, tolerance, all_layers, mode }`).
+- **Magic Eraser** (`tools/magic_eraser.rs`): the press pushes `MagicErase(point)`: the region of the active picture
+  layer's own pixels under the point (`paint_target` rules: a picture layer, shown, unlocked; text / shape: the
+  Rasterize offer), times the selection seen from those pixels, then `select::erase` (one entry "Magic Eraser"); with
+  "Into mask" or Paint on mask `erase_mask` on the layer mask, a mask of 255 added first when there is none (one
+  `set_sticker` entry). An unchanged buffer makes no entry and does not promote (`tools::put`: "...: nothing changed").
+- **Delete** (`commands::delete_selected`): Delete / Backspace in the view run `DeleteKey`; with a selection it runs
+  `DeleteSelected` (through `run_in`, so the shared-picture question comes first): `select::erase` of the selection seen
+  from the active picture layer (with Paint on mask: `fill_mask(.., 0)`), one entry "Delete Selected Pixels". The stamp,
+  its texture layer and the sticker's layers are never deleted; without a selection the status line says
+  `DELETE_HINT`.
+- **Move Selection and Layer via Copy / Cut** (`tools/move_selection.rs`): a Move press inside the selection (value > 0
+  at the press point) with a picture layer active that is shown and unlocked starts `CanvasDrag::MoveSelection { source,
+  start, sent }` instead of the Move tool's layer drag (auto-select is not asked; a press outside the selection is the
+  ordinary Move). Each motion with a new whole-pixel offset pushes `MoveSelection(source, offset, Commit::Preview)`, the
+  release (and the dispatch guard's Save / Export) the Final. The first call cuts: the selected pixels of the source
+  (`select::extract` of the selection seen from its pixels) become a new layer above it (a copy of the source's
+  attributes, name + " cut"; on a plain-move layer its picture and mask cropped to the cut pixels and its position moved
+  to match) and the source keeps `select::erase`d pixels, all in one `set_sticker` call labelled "Move Selection";
+  `StickerUi::moving_cut` remembers the new layer while the pending entry is ours, so the next calls only move it. The
+  Final ends the entry, makes the new layer active and shifts the selection by the offset. `drag_moved` is true once the
+  cut is made: Undo during the drag undoes the drag only; Esc and other commands cancel the pending entry (the cut goes
+  too). Layer via Copy / Layer via Cut (" copy" / " cut") make the same layer without moving it, one entry each, the new
+  layer active and the selection dropped; a selection holding no pixel of the layer says so.
+- **Selection commands** (`commands.rs`): Select All (`Selection::all`), Invert (nothing selected becomes everything),
+  Grow / Shrink / Feather (`Selection::grow` / `shrink` / `feather`; they need a selection), From Layer Alpha (the alpha
+  of `sticker_layer_on_artboard`), Crop to Selection (the artboard becomes the selection's bounds in layer space, one
+  `set_sticker` entry; the users are refitted, the selection dropped).
+- **Cut-out and Filter commands** (`filters.rs`): `CutOut::{RemoveBackground(RemoveBgUi), ColorToAlpha(key),
+  RemoveMatte(Matte), Defringe(width), Blur(radius), Sharpen(amount, radius)}`; `compute` takes the active picture layer
+  (`paint_target` rules), the selection seen from its pixels, and returns the new pixels or mask (Remove Background
+  "Into mask": the layer's mask, or a new mask); `run` puts it as one entry labelled "Remove Background", "Color to
+  Alpha", "Remove White Matte", "Remove Black Matte", "Defringe", "Blur", "Sharpen". Remove Background's refusals are a
+  status line and an info toast (no entry). Blur acts on the mask with Paint on mask (`blur_mask`); Sharpen always on the
+  picture. Blur and Sharpen refuse pictures over 4096 px a side (`MAX_FILTER_SIDE`: three 8-byte planes). Numbers are
+  clamped (blur radius 0.5..=64, sharpen amount 0..=3, radius 0.5..=16, defringe 1..=10).
+- **Popovers** (`popover.rs`): `PopKind::{ColorToAlpha, Defringe, Blur, Sharpen, ColorRange, Modify { how, px }}` opened
+  by `OpenPopover` on the active layer (a pixel popover needs a picture layer, Grow / Shrink / Feather a selection).
+  `popover::frame` (after the live canvas, span `sticker.popover`) computes the preview when its key changed (the
+  numbers, the layer, the shown sticker's `Arc` or the blob, the selection's `Arc`, Paint on mask), at most every 100 ms
+  while a button is held: a pixel popover runs the command's own `filters::compute` and `sticker_picture_with` and puts
+  the picture into the canvas texture (the texture key becomes `Stale`; `sync_texture` leaves the texture alone while
+  `Popover::shows_picture`), a selection popover keeps its would-be selection, which the canvas outlines instead of the
+  editor's. Apply = `ApplyPopover`: the popover closes and its `PopKind::action()` runs through `run_in` (the E6
+  question first for content edits); Cancel, Esc, another active layer (`validate`) or leaving the view close it with no
+  change, and the canvas draws the sticker again. A Primary press on the canvas while Color to Alpha / Color Range is
+  open picks its colour (`sticker_color_at`) instead of running the tool.
+- **The outline** (`outline.rs`): `outline_of` collects the edges between mask >= 128 and < 128 as horizontal and
+  vertical runs; `OutlineCache::get` computes it once per selection `Arc`; `draw` paints each run white with black 4-pt
+  dashes whose phase follows the screen coordinate (no animation, the frame loop stays idle; span `sticker.outline`).
+  Over 50,000 runs, or no edge at 128 (a faint feather), the selection's bounds are drawn instead.
+- **Sticker menu and keys**: the Sticker menu (only in the view) and the Tool tab's blocks draw `filters::COMMANDS` (19
+  entries; enabled by `Needs` against `filters::available`). Ctrl+A / Ctrl+D / Ctrl+Shift+I are in `STICKER_SHORTCUTS`
+  (8.10). `StickerTool::built()` is true for every tool but Crop, Text and Shape (P8); `paints()` includes the Magic
+  Eraser.
+- **Tests.** `sticker/tools/tests_p7b.rs` (`k7b_*`: the Marquee by keys and by the row, a click that drops, the ellipse
+  and the fixed aspect, no entry and no promotion; the Lasso freehand, as a polygon closed by Enter and by its first
+  point, Cancel, too few points; the wand on the active layer and on all layers, Shift adds, outside the artboard; Color
+  Range picked on the canvas, previewed, applied; the Magic Eraser in a selection, promoted and undone, Into mask; Delete
+  with and without a selection with the stamp selected, unchanged pixels no entry, on the mask; Move Selection cancelled
+  and whole (one entry, the cropped piece, the hole, the selection moved, one undo), a press outside the selection; Layer
+  via Copy / Cut; the selection commands and Crop to Selection; the Cut-out and Filter commands (labels, promotion, no
+  white halo, the refusal, Blur limited by the selection); the Blur popover's preview equals Apply's result, Cancel shows
+  the sticker again, Color to Alpha picked on the canvas; popovers closed by another active layer; the outline's runs,
+  its cache and the bounds fallback; the command list's rules on a text layer; the shared-picture question before
+  Delete, the Magic Eraser, Remove Background and Layer via Cut, and the waiting edit after the answer), the colliding
+  chords of `shortcuts::tests` with Ctrl+A / Ctrl+D / Ctrl+Shift+I; scenario `sticker_cutout` (8.11); core `k7b_*`
+  (9.1).
 
 ---
 
@@ -9542,6 +9692,11 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `k7a_a_plain_move_copies_rows_with_the_per_pixel_bytes`. Ignored `perf_k7a_dab_region_and_restyle` (8.4: entering
   stroke mode on a 2048-px styled sticker with a cold layer cache, one dab of size 64 plus its region, the Preview and the
   end restyle jobs; numbers in `docs/notes/sticker/build-P7a.md`).
+- Branch `stickers`, P7b (`doc_sticker_cutout_tests.rs`): `k7b_a_layer_on_the_artboard_is_drawn_alone_and_plain` (full
+  opacity, Normal, no style, its mask; a hidden layer drawn; the document unchanged),
+  `k7b_the_unstyled_composite_leaves_out_the_styles_only` (= the finished picture after clearing the style),
+  `k7b_the_picture_with_replaced_pixels_is_what_the_edit_gives` (pixels and a mask; refusals),
+  `k7b_an_image_stamp_answers_with_its_picture_and_stays_an_image`.
 
 ### 9.2 `wte_app` tests
 
@@ -9557,7 +9712,9 @@ G1-G3 with the second row, the page minimum at 900x600 / 640x480 for every tab),
 `styles_ui::tests`, `dialogs::sticker_shared::tests`, `tools::stamp_place::tests::the_stamp_tool_places_images_with_their_styles_and_tray_stickers`
 (a `Blob` source with default styles is an image stamp; with the tool's styles one entry; a tray sticker placed twice),
 `selftest::tests::scroll_and_key_frames` (`ScreenScroll`), the scenario count (59). Stickers P7a: the paint tools'
-tests of 8.15 (`sticker/tools/tests.rs`) and the scenario count (61: `sticker_edit`, `sticker_pen`).
+tests of 8.15 (`sticker/tools/tests.rs`) and the scenario count (61: `sticker_edit`, `sticker_pen`). Stickers P7b: the
+selection and cut-out tests of 8.15 (`sticker/tools/tests_p7b.rs`), Ctrl+A / Ctrl+D / Ctrl+Shift+I in
+`shortcuts::tests::colliding_chords_run_the_action_of_their_mode`, and the scenario count (62: `sticker_cutout`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

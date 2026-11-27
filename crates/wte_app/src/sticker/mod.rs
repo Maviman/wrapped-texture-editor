@@ -899,14 +899,22 @@ fn answer_shared(state: &mut AppState, answer: Option<ShareScope>) {
     let pending = state.sticker_ui.shared_pending.take();
     let Some(scope) = answer else { return };
     let Some(session) = state.session.as_mut() else { return };
-    let Some(edit) = session.sticker_edit.as_mut() else { return };
-    edit.share_answer = Some(scope);
-    let StickerTarget::Stamp(stamp) = edit.target else { return };
-    if scope == ShareScope::ThisStamp && session.doc.stamp(stamp).is_some_and(|s| matches!(s.source, StampSource::Sticker { .. })) {
+    let Some(target) = session.sticker_edit.as_ref().map(|e| e.target) else { return };
+    if let StickerTarget::Stamp(stamp) = target
+        && scope == ShareScope::ThisStamp
+        && session.doc.stamp(stamp).is_some_and(|s| matches!(s.source, StampSource::Sticker { .. }))
+    {
         let r = session.doc.detach_sticker(stamp);
+        // P6b check: a refused detach (a locked stamp) leaves the question unanswered. The answer used to be stored
+        // first, so every later edit of this opening reached the sticker the other stamps still share, unasked.
         if crate::dispatch::edited(state, r).is_none() {
             return;
         }
+    }
+    let Some(edit) = edit_mut(state) else { return };
+    edit.share_answer = Some(scope);
+    if !matches!(target, StickerTarget::Stamp(_)) {
+        return;
     }
     let replay = match pending {
         Some(StickerAction::SetLayerPosition(_, _, Commit::Preview)) | None => None,
@@ -980,7 +988,11 @@ fn put_style(state: &mut AppState, target: StyleTarget, styles: StyleStack, labe
                 state.status_hint = "Select a stamp or a text first".to_owned();
                 return;
             }
-            let r = state.doc_mut().map(|d| d.set_stamps_styles(&stamps, &styles));
+            // P6b check: Clear Style is one "Edit Sticker Style" entry (`set_stamps_styles` names its entry "Paste
+            // Style", which the Undo item showed after a Clear).
+            let r = state.doc_mut().map(|d| {
+                if styles.is_default() { d.set_styles_of(&stamps, &styles, Commit::Final) } else { d.set_stamps_styles(&stamps, &styles) }
+            });
             if let Some(r) = r {
                 crate::dispatch::edited(state, r);
             }

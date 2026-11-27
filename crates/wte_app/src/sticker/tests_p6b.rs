@@ -298,8 +298,8 @@ fn edit_before_placing_makes_the_picture_a_tray_sticker_and_opens_it() {
 fn export_picture_writes_the_finished_picture() {
     let (mut state, stamp, _) = image_stamp_state(ViewMode::View3D);
     run_in(&mut state, StickerAction::SetStampStyles(vec![stamp], Box::new(StylePreset::ClassicSticker.styles([64, 64])), Commit::Final));
-    let dir = std::env::temp_dir().join(format!("wte_p6b_export_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // P6b check: under target\, never %TEMP% (inside the real %LOCALAPPDATA%; plan 0.4 rule 5).
+    let dir = wte_core::testutil::temp_dir("p6b_export");
     let path = dir.join("logo.png");
     assert!(tray::write_picture(&mut state, PictureOf::Stamp(stamp), &path));
     let bytes = std::fs::read(&path).unwrap();
@@ -324,4 +324,58 @@ fn guarded_and_content_commands_of_p6b() {
     assert!(!S::CopyStyle(StyleTarget::Layers).changes_document());
     assert!(!S::TrayUse(StickerId(1)).changes_document() && S::TrayDelete(StickerId(1)).changes_document());
     assert!(!S::AnswerShared(None).changes_document() && S::AnswerShared(Some(ShareScope::AllUsers)).changes_document());
+}
+
+/// P6b check: "Only this one" whose detach is refused (the edited stamp is locked) leaves the question unanswered: the
+/// next edit asks again instead of reaching the sticker the other stamp still shares.
+#[test]
+fn a_refused_detach_leaves_the_shared_picture_question_open() {
+    let (mut state, stamp, blob) = image_stamp_state(ViewMode::View3D);
+    let other = another_stamp(&mut state, blob, 0.3);
+    // Both stamps show one sticker ("Edit all" on the shared picture).
+    enter_in(&mut state, Some(stamp));
+    run_in(&mut state, StickerAction::SetLayerOpacity(StickerLayerId(1), 0.5, Commit::Final));
+    run_in(&mut state, StickerAction::AnswerShared(Some(ShareScope::AllUsers)));
+    let StampSource::Sticker { sticker } = doc(&state).stamp(stamp).unwrap().source else { panic!("promoted") };
+    assert_eq!(doc(&state).sticker_users(sticker), vec![stamp, other]);
+    leave_in(&mut state, None);
+
+    enter_in(&mut state, Some(stamp));
+    let layer = doc(&state).stamp_layers(stamp)[0].1;
+    state.doc_mut().unwrap().set_layer_locked(layer, true).unwrap();
+    let undo = undo_len(&state);
+    run_in(&mut state, StickerAction::Nudge(5, 0));
+    assert!(matches!(state.dialog, Dialog::StickerShared { users: 2 }));
+    run_in(&mut state, StickerAction::AnswerShared(Some(ShareScope::ThisStamp)));
+    assert_eq!(undo_len(&state), undo, "the detach was refused: nothing changed");
+    assert_eq!(edit_of(&state).unwrap().share_answer, None, "the question is still open");
+    // Unlocked again, the next edit asks again; the shared sticker is untouched.
+    state.doc_mut().unwrap().set_layer_locked(layer, false).unwrap();
+    let before = doc(&state).sticker(sticker).unwrap().layers[0].transform;
+    run_in(&mut state, StickerAction::Nudge(5, 0));
+    assert!(matches!(state.dialog, Dialog::StickerShared { users: 2 }), "{:?}", state.dialog);
+    assert_eq!(doc(&state).sticker(sticker).unwrap().layers[0].transform, before);
+    run_in(&mut state, StickerAction::AnswerShared(Some(ShareScope::ThisStamp)));
+    let StampSource::Sticker { sticker: own } = doc(&state).stamp(stamp).unwrap().source else { panic!() };
+    assert_ne!(own, sticker, "detached now");
+    assert_eq!(doc(&state).sticker(sticker).unwrap().layers[0].transform, before, "the other stamp's sticker is unchanged");
+}
+
+/// P6b check: Clear Style on the selected stamps is one entry named as a style edit (it was named "Paste Style").
+#[test]
+fn clear_style_on_stamps_is_one_style_entry() {
+    let (mut state, stamp, _) = image_stamp_state(ViewMode::View3D);
+    run_in(&mut state, StickerAction::ApplyPreset(StylePreset::ClassicSticker));
+    let undo = undo_len(&state);
+    run_in(&mut state, StickerAction::ClearStyle(StyleTarget::Stamps));
+    assert_eq!(undo_len(&state), undo + 1);
+    assert_eq!(doc(&state).undo_label(), Some(wte_core::doc_stickers::STYLE_LABEL));
+    assert!(doc(&state).stamp(stamp).unwrap().styles.is_default());
+    // Nothing left to clear: no entry.
+    run_in(&mut state, StickerAction::ClearStyle(StyleTarget::Stamps));
+    assert_eq!(undo_len(&state), undo + 1);
+    // Paste keeps its own name.
+    state.style_clipboard = Some(shadow(5.0));
+    run_in(&mut state, StickerAction::PasteStyle(StyleTarget::Stamps));
+    assert_eq!(doc(&state).undo_label(), Some("Paste Style"));
 }

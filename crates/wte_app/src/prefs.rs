@@ -366,7 +366,8 @@ mod tests {
         assert_eq!(from_json(r#"{ "side_split": null }"#).unwrap().side_split, None);
         // A file of an older build has none of the keys.
         let old = from_json(r#"{ "flags_wireframe": true }"#).unwrap();
-        assert_eq!((old.side_upper_tab, old.side_lower_tab.as_str(), old.side_split), (UpperTab::Tool, "layers", None));        // Stickers P6b (STICKER_PLAN 3.9): the fifth tab is written as "sticker" and reads back; an unknown tab name (as
+        assert_eq!((old.side_upper_tab, old.side_lower_tab.as_str(), old.side_split), (UpperTab::Tool, "layers", None));
+        // Stickers P6b (STICKER_PLAN 3.9): the fifth tab is written as "sticker" and reads back; an unknown tab name (as
         // "sticker" is for a build before P6b) falls back to the default tab through the same lenient path as before.
         assert_eq!(serde_json::to_value(UpperTab::Sticker).unwrap(), "sticker");
         let p = from_json(r#"{ "side_upper_tab": "sticker" }"#).unwrap();

@@ -6232,7 +6232,7 @@ Branch `pen-input`:
 
 **Stickers P6a (STICKER_PLAN 3.1-3.3; 8.15).** Additive: `ViewMode::Sticker` (serde name "sticker"; never written,
 `AppState::remembered_view_mode`), `StickerTool` (14 tools, `ALL` in strip order, `label`, `built`: Move and Hand in P6a),
-`StickerTarget { Stamp(StampId), Tray(StickerId), ToolSource }`, `Canvas2D` (= `UvViewState`, the artboard as its
+`StickerTarget { Stamp(StampId), Tray(StickerId) }` (P6b: the plan's `ToolSource` is not built), `Canvas2D` (= `UvViewState`, the artboard as its
 texture), `StickerEdit { target, active_layer, selected_layers, selection, tool, camera, return_mode, share_answer,
 entry: StickerCheckpoint, held_update }`, `Session::sticker_edit: Option<StickerEdit>`, `AppState::sticker_canvas_rect`
 (the canvas rect of the last frame; `None` outside the view) and `AppState::sticker_ui: sticker::StickerUi` (canvas
@@ -8717,14 +8717,15 @@ scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P
   (a newer one replaces it; a canvas drag ends, nothing of it was applied) and `Dialog::StickerShared { users }` opens.
   `AnswerShared`: Edit all = `share_answer = AllUsers` (an image stamp is then promoted together with every stamp of its
   picture); Only this one = `ThisStamp`, and a sticker stamp first gets its own copy (`detach_sticker`, entry "Detach
-  Sticker"); then the waiting command runs (a Preview as a Final; a Move drag's Preview is not replayed). Cancel drops
-  it and asks again next time. The answer holds until the view closes. Tray targets never ask (no stamp of theirs is
+  Sticker"); then the waiting command runs (a Preview as a Final; a Move drag's Preview is not replayed). The answer is
+  stored only after that detach succeeded (P6b check: a refused detach, e.g. of a locked stamp, leaves the question
+  open). Cancel drops it and asks again next time. The answer holds until the view closes. Tray targets never ask (no stamp of theirs is
   being edited); style commands on stamps never ask (they never promote, E3).
 - **Styles.** `SetStampStyles` -> `Document::set_styles_of` (one entry per drag, never a promotion); `ApplyPreset` ->
   `set_styles_each` with each stamp's `stamp_style_reference_size`; `SetLayerStyles` / `ApplyLayerPreset` -> one
   `set_sticker` entry "Sticker Layer Style"; `CopyStyle(Stamps)` copies the first selected stamp's stack, `(Layers)` the
-  active layer's; `PasteStyle(Stamps)` / `ClearStyle(Stamps)` -> `set_stamps_styles` (one entry "Paste Style"; a paste of
-  the same styles is none), `(Layers)` -> one `set_sticker` entry on the selected layers ("Paste Layer Style" / "Clear
+  active layer's; `PasteStyle(Stamps)` -> `set_stamps_styles` (one entry "Paste Style"; a paste of the same styles is
+  none), `ClearStyle(Stamps)` -> `set_styles_of` with no styles (one entry "Edit Sticker Style", P6b check), `(Layers)` -> one `set_sticker` entry on the selected layers ("Paste Layer Style" / "Clear
   Layer Style"). `selected_stamps`: the selected stamp first, then the stamps linked to the selected layers of the Layers
   list (`Session::layer_selection`).
 - **Tray** (`tray.rs`). `tray_stickers`: stickers with `keep` or a user, ascending id. `NewSticker`: "Sticker N", 512 x
@@ -8747,7 +8748,8 @@ scenario `sticker_view` (8.11); core `k6a_layer_at_and_layer_thumbnail` (9.1). P
   the one-slider edit of three stamps one entry, Clear; the E6 question with Cancel, Only this one (image and sticker
   stamp), Edit all, an unchanged name never asks; layer styles a content edit with Copy / Paste / Clear / preset; the
   tray; Edit before placing with Revert and Done; Export Picture writes the finished picture; the guard and content
-  lists), `styles_ui.rs`, `dialogs/sticker_shared.rs`, `tools/stamp_place.rs`
+  lists; P6b check: a refused detach leaves the question open, Clear Style on stamps is one "Edit Sticker Style"
+  entry), `styles_ui.rs`, `dialogs/sticker_shared.rs`, `tools/stamp_place.rs`
   (`the_stamp_tool_places_images_with_their_styles_and_tray_stickers`), `panels/side_groups.rs`, `prefs.rs`,
   `control_sweep/sticker_panel_tests.rs`, `control_sweep/panel_tests.rs` (9.2); scenarios `sticker_styles`,
   `sticker_tray`, `sticker_controls` (8.11); core `k6b_*` (9.1).

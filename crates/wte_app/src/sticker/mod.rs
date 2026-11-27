@@ -455,6 +455,10 @@ pub struct StickerUi {
     pub remove_bg: filters::RemoveBgUi,
     /// The open popover of a command (Color to Alpha..., Blur..., ...).
     pub(crate) popover: Option<popover::Popover>,
+    /// P7b check: the job drawing the open popover's picture preview, and the preview threads still running (a
+    /// dropped one included: no second one starts beside it).
+    pub(crate) popover_job: Option<popover::PreviewJob>,
+    pub(crate) popover_alive: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The selection outline, computed once per selection.
     pub(crate) outline: outline::OutlineCache,
     /// A Move Selection drag that has cut its layer: the source, the new layer and where it was cut.
@@ -495,6 +499,8 @@ impl Default for StickerUi {
             magic_eraser: tools::magic_eraser::MagicEraserOptions::default(),
             remove_bg: filters::RemoveBgUi::default(),
             popover: None,
+            popover_job: None,
+            popover_alive: Default::default(),
             outline: outline::OutlineCache::default(),
             moving_cut: None,
             #[cfg(test)]
@@ -704,6 +710,7 @@ pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
     state.sticker_ui.hover = None;
     // Stickers P7b.
     state.sticker_ui.popover = None;
+    state.sticker_ui.popover_job = None;
     state.sticker_ui.lasso = None;
     state.sticker_ui.moving_cut = None;
     state.sticker_ui.outline = outline::OutlineCache::default();
@@ -847,6 +854,14 @@ pub(crate) fn layered(state: &mut AppState, layer: Option<StickerLayerId>) -> Op
     let id = layer.or(edit.active_layer)?;
     doc.layer(id)?;
     Some((doc, id))
+}
+
+/// P7b check: what a change of the sticker tool (`AppAction::SetStickerTool`) drops: an open polygon lasso belongs to
+/// the Lasso (it stayed drawn under the next tool, and Enter closed it there).
+pub(crate) fn tool_changing(state: &mut AppState, tool: StickerTool) {
+    if tool != StickerTool::Lasso {
+        state.sticker_ui.lasso = None;
+    }
 }
 
 /// Sets the active layer of the open editor.

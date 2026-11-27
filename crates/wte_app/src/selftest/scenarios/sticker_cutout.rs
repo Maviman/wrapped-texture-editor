@@ -294,7 +294,9 @@ pub(super) fn sticker_cutout() -> Vec<Step> {
         }),
         Step::WaitIdle,
         Step::Do(AppAction::Sticker(StickerAction::OpenPopover(PopKind::ColorToAlpha { key: [255, 255, 255] }))),
-        Step::WaitFrames(3),
+        // P7b check: the preview is drawn on a job; the idle check waits for it.
+        Step::WaitIdle,
+        Step::WaitFrames(2),
         Step::Assert("the Color to Alpha popover shows its live preview; nothing applied", |s, sc| {
             let shows = s.sticker_ui.popover.as_ref().is_some_and(|p| p.shows_picture);
             if !shows {
@@ -353,7 +355,8 @@ pub(super) fn sticker_cutout() -> Vec<Step> {
         Step::Dyn("marquee over the left half", |s, _| canvas_drag(s, &[[-6.0, -6.0], [64.0, 128.0], [128.0, 262.0]])),
         Step::WaitIdle,
         Step::Do(AppAction::Sticker(StickerAction::OpenPopover(PopKind::Blur { radius: 4.0 }))),
-        Step::WaitFrames(3),
+        Step::WaitIdle,
+        Step::WaitFrames(2),
         Step::Dyn("click Apply", |s, _| click_panel(s, PanelHit::StickerPopoverApply)),
         Step::WaitIdle,
         Step::Assert("one \"Blur\" entry: the left edge is soft, the right half unchanged", |s, sc| {

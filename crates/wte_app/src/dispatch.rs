@@ -294,7 +294,7 @@ fn validate(app: &mut WteApp) {
 
 /// Stickers P6a (STICKER_PLAN 3.3): in the Sticker view the layer commands of the Layer and Edit menus act on the
 /// active sticker layer, never on a texture layer, and Delete never deletes the stamp.
-fn in_sticker_view(action: AppAction) -> AppAction {
+pub(crate) fn in_sticker_view(action: AppAction) -> AppAction {
     use crate::sticker::StickerAction as S;
     match action {
         AppAction::DeleteSelection => AppAction::Sticker(S::DeleteKey),
@@ -1062,6 +1062,7 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
                 crate::sticker::finish_drag(&mut app.state);
             }
             crate::sticker::cancel_drag(&mut app.state);
+            crate::sticker::tool_changing(&mut app.state, tool);
             if let Some(edit) = crate::sticker::edit_mut(&mut app.state) {
                 edit.tool = tool;
                 app.state.sticker_ui.last_tool = tool;

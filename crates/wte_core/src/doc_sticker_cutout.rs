@@ -66,27 +66,67 @@ impl Document {
     /// pixels (`PixelData::Rgba`) or the mask (`PixelData::Alpha`) of picture layer `layer` replaced by `new`; the
     /// document is not changed. An image stamp that is not a sticker yet: `new` itself (its one layer has no mask).
     /// Errors: as `sticker_layer_on_artboard`; `InvalidParam` for a text or shape layer, a mask on a layer without one
-    /// or of another size, and empty data. Read only.
+    /// or of another size, and empty data. Read only. (`sticker_picture_with_job` + `StickerPictureWith::run`.)
     pub fn sticker_picture_with(&mut self, on: StickerRef, layer: StickerLayerId, new: PixelData) -> Result<PixelBuf, EditError> {
         if !new.is_valid() {
             return Err(EditError::InvalidParam("the new pixels are empty or do not match their size"));
         }
+        self.sticker_picture_with_job(on, layer)?.run(new)
+    }
+
+    /// P7b check: `sticker_picture_with` in two halves, so a live preview draws off the UI thread: this half (UI
+    /// thread, cheap: the sticker's render input, `Arc`s) checks the sticker and the layer; `StickerPictureWith::run`
+    /// (any thread) puts the new pixels in and draws. Errors: as `sticker_picture_with` except those of `new`. Read
+    /// only.
+    pub fn sticker_picture_with_job(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<StickerPictureWith, EditError> {
         let doc = match self.sticker_or_image(on)? {
             Ok(doc) => doc,
             Err(_) if layer != StickerLayerId(1) => return Err(EditError::UnknownStickerLayer),
-            Err(_) => {
-                return match new {
-                    PixelData::Rgba(p) => Ok(p),
-                    PixelData::Alpha(_) => Err(EditError::InvalidParam("the picture has no mask")),
-                };
-            }
+            Err(_) => return Ok(StickerPictureWith { draw: None }),
         };
-        let mut changed = (*doc).clone();
-        let version = self.next_pixel_version();
-        let l = changed.layer_mut(layer).ok_or(EditError::UnknownStickerLayer)?;
+        let l = doc.layer(layer).ok_or(EditError::UnknownStickerLayer)?;
         if !matches!(l.content, StickerContent::Picture(_)) {
             return Err(EditError::InvalidParam("only a picture layer has pixels"));
         }
+        let version = self.next_pixel_version();
+        let input = self.sticker_render_input(&doc)?;
+        Ok(StickerPictureWith { draw: Some((input, layer, version)) })
+    }
+
+    /// Renders `doc` at scale 1, full quality, outside the caches.
+    fn render_unstored(&mut self, doc: StickerDoc) -> Result<PixelBuf, EditError> {
+        let input = self.sticker_render_input(&Arc::new(doc))?;
+        Ok(render(&input, 1.0, RasterQuality::Full))
+    }
+}
+
+/// P7b check: the second half of `Document::sticker_picture_with` (`Document::sticker_picture_with_job`): the sticker's
+/// render input, the layer and a pixel version taken on the UI thread; `run` works on any thread.
+pub struct StickerPictureWith {
+    /// `None`: an image stamp that is not a sticker yet (the picture is the new pixels themselves).
+    draw: Option<(crate::sticker::render::StickerRenderInput, StickerLayerId, u64)>,
+}
+
+const _: fn() = || {
+    fn send_static<T: Send + 'static>() {}
+    send_static::<StickerPictureWith>();
+};
+
+impl StickerPictureWith {
+    /// The finished picture with the layer's pixels or mask replaced by `new` (deterministic: `sticker::render`).
+    /// Errors: `InvalidParam` for empty data, a mask on a layer without one or of another size, a mask of an image stamp.
+    pub fn run(self, new: PixelData) -> Result<PixelBuf, EditError> {
+        if !new.is_valid() {
+            return Err(EditError::InvalidParam("the new pixels are empty or do not match their size"));
+        }
+        let Some((mut input, layer, version)) = self.draw else {
+            return match new {
+                PixelData::Rgba(p) => Ok(p),
+                PixelData::Alpha(_) => Err(EditError::InvalidParam("the picture has no mask")),
+            };
+        };
+        let mut changed = (*input.doc).clone();
+        let l = changed.layer_mut(layer).ok_or(EditError::UnknownStickerLayer)?;
         match new {
             PixelData::Rgba(p) => l.content = StickerContent::Picture(PicturePixels::Owned { pixels: Arc::new(p), version }),
             PixelData::Alpha(a) => match &mut l.mask {
@@ -94,12 +134,7 @@ impl Document {
                 _ => return Err(EditError::InvalidParam("the layer has no mask of that size")),
             },
         }
-        self.render_unstored(changed)
-    }
-
-    /// Renders `doc` at scale 1, full quality, outside the caches.
-    fn render_unstored(&mut self, doc: StickerDoc) -> Result<PixelBuf, EditError> {
-        let input = self.sticker_render_input(&Arc::new(doc))?;
+        input.doc = Arc::new(changed);
         Ok(render(&input, 1.0, RasterQuality::Full))
     }
 }

@@ -3020,6 +3020,9 @@ impl Document {
     /// The finished picture (scale 1, layer styles, no stamp styles) with one picture layer's pixels (`Rgba`) or mask
     /// (`Alpha`) replaced; the document unchanged: a popover's live preview is what Apply gives.
     pub fn sticker_picture_with(&mut self, on: StickerRef, layer: StickerLayerId, new: PixelData) -> Result<PixelBuf, EditError>;
+    /// P7b check: the same in two halves for a job: this one (UI thread, cheap: the render input, `Arc`s) checks the
+    /// sticker and the layer; `StickerPictureWith::run(new)` (any thread, `Send`) puts `new` in and draws.
+    pub fn sticker_picture_with_job(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<StickerPictureWith, EditError>;
 }
 ```
 
@@ -8988,7 +8991,8 @@ selection; 3.4; the Cut-out, Filter and Selection commands).**
 - **Lasso** (`tools/lasso.rs`): the first press opens `StickerUi::lasso` (`LassoState { points, mode, size, freehand }`)
   and holds `CanvasDrag::Lasso`. Travel over 4 points while the first press is held makes it freehand (a point every 2
   screen points, at most 20,000) and the release closes it; otherwise each click adds a corner and the polygon closes by
-  a double-click, a click within 8 points of the first corner, Enter, or Close lasso; Esc / Cancel drop it. Closing:
+  a double-click, a click within 8 points of the first corner, Enter, or Close lasso; Esc / Cancel drop it, and so does
+  choosing another tool (`sticker::tool_changing`, P7b check). Closing:
   `Selection::polygon` (non-zero rule, 4.8), the Lasso's feather, the mode of the first press; fewer than 3 points say so.
 - **Magic Wand** (`tools/wand.rs`): the press pushes `StickerAction::WandAt(point, mode)`: `select::region` (4.4, the
   Tool tab's Tolerance / Contiguous / Anti-alias) on `Document::sticker_layer_on_artboard` (the active layer alone) or,
@@ -9033,9 +9037,15 @@ selection; 3.4; the Cut-out, Filter and Selection commands).**
   by `OpenPopover` on the active layer (a pixel popover needs a picture layer, Grow / Shrink / Feather a selection).
   `popover::frame` (after the live canvas, span `sticker.popover`) computes the preview when its key changed (the
   numbers, the layer, the shown sticker's `Arc` or the blob, the selection's `Arc`, Paint on mask), at most every 100 ms
-  while a button is held: a pixel popover runs the command's own `filters::compute` and `sticker_picture_with` and puts
-  the picture into the canvas texture (the texture key becomes `Stale`; `sync_texture` leaves the texture alone while
-  `Popover::shows_picture`), a selection popover keeps its would-be selection, which the canvas outlines instead of the
+  while a button is held: a pixel popover runs the command's own maths (`filters::prepare` on the UI thread, `Arc`s
+  only, then `Prepared::math`) and `sticker_picture_with_job` / `StickerPictureWith::run` **on a job thread** (P7b
+  check: on the UI thread a 2048-px styled sticker cost ~255 ms per update; `StickerUi::popover_job`, one at a time,
+  counted in `popover_alive` until its thread ends, a dropped one included); the picture that lands for the key still
+  shown goes into the canvas texture (the texture key becomes `Stale`; `sync_texture` leaves the texture alone while
+  `Popover::shows_picture`), one for an older key is dropped and the newer numbers are drawn next; the canvas keeps the
+  last preview meanwhile. `popover::pending` (a job, or a popover not previewed yet) is part of `live::pending`, the
+  self-test's idle check. A selection popover keeps its would-be selection (computed in the frame: Color Range is the
+  wand's work, Grow / Shrink a distance transform, both within 8.4), which the canvas outlines instead of the
   editor's. Apply = `ApplyPopover`: the popover closes and its `PopKind::action()` runs through `run_in` (the E6
   question first for content edits); Cancel, Esc, another active layer (`validate`) or leaving the view close it with no
   change, and the canvas draws the sticker again. A Primary press on the canvas while Color to Alpha / Color Range is
@@ -9060,7 +9070,11 @@ selection; 3.4; the Cut-out, Filter and Selection commands).**
   its cache and the bounds fallback; the command list's rules on a text layer; the shared-picture question before
   Delete, the Magic Eraser, Remove Background and Layer via Cut, and the waiting edit after the answer), the colliding
   chords of `shortcuts::tests` with Ctrl+A / Ctrl+D / Ctrl+Shift+I; scenario `sticker_cutout` (8.11); core `k7b_*`
-  (9.1).
+  (9.1). P7b check: `k7b_check_the_popover_preview_runs_on_a_job` (held job threads: the frame that starts the job
+  leaves the canvas alone, no second job beside a running one, a stale result dropped, a closed popover's job never
+  lands, the landed preview equals the result), `k7b_check_another_tool_drops_an_open_lasso`,
+  `k7b_check_delete_and_backspace_keys_with_a_stamp_selected` (both keys through `shortcuts::handle` in the view, with
+  and without a selection).
 
 ---
 

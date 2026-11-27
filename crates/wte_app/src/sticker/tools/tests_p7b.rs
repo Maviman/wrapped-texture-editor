@@ -494,7 +494,7 @@ fn k7b_a_popover_previews_exactly_what_apply_gives() {
     let (mut state, stamp) = opened(&ctx);
     let start = state.sticker_ui.mirror.clone().unwrap();
     run_in(&mut state, StickerAction::OpenPopover(PopKind::Blur { radius: 3.0 }));
-    crate::sticker::popover::frame(&ctx, &mut state);
+    settle_popover(&ctx, &mut state);
     assert!(state.sticker_ui.popover.as_ref().unwrap().shows_picture);
     let preview = state.sticker_ui.mirror.clone().unwrap();
     assert_ne!(preview, start);
@@ -508,7 +508,7 @@ fn k7b_a_popover_previews_exactly_what_apply_gives() {
     assert_eq!(state.sticker_ui.mirror.as_ref(), Some(&start), "Cancel shows the sticker again");
     assert!(is_image(&state, stamp) && undo_len(&state) == 0);
     run_in(&mut state, StickerAction::OpenPopover(PopKind::Blur { radius: 3.0 }));
-    crate::sticker::popover::frame(&ctx, &mut state);
+    settle_popover(&ctx, &mut state);
     let want = crate::sticker::popover::previewed_data(&mut state);
     run_in(&mut state, StickerAction::ApplyPopover);
     assert_eq!((undo_len(&state), label(&state).as_deref()), (1, Some("Blur")));
@@ -524,6 +524,146 @@ fn k7b_a_popover_previews_exactly_what_apply_gives() {
     let PopKind::ColorToAlpha { key } = state.sticker_ui.popover.as_ref().unwrap().kind else { panic!() };
     assert_eq!(key, [RED[0], RED[1], RED[2]]);
     assert_eq!(undo_len(&state), 1, "picking changes nothing");
+}
+
+/// P7b check: waits (bounded) until the open popover's preview is shown, a frame every few milliseconds.
+fn settle_popover(ctx: &egui::Context, state: &mut AppState) {
+    let start = std::time::Instant::now();
+    refresh(ctx, state);
+    while crate::sticker::popover::pending(state) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "the popover preview never finished");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        refresh(ctx, state);
+    }
+}
+
+/// Waits (bounded) until no popover preview thread runs any more.
+fn wait_popover_threads(state: &AppState) {
+    let start = std::time::Instant::now();
+    while state.sticker_ui.popover_alive.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "a popover preview thread never ended");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+/// P7b check: the picture preview of a popover is drawn on a job, not in the frame (a 2048-px styled sticker cost
+/// ~255 ms of UI thread per update): the frame that starts it returns at once with the canvas unchanged; a result for
+/// numbers that changed meanwhile is dropped and the newer numbers are drawn next (one job at a time); a job of a
+/// closed popover never reaches the canvas; what lands is exactly what Apply gives.
+#[test]
+fn k7b_check_the_popover_preview_runs_on_a_job() {
+    use std::sync::atomic::Ordering;
+    let ctx = egui::Context::default();
+    let (mut state, stamp) = opened(&ctx);
+    let start = state.sticker_ui.mirror.clone().unwrap();
+    let hold = Arc::clone(&state.sticker_ui.jobs.hold);
+    hold.store(true, Ordering::Release);
+    run_in(&mut state, StickerAction::OpenPopover(PopKind::Blur { radius: 3.0 }));
+    refresh(&ctx, &mut state);
+    let pop = state.sticker_ui.popover.as_ref().unwrap();
+    assert!(state.sticker_ui.popover_job.is_some() && !pop.shows_picture && pop.previews == 1, "the job runs, nothing shown yet");
+    assert!(crate::sticker::popover::pending(&state) && crate::sticker::live::pending(&state), "the idle check waits for it");
+    assert_eq!(state.sticker_ui.mirror.as_ref(), Some(&start), "the frame did not draw the preview itself");
+    // New numbers while it runs: no second job beside it.
+    state.sticker_ui.popover.as_mut().unwrap().kind = PopKind::Blur { radius: 6.0 };
+    refresh(&ctx, &mut state);
+    assert_eq!(state.sticker_ui.popover.as_ref().unwrap().previews, 1);
+    assert_eq!(state.sticker_ui.popover_alive.load(Ordering::Acquire), 1);
+    hold.store(false, Ordering::Release);
+    settle_popover(&ctx, &mut state);
+    assert_eq!(state.sticker_ui.popover.as_ref().unwrap().previews, 2, "the stale result was dropped, the new numbers drawn");
+    let shown = state.sticker_ui.mirror.clone().unwrap();
+    let (t, change) = crate::sticker::filters::compute(&mut state, crate::sticker::filters::CutOut::Blur(6.0)).unwrap();
+    let crate::sticker::filters::Change::Data(data) = change else { panic!("pixels expected") };
+    let want = state.doc_mut().unwrap().sticker_picture_with(t.on, t.layer, data).unwrap();
+    assert_eq!(shown, want, "the preview of radius 6");
+    assert_eq!(undo_len(&state), 0);
+    // A job of a closed popover never lands.
+    hold.store(true, Ordering::Release);
+    state.sticker_ui.popover.as_mut().unwrap().kind = PopKind::Blur { radius: 9.0 };
+    refresh(&ctx, &mut state);
+    assert!(state.sticker_ui.popover_job.is_some());
+    run_in(&mut state, StickerAction::ClosePopover);
+    refresh(&ctx, &mut state);
+    assert!(state.sticker_ui.popover_job.is_none() && !crate::sticker::popover::pending(&state));
+    hold.store(false, Ordering::Release);
+    wait_popover_threads(&state);
+    refresh(&ctx, &mut state);
+    assert_eq!(state.sticker_ui.mirror.as_ref(), Some(&start), "the canvas shows the sticker");
+    assert!(is_image(&state, stamp) && undo_len(&state) == 0);
+    // Apply runs the command itself (on the UI thread, one entry), whatever the job was doing.
+    run_in(&mut state, StickerAction::OpenPopover(PopKind::Blur { radius: 6.0 }));
+    run_in(&mut state, StickerAction::ApplyPopover);
+    assert_eq!((undo_len(&state), label(&state).as_deref()), (1, Some("Blur")));
+    let id = sticker_id(&state, stamp);
+    assert_eq!(state.doc_mut().unwrap().sticker_picture(id, None, 1.0).unwrap(), want);
+}
+
+/// P7b check: an open polygon lasso is dropped when another tool is chosen (it stayed drawn under the Brush and Enter
+/// closed it into a selection there); choosing the Lasso again keeps it.
+#[test]
+fn k7b_check_another_tool_drops_an_open_lasso() {
+    let ctx = egui::Context::default();
+    let (mut state, _) = opened(&ctx);
+    tool(&mut state, StickerTool::Lasso);
+    for p in [v(10.0, 10.0), v(30.0, 10.0), v(30.0, 30.0)] {
+        click(&ctx, &mut state, Hit::Image, p, NONE);
+    }
+    crate::sticker::tool_changing(&mut state, StickerTool::Lasso);
+    assert_eq!(state.sticker_ui.lasso.as_ref().map(|l| l.points.len()), Some(3));
+    crate::sticker::tool_changing(&mut state, StickerTool::Brush);
+    tool(&mut state, StickerTool::Brush);
+    assert!(state.sticker_ui.lasso.is_none());
+    run_in(&mut state, StickerAction::EnterKey);
+    assert!(selection(&state).is_none(), "Enter under the Brush makes no selection");
+}
+
+/// P7b check (plan 7 "P7b" Checker): Delete and Backspace through the real key table in the Sticker view, with and
+/// without a selection, with the stamp selected: the selected pixels go, the stamp and the texture layers stay.
+#[test]
+fn k7b_check_delete_and_backspace_keys_with_a_stamp_selected() {
+    let ctx = egui::Context::default();
+    let (mut state, stamp) = opened(&ctx);
+    let layers_before = doc(&state).set(wte_core::TextureSetId(0)).map(|s| s.layers.len());
+    for (k, key) in [egui::Key::Delete, egui::Key::Backspace].into_iter().enumerate() {
+        let actions = key_actions(&ctx, &mut state, key);
+        assert_eq!(actions.len(), 1, "{key:?}: {actions:?}");
+        run_dispatched(&mut state, actions);
+        assert_eq!(undo_len(&state), k, "{key:?} without a selection makes no entry");
+        assert_eq!(state.status_hint, crate::sticker::DELETE_HINT);
+        let y = 4.0 + 10.0 * k as f32;
+        select_rect(&mut state, [0.0, y], [8.0, y + 6.0]);
+        let actions = key_actions(&ctx, &mut state, key);
+        run_dispatched(&mut state, actions);
+        assert_eq!((undo_len(&state), label(&state).as_deref()), (k + 1, Some(DELETE_SELECTED_LABEL)), "{key:?}");
+        assert_eq!(layer_pixels(&state, stamp, 0).get(4, y as u32 + 2)[3], 0, "{key:?}: the selected pixels went");
+        assert!(doc(&state).stamp(stamp).is_some(), "{key:?}: the stamp stays");
+        assert_eq!(state.session.as_ref().unwrap().selected_stamp, Some(stamp));
+        run_in(&mut state, StickerAction::SelectNone);
+    }
+    assert_eq!(doc(&state).set(wte_core::TextureSetId(0)).map(|s| s.layers.len()), layers_before, "no texture layer went");
+}
+
+/// The actions the shortcut table makes of one key press in the Sticker view (no text field focused).
+fn key_actions(ctx: &egui::Context, state: &mut AppState, key: egui::Key) -> Vec<AppAction> {
+    let mut out = Vec::new();
+    let input = egui::RawInput {
+        events: vec![egui::Event::ModifiersChanged(NONE), egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: NONE }],
+        ..Default::default()
+    };
+    crate::theme::run_test_pass(ctx, input, |ui| out = crate::shortcuts::handle(ui.ctx(), state));
+    out
+}
+
+/// Runs what `dispatch` makes of them in the Sticker view (`DeleteSelection` is the Sticker view's Delete key).
+fn run_dispatched(state: &mut AppState, actions: Vec<AppAction>) {
+    assert_eq!(state.view_mode, ViewMode::Sticker);
+    for a in actions {
+        match crate::dispatch::in_sticker_view(a) {
+            AppAction::Sticker(s) => run_in(state, s),
+            other => panic!("unexpected action {other:?}"),
+        }
+    }
 }
 
 /// A popover closes when another layer becomes active; a pixel popover needs a picture layer, Grow a selection.

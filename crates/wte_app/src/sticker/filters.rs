@@ -9,7 +9,9 @@
 // tab's command blocks draw (label, shortcut, what it needs, the action).
 
 use wte_core::sticker::{cutout, filter, select};
-use wte_core::{AlphaBuf, Matte, PixelData, PixelTarget, RemoveBgOptions, StickerContent};
+use std::sync::Arc;
+
+use wte_core::{AlphaBuf, Matte, PixelBuf, PixelData, PixelTarget, RemoveBgOptions, Selection, StickerContent};
 
 use crate::state::{AppState, StickerTool};
 use crate::sticker::popover::PopKind;
@@ -62,11 +64,26 @@ pub(crate) enum Change {
     NewMask(AlphaBuf),
 }
 
-/// The result of `cut` on the active picture layer, without changing anything (`None` after saying why).
-pub(crate) fn compute(state: &mut AppState, cut: CutOut) -> Option<(PaintTarget, Change)> {
+/// P7b check: the inputs of a Cut-out or Filter command, read on the UI thread without copying a buffer (`Arc`s);
+/// `math` works on any thread (the popovers' live preview runs it on a job, `popover.rs`).
+pub(crate) struct Prepared {
+    pub(crate) t: PaintTarget,
+    cut: CutOut,
+    pixels: Arc<PixelBuf>,
+    mask: Option<Arc<AlphaBuf>>,
+    /// The editor's selection (artboard pixels); `math` sees it from the layer's content pixels.
+    selection: Option<Arc<Selection>>,
+}
+
+const _: fn() = || {
+    fn send_static<T: Send + 'static>() {}
+    send_static::<Prepared>();
+};
+
+/// The inputs of `cut` on the active picture layer (`None` after saying why).
+pub(crate) fn prepare(state: &mut AppState, cut: CutOut) -> Option<Prepared> {
     let t = tools::paint_target(state, StickerTool::Brush, false)?;
-    let selection = tools::selection_for(state, &t);
-    let sel = selection.as_deref();
+    let selection = edit_of(state).and_then(|e| e.selection.clone());
     if matches!(cut, CutOut::Blur(_) | CutOut::Sharpen(..)) && t.size.iter().any(|&s| s > MAX_FILTER_SIDE) {
         state.status_hint = format!("{} works on pictures up to {MAX_FILTER_SIDE} pixels a side", cut.label());
         return None;
@@ -80,64 +97,80 @@ pub(crate) fn compute(state: &mut AppState, cut: CutOut) -> Option<(PaintTarget,
         }
     };
     let mask = doc.sticker_layer_mask(t.on, t.layer).ok().flatten();
-    let change = match cut {
-        CutOut::RemoveBackground(ui) => {
-            let found = match cutout::remove_background(&pixels, ui.opts) {
-                Ok(c) => c,
-                Err(refusal) => {
-                    state.status_hint = refusal.message().to_owned();
-                    state.toasts.info(refusal.message());
-                    return None;
-                }
-            };
-            if ui.into_mask {
-                match mask {
-                    Some(m) => {
-                        let mut out = (*m).clone();
-                        found.apply_to_mask(&mut out, sel);
-                        Change::Data(PixelData::Alpha(out))
+    Some(Prepared { t, cut, pixels, mask, selection })
+}
+
+impl Prepared {
+    /// What the command changes (Remove Background can refuse).
+    pub(crate) fn math(&self) -> Result<Change, cutout::RemoveBgRefusal> {
+        let t = &self.t;
+        let selection = self.selection.as_ref().map(|s| select::selection_in_content(&s.mask, t.artboard, &t.transform, t.size));
+        let sel = selection.as_ref();
+        let (pixels, mask) = (&self.pixels, &self.mask);
+        Ok(match self.cut {
+            CutOut::RemoveBackground(ui) => {
+                let found = cutout::remove_background(pixels, ui.opts)?;
+                if ui.into_mask {
+                    match mask {
+                        Some(m) => {
+                            let mut out = (**m).clone();
+                            found.apply_to_mask(&mut out, sel);
+                            Change::Data(PixelData::Alpha(out))
+                        }
+                        None => {
+                            let mut out = AlphaBuf::filled(t.size[0], t.size[1], 255);
+                            found.apply_to_mask(&mut out, sel);
+                            Change::NewMask(out)
+                        }
                     }
-                    None => {
-                        let mut out = AlphaBuf::filled(t.size[0], t.size[1], 255);
-                        found.apply_to_mask(&mut out, sel);
-                        Change::NewMask(out)
-                    }
+                } else {
+                    let mut out = (**pixels).clone();
+                    found.apply(&mut out, sel);
+                    Change::Data(PixelData::Rgba(out))
                 }
-            } else {
-                let mut out = (*pixels).clone();
-                found.apply(&mut out, sel);
+            }
+            CutOut::ColorToAlpha(key) => {
+                let mut out = (**pixels).clone();
+                cutout::color_to_alpha(&mut out, key, 0.0, 1.0, sel);
                 Change::Data(PixelData::Rgba(out))
             }
-        }
-        CutOut::ColorToAlpha(key) => {
-            let mut out = (*pixels).clone();
-            cutout::color_to_alpha(&mut out, key, 0.0, 1.0, sel);
-            Change::Data(PixelData::Rgba(out))
-        }
-        CutOut::RemoveMatte(m) => {
-            let mut out = (*pixels).clone();
-            cutout::remove_matte(&mut out, m, sel);
-            Change::Data(PixelData::Rgba(out))
-        }
-        CutOut::Defringe(width) => {
-            let mut out = (*pixels).clone();
-            cutout::defringe(&mut out, width.clamp(1, cutout::MAX_DEFRINGE), sel);
-            Change::Data(PixelData::Rgba(out))
-        }
-        CutOut::Blur(radius) => {
-            let radius = clean(radius, 0.5, filter::MAX_BLUR_RADIUS);
-            match (t.target, &mask) {
-                (PixelTarget::Mask, Some(m)) => Change::Data(PixelData::Alpha(filter::blur_mask(m, radius, sel))),
-                _ => Change::Data(PixelData::Rgba(filter::blur(&pixels, radius, sel))),
+            CutOut::RemoveMatte(m) => {
+                let mut out = (**pixels).clone();
+                cutout::remove_matte(&mut out, m, sel);
+                Change::Data(PixelData::Rgba(out))
             }
+            CutOut::Defringe(width) => {
+                let mut out = (**pixels).clone();
+                cutout::defringe(&mut out, width.clamp(1, cutout::MAX_DEFRINGE), sel);
+                Change::Data(PixelData::Rgba(out))
+            }
+            CutOut::Blur(radius) => {
+                let radius = clean(radius, 0.5, filter::MAX_BLUR_RADIUS);
+                match (t.target, mask) {
+                    (PixelTarget::Mask, Some(m)) => Change::Data(PixelData::Alpha(filter::blur_mask(m, radius, sel))),
+                    _ => Change::Data(PixelData::Rgba(filter::blur(pixels, radius, sel))),
+                }
+            }
+            CutOut::Sharpen(amount, radius) => {
+                let amount = clean(amount, 0.0, filter::MAX_SHARPEN_AMOUNT);
+                let radius = clean(radius, 0.5, filter::MAX_SHARPEN_RADIUS);
+                Change::Data(PixelData::Rgba(filter::sharpen(pixels, amount, radius, sel)))
+            }
+        })
+    }
+}
+
+/// The result of `cut` on the active picture layer, without changing anything (`None` after saying why).
+pub(crate) fn compute(state: &mut AppState, cut: CutOut) -> Option<(PaintTarget, Change)> {
+    let prepared = prepare(state, cut)?;
+    match prepared.math() {
+        Ok(change) => Some((prepared.t, change)),
+        Err(refusal) => {
+            state.status_hint = refusal.message().to_owned();
+            state.toasts.info(refusal.message());
+            None
         }
-        CutOut::Sharpen(amount, radius) => {
-            let amount = clean(amount, 0.0, filter::MAX_SHARPEN_AMOUNT);
-            let radius = clean(radius, 0.5, filter::MAX_SHARPEN_RADIUS);
-            Change::Data(PixelData::Rgba(filter::sharpen(&pixels, amount, radius, sel)))
-        }
-    };
-    Some((t, change))
+    }
 }
 
 /// A finite value clamped to `lo..=hi` (`lo` for NaN).

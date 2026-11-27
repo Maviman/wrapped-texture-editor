@@ -8,16 +8,19 @@
 // selection); Cancel, Esc, another active layer or leaving the view close it with no change.
 //
 // The preview is computed when what it shows changes (the numbers, the layer's pixels, the selection, "Paint on
-// mask") and at most every `PREVIEW_EVERY` while a slider is dragged; it runs on the UI thread (the budgets of 8.4:
-// blur radius 16 at 2048 x 2048 is about 50 ms).
+// mask") and at most every `PREVIEW_EVERY` while a slider is dragged. P7b check: a picture preview (the command's maths
+// and the styled render of the sticker) runs on a job thread, one at a time; the canvas keeps the last preview until
+// the next one lands (on the UI thread a 2048-px styled sticker took ~255 ms per update). The selection previews
+// stay on the UI thread (Color Range is the wand's work, Grow / Shrink a distance transform: within 8.4).
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui::{Rect, vec2};
 use glam::Vec2;
-use wte_core::{SelectMode, Selection, StickerLayerId};
+use wte_core::{PixelBuf, SelectMode, Selection, StickerLayerId};
 
 use crate::state::{AppState, PanelHit};
 use crate::sticker::commands::Modify;
@@ -166,12 +169,60 @@ fn key_now(state: &mut AppState, pop: &Popover) -> Option<PreviewKey> {
     Some(PreviewKey { kind: pop.kind.clone(), layer: pop.layer, source, selection, paint_on_mask: state.sticker_ui.paint_on_mask })
 }
 
-/// Once per frame before the canvas is drawn: computes the preview when it is out of date (not more often than every
-/// `PREVIEW_EVERY` while a button is held) and puts a preview picture into the canvas texture.
+/// P7b check: the job drawing a picture preview off the UI thread (`StickerUi::popover_job`): the key it was started
+/// for and the channel of its picture (`None`: the command found nothing to do).
+pub(crate) struct PreviewJob {
+    key: PreviewKey,
+    rx: mpsc::Receiver<Option<PixelBuf>>,
+}
+
+/// Counts a preview thread while it runs; at its end (a panic included) the count drops and a frame is asked for.
+struct AliveGuard {
+    alive: Arc<AtomicU64>,
+    ctx: egui::Context,
+}
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.alive.fetch_sub(1, Ordering::AcqRel);
+        self.ctx.request_repaint();
+    }
+}
+
+/// True while the preview of the open popover is not shown yet (the self-test's idle check waits for it).
+pub(crate) fn pending(state: &AppState) -> bool {
+    state.sticker_ui.popover_job.is_some() || state.sticker_ui.popover.as_ref().is_some_and(|p| p.previewed.is_none())
+}
+
+/// Once per frame before the canvas is drawn: takes a finished preview job's picture into the canvas texture (when it
+/// is still what the popover shows), and starts the next job when the preview is out of date (one job at a time, not
+/// more often than every `PREVIEW_EVERY` while a button is held). P7b check: a picture preview (the command's maths
+/// and the styled render, ~255 ms for a 2048-px styled sticker) runs on a job thread; the UI thread only gathers its
+/// inputs. The selection previews (Color Range, Grow / Shrink / Feather: within the wand's budget of 8.4) stay here.
 pub(crate) fn frame(ctx: &egui::Context, state: &mut AppState) {
-    let Some(pop) = state.sticker_ui.popover.clone() else { return };
+    let Some(pop) = state.sticker_ui.popover.clone() else {
+        state.sticker_ui.popover_job = None;
+        return;
+    };
     let _p = crate::app::frame_profile::scope("sticker.popover");
     let Some(key) = key_now(state, &pop) else { return };
+    if let Some(job) = state.sticker_ui.popover_job.as_ref() {
+        match job.rx.try_recv() {
+            Ok(picture) => {
+                let job = state.sticker_ui.popover_job.take();
+                if job.is_some_and(|j| j.key == key) {
+                    show_picture(ctx, state, picture);
+                }
+            }
+            // Still drawing: its end asks for a frame.
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                state.sticker_ui.popover_job = None;
+                show_picture(ctx, state, None);
+            }
+        }
+    }
+    let Some(pop) = state.sticker_ui.popover.clone() else { return };
     if pop.previewed.as_ref() == Some(&key) {
         return;
     }
@@ -180,16 +231,75 @@ pub(crate) fn frame(ctx: &egui::Context, state: &mut AppState) {
         ctx.request_repaint_after(PREVIEW_EVERY);
         return;
     }
-    let mut picture = None;
-    let mut selection = None;
-    match pop.kind.cut() {
+    let selection = match pop.kind.cut() {
         Some(cut) => {
-            if let Some((t, Change::Data(data))) = filters::compute(state, cut) {
-                picture = state.doc_mut().and_then(|d| d.sticker_picture_with(t.on, t.layer, data).ok());
+            // A dropped job (of an earlier key or a closed popover) still running finishes first.
+            if state.sticker_ui.popover_alive.load(Ordering::Acquire) > 0 {
+                return;
             }
+            start_job(ctx, state, cut, key.clone());
+            None
         }
-        None => selection = preview_selection(state, &pop.kind),
+        None => {
+            let selection = preview_selection(state, &pop.kind);
+            if pop.shows_picture {
+                show_picture(ctx, state, None);
+            }
+            selection
+        }
+    };
+    if let Some(p) = state.sticker_ui.popover.as_mut() {
+        p.previewed = Some(key);
+        p.last = Some(Instant::now());
+        p.selection = selection;
+        p.previews += 1;
     }
+}
+
+/// Starts the job of a picture preview for `key`: the inputs are gathered here (`filters::prepare`,
+/// `Document::sticker_picture_with_job`: `Arc`s), the maths and the render run on the thread.
+fn start_job(ctx: &egui::Context, state: &mut AppState, cut: CutOut, key: PreviewKey) {
+    let Some(prepared) = filters::prepare(state, cut) else {
+        show_picture(ctx, state, None);
+        return;
+    };
+    let (on, layer) = (prepared.t.on, prepared.t.layer);
+    let Some(draw) = state.doc_mut().and_then(|d| d.sticker_picture_with_job(on, layer).ok()) else {
+        show_picture(ctx, state, None);
+        return;
+    };
+    let (tx, rx) = mpsc::channel();
+    let alive = Arc::clone(&state.sticker_ui.popover_alive);
+    alive.fetch_add(1, Ordering::AcqRel);
+    let guard = AliveGuard { alive, ctx: ctx.clone() };
+    #[cfg(test)]
+    let hold = Arc::clone(&state.sticker_ui.jobs.hold);
+    let spawned = std::thread::Builder::new().name("Sticker popover preview".to_owned()).spawn(move || {
+        let _guard = guard;
+        let picture = match prepared.math() {
+            Ok(Change::Data(data)) => draw.run(data).ok(),
+            _ => None,
+        };
+        #[cfg(test)]
+        while hold.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The guard's drop (after the send) asks for the frame that takes the picture.
+        let _ = tx.send(picture);
+    });
+    match spawned {
+        Ok(_) => state.sticker_ui.popover_job = Some(PreviewJob { key, rx }),
+        Err(e) => {
+            // The closure, and the guard in it, went with the error: the count is back.
+            log::warn!("the popover preview cannot start: {e}");
+            show_picture(ctx, state, None);
+        }
+    }
+}
+
+/// Puts a preview picture into the canvas texture (`None`: the canvas draws the sticker again).
+fn show_picture(ctx: &egui::Context, state: &mut AppState, picture: Option<PixelBuf>) {
+    let shown_before = state.sticker_ui.popover.as_ref().is_some_and(|p| p.shows_picture);
     if let Some(p) = &picture {
         let size = [p.width, p.height];
         crate::sticker::live::upload(ctx, state, &wte_core::IRect::from_size(size[0], size[1]), &p.data, size, true);
@@ -197,18 +307,12 @@ pub(crate) fn frame(ctx: &egui::Context, state: &mut AppState) {
             c.key = crate::sticker::canvas::CanvasKey::Stale;
             c.exact = false;
         }
-    } else if pop.shows_picture
-        && let Some(c) = state.sticker_ui.canvas.as_mut()
-    {
+    } else if shown_before && let Some(c) = state.sticker_ui.canvas.as_mut() {
         // The preview cannot be drawn any more: the canvas draws the sticker again.
         c.key = crate::sticker::canvas::CanvasKey::Stale;
     }
     if let Some(p) = state.sticker_ui.popover.as_mut() {
-        p.previewed = Some(key);
-        p.last = Some(Instant::now());
         p.shows_picture = picture.is_some();
-        p.selection = selection;
-        p.previews += 1;
     }
 }
 

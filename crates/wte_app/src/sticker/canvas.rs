@@ -197,6 +197,8 @@ pub(crate) fn refresh(ctx: &egui::Context, state: &mut AppState) {
     let Some(shown) = shown(&mut session.doc, &edit) else { return };
     sync_texture(ctx, state, &shown, &edit);
     crate::sticker::live::frame(ctx, state);
+    // P7b check: and the open popover's preview (its job), as `canvas_side`.
+    crate::sticker::popover::frame(ctx, state);
 }
 
 /// The central area in the Sticker view: canvas, divider, 3D view. Without an open editor (a document replaced

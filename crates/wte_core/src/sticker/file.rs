@@ -161,7 +161,13 @@ fn read_small<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, limit: u64) -
 /// sticker's name, without reading the layers: what the library list shows. `None` when the bytes are not a sticker
 /// file; the picture is `None` when the file has no readable preview.
 pub fn read_wtes_preview(bytes: &[u8]) -> Option<(String, Option<PixelBuf>)> {
-    let mut zip = ZipArchive::new(Cursor::new(bytes)).ok()?;
+    read_wtes_preview_from(Cursor::new(bytes))
+}
+
+/// `read_wtes_preview` from a reader (check P8: the library opens each file and reads only the zip directory, the
+/// manifest and `preview.png`, never the whole file with its layers).
+pub fn read_wtes_preview_from<R: Read + Seek>(reader: R) -> Option<(String, Option<PixelBuf>)> {
+    let mut zip = ZipArchive::new(reader).ok()?;
     if read_small(&mut zip, "mimetype", 64).as_deref() != Some(WTES_MIMETYPE.as_bytes()) {
         return None;
     }

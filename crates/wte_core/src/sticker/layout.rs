@@ -295,13 +295,14 @@ pub fn pad(doc: &mut StickerDoc, px: u32) {
 
 /// The artboard `rect` cut to the limit (each side at most 4096, kept about its own centre; at least 1).
 pub fn limited(rect: IRect) -> IRect {
+    // Check P8: in i64 (a rectangle from the API may span more than i32 can hold: `b - a` overflowed); a side that
+    // would end past i32::MAX starts earlier.
     let side = |a: i32, b: i32| -> (i32, i32) {
-        let len = (b - a).max(1) as u32;
-        if len <= MAX_ARTBOARD {
-            return (a, a + len as i32);
-        }
-        let cut = ((len - MAX_ARTBOARD) / 2) as i32;
-        (a + cut, a + cut + MAX_ARTBOARD as i32)
+        let (a, b) = (i64::from(a), i64::from(b));
+        let len = (b - a).max(1);
+        let (start, len) = if len <= i64::from(MAX_ARTBOARD) { (a, len) } else { (a + (len - i64::from(MAX_ARTBOARD)) / 2, i64::from(MAX_ARTBOARD)) };
+        let start = start.min(i64::from(i32::MAX) - len);
+        (start as i32, (start + len) as i32)
     };
     let (x0, x1) = side(rect.x0, rect.x1);
     let (y0, y1) = side(rect.y0, rect.y1);

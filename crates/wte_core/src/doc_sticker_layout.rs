@@ -281,9 +281,10 @@ impl Document {
 
     /// "Merge Down" of sticker layer `layer` (3.3): it and the layer below become one picture layer of the two drawn
     /// together (each with its own opacity, blend, mask, adjustments and styles; the upper one clipped to the lower
-    /// one when it is clipped) over the artboard, at scale 1. The result takes the lower layer's name, place in the
+    /// one when it is clipped and the lower one is not; when both are clipped they share a base further down, which
+    /// clips the merged layer) over the artboard, at scale 1. The result takes the lower layer's name, place in the
     /// stack and clipping flag; Normal, full opacity, no mask or style. Content outside the artboard is not kept. One
-    /// entry. Errors: `UnknownStickerLayer`, `InvalidParam` (the bottom layer, a locked layer).
+    /// entry. Errors: `UnknownStickerLayer`, `InvalidParam` (the bottom layer, a locked or a hidden layer).
     pub fn merge_down_sticker_layer(&mut self, on: StickerRef, layer: StickerLayerId) -> Result<StickerId, EditError> {
         let doc = self.sticker_layered(on)?;
         let i = doc.layers.iter().position(|l| l.id == layer).ok_or(EditError::UnknownStickerLayer)?;
@@ -294,10 +295,19 @@ impl Document {
         if lower.locked || upper.locked {
             return Err(EditError::InvalidParam("a locked layer cannot be merged"));
         }
+        // Check P8: a hidden layer is not drawn, so merging it would throw its pixels away unasked (Photoshop refuses
+        // a Merge Down onto a hidden layer too).
+        if !lower.visible || !upper.visible {
+            return Err(EditError::InvalidParam("a hidden layer cannot be merged: show it first"));
+        }
         let lower_base = StickerLayer { clip: false, ..lower.clone() };
-        let pair = StickerDoc { shape: ArtboardShape::Rect, layers: vec![lower_base, upper.clone()], ..(*doc).clone() };
+        // Check P8: when both layers are clipped (to the same base further down), the upper one was clipped to that
+        // base, not to the lower layer: drawn as a pair it is not clipped; the merged layer keeps the lower one's clip,
+        // so the base cuts both as before.
+        let upper_drawn = StickerLayer { clip: upper.clip && !lower.clip, ..upper.clone() };
+        let pair = StickerDoc { shape: ArtboardShape::Rect, layers: vec![lower_base, upper_drawn], ..(*doc).clone() };
         let picture = self.render_unstored(pair)?;
-        let (lower_id, name, clip, visible) = (lower.id, lower.name.clone(), lower.clip, lower.visible || upper.visible);
+        let (lower_id, name, clip, visible) = (lower.id, lower.name.clone(), lower.clip, true);
         let origin = Vec2::new(doc.artboard.x0 as f32, doc.artboard.y0 as f32);
         self.set_sticker_with(
             on,

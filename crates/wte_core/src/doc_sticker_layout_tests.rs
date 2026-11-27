@@ -301,6 +301,127 @@ fn k8_a_library_file_shows_its_name_and_preview_without_its_layers() {
     assert_eq!(doc.sticker_picture(id, None, 1.0).unwrap(), doc.sticker_picture(sid, None, 1.0).unwrap());
 }
 
+// ---- checker of P8 ----
+
+/// A 64 x 48 sticker: a white base, two pictures clipped to it that do not overlap (green at (10, 10), yellow at
+/// (30, 10), 10 x 10 each), and a fourth unclipped picture at (50, 30).
+fn clipped_pair() -> (Document, StickerId, [StickerLayerId; 4]) {
+    let mut doc = doc_from_raw(samples::flat_quad(), 256);
+    let mut s = StickerDoc::new("clip", 64, 48);
+    let mut ids = [StickerLayerId(0); 4];
+    for (k, (c, w, at, clip)) in [
+        ([255, 255, 255, 255], [40, 30], [0.0, 0.0], false),
+        ([20, 200, 20, 255], [10, 10], [10.0, 10.0], true),
+        ([250, 220, 30, 255], [10, 10], [30.0, 10.0], true),
+        ([200, 20, 20, 255], [10, 10], [50.0, 30.0], false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = s.alloc_layer();
+        let v = doc.next_pixel_version();
+        let mut l = StickerLayer::new(id, "l", StickerContent::Picture(PicturePixels::Owned { pixels: Arc::new(flat(w[0], w[1], c)), version: v }));
+        l.transform = LayerTransform::moved(at[0], at[1]);
+        l.clip = clip;
+        s.layers.push(l);
+        ids[k] = id;
+    }
+    let sid = doc.add_sticker(s).unwrap();
+    doc.history.clear();
+    (doc, sid, ids)
+}
+
+#[test]
+fn k8_check_merging_two_layers_clipped_to_one_base_keeps_the_look() {
+    let (mut doc, sid, [_, green, yellow, _]) = clipped_pair();
+    let r = StickerRef::Id(sid);
+    let before = doc.sticker_picture(sid, None, 1.0).unwrap();
+    assert_eq!(before.get(35, 15), [250, 220, 30, 255], "the yellow square shows (clipped to the white base)");
+    doc.merge_down_sticker_layer(r, yellow).unwrap();
+    let d = Arc::clone(doc.sticker(sid).unwrap());
+    assert_eq!(d.layers.len(), 3);
+    assert!(d.layer(green).unwrap().clip, "the merged layer keeps the lower layer's clip");
+    // Before the fix the yellow square was clipped to the green one (they do not overlap) and vanished.
+    assert_eq!(doc.sticker_picture(sid, None, 1.0).unwrap(), before, "merging changes no pixel");
+}
+
+#[test]
+fn k8_check_a_hidden_layer_is_never_merged() {
+    let (mut doc, sid, [_, green, yellow, red]) = clipped_pair();
+    let r = StickerRef::Id(sid);
+    doc.set_sticker(r, |d| d.layer_mut(green).unwrap().visible = false, "hide", crate::document::Commit::Final).unwrap();
+    let n = doc.history.undo_len();
+    assert!(matches!(doc.merge_down_sticker_layer(r, yellow), Err(EditError::InvalidParam(_))), "onto a hidden layer");
+    assert!(matches!(doc.merge_down_sticker_layer(r, green), Err(EditError::InvalidParam(_))), "a hidden layer down");
+    assert_eq!(doc.history.undo_len(), n, "no entry");
+    assert_eq!(doc.sticker(sid).unwrap().layers.len(), 4, "nothing thrown away");
+    doc.merge_down_sticker_layer(r, red).unwrap();
+}
+
+/// Every layout command with 0, negative, huge and non-numeric numbers, on a 1 x 1 sticker and on a 4096 x 4096 one:
+/// no panic, the artboard within 1..=4096 a side, and a refused command makes no entry.
+#[test]
+fn k8_check_every_command_at_the_limits_and_with_bad_numbers() {
+    let check = |doc: &Document, sid: StickerId| {
+        let a = doc.sticker(sid).unwrap().artboard;
+        assert!((1..=crate::sticker::MAX_ARTBOARD).contains(&a.width()) && (1..=crate::sticker::MAX_ARTBOARD).contains(&a.height()), "{a:?}");
+    };
+    for side in [1u32, 4096] {
+        let mut doc = doc_from_raw(samples::flat_quad(), 256);
+        let mut s = StickerDoc::new("limit", side, side);
+        let id = s.alloc_layer();
+        let shape = ShapeSpec { kind: ShapeKind::Ellipse, size: Vec2::splat(side as f32), fill: Paint::Solid([9, 9, 9, 255]), outline: None };
+        s.layers.push(StickerLayer::new(id, "s", StickerContent::Shape(shape)));
+        let sid = doc.add_sticker(s).unwrap();
+        let r = StickerRef::Id(sid);
+        doc.history.clear();
+        for deg in [0.0, -90.0, 90.0, 180.0, 270.0, 360.0, 45.0, -1.0e9, 1.0e30] {
+            let _ = doc.rotate_sticker(r, deg);
+            check(&doc, sid);
+        }
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let n = doc.history.undo_len();
+            assert!(doc.rotate_sticker(r, bad).is_err());
+            assert_eq!(doc.history.undo_len(), n);
+        }
+        for size in [[0, 0], [1, u32::MAX], [u32::MAX, u32::MAX], [4096, 4096], [1, 1]] {
+            let _ = doc.resize_sticker(r, size);
+            check(&doc, sid);
+            let _ = doc.canvas_size_sticker(r, size, [f32::NAN, -5.0]);
+            check(&doc, sid);
+            let _ = doc.canvas_size_sticker(r, size, [f32::INFINITY, 1.0e9]);
+            check(&doc, sid);
+        }
+        for px in [0, 1, 4096, u32::MAX] {
+            let _ = doc.pad_sticker(r, px);
+            check(&doc, sid);
+            let _ = doc.trim_sticker(r, px);
+            check(&doc, sid);
+        }
+        for rect in [IRect::new(i32::MIN, i32::MIN, i32::MAX, i32::MAX), IRect::new(-5, -5, 0, 0), IRect::new(i32::MAX - 1, 0, i32::MAX, 1)] {
+            let _ = doc.crop_sticker(r, rect, ArtboardShape::RoundedRect { radius: f32::NAN }, true);
+            check(&doc, sid);
+        }
+        assert!(doc.crop_sticker(r, IRect::new(3, 3, 3, 3), ArtboardShape::Rect, false).is_err(), "an empty crop");
+        let _ = doc.flip_sticker(r, true);
+        let _ = doc.flatten_sticker(r);
+        check(&doc, sid);
+        while doc.history.undo_len() > 0 {
+            doc.undo();
+        }
+        assert_eq!(doc.sticker(sid).unwrap().size(), [side, side], "undo brings back the start");
+    }
+}
+
+#[test]
+fn k8_check_a_library_preview_is_read_from_a_file_without_its_layers() {
+    let (mut doc, sid, _, _, _) = doc();
+    let bytes = doc.sticker_wtes(sid, None).unwrap();
+    let (name, preview) = crate::sticker::file::read_wtes_preview_from(std::io::Cursor::new(&bytes)).unwrap();
+    assert_eq!((name.as_str(), preview.map(|p| [p.width, p.height])), ("lay", Some([64, 48])));
+    assert!(crate::sticker::file::read_wtes_preview_from(std::io::Cursor::new(b"PK\x03\x04 broken")).is_none());
+}
+
 /// Timing (8.4 has no own budget for the layout commands; they run once per click, like Crop to Selection): Trim,
 /// Rotate 90, Resize, Merge Down and Flatten of a 2048 x 2048 sticker of a white picture and a styled red square.
 #[test]

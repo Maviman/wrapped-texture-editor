@@ -1,7 +1,7 @@
 // Owner: stickers P8 (STICKER_PLAN 3.8 "Library", E7; ARCHITECTURE 8.15). The sticker library of the Sticker tab: a
 // folder of `.wtes` files (`Prefs::sticker_library_dir`, default `%APPDATA%\WrappedTextureEditor\stickers\`; "Choose
 // folder..." changes it). The folder is listed on a job thread (each file's name and `preview.png` through
-// `wte_core::read_wtes_preview`, never the layers); the UI takes at most one finished entry per frame and uploads its
+// `wte_core::read_wtes_preview_from`, never the layers); the UI takes at most one finished entry per frame and uploads its
 // thumbnail then. A click on an entry adds the sticker to this project's tray (`read_wtes` + `Document::import_wtes`:
 // one entry "Add Sticker", kept); its stamp styles, when the file has them, become the Stamp tool's styles. "Save to
 // Library" writes a tray sticker or the edited sticker (with its stamp's styles) as `<name>.wtes` into the folder.
@@ -26,14 +26,16 @@ use crate::sticker::StickerAction;
 const THUMB: f32 = 52.0;
 /// Most files listed (a folder with more shows the first ones by name).
 pub(crate) const MAX_FILES: usize = 500;
-/// Largest `.wtes` file read (bytes).
-const MAX_FILE_BYTES: u64 = 1 << 30;
+/// Longest side of a library thumbnail picture (pixels; check P8: the 512-px `preview.png` is made this small on the
+/// job thread, so 500 entries hold about 500 x 64 KB, not 500 x 1 MB, in RAM and on the GPU).
+pub(crate) const THUMB_PX: u32 = 128;
 
 /// One listed file.
 pub(crate) struct LibItem {
     pub(crate) path: PathBuf,
     pub(crate) name: String,
-    picture: Option<PixelBuf>,
+    /// Width / height of the preview (1 without one).
+    aspect: f32,
     tex: Option<egui::TextureHandle>,
 }
 
@@ -107,9 +109,12 @@ fn start_listing(ctx: &egui::Context, lib: &mut LibraryState, dir: PathBuf) {
     lib.finished = Arc::clone(&finished);
     let spawned = std::thread::Builder::new().name("Sticker library".to_owned()).spawn(move || {
         for path in wtes_files(&dir) {
-            let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= MAX_FILE_BYTES);
-            let read = if small { std::fs::read(&path).ok().and_then(|b| wte_core::read_wtes_preview(&b)) } else { None };
+            // Check P8: only the zip directory, the manifest and the preview are read (the file was read whole).
+            let read = std::fs::File::open(&path).ok().and_then(|f| wte_core::read_wtes_preview_from(std::io::BufReader::new(f)));
             let Some((name, picture)) = read else { continue };
+            let picture = picture.filter(|p| p.width > 0 && p.height > 0).map(|p| {
+                if p.width.max(p.height) <= THUMB_PX { p } else { wte_core::thumbnail(p.view(), p.width, p.height, THUMB_PX) }
+            });
             let name = if name.trim().is_empty() { path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned()) } else { name };
             if tx.send(Listed::Item(path, name, picture)).is_err() {
                 finished.store(true, Ordering::Release);
@@ -149,7 +154,8 @@ pub(crate) fn frame(ctx: &egui::Context, state: &mut AppState) {
                 let image = egui::ColorImage::from_rgba_unmultiplied([p.width as usize, p.height as usize], &p.data);
                 ctx.load_texture(format!("sticker-library-{}", lib.items.len()), image, egui::TextureOptions::LINEAR)
             });
-            lib.items.push(LibItem { path, name, picture, tex });
+            let aspect = picture.as_ref().map_or(1.0, |p| p.width as f32 / p.height.max(1) as f32);
+            lib.items.push(LibItem { path, name, aspect, tex });
             ctx.request_repaint();
         }
         Ok(Listed::Done) | Err(mpsc::TryRecvError::Disconnected) => lib.job = None,
@@ -178,8 +184,7 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Ap
         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
         for (i, item) in state.sticker_ui.library.items.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(vec2(THUMB, THUMB), Sense::click());
-            let aspect = item.picture.as_ref().map_or(1.0, |p| p.width as f32 / p.height.max(1) as f32);
-            paint_thumb(ui.painter(), rect, item.tex.as_ref().map(egui::TextureHandle::id), aspect);
+            paint_thumb(ui.painter(), rect, item.tex.as_ref().map(egui::TextureHandle::id), item.aspect);
             let resp = resp.on_hover_text(format!("{}. Click: add it to this project's tray", item.name));
             hits.push((PanelHit::LibraryItem(i as u32), rect));
             if resp.clicked() {
@@ -314,6 +319,38 @@ mod tests {
         let b = free_path(&dir, "My: sticker?");
         assert_eq!(b.file_name().unwrap().to_string_lossy(), "My_ sticker_ (2).wtes");
         assert_eq!(free_path(&dir, " . ").file_name().unwrap().to_string_lossy(), "Sticker.wtes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Check P8: a library entry keeps a small thumbnail (at most `THUMB_PX` a side) and its aspect, not the 512-px
+    /// preview picture; the job reads the file through the zip directory.
+    #[test]
+    fn library_thumbnails_are_small() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("target").join("sticker").join("unit_library_thumbs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut doc = wte_core::testutil::doc_from_raw(wte_core::samples::flat_quad(), 64);
+        let mut s = wte_core::StickerDoc::new("wide", 600, 300);
+        let id = s.alloc_layer();
+        let pixels = std::sync::Arc::new(PixelBuf::filled(600, 300, [200, 40, 40, 255]));
+        let v = doc.next_pixel_version();
+        s.layers.push(wte_core::StickerLayer::new(id, "p", wte_core::StickerContent::Picture(wte_core::PicturePixels::Owned { pixels, version: v })));
+        let sid = doc.add_sticker(s).unwrap();
+        std::fs::write(dir.join("wide.wtes"), doc.sticker_wtes(sid, None).unwrap()).unwrap();
+        let mut state = AppState::new(crate::state::Prefs::default(), true);
+        state.prefs.sticker_library_dir = Some(dir.clone());
+        let ctx = egui::Context::default();
+        for _ in 0..2000 {
+            frame(&ctx, &mut state);
+            if !state.sticker_ui.library.busy() && !state.sticker_ui.library.items.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let item = state.sticker_ui.library.items.first().expect("listed");
+        let size = item.tex.as_ref().expect("a thumbnail").size();
+        assert_eq!(size, [THUMB_PX as usize, THUMB_PX as usize / 2], "a small thumbnail of the 512 x 256 preview");
+        assert!((item.aspect - 2.0).abs() < 1e-3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

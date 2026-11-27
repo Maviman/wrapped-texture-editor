@@ -183,7 +183,9 @@ fn layer_commands_are_one_entry_each_and_keep_their_rules() {
     step(&mut state, &mut undo, StickerAction::SetLayerLocked(StickerLayerId(4), false), "Unlock Sticker Layer");
     step(&mut state, &mut undo, StickerAction::DeleteLayer(None), DELETE_LABEL);
     assert_eq!(edit_of(&state).unwrap().active_layer, Some(StickerLayerId(1)), "the layer below becomes active");
-    // A Preview opacity drag folds into one entry; Merge Down never touches a texture layer.
+    // A Preview opacity drag folds into one entry; Merge Down never touches a texture layer. (P8 check: a hidden layer
+    // is never merged, so layer 1 is shown first; then the same Merge Down is refused while it is hidden.)
+    step(&mut state, &mut undo, StickerAction::SetLayerVisible(StickerLayerId(1), true), "Show Sticker Layer");
     let layers_before = doc(&state).sets[0].layers.len();
     run_in(&mut state, StickerAction::SetLayerOpacity(StickerLayerId(1), 0.8, Commit::Preview));
     run_in(&mut state, StickerAction::SetLayerOpacity(StickerLayerId(1), 0.6, Commit::Preview));

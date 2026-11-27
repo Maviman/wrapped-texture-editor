@@ -214,7 +214,9 @@ and Layer; the Tool tab has the same buttons at its end.
      sharper without making it bigger on the model. Rotate 90 CW / CCW /
      180 and Rotate... turn it on the model too; Flip mirrors it.
   7. Layer > Merge Down (Ctrl+M) and Sticker > Flatten join layers; the
-     look does not change. Every one of these is one Undo step.
+     look does not change, also for two pattern layers clipped to the same
+     text. Merge Down refuses a hidden layer (show it first). Every one of
+     these is one Undo step.
   8. Adjustments (Tool tab, under Layer styles): Add adjustment... >
      Brightness / Contrast, Hue / Saturation, Levels, Invert, Black & White,
      Posterize or Threshold; the sliders change the layer's look live and

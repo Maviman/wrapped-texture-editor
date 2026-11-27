@@ -3094,9 +3094,13 @@ impl Document {
   layers left out, layer styles drawn in) at the artboard's corner; the shape stays, so the picture is unchanged (test).
   Refused for a sticker that is one plain layer already.
 - **Merge Down**: the layer and the one below rendered alone together (the lower one unclipped, the upper one clipped to
-  it when it is clipped) over the artboard at scale 1 become one `Owned` picture layer with the lower layer's id, name,
-  place and clip flag (Normal, opacity 1, no mask or style). Content outside the artboard is not kept; a lower layer's
-  own blend mode and its clipping to a base further down are baked as drawn alone (documented approximations).
+  it when it is clipped and the lower one is not; when both are clipped they share a base further down, so the upper one
+  is drawn unclipped and the merged layer, which keeps the clip flag, is cut by that base again: P8 check) over the
+  artboard at scale 1 become one `Owned` picture layer with the lower layer's id, name, place and clip flag (Normal,
+  opacity 1, no mask or style). Refused (no entry) for the bottom layer, a locked layer and a hidden layer (a hidden layer
+  is not drawn, so its pixels would be thrown away; P8 check). Content outside the artboard is not kept; a lower layer's
+  own blend mode and an upper layer's blend against the layers below the pair are baked as drawn alone (documented
+  approximations).
 - **Layer boxes** (`sticker::layout::LayerBox { size, pivot, text }`): a picture its pixels, a shape its size (pivot =
   centre, at `translate + pivot`), a text its frame at `size_px` (pivot = the anchor, at `translate`; a size above the
   text engine's 512 px is the 512-px frame scaled, as `render` draws it). `to_layer`, `to_content`, `corners`, `bounds`,
@@ -3585,8 +3589,9 @@ Every function is pure, headless and deterministic (any thread count gives the s
 sRGB RGBA8. Types are re-exported at the crate root; free functions are reached through their modules
 (`sticker::fx::apply_styles`, ...). P2 (selection, cut-out, filters), P3a (the sticker document, render, `Document`
 API) and P3b (pixel edits) extend this section. P8: `sticker/layout.rs` (the layout maths of 5.20 "Layout": `LayerBox`,
-`resize`, `rotate`, `flip`, `canvas_size`, `pad`, `limited`) and `file::read_wtes_preview` (a `.wtes` file's name and
-`preview.png` without its layers, for the library list).
+`resize`, `rotate`, `flip`, `canvas_size`, `pad`, `limited`) and `file::read_wtes_preview` / `read_wtes_preview_from`
+(a `.wtes` file's name and `preview.png` without its layers, for the library list; the `_from` form reads through any
+`Read + Seek`, so the library reads only the zip directory, the manifest and the preview of a file).
 
 ```rust
 // sticker/mod.rs
@@ -8371,8 +8376,10 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
 Stickers P8: `prefs.json` has `sticker_library_dir` (the sticker library folder; written only when set: `None` means
 `%APPDATA%\WrappedTextureEditor\stickers`, never used by a self-test or a unit test, which have no library folder unless
 one is set: `sticker::library::folder`). The library is listed on a named thread ("Sticker library"): `.wtes` files of the
-folder by name (at most 500, files up to 1 GiB), each read with `wte_core::read_wtes_preview` (the name and
-`preview.png`, never the layers); the UI takes at most one listed file per frame (its thumbnail uploaded then) and the
+folder by name (at most 500), each opened with `wte_core::read_wtes_preview_from` (the zip directory, the name and
+`preview.png`, never the layers or the whole file; P8 check), the preview made at most 128 px a side on the job thread
+(`library::THUMB_PX`; an entry keeps only that texture and its aspect, not the picture); the UI takes at most one listed
+file per frame (its thumbnail uploaded then) and the
 self-test's idle check waits for the job (`live::pending`). Save to Library writes `<name>.wtes` (characters Windows
 refuses replaced, ` (2)`, ` (3)` ... instead of overwriting); Export as PSD... writes the `.psd` of
 `Document::sticker_psd_bytes` (`io_flows::pick_save_psd`; no dialog in a self-test).
@@ -9252,7 +9259,8 @@ Shape; the Sticker and Layer commands; 3.2; 3.8).**
   16); the shared-picture question before Rotate, Text, Clip and Crop; Save to Library, the listing job, Add from the
   library, a broken file, Export as PSD read back; the command list's Sticker and Layer groups and every one of their
   commands run on an image stamp), `tools::crop::tests`, `tools::shape::tests`, `tools::text::tests`,
-  `adjust_ui::tests`, `library::tests` (free names, no library folder in a test); changed:
+  `adjust_ui::tests`, `library::tests` (free names, no library folder in a test; P8 check `library_thumbnails_are_small`:
+  a 512 x 256 preview listed as a 128 x 64 texture with its aspect); changed:
   `sticker::tests::layer_commands_are_one_entry_each_and_keep_their_rules` (Ctrl+M merges the sticker layers) and
   `a_locked_layer_and_an_unbuilt_tool_do_nothing` (every tool is built; the Crop starts its box); scenarios
   `sticker_text`, `sticker_layout`, `sticker_library` and the updated `sticker_keys` (8.11); core `k8_*` (9.1).
@@ -9907,7 +9915,12 @@ and text layers (exactly those two files, each = `dense(layer)`).
   (byte-identical finished pictures, also with an ellipse artboard), `k8_an_image_stamp_is_promoted_inside_a_layout_command`,
   `k8_layer_boxes_and_export_as_psd` (picture / shape / text boxes, a 1024-px text = the 512-px frame doubled; the PSD
   passes the strict walker and reads back with three layers, no link made),
-  `k8_a_library_file_shows_its_name_and_preview_without_its_layers`.
+  `k8_a_library_file_shows_its_name_and_preview_without_its_layers`. P8 check:
+  `k8_check_merging_two_layers_clipped_to_one_base_keeps_the_look` (two non-overlapping layers clipped to one base: the
+  upper one vanished when it was drawn clipped to the lower one), `k8_check_a_hidden_layer_is_never_merged` (no entry,
+  nothing thrown away), `k8_check_every_command_at_the_limits_and_with_bad_numbers` (a 1 x 1 and a 4096 x 4096 sticker
+  through every command with 0, negative, huge, NaN and infinite numbers and an `i32::MIN..i32::MAX` crop: no panic, the
+  artboard within 1..=4096, undo back to the start), `k8_check_a_library_preview_is_read_from_a_file_without_its_layers`.
 
 ### 9.2 `wte_app` tests
 

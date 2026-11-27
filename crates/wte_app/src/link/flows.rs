@@ -154,8 +154,16 @@ pub(crate) fn run_in(state: &mut AppState, action: LinkAction) {
         }
         LinkAction::Restore(id) => restore(state, id),
         LinkAction::SaveThenEdit(req) => {
-            state.link_ui.after_save = Some(req);
+            // Dispatch runs the queue in order: the save starts (`before_save` takes the request) or it does not
+            // (cancelled file dialog, a running job), and then `DropUnstartedEdit` drops what is left (check-P9a).
+            state.link_ui.save_then_edit = Some(req);
             state.push(AppAction::Save);
+            state.push(act(LinkAction::DropUnstartedEdit));
+        }
+        LinkAction::DropUnstartedEdit => {
+            if state.link_ui.save_then_edit.take().is_some() {
+                log::info!("the save did not start; the waiting \"Edit in\" is dropped");
+            }
         }
         LinkAction::Convert(id) => start_convert(state, id),
         LinkAction::LocateEditor(Some(path)) => set_editor_exe(state, path),
@@ -769,6 +777,10 @@ pub(crate) fn import_psd(state: &mut AppState, path: &Path, keep_linked: bool) {
 /// aliases-to-be (set when the save succeeds).
 pub(crate) fn before_save(state: &mut AppState, new_path: &Path) {
     state.link_ui.pending_aliases.clear();
+    // This save is the one a "Save..." of the save-first question waits for (check-P9a), and it holds the links made
+    // since the last save as they are now (a link made while it runs stays in the close prompt's line).
+    state.link_ui.after_save = state.link_ui.save_then_edit.take();
+    state.link_ui.saving_made = state.link_ui.made_since_save.clone();
     let Some(session) = state.session.as_ref() else { return };
     let Some(old) = session.path.clone() else { return };
     if old == new_path {
@@ -800,7 +812,8 @@ pub(crate) fn after_save(state: &mut AppState, links_revision: u64, warnings: &[
     if let Some(doc) = state.doc_mut() {
         doc.mark_links_saved(links_revision);
     }
-    state.link_ui.made_since_save.clear();
+    let saved = std::mem::take(&mut state.link_ui.saving_made);
+    state.link_ui.made_since_save.retain(|id| !saved.contains(id));
     let aliases = std::mem::take(&mut state.link_ui.pending_aliases);
     if let Some((first, _)) = aliases.first() {
         let editor = editor_name(state, *first);
@@ -825,6 +838,7 @@ pub(crate) fn after_save(state: &mut AppState, links_revision: u64, warnings: &[
 pub(crate) fn save_failed(state: &mut AppState) {
     state.link_ui.pending_aliases.clear();
     state.link_ui.after_save = None;
+    state.link_ui.saving_made.clear();
 }
 
 /// After a project was opened (5.3 "At load"; `project::load` only reported): a missing file of the links folder

@@ -250,7 +250,21 @@ impl Document {
             problem: None,
         };
         let cx = ImportContext { editor_key, editor_name, file_name, blob_sizes: &[], layer_hashes: &[] };
-        let made = import(psd, &empty, &start, &cx).map_err(|p| match p {
+        // check-P9a: a file larger than a sticker may be (4096 px a side) is fitted at once, as "Fit it into the
+        // sticker" does for a linked one (5.4, review A18): one merged picture, nothing thrown away. The "is now W x
+        // H in <editor>" question of an update makes no sense for a file that is only being imported.
+        let fitted = |p: ImportProblem| match p {
+            ImportProblem::CanvasTooLarge { width, height } => import_fitted(psd, &empty, &start, &cx).map(|mut made| {
+                made.toast = Some(format!(
+                    "{file_name} is {width} x {height}; a sticker can be at most 4096 px, so it came in as one picture of {} x {}.",
+                    made.sticker.artboard.width(),
+                    made.sticker.artboard.height()
+                ));
+                made
+            }),
+            other => Err(other),
+        };
+        let made = import(psd, &empty, &start, &cx).or_else(fitted).map_err(|p| match p {
             ImportProblem::NeedsMerged => crate::link::texts::needs_merged(editor_key, editor_name),
             ImportProblem::CanvasTooLarge { width, height } => {
                 crate::link::texts::canvas_too_large(name, width, height, editor_name)

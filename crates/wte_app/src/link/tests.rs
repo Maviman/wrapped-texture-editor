@@ -362,13 +362,65 @@ fn an_unsaved_project_asks_to_save_first_and_writes_nothing() {
     assert!(state.link_ui.launcher.calls().is_empty());
     assert_eq!(state.doc().unwrap().history.undo_len(), undo, "nothing changed");
     assert!(matches!(state.doc().unwrap().stamp(stamp).unwrap().source, StampSource::Image { .. }));
-    // "Save..." saves, and the edit continues after the save.
+    // "Save..." saves, and the edit continues after the save. Dispatch runs the queue in order: the Save (whose
+    // `start_save` calls `before_save` when the job starts), then `DropUnstartedEdit` (check-P9a).
     press(&mut state, "Save...").unwrap();
-    let other = run_queued(&mut state);
-    assert!(matches!(other.as_slice(), [AppAction::Save]), "{other:?}");
-    assert!(state.link_ui.after_save.is_some());
+    save_then_edit_queues_save_and_drop(&mut state);
+    flows::before_save(&mut state, Path::new(r"X:\never\proj.wtep"));
+    flows::run_in(&mut state, LinkAction::DropUnstartedEdit);
+    assert!(state.link_ui.after_save.is_some(), "the started save keeps the edit");
     flows::after_save(&mut state, 0, &[]);
     assert!(matches!(state.actions.as_slice(), [AppAction::Link(LinkAction::EditIn(_))]));
+}
+
+/// Runs the queued `SaveThenEdit` and checks that it queued the Save and, right behind it, `DropUnstartedEdit`.
+fn save_then_edit_queues_save_and_drop(state: &mut AppState) {
+    let queued = std::mem::take(&mut state.actions);
+    assert!(matches!(queued.as_slice(), [AppAction::Link(LinkAction::SaveThenEdit(_))]), "{queued:?}");
+    for a in queued {
+        if let AppAction::Link(l) = a {
+            flows::run_in(state, l);
+        }
+    }
+    let queued = std::mem::take(&mut state.actions);
+    assert!(matches!(queued.as_slice(), [AppAction::Save, AppAction::Link(LinkAction::DropUnstartedEdit)]), "{queued:?}");
+}
+
+/// check-P9a: "Save..." whose save never starts (the Save As dialog cancelled, a job running) must not leave the edit
+/// waiting: a later, unrelated save would otherwise open the sticker in the editor out of the blue.
+#[test]
+fn check_p9a_a_save_that_did_not_start_drops_the_waiting_edit() {
+    let (mut state, stamp, _) = crate::sticker::tests::image_stamp_state(ViewMode::Split);
+    edit(&mut state, stamp);
+    assert_eq!(question_kind(&state), Some(QuestionKind::SaveFirst));
+    press(&mut state, "Save...").unwrap();
+    save_then_edit_queues_save_and_drop(&mut state);
+    // The Save did nothing (no `before_save`); the drop runs next.
+    flows::run_in(&mut state, LinkAction::DropUnstartedEdit);
+    assert!(state.link_ui.save_then_edit.is_none() && state.link_ui.after_save.is_none());
+    // Later the user saves for another reason: nothing is opened in the editor.
+    flows::before_save(&mut state, Path::new(r"X:\never\proj.wtep"));
+    flows::after_save(&mut state, 0, &[]);
+    assert!(state.actions.is_empty(), "a later save continued the dropped edit: {:?}", state.actions);
+    assert!(state.link_ui.launcher.calls().is_empty());
+}
+
+/// check-P9a: a link made while a save runs is not in that save, so the close prompt keeps naming it.
+#[test]
+fn check_p9a_a_link_made_during_a_save_stays_in_the_close_prompt() {
+    let (mut state, stamp, dir) = linked_state("made_during_save");
+    let project = dir.join("proj.wtep");
+    flows::before_save(&mut state, &project);
+    edit(&mut state, stamp);
+    let id = sticker_id(&state, stamp);
+    assert!(state.link_ui.made_since_save.contains(&id));
+    flows::after_save(&mut state, 0, &[]);
+    assert!(state.link_ui.made_since_save.contains(&id), "the running save did not hold the link");
+    assert!(unsaved_line(&state).is_some());
+    // The next save holds it.
+    flows::before_save(&mut state, &project);
+    flows::after_save(&mut state, 0, &[]);
+    assert!(unsaved_line(&state).is_none());
 }
 
 #[test]
@@ -777,4 +829,41 @@ impl DialogName for AppState {
             _ => "other",
         }
     }
+}
+
+/// check-P9a: a PSD file larger than a sticker may be (here 6000 x 100, a flat file) is imported fitted, as one picture
+/// of at most 4096 px with the toast saying so, instead of being refused with the "is now W x H in <editor>" question
+/// text of a linked update.
+#[test]
+fn check_p9a_a_psd_larger_than_a_sticker_is_imported_fitted() {
+    let (mut state, _, _dir) = linked_state("import_large");
+    let mut merged = wte_core::PixelBuf::new(6000, 100);
+    merged.data.as_chunks_mut::<4>().0.iter_mut().for_each(|px| *px = [30, 120, 200, 255]);
+    let psd = wte_core::psd::PsdDoc {
+        size: [6000, 100],
+        depth: 8,
+        psb: false,
+        mode: wte_core::psd::PsdColorMode::Rgb,
+        has_real_merged: true,
+        merged: Some(merged),
+        layers: Vec::new(),
+        too_large: false,
+        icc_description: None,
+    };
+    let stamp = FileStamp::of_bytes(b"large", None);
+    let made = state
+        .doc_mut()
+        .unwrap()
+        .add_sticker_from_psd(&psd, "wide", stamp, None, "photocraft", "PhotoCraft", "wide.psd")
+        .expect("a large file is fitted, not refused");
+    let d = state.doc().unwrap().sticker(made.id).unwrap();
+    assert_eq!(d.size(), [4096, 69]);
+    assert_eq!(d.layers.len(), 1);
+    assert_eq!(made.mode, wte_core::link::LinkMode::Merged);
+    let toast = made.toast.expect("the toast says what happened");
+    assert!(toast.starts_with("wide.psd is 6000 x 100; a sticker can be at most 4096 px"), "{toast}");
+    // Over the reader's limits stays refused.
+    let huge = wte_core::psd::PsdDoc { size: [9000, 9000], merged: None, too_large: true, ..psd };
+    let r = state.doc_mut().unwrap().add_sticker_from_psd(&huge, "huge", stamp, None, "photocraft", "PhotoCraft", "huge.psd");
+    assert_eq!(r.unwrap_err(), wte_core::link::texts::too_large("huge.psd", 9000, 9000));
 }

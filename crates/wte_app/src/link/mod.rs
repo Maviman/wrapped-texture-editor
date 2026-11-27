@@ -106,6 +106,9 @@ pub enum LinkAction {
     Fit(StickerId),
     /// "Save..." of the save-first question: save, then continue the edit.
     SaveThenEdit(EditRequest),
+    /// Queued right behind the `Save` of `SaveThenEdit` (check-P9a): a save that did not start (its file dialog was
+    /// cancelled, a job was running) drops the waiting edit, so a later, unrelated save never starts the editor.
+    DropUnstartedEdit,
     /// Help > "PhotoCraft location...", and the first-time "Where is photocraft.exe?" (`None`: the file dialog).
     LocateEditor(Option<PathBuf>),
     /// "Convert with PhotoCraft's command-line tool" of "needs a merged picture" (5.4, 5.7).
@@ -272,8 +275,13 @@ pub struct LinkUi {
     pub questions: VecDeque<LinkQuestion>,
     /// Stickers linked since the last project save (the close prompt's line, 5.3).
     pub made_since_save: BTreeSet<StickerId>,
-    /// "Save..." of the save-first question: the edit continues after the save.
+    /// "Save..." of the save-first question, until its save starts (`flows::before_save` moves it to `after_save`;
+    /// `LinkAction::DropUnstartedEdit` drops it when no save started; check-P9a).
+    pub save_then_edit: Option<EditRequest>,
+    /// The edit that continues after the save that is running now.
     pub after_save: Option<EditRequest>,
+    /// The links made since the last save that the running save holds (`made_since_save` when it started).
+    pub saving_made: BTreeSet<StickerId>,
     /// A Save As in flight: the links whose old file becomes an alias when it succeeds.
     pub pending_aliases: Vec<(StickerId, PathBuf)>,
     /// The note about styles was shown in this session.
@@ -302,7 +310,9 @@ impl LinkUi {
             sent: None,
             questions: VecDeque::new(),
             made_since_save: BTreeSet::new(),
+            save_then_edit: None,
             after_save: None,
+            saving_made: BTreeSet::new(),
             pending_aliases: Vec::new(),
             first_note_shown: false,
             convert: None,
@@ -323,7 +333,9 @@ impl LinkUi {
         self.sent = None;
         self.questions.clear();
         self.made_since_save.clear();
+        self.save_then_edit = None;
         self.after_save = None;
+        self.saving_made.clear();
         self.pending_aliases.clear();
         self.convert = None;
     }

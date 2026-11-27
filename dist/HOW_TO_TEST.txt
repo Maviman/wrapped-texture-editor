@@ -290,6 +290,8 @@ WTE never comes to the front, flashes or beeps when PhotoCraft saves.
  11. File > Import Sticker from PSD... (or drop a .psd on the window): the
      file becomes a sticker in the tray, layer by layer; "Import Sticker
      from PSD, Keep Linked..." also follows that file when it changes.
+     A file larger than 4096 px comes in as one picture fitted into
+     4096 px, and a note says so.
  12. Stay in PhotoCraft (or in a full-screen game) and press Ctrl+S: WTE
      does not come to the front, its taskbar button does not flash and no
      sound plays; a question waits inside WTE's window.

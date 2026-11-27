@@ -274,6 +274,37 @@ pub(super) fn sticker_link() -> Vec<Step> {
             }
             wte_core::project::read_link_archive(&project(sc), &wte_core::link::archive_entry(id)).map(|_| ()).map_err(|e| e.to_string())
         }),
+        // check-P9a (the checker's "delete the links folder in mid-run"): the whole links folder goes away while WTE
+        // runs; the watcher reports it, the badge says "file missing" and offers Restore from project, which writes the
+        // archived copy back; nothing is applied, nothing asks.
+        Step::Setup("delete the whole links folder", |s, sc| {
+            remember_link(s, sc)?;
+            std::fs::remove_dir_all(wte_core::link::links_folder(&project(sc))).map_err(|e| e.to_string())
+        }),
+        Step::Until("the watcher reports the file missing", |s, sc| {
+            let id = sticker_key(sc, "sticker")?;
+            Ok(s.link_ui.sessions.get(&id).is_some_and(|x| x.observed == Some(None)))
+        }),
+        Step::Setup("the badge says file missing", |s, sc| badge_is(s, sc, "sticker", "file missing")),
+        Step::WaitFrames(3),
+        Step::Dyn("click Restore from project", |s, _| {
+            let rect = panel_rect(s, PanelHit::LinkRestore)?;
+            Ok(vec![Step::ScreenClick { at: rect.center(), button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }])
+        }),
+        Step::WaitIdle,
+        Step::WaitMs(1500),
+        Step::Setup("restored: the same bytes, linked, nothing applied, no question, no new entry", |s, sc| {
+            let id = sticker_key(sc, "sticker")?;
+            let (stamp, _) = FileStampOf::read(&link_file(s, id)?)?;
+            if stamp.crc32 as u64 != remembered(sc, "psd_crc")? {
+                return Err("the restored file differs".into());
+            }
+            if s.link_ui.counters.applied != remembered(sc, "applied")? || crate::link::open_question(s).is_some() {
+                return Err("the restore was taken as a change of the file".into());
+            }
+            undo_since(s, sc, 0)?;
+            badge_is(s, sc, "sticker", "linked")
+        }),
         // (5) In the Sticker view: a selection, the bottom layer active, a focused text field; the update waits.
         Step::Dyn("open the Sticker view on the linked stamp", |s, sc| {
             Ok(vec![Step::Do(AppAction::Sticker(StickerAction::Enter(Some(stamp_key(s, sc, "image")?))))])

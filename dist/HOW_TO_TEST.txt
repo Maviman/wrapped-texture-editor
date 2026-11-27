@@ -243,8 +243,14 @@ WTE never comes to the front, flashes or beeps when PhotoCraft saves.
      - A project that was never saved asks "Save the project first, so the
        linked file has a place next to it." Save..., then it goes on.
      - The first time WTE asks "Where is photocraft.exe?" (the portable
-       copy leaves no trace WTE can find); Help > PhotoCraft location...
+       copy leaves no trace WTE can find); Help > Editor locations...
        changes it later.
+     - With Photoshop installed as well, the button reads "Edit in..." and
+       the first click asks "Edit in which program?" (Photoshop /
+       PhotoCraft / Other program..., and "Always use this one"). After
+       that the button names your default editor, and the small "Edit
+       in..." button beside it opens the list (any editor for this one
+       sticker, Other program..., and "Default: <name>").
      - A picture several stamps show asks "Edit all" / "Only this one"
        first. With "Only this one" the other stamps stay as they are.
      - The file is <project>_links\<sticker>_k<number>.psd; the Sticker tab
@@ -299,6 +305,15 @@ WTE never comes to the front, flashes or beeps when PhotoCraft saves.
      and a layer effect: the badge reads "needs a merged picture" with what
      to turn on; "Convert with PhotoCraft's command-line tool" (when
      photocraft-cli.exe is next to photocraft.exe) is the fallback.
+ 14. Help > Editor locations...: the programs WTE found for Photoshop and
+     PhotoCraft (it only reads the registry), Browse... / Clear for each and
+     for another program, and the default editor ("Ask" brings the
+     question back). Nothing is started from this window.
+ 15. A sticker opened in PhotoCraft, then Edit in... > Photoshop: WTE asks
+     first ("PhotoCraft may still have this file open. Two programs saving
+     the same file overwrite each other.") and "Open in Photoshop anyway"
+     makes Photoshop the link's editor: the badge, the buttons and the
+     questions name Photoshop from then on.
 What does not come across: WTE's layer styles and stamp styles are not
 in the file (WTE adds them again to what comes back); a WTE text or shape
 layer you change in PhotoCraft comes back as pixels; PhotoCraft's text,

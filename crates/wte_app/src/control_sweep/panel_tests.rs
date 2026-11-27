@@ -154,6 +154,8 @@ fn every_menu_entry_queues_its_action() {
         (&["Help", "Shortcuts"], |a, _| matches!(a, [A::ShowDialog(Dialog::Shortcuts)])),
         (&["Help", "Tablet setup"], |a, _| matches!(a, [A::ShowDialog(Dialog::TabletHelp)])),
         (&["Help", "About"], |a, _| matches!(a, [A::ShowDialog(Dialog::About)])),
+        // Stickers P9b: the editors' programs and the default editor.
+        (&["Help", "Editor locations..."], |a, _| matches!(a, [A::Link(crate::link::LinkAction::ShowEditorLocations)])),
     ];
     for (path, check) in cases {
         let actions = app.menu(path);

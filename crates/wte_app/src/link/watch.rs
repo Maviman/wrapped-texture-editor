@@ -9,7 +9,9 @@
 //! `psd::read` must accept the bytes (an editor that writes in place leaves half-written files; `Truncated` just
 //! waits). After 30 s without a readable file: one `Unreadable` event, then quiet until the file changes again.
 //! WTE's own writes are recognised by content, not by timing (review A26): a settled file whose CRC-32 is in
-//! `own_writes` or equals the link's synced CRC only updates the "last seen" stamp. Parsing and CRC happen here; the
+//! `own_writes` or equals the link's synced CRC only updates the "last seen" stamp. A registration is used up when the
+//! watcher sees that content settle (stickers P9b; check-P9a open item 1): an editor that later saves bytes equal to
+//! something WTE once wrote (an undo back to the sent version, the same edit on a second link) is reported. Parsing and CRC happen here; the
 //! app only drains the events. Every repaint request goes through one function that also counts it
 //! (the counter `LinkUi::repaints` passed to [`LinkWatcher::start`]): with nothing changing it does not move.
 //!
@@ -54,8 +56,22 @@ impl OwnWrites {
         }
     }
 
+    /// The tests look at the registrations (the watcher uses them up with [`OwnWrites::take`]).
+    #[cfg(test)]
     pub fn contains(&self, crc: u32) -> bool {
         self.0.lock().is_ok_and(|q| q.contains(&crc))
+    }
+
+    /// Uses up one registration of `crc`: true when there was one (the watcher saw WTE's own write settle).
+    pub fn take(&self, crc: u32) -> bool {
+        let Ok(mut q) = self.0.lock() else { return false };
+        match q.iter().position(|c| *c == crc) {
+            Some(i) => {
+                q.remove(i);
+                true
+            }
+            None => false,
+        }
     }
 
     #[cfg(test)]
@@ -319,7 +335,9 @@ impl Worker {
 
     fn judge(&self, bytes: &[u8], meta: Meta, since: Instant, synced: &FileStamp) -> Judged {
         let stamp = FileStamp { size: meta.0, modified_ns: meta.1, crc32: crc(bytes) };
-        if stamp.same_content(synced) || self.own_writes.contains(stamp.crc32) {
+        // WTE's own write seen settled: its registration is used up (also when the list already has it as synced).
+        let own = self.own_writes.take(stamp.crc32);
+        if own || stamp.same_content(synced) {
             return Judged::Own;
         }
         match wte_core::psd::read(bytes, &PsdLimits::default()) {

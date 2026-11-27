@@ -19,7 +19,7 @@ use super::*;
 use crate::state::{AppState, ViewMode};
 
 /// A fresh folder under `target\wte-test-tmp\link\`, removed when the guard is dropped (ARCHITECTURE 4.8).
-struct TmpDir(PathBuf);
+pub(super) struct TmpDir(PathBuf);
 
 impl std::ops::Deref for TmpDir {
     type Target = Path;
@@ -34,7 +34,7 @@ impl Drop for TmpDir {
     }
 }
 
-fn tmp(name: &str) -> TmpDir {
+pub(super) fn tmp(name: &str) -> TmpDir {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wte-test-tmp/link").join(format!("{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -43,7 +43,7 @@ fn tmp(name: &str) -> TmpDir {
 
 /// An image stamp on the sphere in a project "saved" at `<dir>\proj.wtep` (the path only: the links folder is beside
 /// it), the stub launcher with an existing fake `photocraft.exe`.
-fn linked_state(name: &str) -> (AppState, StampId, TmpDir) {
+pub(super) fn linked_state(name: &str) -> (AppState, StampId, TmpDir) {
     let dir = tmp(name);
     let (mut state, stamp, _) = crate::sticker::tests::image_stamp_state(ViewMode::Split);
     state.session.as_mut().unwrap().path = Some(dir.join("proj.wtep"));
@@ -55,7 +55,7 @@ fn linked_state(name: &str) -> (AppState, StampId, TmpDir) {
 }
 
 /// Runs the queued link and sticker actions (what dispatch does next frame); other actions are returned.
-fn run_queued(state: &mut AppState) -> Vec<AppAction> {
+pub(super) fn run_queued(state: &mut AppState) -> Vec<AppAction> {
     let mut other = Vec::new();
     for _ in 0..8 {
         let actions = std::mem::take(&mut state.actions);
@@ -74,28 +74,28 @@ fn run_queued(state: &mut AppState) -> Vec<AppAction> {
     other
 }
 
-fn edit(state: &mut AppState, stamp: StampId) {
+pub(super) fn edit(state: &mut AppState, stamp: StampId) {
     flows::run_in(state, LinkAction::EditIn(EditRequest::new(LinkTarget::Stamp(stamp))));
     run_queued(state);
 }
 
-fn question_kind(state: &AppState) -> Option<QuestionKind> {
+pub(super) fn question_kind(state: &AppState) -> Option<QuestionKind> {
     open_question(state).map(|q| q.kind)
 }
 
-fn sticker_id(state: &AppState, stamp: StampId) -> StickerId {
+pub(super) fn sticker_id(state: &AppState, stamp: StampId) -> StickerId {
     sticker_of_stamp(state, stamp).expect("a sticker stamp")
 }
 
 /// Reads sticker `id`'s link file as the watcher would and hands the event to the app.
-fn deliver(state: &mut AppState, id: StickerId, tools_busy: bool) {
+pub(super) fn deliver(state: &mut AppState, id: StickerId, tools_busy: bool) {
     let path = link_path(state, id).unwrap();
     let (stamp, bytes) = FileStamp::read(&path).unwrap();
     let psd = wte_core::psd::read(&bytes, &wte_core::psd::PsdLimits::default()).unwrap();
     on_event(state, LinkEvent::Changed { id, stamp, psd: Box::new(psd), from_alias: false }, tools_busy);
 }
 
-fn badge_text(state: &mut AppState, id: StickerId) -> String {
+pub(super) fn badge_text(state: &mut AppState, id: StickerId) -> String {
     badge(state, id).map(|(_, t)| t).unwrap_or_default()
 }
 
@@ -129,13 +129,20 @@ fn self_tests_and_test_builds_get_only_the_stub() {
     assert!(LinkUi::new(true).launcher.is_stub() && LinkUi::new(false).launcher.is_stub());
     assert!(AppState::new(crate::state::Prefs::default(), true).link_ui.launcher.is_stub());
     // The registry of a self-test (and of a test build) is empty.
-    assert_eq!(launch::registry_for(false).default_value(Hive::CurrentUser, r"Software\Classes\Applications\photocraft.exe\shell\open\command"), None);
+    assert_eq!(
+        launch::registry_for(false).default_value(Hive::CurrentUser, launch::RegView::Bits64, r"Software\Classes\Applications\photocraft.exe\shell\open\command"),
+        None
+    );
 }
 
-struct MapRegistry(HashMap<(Hive, String), String>);
+/// An injected registry: values of the 64-bit view by (hive, key); `MapRegistry32` adds the 32-bit view.
+pub(super) struct MapRegistry(pub(super) HashMap<(Hive, String), String>);
 
 impl RegistryReader for MapRegistry {
-    fn default_value(&self, hive: Hive, subkey: &str) -> Option<String> {
+    fn default_value(&self, hive: Hive, view: launch::RegView, subkey: &str) -> Option<String> {
+        if view != launch::RegView::Bits64 {
+            return None;
+        }
         self.0.get(&(hive, subkey.to_owned())).cloned()
     }
 }
@@ -163,7 +170,7 @@ fn discovery_reads_the_two_keys_hkcu_first_and_needs_an_existing_exe() {
     let r = reg(&[(Hive::CurrentUser, K1, r#""C:\gone\photocraft.exe" "%1""#), (Hive::LocalMachine, K2, r#""C:\PC\photocraft.exe" "%1""#)]);
     assert_eq!(launch::discover(&pc, &r, &exists), Some(PathBuf::from(r"C:\PC\photocraft.exe")));
     assert_eq!(launch::discover(&pc, &reg(&[]), &exists), None);
-    // P9a discovers PhotoCraft only.
+    // These PhotoCraft keys name no Photoshop (P9b discovers Photoshop from its own keys: `link::editor_tests`).
     assert_eq!(launch::discover(&ExternalEditor::Photoshop, &r, &exists), None);
     assert_eq!(launch::exe_of_command(r#"  "C:\x y\a.exe"  "%1" "#), Some(PathBuf::from(r"C:\x y\a.exe")));
     assert_eq!(launch::exe_of_command(r"C:\x\A.EXE /open %1"), Some(PathBuf::from(r"C:\x\A.EXE")));
@@ -285,9 +292,38 @@ fn wtes_own_write_is_not_reported_even_with_the_old_list() {
     let mine = small_psd([1, 2, 3, 255]);
     let mut io = super::watch::OwnWritesIo(own.clone());
     wte_core::link::write_link_file(&file, &mine, &mut io).unwrap();
-    assert_eq!(own.len(), 1);
+    assert!(own.len() <= 1, "registered once (the watcher may have used it up already)");
     assert!(collect(&w, 250).is_empty(), "WTE's own write was reported");
     assert_eq!(repaints.load(Ordering::SeqCst), 0);
+}
+
+/// Stickers P9b (check-P9a open item 1, met by the Photoshop pass of `sticker_link`): a registration of WTE's own write
+/// is used up when the watcher sees it settle, so the editor saving the very same bytes later (another link of the
+/// same picture, an undo back to what WTE sent) is reported instead of being taken for WTE's write for the session.
+#[test]
+fn an_own_write_is_used_up_when_seen_so_the_same_bytes_from_the_editor_are_reported() {
+    let dir = tmp("watch_own_once");
+    let file = dir.join("a_k7.psd");
+    let first = small_psd([10, 20, 30, 255]);
+    std::fs::write(&file, &first).unwrap();
+    let (w, _, own) = watcher();
+    w.set_list(vec![entry(&file, &first)]);
+    std::thread::sleep(Duration::from_millis(80));
+    let mine = small_psd([1, 2, 3, 255]);
+    let mut io = super::watch::OwnWritesIo(own.clone());
+    wte_core::link::write_link_file(&file, &mine, &mut io).unwrap();
+    assert!(collect(&w, 250).is_empty(), "WTE's own write was reported");
+    assert_eq!(own.len(), 0, "the registration was not used up");
+    // The editor saves something else, then exactly WTE's earlier bytes: both are reported.
+    let other = small_psd([90, 90, 90, 255]);
+    testkit::save_bytes(&file, &other).unwrap();
+    assert!(matches!(first_event(&w), LinkEvent::Changed { stamp, .. } if stamp.crc32 == super::watch::crc(&other)));
+    testkit::save_bytes(&file, &mine).unwrap();
+    assert!(matches!(first_event(&w), LinkEvent::Changed { stamp, .. } if stamp.crc32 == super::watch::crc(&mine)));
+    // Two registrations of one content (two writes) are used up one at a time.
+    own.add(7);
+    own.add(7);
+    assert!(own.take(7) && own.take(7) && !own.take(7));
 }
 
 #[test]
@@ -520,7 +556,7 @@ fn a_running_child_asks_already_open_and_an_exited_one_clears_stale() {
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// The linked sticker with the editor's save of one more layer on its file.
-fn editor_adds_a_layer(state: &mut AppState, id: StickerId, name: &str) {
+pub(super) fn editor_adds_a_layer(state: &mut AppState, id: StickerId, name: &str) {
     let path = link_path(state, id).unwrap();
     let psd = testkit::with_new_layer(&path, name, 50, IRect::from_xywh(4, 4, 20, 10)).unwrap();
     testkit::save_as_editor(&path, &psd).unwrap();
@@ -817,7 +853,7 @@ fn the_command_line_conversion_becomes_a_merged_update() {
     let _ = LinkState::Linked;
 }
 
-trait DialogName {
+pub(super) trait DialogName {
     fn dialog_name(&self) -> &'static str;
 }
 
@@ -826,6 +862,7 @@ impl DialogName for AppState {
         match &self.dialog {
             crate::state::Dialog::None => "None",
             crate::state::Dialog::Link(_) => "Link",
+            crate::state::Dialog::EditorLocations => "EditorLocations",
             _ => "other",
         }
     }

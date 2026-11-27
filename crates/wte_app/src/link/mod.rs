@@ -5,8 +5,11 @@
 // Unlink, Restore, the answers, Import PSD as sticker, the save / Save As / load / close hooks) and the Sticker tab's
 // link block and the canvas header's badge (`ui.rs`).
 //
-// Every text takes the link editor's name (`editor::name_of_key`): P9a has PhotoCraft as the only discoverable editor
-// and the default for a new link; P9b adds Photoshop, the editor list and the default editor.
+// Every text takes the link editor's name (`editor::name_of_key`). P9a built the link with PhotoCraft as the only
+// discoverable editor; P9b (STICKER_PLAN 13.1) adds Photoshop's discovery, the editor list ("Edit in..." beside every
+// "Edit in <editor>", a submenu in the Layer and row menus), the chooser "Edit in which program?", the default editor,
+// Help > Editor locations..., the per-editor two-copies guard and the question before a link is opened in a second
+// editor.
 //
 // Nothing here raises, focuses or flashes the window or plays a sound: an update applies in place and questions are
 // in-window dialogs that wait there (`Dialog::Link`). The watcher's events are applied in `pump` (called by
@@ -20,6 +23,8 @@ pub mod testkit;
 pub mod ui;
 pub mod watch;
 
+#[cfg(test)]
+mod editor_tests;
 #[cfg(test)]
 mod tests;
 
@@ -57,11 +62,21 @@ pub struct EditRequest {
     pub open_as_is: bool,
     /// "Open anyway" to the two-copies guard.
     pub open_anyway: bool,
+    /// Stickers P9b: the editor's key when one was named (the editor list, the chooser); `None` = the link's editor,
+    /// else the default editor.
+    pub editor: Option<String>,
+    /// Stickers P9b: "Open in <editor> anyway" to "<other editor> may still have this file open." (13.1).
+    pub switch_ok: bool,
 }
 
 impl EditRequest {
     pub fn new(target: LinkTarget) -> EditRequest {
-        EditRequest { target, share: None, open_as_is: false, open_anyway: false }
+        EditRequest { target, share: None, open_as_is: false, open_anyway: false, editor: None, switch_ok: false }
+    }
+
+    /// The same request in the editor with `key`.
+    pub fn in_editor(target: LinkTarget, key: &str) -> EditRequest {
+        EditRequest { editor: Some(key.to_owned()), ..EditRequest::new(target) }
     }
 }
 
@@ -109,8 +124,17 @@ pub enum LinkAction {
     /// Queued right behind the `Save` of `SaveThenEdit` (check-P9a): a save that did not start (its file dialog was
     /// cancelled, a job was running) drops the waiting edit, so a later, unrelated save never starts the editor.
     DropUnstartedEdit,
-    /// Help > "PhotoCraft location...", and the first-time "Where is photocraft.exe?" (`None`: the file dialog).
-    LocateEditor(Option<PathBuf>),
+    /// Help > Editor locations... "Browse..." and the first-time "Where is photocraft.exe?" (`path: None`: the file
+    /// dialog) for the editor with key `editor`.
+    LocateEditor { editor: String, path: Option<PathBuf> },
+    /// Stickers P9b: Help > Editor locations... "Clear" (the program of `editor` is forgotten).
+    ClearEditor(String),
+    /// Stickers P9b: the default editor (a key; `None` = not chosen, the chooser asks again).
+    SetDefaultEditor(Option<String>),
+    /// Stickers P9b: "Other program..." of the editor list: the file dialog, then the edit in that program.
+    PickOther(EditRequest),
+    /// Stickers P9b: Help > Editor locations... (discovery runs again, then the dialog opens).
+    ShowEditorLocations,
     /// "Convert with PhotoCraft's command-line tool" of "needs a merged picture" (5.4, 5.7).
     Convert(StickerId),
     /// File > Import > Sticker from PSD... (5.8): a new tray sticker; `keep_linked` makes an `External` link.
@@ -152,6 +176,10 @@ pub enum QuestionKind {
     CanvasTooLarge,
     /// A message with OK (a failed write, a failed start).
     Info,
+    /// Stickers P9b: "Edit in which program?" (one button per known editor, the box "Always use this one").
+    ChooseEditor,
+    /// Stickers P9b: the link was opened in another editor in this session (13.1): "Open in <name> anyway" / Cancel.
+    OtherEditor,
 }
 
 /// One button of a question: its label and what it does (the dialog closes first).
@@ -159,6 +187,9 @@ pub enum QuestionKind {
 pub struct QuestionButton {
     pub label: String,
     pub actions: Vec<AppAction>,
+    /// Stickers P9b: the editor key a chooser button picks; with "Always use this one" ticked the press makes it the
+    /// default editor first.
+    pub choice: Option<String>,
 }
 
 /// An in-window question of the link (`Dialog::Link`).
@@ -178,7 +209,7 @@ impl LinkQuestion {
     }
 
     fn button(mut self, label: impl Into<String>, actions: Vec<AppAction>) -> LinkQuestion {
-        self.buttons.push(QuestionButton { label: label.into(), actions });
+        self.buttons.push(QuestionButton { label: label.into(), actions, choice: None });
         self
     }
 
@@ -187,10 +218,29 @@ impl LinkQuestion {
         self.button(label, Vec::new())
     }
 
+    /// A chooser button: picks the editor with `key`.
+    fn choice(mut self, label: impl Into<String>, key: &str, actions: Vec<AppAction>) -> LinkQuestion {
+        self.buttons.push(QuestionButton { label: label.into(), actions, choice: Some(key.to_owned()) });
+        self
+    }
+
     /// The button with this label.
     pub fn find(&self, label: &str) -> Option<&QuestionButton> {
         self.buttons.iter().find(|b| b.label == label)
     }
+}
+
+/// What pressing `b` queues: its actions, behind "make this the default editor" for a chooser button while "Always use
+/// this one" is ticked (the dialog's buttons and [`press`]).
+pub fn button_actions(state: &AppState, b: &QuestionButton) -> Vec<AppAction> {
+    let mut out = Vec::new();
+    if let Some(key) = &b.choice
+        && state.link_ui.chooser_always
+    {
+        out.push(AppAction::Link(LinkAction::SetDefaultEditor(Some(key.clone()))));
+    }
+    out.extend(b.actions.iter().cloned());
+    out
 }
 
 /// A file change that waits: for the view to be idle (5.6), for the answer to a conflict or to "changed while
@@ -290,6 +340,13 @@ pub struct LinkUi {
     pub counters: LinkCounters,
     /// The window had the focus in the last frame (a gained focus pokes the watcher).
     focused: bool,
+    /// Stickers P9b: discovery ran in this session (`editor::ensure_discovered`).
+    pub discovered: bool,
+    /// Stickers P9b: the editors whose program exists, in list order (refreshed by discovery and by every change of a
+    /// program; the labels drawn every frame read it).
+    pub known: Vec<editor::ExternalEditor>,
+    /// Stickers P9b: the box "Always use this one" of the chooser (ticked when the chooser opens).
+    pub chooser_always: bool,
 }
 
 impl LinkUi {
@@ -318,6 +375,9 @@ impl LinkUi {
             convert: None,
             counters: LinkCounters::default(),
             focused: false,
+            discovered: false,
+            known: Vec::new(),
+            chooser_always: true,
         }
     }
 
@@ -350,15 +410,29 @@ impl LinkUi {
 // Small helpers
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// The name of the link editor of sticker `id` ("PhotoCraft" for a sticker without a link: the default of P9a).
+/// The name of the link editor of sticker `id` (for a sticker without a link: the editor a new link opens in, or
+/// "your editor" while the chooser has to ask).
 pub fn editor_name(state: &AppState, id: StickerId) -> String {
-    let key = state.doc().and_then(|d| d.link(id)).map_or(wte_core::link::EDITOR_PHOTOCRAFT, |l| l.editor.as_str());
-    editor::name_of_key(key, None)
+    match state.doc().and_then(|d| d.link(id)) {
+        Some(l) => editor::name_of_key(&l.editor, state.prefs.other_editor_exe.as_deref()),
+        None => editor_name_new(state),
+    }
 }
 
-/// The name of the editor a new link is opened in (P9a: PhotoCraft).
-pub fn default_editor() -> editor::ExternalEditor {
-    editor::ExternalEditor::PhotoCraft
+/// The name of the editor a new link opens in ("your editor" while the chooser has to ask).
+pub fn editor_name_new(state: &AppState) -> String {
+    editor::quiet_editor(state).map_or_else(|| "your editor".to_owned(), |e| e.name())
+}
+
+/// The label of the main "Edit in" control for sticker `sticker` (`None`: an image or text stamp, not linked yet):
+/// "Edit in <link's editor>", else "Edit in <default or only known editor>", else "Edit in..." (the chooser asks).
+pub fn edit_in_label(state: &AppState, sticker: Option<StickerId>) -> String {
+    if let Some(id) = sticker
+        && state.doc().and_then(|d| d.link(id)).is_some()
+    {
+        return texts::edit_in(&editor_name(state, id));
+    }
+    editor::quiet_editor(state).map_or_else(|| ui::LIST_LABEL.to_owned(), |e| texts::edit_in(&e.name()))
 }
 
 /// The sticker's name ("sticker" when it is gone).
@@ -402,7 +476,7 @@ pub fn press(state: &mut AppState, label: &str) -> Result<(), String> {
         let labels: Vec<&str> = q.buttons.iter().map(|b| b.label.as_str()).collect();
         return Err(format!("the question has no \"{label}\" button: {labels:?}"));
     };
-    let actions = b.actions.clone();
+    let actions = button_actions(state, b);
     state.dialog = Dialog::None;
     state.actions.extend(actions);
     Ok(())
@@ -640,6 +714,22 @@ pub fn unsaved_line(state: &AppState) -> Option<String> {
     }
     let folder = session.path.as_deref().map(wte_core::link::links_folder).map_or_else(String::new, |p| p.display().to_string());
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let editor = editor_name(state, *state.link_ui.made_since_save.iter().next()?);
-    Some(texts::unsaved_links(&refs, &editor, &folder))
+    let editors = editors_of(state, state.link_ui.made_since_save.iter().copied());
+    Some(texts::unsaved_links(&refs, &editors, &folder))
+}
+
+/// The editors of these links' stickers, each once, in the order met: "Photoshop", "Photoshop and PhotoCraft".
+pub fn editors_of(state: &AppState, ids: impl Iterator<Item = StickerId>) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for id in ids {
+        let name = editor_name(state, id);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }

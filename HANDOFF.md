@@ -106,8 +106,12 @@ shared-picture question, the editor's saves written by the scenario, undo and th
 PSD alone, an update held by a focused text field in the Sticker view, PhotoCraft's own text layer and a layer effect
 from the core's fixtures, the conflict with both answers, a send while open and the "saved over" question, reopen with
 the file present, deleted and changed; shots `link_shared`, `link_made`, `link_updated`, `link_held_applied`,
-`link_merged`, `link_conflict`, `link_saved_over`, `link_changed_closed`), `sticker_link_path` (PATH = a `.psd`: a tray
-sticker layer by layer, placed; shot `psd_placed`).
+`link_merged`, `link_conflict`, `link_saved_over`, `link_changed_closed`, `link_pc_done`; P9b: then steps 1-3 and 6
+again with the stub as Photoshop, found through an injected registry: the chooser, the editor list, Photoshop's own type
+layer spliced into the linked file, `effects\outside-stroke.psd` and `layers\smartobject-layer.psd` merged,
+`layers-minimal\shape-layer.psd` "needs a merged picture" with Photoshop's sentence; shots `link_chooser`,
+`link_made_ps`, `link_editor_list`, `link_merged_ps`, `link_needs_merged_ps`), `sticker_link_path` (PATH = a `.psd`: a
+tray sticker layer by layer, placed; shot `psd_placed`).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
@@ -175,7 +179,7 @@ Khronos `glTF-Sample-Assets` repository on GitHub (`Models/<Name>/glTF-Binary/<N
 | pen-input | drawing tablets: pen pressure (size / flow), eraser end, barrel button, Windows Ink feedback off, status read-out, Help > Tablet setup; plan `docs/plans/PEN_INPUT_PLAN.md`, notes `docs/notes/pen/` | built on branch `pen-input` (2026-11-24), **not merged to `main`**; hand tests with a real tablet owed (5.2) | — |
 | objects-tabs | objects (select / hide / isolate / frame, hidden objects skipped by every ray; Objects tab) and two tab groups in the side panel (Tool / Color / Texture sets / Objects above, Layers / Brush / Text below, draggable split); plan `docs/plans/OBJECTS_TABS_PLAN.md`, notes `docs/notes/objtabs/`, report `docs/reports/OBJECTS_TABS_GATE_REPORT.md` | built and gated on branch `objects-tabs` (2026-11-24), **not merged to `main`** | — |
 
-| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P8 built and checked (P8 check: Merge Down of two clipped layers, hidden layers, the library's memory); P9a built (the editor link in the app, PhotoCraft); P9b-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
+| stickers | layered stickers, a Sticker view in the main window, layer styles on every stamp, the sticker tray, the PhotoCraft / Photoshop link (PSD), drag and drop and clipboard; plan `docs/plans/STICKER_PLAN.md` (rev 3), notes `docs/notes/sticker/` (`build-P*.md` / `check-P*.md`) | in progress on branch `stickers` (from `main` b2fb8f5): P0-P9a built and checked; P9b built (Photoshop's discovery, the editor list, the chooser, the default editor, Help > Editor locations...); P10a-P13 next; **not merged, no tag**; hand tests owed (5.4) | — |
 | companion | Android tablet companion: in-process server (USB through adb reverse, Wi-Fi with a pairing code, Bluetooth RFCOMM), the window mirrored as JPEG tiles, the tablet's pen / fingers / keys fed in-process; Help > Tablet companion, status chip; plan `docs/plans/COMPANION_PLAN.md`, wire spec `docs/protocol/`, notes `docs/notes/companion/`; the Android app is in https://github.com/Maviman/tablet-companion | desktop part D0-D11 built on branch `companion` (2026-11-24), **not merged to `main`**; Android part next, then the gate; hand tests owed (5.3) | — |
 Reports: `docs/reports/`. Plans: `docs/plans/`.
 
@@ -240,9 +244,14 @@ adjustments, the sticker library in the Sticker tab, Save to Library, Export as 
 app with PhotoCraft (Edit in PhotoCraft with the save-first, shared-picture, send-first and already-open questions, the
 watcher that applies a Ctrl+S in PhotoCraft in place, held while the Sticker view is busy, the badge and Update now /
 Send to / Show file / Unlink / Restore, conflicts and "saved over", the save / Save As / load / close rules, Import
-Sticker from PSD, the command-line conversion; the stub launcher in every self-test and test).
-Next: P9b the editor list (Photoshop, PhotoCraft, Other) and the default editor, P10a / P10b / P11 drop, clipboard,
-drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if everything is green; then the gate.
+Sticker from PSD, the command-line conversion; the stub launcher in every self-test and test), **P9b** the editor
+list (Photoshop found in the registry, read only: App Paths and its `Applications` key, 64- and 32-bit views; the
+chooser "Edit in which program?" with "Always use this one" while two editors are known and none is the default; the
+"Edit in..." list beside every "Edit in <editor>" and as a submenu in the Layer and row menus; Other program...; Help >
+Editor locations...; no already-open question for Photoshop; a question before a link opens in a second editor; the
+"could not be replaced" message when an editor holds the file).
+Next: P10a / P10b / P11 drop, clipboard, drag out, P12 linked paint layers, P13 docs and version 0.4.0; S1 / S2 only if
+everything is green; then the gate.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open

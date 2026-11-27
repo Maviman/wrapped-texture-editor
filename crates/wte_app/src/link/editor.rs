@@ -3,10 +3,18 @@
 //!
 //! The core knows only the editor's key (`StickerLink::editor`); every text the user sees takes the editor's name
 //! (`name()`), never a literal.
+//!
+//! Stickers P9b: the programs of the three editors live in the prefs (`photoshop_exe`, `photocraft_exe`,
+//! `other_editor_exe`), the default editor's key in `Prefs::default_editor` (decision D1: none until the user picks one
+//! in the chooser, or the only known editor). Discovery reads the registry once per session, when an "Edit in" control
+//! is first shown or used and whenever Help > Editor locations... opens ([`ensure_discovered`]); the editors whose
+//! program exists are cached in `LinkUi::known` for the labels drawn every frame.
 
 use std::path::{Path, PathBuf};
 
 use wte_core::link::{EDITOR_OTHER, EDITOR_PHOTOCRAFT, EDITOR_PHOTOSHOP};
+
+use crate::state::{AppState, Prefs};
 
 /// An outside editor.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +61,92 @@ impl ExternalEditor {
             ExternalEditor::Photoshop => Some("Photoshop.exe"),
             ExternalEditor::Other(_) => None,
         }
+    }
+}
+
+/// The editors in the order of every list (13.1): Photoshop, PhotoCraft, then another program.
+pub const KEYS: [&str; 3] = [EDITOR_PHOTOSHOP, EDITOR_PHOTOCRAFT, EDITOR_OTHER];
+
+/// The remembered program of the editor with `key` (`None` when not set).
+pub fn exe_pref<'a>(prefs: &'a Prefs, key: &str) -> Option<&'a PathBuf> {
+    match key {
+        EDITOR_PHOTOSHOP => prefs.photoshop_exe.as_ref(),
+        EDITOR_PHOTOCRAFT => prefs.photocraft_exe.as_ref(),
+        EDITOR_OTHER => prefs.other_editor_exe.as_ref(),
+        _ => None,
+    }
+}
+
+/// Sets (or clears) the remembered program of the editor with `key`.
+pub fn set_exe_pref(prefs: &mut Prefs, key: &str, path: Option<PathBuf>) {
+    match key {
+        EDITOR_PHOTOSHOP => prefs.photoshop_exe = path,
+        EDITOR_PHOTOCRAFT => prefs.photocraft_exe = path,
+        EDITOR_OTHER => prefs.other_editor_exe = path,
+        _ => {}
+    }
+}
+
+/// The editor of `key` as this machine knows it (`other` needs its remembered program).
+pub fn editor_of_key(prefs: &Prefs, key: &str) -> Option<ExternalEditor> {
+    match key {
+        EDITOR_PHOTOSHOP => Some(ExternalEditor::Photoshop),
+        EDITOR_PHOTOCRAFT => Some(ExternalEditor::PhotoCraft),
+        EDITOR_OTHER => prefs.other_editor_exe.clone().map(ExternalEditor::Other),
+        _ => None,
+    }
+}
+
+/// The editors whose program is remembered and exists, in list order (looks at the disk; not for every frame).
+pub fn known_editors(prefs: &Prefs, exists: &dyn Fn(&Path) -> bool) -> Vec<ExternalEditor> {
+    KEYS.iter()
+        .filter(|k| exe_pref(prefs, k).is_some_and(|p| exists(p)))
+        .filter_map(|k| editor_of_key(prefs, k))
+        .collect()
+}
+
+/// Discovery for every editor whose program is not remembered or no longer exists (13.1): once per session, or again
+/// with `force` (Help > Editor locations...). A found program is remembered in the prefs (written with them at exit);
+/// `LinkUi::known` is refreshed.
+pub fn ensure_discovered(state: &mut AppState, force: bool) {
+    if state.link_ui.discovered && !force {
+        return;
+    }
+    state.link_ui.discovered = true;
+    let exists = |p: &Path| p.is_file();
+    for editor in [ExternalEditor::Photoshop, ExternalEditor::PhotoCraft] {
+        if exe_pref(&state.prefs, editor.key()).is_some_and(|p| exists(p)) {
+            continue;
+        }
+        if let Some(found) = super::launch::discover(&editor, &*state.link_ui.registry, &exists) {
+            log::info!("{} found at {}", editor.name(), found.display());
+            set_exe_pref(&mut state.prefs, editor.key(), Some(found));
+        }
+    }
+    refresh_known(state);
+}
+
+/// Recomputes `LinkUi::known` (after discovery and after a program was chosen or cleared).
+pub fn refresh_known(state: &mut AppState) {
+    state.link_ui.known = known_editors(&state.prefs, &|p: &Path| p.is_file());
+}
+
+/// The default editor the prefs name, if any (an `other` default without a remembered program is none).
+pub fn default_of(prefs: &Prefs) -> Option<ExternalEditor> {
+    prefs.default_editor.as_deref().and_then(|k| editor_of_key(prefs, k))
+}
+
+/// The editor a new link opens in without asking (the labels, an import that keeps the file linked): the default
+/// editor, else the only known editor, else PhotoCraft (it can be located). `None` when two or more editors are known
+/// and none is the default: the main button reads "Edit in..." and its click opens the chooser.
+pub fn quiet_editor(state: &AppState) -> Option<ExternalEditor> {
+    if let Some(e) = default_of(&state.prefs) {
+        return Some(e);
+    }
+    match state.link_ui.known.as_slice() {
+        [] => Some(ExternalEditor::PhotoCraft),
+        [one] => Some(one.clone()),
+        _ => None,
     }
 }
 

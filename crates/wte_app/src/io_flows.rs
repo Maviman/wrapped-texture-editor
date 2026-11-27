@@ -921,10 +921,11 @@ pub fn pick_save_psd(frame: &eframe::Frame, prefs: &Prefs, default_name: &str) -
     dialog.save_file().map(|p| if crate::dnd::extension_of(&p) == "psd" { p } else { p.with_extension("psd") })
 }
 
-/// Stickers P9a: native "choose program" dialog ("Where is photocraft.exe?", Help > PhotoCraft location...).
-pub fn pick_program(frame: &eframe::Frame, prefs: &Prefs, title: &str) -> Option<PathBuf> {
+/// Stickers P9a / P9b: native "choose program" dialog ("Where is photocraft.exe?", "Where is Photoshop.exe?", "Other
+/// program...", Help > Editor locations...), opened in the folder of the editor's remembered program.
+pub fn pick_program(frame: &eframe::Frame, prefs: &Prefs, title: &str, editor_key: &str) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new().set_title(title).add_filter("Programs", &["exe"]).set_parent(frame);
-    if let Some(dir) = prefs.photocraft_exe.as_deref().and_then(Path::parent).filter(|d| d.is_dir()) {
+    if let Some(dir) = crate::link::editor::exe_pref(prefs, editor_key).map(PathBuf::as_path).and_then(Path::parent).filter(|d| d.is_dir()) {
         dialog = dialog.set_directory(dir);
     }
     dialog.pick_file()

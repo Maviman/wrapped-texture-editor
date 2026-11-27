@@ -14,6 +14,17 @@
 //   change -> the conflict, both answers; (8) "Send to PhotoCraft" after the launch -> the warning, Send anyway, then the
 //   editor saves over it -> the "saved over" question, never a silent update; (9) save, reopen: the link is there;
 //   the PSD deleted, reopen: restored; changed while closed, reopen: the question, Update.
+//   Stickers P9b (STICKER_PLAN 13.9 "P9b"): then the same steps 1-3 and 6 run a second time with the stub as
+//   **Photoshop**: Photoshop is found through an injected registry (its App Paths key names a stub program in the run
+//   folder), so two editors are known and none is the default: the main button reads "Edit in...", its click opens
+//   the chooser "Edit in which program?"; Photoshop with "Always use this one" -> the shared-picture question -> the
+//   link in Photoshop (the stub saw Photoshop's program); the editor list; Photoshop's save -> one update "Updated from
+//   Photoshop"; undo, the idle check, "changed in WTE", Update now; a sticker from Photoshop's own shape-layer file,
+//   placed and linked, then Photoshop's own type layer added to the linked file (the bytes of
+//   `layers\type-layer.psd`'s layer, `testkit::with_foreign_layer`) -> the WTE layer stays, one new picture layer;
+//   `effects\outside-stroke.psd` -> merged with "layer effects"; `layers\smartobject-layer.psd` -> merged with "smart
+//   objects"; `layers-minimal\shape-layer.psd` (MaxCompat off) -> nothing applied, "needs a merged picture" and
+//   Photoshop's sentence word for word in the Sticker tab; two undos bring the layers back.
 // - `sticker_link_path`: PATH = a PSD file: imported as a tray sticker layer by layer and placed on the sphere.
 // Each shot says what it must show.
 
@@ -22,11 +33,42 @@ use crate::link::{EditRequest, LinkAction, LinkTarget, QuestionKind, SendRequest
 use crate::sticker::StickerAction;
 use wte_core::StickerId;
 
-/// The PSD fixtures of the core's tests (made with PhotoCraft v0.2.0's command-line tool, P0).
+/// The PSD fixtures of the core's tests (made with PhotoCraft v0.2.0's command-line tool, P0; Photoshop's own files
+/// under `photoshop\`, P5a).
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../wte_core/tests/fixtures/psd/");
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(FIXTURES).join(name)
+}
+
+/// The registry of the Photoshop pass (stickers P9b): Photoshop's App Paths key names the stub program in the run
+/// folder. An injected reader: a self-test never reads the real registry.
+struct StubPhotoshopRegistry(String);
+
+impl crate::link::launch::RegistryReader for StubPhotoshopRegistry {
+    fn default_value(&self, hive: crate::link::launch::Hive, view: crate::link::launch::RegView, subkey: &str) -> Option<String> {
+        let wanted = hive == crate::link::launch::Hive::LocalMachine
+            && view == crate::link::launch::RegView::Bits64
+            && subkey == r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Photoshop.exe";
+        wanted.then(|| self.0.clone())
+    }
+}
+
+/// The labels of the open link question's buttons.
+fn button_labels(s: &AppState) -> Vec<String> {
+    crate::link::open_question(s).map(|q| q.buttons.iter().map(|b| b.label.clone()).collect()).unwrap_or_default()
+}
+
+/// The toasts include one that starts with `start`.
+fn toast_starts(s: &AppState, start: &str) -> Result<(), String> {
+    let toasts = s.toasts.visible_labels();
+    if toasts.iter().any(|t| t.starts_with(start)) { Ok(()) } else { Err(format!("no toast \"{start}...\": {toasts:?}")) }
+}
+
+/// Photoshop "saves" the linked file of sticker `key` as the fixture `rel` (its own bytes).
+fn photoshop_saves(s: &AppState, sc: &Scratch, key: &str, rel: &str) -> Result<(), String> {
+    let bytes = std::fs::read(fixture(rel)).map_err(|e| e.to_string())?;
+    testkit::save_bytes(&link_file(s, sticker_key(sc, key)?)?, &bytes)
 }
 
 fn project(sc: &Scratch) -> PathBuf {
@@ -198,8 +240,8 @@ pub(super) fn sticker_link() -> Vec<Step> {
         Step::Shot {
             name: "link_made",
             expect: "Sticker tab: the selected logo stamp (Sticker, 1 layer) with \"Link: linked\", \"Editor: PhotoCraft\", the \
-                     file name Logo_k<id>.psd and the buttons Edit in PhotoCraft, Update now, Send to PhotoCraft, Show file in \
-                     Explorer, Unlink",
+                     file name Logo_k<id>.psd and the buttons Edit in PhotoCraft, Edit in..., Update now, Send to \
+                     PhotoCraft, Show file in Explorer, Unlink",
         },
         // (2) The editor adds a red layer and saves: one update.
         Step::Setup("remember; the editor saves a red layer", |s, sc| {
@@ -588,11 +630,332 @@ pub(super) fn sticker_link() -> Vec<Step> {
             }
             entry_is(s, sc, "Update Linked Sticker", 1)
         }),
-        Step::Setup("the Sticker tab with the linked stamp for the final screenshot", |s, sc| {
+        Step::Setup("the Sticker tab with the linked stamp", |s, sc| {
             let stamp = stamp_key(s, sc, "image")?;
             crate::dispatch::select_stamp(s, Some(stamp));
             s.upper_tab = UpperTab::Sticker;
             Ok(())
+        }),
+        Step::WaitFrames(3),
+        Step::Shot {
+            name: "link_pc_done",
+            expect: "Sticker tab: the selected logo stamp with \"Link: linked\", \"Editor: PhotoCraft\" and the buttons Edit in \
+                     PhotoCraft, Edit in..., Update now, Send to PhotoCraft, Show file in Explorer, Unlink; the left logo \
+                     on the sphere with its red bar",
+        },
+    ]);
+    steps.extend(photoshop_pass());
+    steps
+}
+
+/// Stickers P9b: steps 1-3 and 6 of `sticker_link` a second time with the stub as Photoshop (see the module docs).
+fn photoshop_pass() -> Vec<Step> {
+    let mut steps = vec![Step::Setup(
+        "Photoshop known through the registry (the stub program in the run folder), PhotoCraft too, no default editor; \
+         a fresh stub log; the logo as the Stamp tool's source",
+        |s, sc| {
+            let exe = with_suffix(&sc.out_stem, "_stub").join("Photoshop.exe");
+            std::fs::write(&exe, b"").map_err(|e| e.to_string())?;
+            s.link_ui.registry = Box::new(StubPhotoshopRegistry(exe.display().to_string()));
+            s.link_ui.discovered = false;
+            s.link_ui.launcher = Box::new(crate::link::launch::StubLauncher::default());
+            s.prefs.default_editor = None;
+            crate::dispatch::select_stamp(s, None);
+            s.upper_tab = UpperTab::Sticker;
+            setup_stamp_image(s, sc)
+        },
+    )];
+    steps.extend(place_logo(
+        |s, _| model_click(s, ViewId::Main3D, [-0.05, 0.4]),
+        |s, sc| {
+            let (id, _) = placed_stamp(s, false)?;
+            sc.values.insert("ps1", id.0);
+            Ok(())
+        },
+    ));
+    steps.extend(place_logo(
+        |s, _| model_click(s, ViewId::Main3D, [0.1, -0.4]),
+        |s, sc| {
+            let (id, _) = placed_stamp(s, false)?;
+            sc.values.insert("ps2", id.0);
+            Ok(())
+        },
+    ));
+    steps.extend([
+        // (1) Two editors known and no default: the chooser; Photoshop; the shared picture; the link.
+        Step::Dyn("select the first new logo", |s, sc| Ok(vec![Step::Do(AppAction::SelectStamp(Some(stamp_key(s, sc, "ps1")?)))])),
+        Step::Do(AppAction::SetTool(ToolKind::Transform)),
+        Step::WaitFrames(3),
+        Step::Assert("Photoshop was found (the injected App Paths key); the main button reads \"Edit in...\"", |s, sc| {
+            let exe = with_suffix(&sc.out_stem, "_stub").join("Photoshop.exe");
+            if s.prefs.photoshop_exe.as_deref() != Some(exe.as_path()) {
+                return Err(format!("Photoshop's program {:?}", s.prefs.photoshop_exe));
+            }
+            let known: Vec<String> = s.link_ui.known.iter().map(|e| e.name()).collect();
+            if known != ["Photoshop", "PhotoCraft"] {
+                return Err(format!("known editors {known:?}"));
+            }
+            let label = crate::link::edit_in_label(s, None);
+            if label == "Edit in..." { Ok(()) } else { Err(format!("the main button reads \"{label}\"")) }
+        }),
+        Step::Dyn("click Edit in... in the Sticker tab", |s, _| {
+            let rect = panel_rect(s, PanelHit::LinkEditIn)?;
+            Ok(vec![Step::ScreenClick { at: rect.center(), button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }])
+        }),
+        Step::WaitIdle,
+        Step::Assert("the chooser, before any file or start", |s, _| {
+            question_is(s, QuestionKind::ChooseEditor)?;
+            let labels = button_labels(s);
+            if labels != ["Cancel", "Other program...", "Photoshop", "PhotoCraft"] {
+                return Err(format!("buttons {labels:?}"));
+            }
+            if !s.link_ui.chooser_always {
+                return Err("\"Always use this one\" is not ticked".into());
+            }
+            if s.link_ui.launcher.calls().is_empty() { Ok(()) } else { Err("something was started".into()) }
+        }),
+        Step::Shot {
+            name: "link_chooser",
+            expect: "the question \"Edit in which program?\" with the ticked box \"Always use this one\" and the buttons \
+                     Cancel, Other program..., Photoshop and PhotoCraft over the sphere",
+        },
+        Step::Setup("Photoshop, Always use this one", |s, sc| {
+            remember_undo(s, sc)?;
+            press(s, "Photoshop")
+        }),
+        Step::WaitIdle,
+        Step::Setup("the shared-picture question (two stamps of one picture); Only this one", |s, _| {
+            question_is(s, QuestionKind::Shared)?;
+            press(s, "Only this one")
+        }),
+        Step::WaitIdle,
+        Step::Setup("linked in Photoshop: the default, the file, the stub saw Photoshop's program, the other stamp is an image", |s, sc| {
+            if s.prefs.default_editor.as_deref() != Some("photoshop") {
+                return Err(format!("the default editor {:?}", s.prefs.default_editor));
+            }
+            let first = stamp_key(s, sc, "ps1")?;
+            let id = crate::link::sticker_of_stamp(s, first).ok_or("the first stamp is not a sticker stamp")?;
+            sc.values.insert("pss", id.0);
+            let link = doc_of(s)?.link(id).ok_or("not linked")?;
+            if link.editor != "photoshop" {
+                return Err(format!("the link's editor {}", link.editor));
+            }
+            let path = link_file(s, id)?;
+            let calls = s.link_ui.launcher.calls();
+            let exe = with_suffix(&sc.out_stem, "_stub").join("Photoshop.exe");
+            if calls.len() != 1 || calls[0].file != path || calls[0].editor != "photoshop" || calls[0].exe != exe {
+                return Err(format!("stub calls {calls:?}"));
+            }
+            if !matches!(doc_of(s)?.stamp(stamp_key(s, sc, "ps2")?).ok_or("no stamp")?.source, StampSource::Image { .. }) {
+                return Err("the second stamp changed".into());
+            }
+            undo_since(s, sc, 1)?;
+            badge_is(s, sc, "pss", "linked")
+        }),
+        Step::WaitFrames(3),
+        Step::Shot {
+            name: "link_made_ps",
+            expect: "Sticker tab: the selected logo stamp (Sticker, 1 layer) with \"Link: linked\", \"Editor: Photoshop\", the \
+                     file name Logo_k<id>.psd and the buttons Edit in Photoshop, Edit in..., Update now, Send to Photoshop, \
+                     Show file in Explorer, Unlink; toast \"Opening Logo_k<id>.psd in Photoshop\"",
+        },
+        Step::Dyn("open the editor list (Edit in...)", |s, _| {
+            let rect = panel_rect(s, PanelHit::LinkEditInList)?;
+            Ok(vec![Step::ScreenClick { at: rect.center(), button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }])
+        }),
+        Step::WaitFrames(3),
+        Step::Assert("the list has five items: Photoshop, PhotoCraft, Other program..., Default: Photoshop, Default: PhotoCraft", |s, _| {
+            for i in 0..5 {
+                panel_rect(s, PanelHit::LinkEditorItem(i))?;
+            }
+            Ok(())
+        }),
+        Step::Shot {
+            name: "link_editor_list",
+            expect: "the open list under Edit in...: Photoshop, PhotoCraft, Other program..., a line, then the radio items \
+                     Default: Photoshop (chosen) and Default: PhotoCraft",
+        },
+        Step::Dyn("click Default: Photoshop (the list closes)", |s, _| {
+            let rect = panel_rect(s, PanelHit::LinkEditorItem(3))?;
+            Ok(vec![Step::ScreenClick { at: rect.center(), button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }])
+        }),
+        Step::WaitIdle,
+        Step::Assert("still Photoshop; nothing started", |s, _| {
+            if s.prefs.default_editor.as_deref() != Some("photoshop") || s.link_ui.launcher.calls().len() != 1 {
+                return Err(format!("default {:?}, {} starts", s.prefs.default_editor, s.link_ui.launcher.calls().len()));
+            }
+            Ok(())
+        }),
+        // (2) Photoshop saves a red layer: one update.
+        Step::Setup("remember; Photoshop saves a red layer", |s, sc| {
+            remember_link(s, sc)?;
+            editor_adds(s, sc, "pss", "red bar")
+        }),
+        Step::Until("the update arrives", one_more_update),
+        Step::WaitIdle,
+        Step::Assert("one undo step \"Update Linked Sticker\"; two layers; \"Updated from Photoshop\"", |s, sc| {
+            entry_is(s, sc, "Update Linked Sticker", 1)?;
+            let names = layer_names(s, sticker_key(sc, "pss")?)?;
+            if names.len() != 2 || names[1] != "red bar" {
+                return Err(format!("layers {names:?}"));
+            }
+            toast_starts(s, "Updated from Photoshop")
+        }),
+        // (3) Undo; nothing comes back by itself; the idle check; Update now.
+        Step::Do(AppAction::Undo),
+        Step::WaitIdle,
+        Step::Setup("remember after the undo, and the watcher's repaint requests", |s, sc| {
+            remember_link(s, sc)?;
+            sc.values.insert("repaints", s.link_ui.repaint_count());
+            Ok(())
+        }),
+        Step::WaitMs(3000),
+        Step::Assert("3 s later: no second update, the same picture, no repaint asked by the watcher", |s, sc| {
+            undo_since(s, sc, 0)?;
+            if s.link_ui.counters.applied != remembered(sc, "applied")? || composite_hash(doc_of(s)?) != remembered(sc, "composite")? {
+                return Err("an update arrived by itself".into());
+            }
+            let r = s.link_ui.repaint_count();
+            if r != remembered(sc, "repaints")? { Err(format!("the watcher asked for {r} repaints")) } else { Ok(()) }
+        }),
+        Step::Setup("the badge reads exactly \"changed in WTE\"", |s, sc| badge_is(s, sc, "pss", "changed in WTE")),
+        Step::Dyn("Update now", |_, sc| Ok(vec![Step::Do(AppAction::Link(LinkAction::UpdateNow(sticker_key(sc, "pss")?)))])),
+        Step::WaitIdle,
+        Step::Setup("applied again: two layers, linked", |s, sc| {
+            if !one_more_update(s, sc)? || layer_names(s, sticker_key(sc, "pss")?)?.len() != 2 {
+                return Err("Update now did not apply the file".into());
+            }
+            badge_is(s, sc, "pss", "linked")
+        }),
+        // (6) A sticker from Photoshop's own file, placed and linked; Photoshop's own layers and files.
+        Step::Do(AppAction::Link(LinkAction::ImportPsd { path: Some(fixture("photoshop/layers/shape-layer.psd")), keep_linked: false })),
+        Step::WaitIdle,
+        Step::Setup("the tray sticker of Photoshop's shape-layer file (one picture layer)", |s, sc| {
+            let crate::state::StampToolSource::Sticker(id) = s.tools.stamp.source else { return Err("no tray sticker".into()) };
+            sc.values.insert("pstray", id.0);
+            let d = doc_of(s)?.sticker(id).ok_or("no sticker")?;
+            if d.layers.len() != 1 || d.size() != [32, 32] {
+                return Err(format!("layers {:?}, size {:?}", layer_names(s, id)?, d.size()));
+            }
+            Ok(())
+        }),
+        Step::Dyn("place it on the sphere", |s, _| model_click(s, ViewId::Main3D, [-0.4, 0.35])),
+        Step::WaitIdle,
+        Step::Setup("remember the placed stamp; link the sticker (Edit in, the default Photoshop: no question)", |s, sc| {
+            let (stamp, _) = placed_stamp(s, false)?;
+            sc.values.insert("pstray_stamp", stamp.0);
+            s.actions.push(AppAction::Link(LinkAction::EditIn(EditRequest::new(LinkTarget::Sticker(sticker_key(sc, "pstray")?)))));
+            Ok(())
+        }),
+        Step::WaitIdle,
+        Step::Setup("linked in Photoshop at scale 1; Photoshop adds its own type layer (type-layer.psd's layer, an id above the seed)", |s, sc| {
+            let id = sticker_key(sc, "pstray")?;
+            if crate::link::open_question(s).is_some() {
+                return Err(format!("a question: {:?}", crate::link::open_question(s).map(|q| q.lines.clone())));
+            }
+            let link = doc_of(s)?.link(id).ok_or("not linked")?;
+            if link.editor != "photoshop" || link.scale != 1.0 || link.layer_map.len() != 1 {
+                return Err(format!("editor {} scale {} map {}", link.editor, link.scale, link.layer_map.len()));
+            }
+            let lyid = link.next_lyid + 10;
+            sc.values.insert("pstray_layer", doc_of(s)?.sticker(id).ok_or("no sticker")?.layers[0].id.0 as u64);
+            remember_link(s, sc)?;
+            let path = link_file(s, id)?;
+            let base = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let donor = std::fs::read(fixture("photoshop/layers/type-layer.psd")).map_err(|e| e.to_string())?;
+            testkit::save_bytes(&path, &testkit::with_foreign_layer(&base, &donor, 0, lyid)?)
+        }),
+        Step::Until("the update arrives", one_more_update),
+        Step::WaitIdle,
+        Step::Assert("the WTE layer is still there, and Photoshop's type layer \"A\" is a new picture layer on top", |s, sc| {
+            let id = sticker_key(sc, "pstray")?;
+            let d = doc_of(s)?.sticker(id).ok_or("no sticker")?;
+            if d.layers.len() != 2 || d.layers[0].id.0 as u64 != remembered(sc, "pstray_layer")? {
+                return Err(format!("layers {:?}", layer_names(s, id)?));
+            }
+            if d.layers[1].name != "A" || !matches!(d.layers[1].content, wte_core::StickerContent::Picture(_)) {
+                return Err(format!("the top layer {:?}", d.layers[1].name));
+            }
+            if !doc_of(s)?.link(id).ok_or("not linked")?.editor_native {
+                return Err("the file's own type layer is not noted".into());
+            }
+            entry_is(s, sc, "Update Linked Sticker", 1)
+        }),
+        Step::Setup("remember; Photoshop saves its file with an outside stroke (effects\\outside-stroke.psd)", |s, sc| {
+            remember_link(s, sc)?;
+            photoshop_saves(s, sc, "pstray", "photoshop/effects/outside-stroke.psd")
+        }),
+        Step::Until("the update arrives", one_more_update),
+        Step::WaitIdle,
+        Step::Assert("one merged picture \"Photoshop picture\" and the toast that names layer effects", |s, sc| {
+            let id = sticker_key(sc, "pstray")?;
+            if layer_names(s, id)? != ["Photoshop picture"] || doc_of(s)?.link(id).ok_or("not linked")?.mode != wte_core::link::LinkMode::Merged {
+                return Err(format!("layers {:?}", layer_names(s, id)?));
+            }
+            toast_starts(s, "This sticker now uses layer effects, which only Photoshop can show.")?;
+            entry_is(s, sc, "Update Linked Sticker", 1)
+        }),
+        Step::Setup("remember; Photoshop saves a smart object (layers\\smartobject-layer.psd)", |s, sc| {
+            remember_link(s, sc)?;
+            photoshop_saves(s, sc, "pstray", "photoshop/layers/smartobject-layer.psd")
+        }),
+        Step::Until("the update arrives", one_more_update),
+        Step::WaitIdle,
+        Step::Assert("merged again, with the sentence that names smart objects", |s, sc| {
+            let id = sticker_key(sc, "pstray")?;
+            if layer_names(s, id)? != ["Photoshop picture"] {
+                return Err(format!("layers {:?}", layer_names(s, id)?));
+            }
+            toast_starts(s, "This sticker now uses smart objects, which only Photoshop can show. WTE shows the finished picture; keep editing its layers in Photoshop.")?;
+            entry_is(s, sc, "Update Linked Sticker", 1)
+        }),
+        Step::Shot {
+            name: "link_merged_ps",
+            expect: "toasts \"Updated from Photoshop\" (counted) and \"This sticker now uses smart objects, which only Photoshop \
+                     can show. WTE shows the finished picture; keep editing its layers in Photoshop.\"; the small sticker at \
+                     the upper left of the sphere shows Photoshop's smart object picture",
+        },
+        Step::Setup("remember; Photoshop saves a shape layer with Maximize Compatibility off (layers-minimal\\shape-layer.psd)", |s, sc| {
+            remember_link(s, sc)?;
+            photoshop_saves(s, sc, "pstray", "photoshop/layers-minimal/shape-layer.psd")
+        }),
+        Step::Until("the file is read and refused as needing a merged picture", |s, sc| {
+            let link = doc_of(s)?.link(sticker_key(sc, "pstray")?).ok_or("not linked")?;
+            Ok(matches!(link.problem, Some(wte_core::link::LinkProblem::NeedsMerged { .. })))
+        }),
+        Step::WaitIdle,
+        Step::Setup("nothing applied; the badge reads \"needs a merged picture\"; the Sticker tab on the placed sticker", |s, sc| {
+            undo_since(s, sc, 0)?;
+            if s.link_ui.counters.applied != remembered(sc, "applied")? || layer_names(s, sticker_key(sc, "pstray")?)? != ["Photoshop picture"] {
+                return Err("the file was applied".into());
+            }
+            badge_is(s, sc, "pstray", "needs a merged picture")?;
+            let stamp = stamp_key(s, sc, "pstray_stamp")?;
+            crate::dispatch::select_stamp(s, Some(stamp));
+            s.upper_tab = UpperTab::Sticker;
+            Ok(())
+        }),
+        Step::WaitFrames(3),
+        Step::Assert("Photoshop's sentence, word for word", |_, _| {
+            let want = "Photoshop saved this file without a merged picture. In Photoshop choose Edit > Preferences > File Handling, \
+                        set \"Maximize PSD and PSB File Compatibility\" to Always, and save again.";
+            let got = wte_core::link::texts::needs_merged("photoshop", "Photoshop");
+            if got == want { Ok(()) } else { Err(format!("the sentence reads {got:?}")) }
+        }),
+        Step::Shot {
+            name: "link_needs_merged_ps",
+            expect: "Sticker tab: the selected small sticker (Sticker, 1 layer) with \"Link: needs a merged picture\" in red, \
+                     \"Editor: Photoshop\", its file name and the sentence \"Photoshop saved this file without a merged \
+                     picture. In Photoshop choose Edit > Preferences > File Handling, set \"Maximize PSD and PSB File \
+                     Compatibility\" to Always, and save again.\"; no command-line button (a Photoshop link)",
+        },
+        Step::Do(AppAction::Undo),
+        Step::WaitIdle,
+        Step::Do(AppAction::Undo),
+        Step::WaitIdle,
+        Step::Assert("two undos bring the layers back: the WTE layer and \"A\"", |s, sc| {
+            let names = layer_names(s, sticker_key(sc, "pstray")?)?;
+            if names.len() == 2 && names[1] == "A" { Ok(()) } else { Err(format!("layers {names:?}")) }
         }),
         Step::WaitFrames(3),
     ]);
@@ -666,7 +1029,7 @@ pub(super) fn sticker_link_path(path: Option<PathBuf>) -> Vec<Step> {
         Step::Shot {
             name: "psd_placed",
             expect: "3D view: the PSD's picture placed in the middle of the sphere; Sticker tab: the selected stamp \
-                     (Sticker, N layers) with Edit in PhotoCraft and no link lines (not linked); toasts \"Open a model \
+                     (Sticker, N layers) with Edit in PhotoCraft, Edit in... and no link lines (not linked); toasts \"Open a model \
                      first\" (the PATH opened at start, before the sample) and \"Imported <file> as a sticker (N layers)\"",
         },
     ]

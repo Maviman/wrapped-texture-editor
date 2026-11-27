@@ -104,6 +104,7 @@ impl FullApp {
             Dialog::CloseOpenings(_) => "CloseOpenings",
             Dialog::StickerShared { .. } => "StickerShared",
             Dialog::Link(_) => "Link",
+            Dialog::EditorLocations => "EditorLocations",
         }
     }
 

@@ -10,6 +10,7 @@ use crate::view::ViewCx;
 
 pub mod about;
 pub mod companion;
+pub mod editors;
 pub mod export;
 pub mod import;
 pub mod link;
@@ -60,6 +61,7 @@ pub fn show(ctx: &egui::Context, cx: &mut ViewCx<'_>, ds: &mut DialogsState) {
         Dialog::CloseOpenings(st) => crate::brush_flows::show_openings_dialog(ctx, cx, st),
         Dialog::StickerShared { users } => sticker_shared::show(ctx, cx, *users),
         Dialog::Link(q) => link::show(ctx, cx, q),
+        Dialog::EditorLocations => editors::show(ctx, cx),
     }
     // Always put back: dialogs never assign `state.dialog` themselves, they push actions.
     cx.state.dialog = dialog;

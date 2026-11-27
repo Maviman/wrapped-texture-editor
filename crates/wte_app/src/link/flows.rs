@@ -9,14 +9,14 @@
 use std::path::{Path, PathBuf};
 
 use wte_core::link::{
-    FileStamp, LinkFile, LinkState, OpenedState, StaleEvent, archive_entry, link_file_name, links_folder, next_stale,
-    rewrite_warning, send_first_question, texts,
+    EDITOR_OTHER, EDITOR_PHOTOCRAFT, FileStamp, LinkFile, LinkState, OpenedState, StaleEvent, StickerLink, archive_entry,
+    link_file_name, links_folder, next_stale, rewrite_warning, send_first_question, texts,
 };
 use wte_core::psd::{PsdColorMode, PsdDoc, PsdError, PsdLimits};
 use wte_core::doc_links::LinkApplied;
 use wte_core::{ShareScope, StampSource, StickerId};
 
-use super::editor::ExternalEditor;
+use super::editor::{self, ExternalEditor};
 use super::launch::ChildState;
 use super::watch::OwnWritesIo;
 use super::{
@@ -44,11 +44,20 @@ fn act(a: LinkAction) -> AppAction {
 /// Executes a `LinkAction` (dispatch): the file dialogs here, everything else in `run_in`.
 pub(crate) fn run(app: &mut WteApp, action: LinkAction, frame: &eframe::Frame) {
     match action {
-        LinkAction::LocateEditor(path) => {
-            let title = locate_title(&super::default_editor());
-            let path = crate::dispatch::resolve_path(app, path, |prefs| crate::io_flows::pick_program(frame, prefs, &title));
+        LinkAction::LocateEditor { editor, path } => {
+            let title = locate_title(&editor_for_key(&app.state.prefs, &editor));
+            let path = crate::dispatch::resolve_path(app, path, |prefs| crate::io_flows::pick_program(frame, prefs, &title, &editor));
             if let Some(path) = path {
-                set_editor_exe(&mut app.state, path);
+                set_editor_exe(&mut app.state, &editor, path);
+            }
+        }
+        LinkAction::PickOther(req) => {
+            // "Other program..." (13.1, D5): the user's own exe, then the edit in it.
+            let title = locate_title(&ExternalEditor::Other(PathBuf::new()));
+            let path = crate::dispatch::resolve_path(app, None, |prefs| crate::io_flows::pick_program(frame, prefs, &title, EDITOR_OTHER));
+            if let Some(path) = path {
+                set_editor_exe(&mut app.state, EDITOR_OTHER, path);
+                app.state.push(act(LinkAction::EditIn(EditRequest { editor: Some(EDITOR_OTHER.to_owned()), ..req })));
             }
         }
         LinkAction::ImportPsd { path, keep_linked } => {
@@ -63,11 +72,11 @@ pub(crate) fn run(app: &mut WteApp, action: LinkAction, frame: &eframe::Frame) {
         }
         LinkAction::EditIn(req) => {
             let selftest = app.state.selftest;
-            let mut pick = |prefs: &Prefs| {
+            let mut pick = |prefs: &Prefs, editor: &ExternalEditor| {
                 if selftest {
                     return None;
                 }
-                crate::io_flows::pick_program(frame, prefs, &locate_title(&super::default_editor()))
+                crate::io_flows::pick_program(frame, prefs, &locate_title(editor), editor.key())
             };
             edit_in(&mut app.state, req, &mut pick);
         }
@@ -75,15 +84,24 @@ pub(crate) fn run(app: &mut WteApp, action: LinkAction, frame: &eframe::Frame) {
     }
 }
 
-/// "Where is photocraft.exe?" (the file dialog's title).
+/// "Where is photocraft.exe?", "Where is Photoshop.exe?", "Choose the program to edit stickers in" (the file
+/// dialog's title).
 fn locate_title(editor: &ExternalEditor) -> String {
-    format!("Where is {}?", editor.exe_name().unwrap_or("the program"))
+    match editor.exe_name() {
+        Some(exe) => format!("Where is {exe}?"),
+        None => "Choose the program to edit stickers in".to_owned(),
+    }
+}
+
+/// The editor of a key for the file dialog's title (`other` without a remembered program is still "other").
+fn editor_for_key(prefs: &Prefs, key: &str) -> ExternalEditor {
+    editor::editor_of_key(prefs, key).unwrap_or(if key == EDITOR_OTHER { ExternalEditor::Other(PathBuf::new()) } else { ExternalEditor::PhotoCraft })
 }
 
 /// The `LinkAction`s that need only the state.
 pub(crate) fn run_in(state: &mut AppState, action: LinkAction) {
     match action {
-        LinkAction::EditIn(req) => edit_in(state, req, &mut |_| None),
+        LinkAction::EditIn(req) => edit_in(state, req, &mut |_, _| None),
         LinkAction::Send(req) => send(state, req),
         LinkAction::UpdateNow(id) => {
             let s = state.link_ui.session(id);
@@ -166,11 +184,33 @@ pub(crate) fn run_in(state: &mut AppState, action: LinkAction) {
             }
         }
         LinkAction::Convert(id) => start_convert(state, id),
-        LinkAction::LocateEditor(Some(path)) => set_editor_exe(state, path),
+        LinkAction::LocateEditor { editor, path: Some(path) } => set_editor_exe(state, &editor, path),
         LinkAction::ImportPsd { path: Some(path), keep_linked } => import_psd(state, &path, keep_linked),
-        LinkAction::LocateEditor(None) | LinkAction::ImportPsd { path: None, .. } => {
+        LinkAction::LocateEditor { path: None, .. } | LinkAction::ImportPsd { path: None, .. } | LinkAction::PickOther(_) => {
             log::debug!("a file dialog request needs the app; dropped");
         }
+        LinkAction::ClearEditor(key) => {
+            let name = editor_for_key(&state.prefs, &key).name();
+            editor::set_exe_pref(&mut state.prefs, &key, None);
+            editor::refresh_known(state);
+            save_prefs(state);
+            state.toasts.info(format!("{name}: no program"));
+        }
+        LinkAction::SetDefaultEditor(key) => {
+            state.prefs.default_editor = key;
+            save_prefs(state);
+        }
+        LinkAction::ShowEditorLocations => {
+            editor::ensure_discovered(state, true);
+            state.dialog = crate::state::Dialog::EditorLocations;
+        }
+    }
+}
+
+/// Writes the prefs (never in a self-test or a test build: rule 5 of 0.4).
+fn save_prefs(state: &AppState) {
+    if !state.selftest && !cfg!(test) {
+        crate::prefs::save(&state.prefs);
     }
 }
 
@@ -181,7 +221,12 @@ pub(crate) fn run_in(state: &mut AppState, action: LinkAction) {
 /// "Edit in <editor>" (5.1, 5.5, 5.7): save first, find the editor, convert a text stamp, the shared-picture question
 /// (before any file is written), make the link or offer to send WTE's changes, the two-copies guard, then start the
 /// editor. Each question re-enters here with its answer. `pick` asks for the editor's exe (`None` in a self-test).
-pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnMut(&Prefs) -> Option<PathBuf>) {
+///
+/// Stickers P9b (13.1): the editor is the one the request names, else the link's, else the default editor, else the
+/// only known one (which becomes the default without a question); with two or more known and no default the chooser
+/// "Edit in which program?" asks. A link opened in another editor in this session asks "<name> may still have this
+/// file open..." before it opens in a second one.
+pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnMut(&Prefs, &ExternalEditor) -> Option<PathBuf>) {
     let Some(session) = state.session.as_ref() else { return };
     let doc = &session.doc;
     let (stamp, sticker) = match req.target {
@@ -208,10 +253,23 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
         ask(state, q);
         return;
     }
-    let editor = existing
-        .as_ref()
-        .and_then(|l| ExternalEditor::from_key(&l.editor, None))
-        .unwrap_or_else(super::default_editor);
+    editor::ensure_discovered(state, false);
+    let Some(editor) = choose_editor(state, &req, sticker, existing.as_ref()) else { return };
+    // A link opened in another editor in this session (13.1): two programs saving one file overwrite each other.
+    if let Some(id) = sticker
+        && existing.is_some()
+        && !req.switch_ok
+        && let Some(old) = state.link_ui.sessions.get(&id).filter(|s| s.opened).and_then(|s| s.opened_editor.clone())
+        && old != editor.key()
+    {
+        let old_name = editor::name_of_key(&old, state.prefs.other_editor_exe.as_deref());
+        let anyway = EditRequest { editor: Some(editor.key().to_owned()), switch_ok: true, ..req.clone() };
+        let q = LinkQuestion::new(QuestionKind::OtherEditor, Some(id), "Open in another program?", vec![texts::other_editor_open(&old_name)])
+            .cancel("Cancel")
+            .button(format!("Open in {} anyway", editor.name()), vec![act(LinkAction::EditIn(anyway))]);
+        ask(state, q);
+        return;
+    }
     let Some(exe) = editor_exe(state, &editor, pick) else { return };
     // A text stamp becomes a layered sticker first (5.1, with a confirmation).
     if let Some(s) = stamp
@@ -269,10 +327,13 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
             }
         }
     }
-    // The two-copies guard (5.7, 13.1): a launched child that still runs (PhotoCraft v0.2.0 and portable copies,
-    // another program); never for Photoshop (A3).
-    let running = state.link_ui.session(id).child_state() == ChildState::Running;
-    if running && !req.open_anyway && editor != ExternalEditor::Photoshop {
+    // The two-copies guard (5.7, 13.1): a launched child of this editor that still runs (PhotoCraft v0.2.0 and portable
+    // copies, another program); never for Photoshop (A3: opening an open file shows its tab; its first child lives as
+    // long as Photoshop does). A child of another editor was asked about above.
+    let s = state.link_ui.session(id);
+    let same_editor = s.opened_editor.as_deref().is_none_or(|k| k == editor.key());
+    let running = same_editor && s.child_state() == ChildState::Running;
+    if running && !req.open_anyway && guards_two_copies(&editor) {
         let mut anyway = req.clone();
         anyway.open_anyway = true;
         let q = LinkQuestion::new(
@@ -311,6 +372,57 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
 
 fn link_action(a: LinkAction) -> AppAction {
     act(a)
+}
+
+/// The per-editor two-copies guard of 13.1: PhotoCraft and another program ask when their launched child still runs;
+/// Photoshop never does (A3).
+pub(crate) fn guards_two_copies(editor: &ExternalEditor) -> bool {
+    !matches!(editor, ExternalEditor::Photoshop)
+}
+
+/// The editor of an "Edit in" (13.1, D1); `None` after the chooser was asked (or nothing can be opened).
+fn choose_editor(state: &mut AppState, req: &EditRequest, sticker: Option<StickerId>, existing: Option<&StickerLink>) -> Option<ExternalEditor> {
+    if let Some(key) = &req.editor {
+        let e = editor::editor_of_key(&state.prefs, key);
+        if e.is_none() {
+            state.toasts.warn("Choose the program first: Edit in... > Other program...");
+        }
+        return e;
+    }
+    if let Some(e) = existing.and_then(|l| editor::editor_of_key(&state.prefs, &l.editor)) {
+        return Some(e);
+    }
+    if let Some(e) = editor::default_of(&state.prefs) {
+        return Some(e);
+    }
+    let known = editor::known_editors(&state.prefs, &|p: &Path| p.is_file());
+    match known.as_slice() {
+        // None known: PhotoCraft, which can be located ("Where is photocraft.exe?").
+        [] => Some(ExternalEditor::PhotoCraft),
+        // One known: it is used and becomes the default without a question (D1).
+        [one] => {
+            state.prefs.default_editor = Some(one.key().to_owned());
+            save_prefs(state);
+            Some(one.clone())
+        }
+        several => {
+            let mut q = LinkQuestion::new(
+                QuestionKind::ChooseEditor,
+                sticker,
+                "Edit in which program?",
+                vec!["WTE opens the sticker's layers in it; Ctrl+S there updates the sticker on the model.".to_owned()],
+            )
+            .cancel("Cancel")
+            .choice("Other program...", EDITOR_OTHER, vec![act(LinkAction::PickOther(EditRequest { editor: None, ..req.clone() }))]);
+            for e in several {
+                let pick = EditRequest { editor: Some(e.key().to_owned()), ..req.clone() };
+                q = q.choice(e.name(), e.key(), vec![act(LinkAction::EditIn(pick))]);
+            }
+            state.link_ui.chooser_always = true;
+            ask(state, q);
+            None
+        }
+    }
 }
 
 /// An OK message.
@@ -608,34 +720,40 @@ fn restore_from_archive(state: &mut AppState, project: &Path, id: StickerId, pat
 // The editor's exe, the command-line conversion
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// The editor's exe (5.7): the remembered one when it exists, else discovery (registry only), else the user's file
-/// dialog once ("Where is photocraft.exe?"). `None` (after a hint) when none is known.
-fn editor_exe(state: &mut AppState, editor: &ExternalEditor, pick: &mut dyn FnMut(&Prefs) -> Option<PathBuf>) -> Option<PathBuf> {
+/// The editor's exe (5.7, 13.1): the remembered one when it exists, else discovery (registry only; never for another
+/// program), else the user's file dialog once ("Where is photocraft.exe?", "Where is Photoshop.exe?"). `None` (after a
+/// hint) when none is known.
+fn editor_exe(state: &mut AppState, editor: &ExternalEditor, pick: &mut dyn FnMut(&Prefs, &ExternalEditor) -> Option<PathBuf>) -> Option<PathBuf> {
     let exists = |p: &Path| p.is_file();
-    if let Some(p) = state.prefs.photocraft_exe.clone().filter(|p| exists(p)) {
+    let remembered = match editor {
+        ExternalEditor::Other(p) => Some(p.clone()),
+        _ => editor::exe_pref(&state.prefs, editor.key()).cloned(),
+    };
+    if let Some(p) = remembered.filter(|p| exists(p)) {
         return Some(p);
     }
     if let Some(p) = super::launch::discover(editor, &*state.link_ui.registry, &exists) {
         log::info!("{} found at {}", editor.name(), p.display());
-        state.prefs.photocraft_exe = Some(p.clone());
+        editor::set_exe_pref(&mut state.prefs, editor.key(), Some(p.clone()));
+        editor::refresh_known(state);
         return Some(p);
     }
-    match pick(&state.prefs) {
+    match pick(&state.prefs, editor) {
         Some(p) => {
-            set_editor_exe(state, p.clone());
+            set_editor_exe(state, editor.key(), p.clone());
             Some(p)
         }
         None => {
-            state.toasts.warn(format!("{} was not found. Choose its program with Help > {} location...", editor.name(), editor.name()));
+            state.toasts.warn(format!("{} was not found. Choose its program with Help > Editor locations...", editor.name()));
             None
         }
     }
 }
 
-/// Remembers the editor's exe (Help > "PhotoCraft location...", the first-time question). A file not named like the
-/// editor's exe is taken with a warning (5.7: warn, do not refuse).
-pub(crate) fn set_editor_exe(state: &mut AppState, path: PathBuf) {
-    let editor = super::default_editor();
+/// Remembers the program of the editor with `key` (Help > Editor locations..., the first-time question, "Other
+/// program..."). A file not named like the editor's exe is taken with a warning (5.7: warn, do not refuse).
+pub(crate) fn set_editor_exe(state: &mut AppState, key: &str, path: PathBuf) {
+    let editor = if key == EDITOR_OTHER { ExternalEditor::Other(path.clone()) } else { editor_for_key(&state.prefs, key) };
     let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if let Some(expected) = editor.exe_name()
         && name != expected.to_ascii_lowercase()
@@ -644,10 +762,9 @@ pub(crate) fn set_editor_exe(state: &mut AppState, path: PathBuf) {
     } else {
         state.toasts.info(format!("{}: {}", editor.name(), path.display()));
     }
-    state.prefs.photocraft_exe = Some(path);
-    if !state.selftest {
-        crate::prefs::save(&state.prefs);
-    }
+    editor::set_exe_pref(&mut state.prefs, editor.key(), Some(path));
+    editor::refresh_known(state);
+    save_prefs(state);
 }
 
 /// `photocraft-cli.exe` next to the remembered `photocraft.exe` (5.7), when it exists.
@@ -744,9 +861,13 @@ pub(crate) fn import_psd(state: &mut AppState, path: &Path, keep_linked: bool) {
         }
     };
     let stem = path.file_stem().map_or_else(|| "Sticker".to_owned(), |s| s.to_string_lossy().into_owned());
-    let editor = super::default_editor();
+    // The editor a kept link follows: the default editor, else the only known one, else PhotoCraft (13.1). A file
+    // imported without a link counts as "not PhotoCraft" for smart objects (13.2): with PhotoCraft as that editor the
+    // key passed is "other" (the generic sentences), the name stays.
+    let editor = editor::quiet_editor(state).unwrap_or(ExternalEditor::PhotoCraft);
+    let key = if !keep_linked && editor.key() == EDITOR_PHOTOCRAFT { EDITOR_OTHER } else { editor.key() };
     let Some(doc) = state.doc_mut() else { return };
-    let made = doc.add_sticker_from_psd(&psd, &stem, stamp, keep_linked.then(|| path.to_path_buf()), editor.key(), &editor.name(), &file);
+    let made = doc.add_sticker_from_psd(&psd, &stem, stamp, keep_linked.then(|| path.to_path_buf()), key, &editor.name(), &file);
     match made {
         Ok(made) => {
             let layers = state.doc().and_then(|d| d.sticker(made.id)).map_or(0, |d| d.layers.len());
@@ -815,8 +936,8 @@ pub(crate) fn after_save(state: &mut AppState, links_revision: u64, warnings: &[
     let saved = std::mem::take(&mut state.link_ui.saving_made);
     state.link_ui.made_since_save.retain(|id| !saved.contains(id));
     let aliases = std::mem::take(&mut state.link_ui.pending_aliases);
-    if let Some((first, _)) = aliases.first() {
-        let editor = editor_name(state, *first);
+    if !aliases.is_empty() {
+        let editor = super::editors_of(state, aliases.iter().map(|(id, _)| *id));
         let names: Vec<String> = aliases.iter().map(|(id, _)| sticker_name(state, *id)).collect();
         for (id, old) in aliases {
             state.link_ui.session(id).alias = Some(old);

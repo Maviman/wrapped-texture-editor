@@ -226,6 +226,20 @@ pub enum PanelHit {
     StickerNameField,
     /// A button of a link question (`Dialog::Link`), left to right.
     LinkDialogButton(u8),
+    // ---- stickers P9b: the editor list ----
+    /// The small "Edit in..." button beside "Edit in <editor>" in the Sticker tab (opens the editor list).
+    LinkEditInList,
+    /// The same button in the canvas header.
+    StickerHeaderEditInList,
+    /// An item of the open editor list, top to bottom (`link::ui::editor_list`).
+    LinkEditorItem(u8),
+    /// The box "Always use this one" of the chooser "Edit in which program?".
+    LinkChooserAlways,
+    /// Help > Editor locations...: Browse / Clear of a row (0 = Photoshop, 1 = PhotoCraft, 2 = Other) and the
+    /// default editor's choices (0 = not chosen, then the rows' order).
+    EditorBrowse(u8),
+    EditorClear(u8),
+    EditorDefault(u8),
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
@@ -1429,6 +1443,9 @@ pub enum Dialog {
     StickerShared { users: usize },
     /// Stickers P9a (STICKER_PLAN 5.1, 5.5, 5.7): an in-window question of the editor link (`dialogs/link.rs`).
     Link(Box<crate::link::LinkQuestion>),
+    /// Stickers P9b (STICKER_PLAN 13.1): Help > Editor locations... - the programs of Photoshop, PhotoCraft and another
+    /// editor (Browse / Clear each) and the default editor (`dialogs/editors.rs`).
+    EditorLocations,
 }
 
 /// User preferences, stored as JSON by `prefs.rs`. Every field falls back to its default when missing.
@@ -1489,9 +1506,21 @@ pub struct Prefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sticker_library_dir: Option<PathBuf>,
     /// Stickers P9a (STICKER_PLAN 5.7): PhotoCraft's exe, found in the registry or chosen by the user ("Where is
-    /// photocraft.exe?", Help > PhotoCraft location...). Not written when `None`; never set by a self-test.
+    /// photocraft.exe?", Help > Editor locations...). Not written when `None`; never set by a self-test.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub photocraft_exe: Option<PathBuf>,
+    /// Stickers P9b (STICKER_PLAN 13.1): Photoshop's exe, found in the registry (App Paths, `Applications\Photoshop.exe`)
+    /// or chosen in Help > Editor locations.... Not written when `None`; never set by a self-test from the real registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub photoshop_exe: Option<PathBuf>,
+    /// Stickers P9b: the program chosen with "Other program..." (any exe, started with the file). Not written when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_editor_exe: Option<PathBuf>,
+    /// Stickers P9b (13.1, decision D1): the key of the default editor (`"photoshop"`, `"photocraft"`, `"other"`); `None`
+    /// = not chosen yet (the chooser "Edit in which program?" asks when more than one editor is known). Read leniently:
+    /// anything but a known key reads as `None`. Not written when `None`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_prefs_serde::editor_key")]
+    pub default_editor: Option<String>,
 }
 
 impl Default for Prefs {
@@ -1518,6 +1547,9 @@ impl Default for Prefs {
             sticker_split: STICKER_SPLIT_DEFAULT,
             sticker_library_dir: None,
             photocraft_exe: None,
+            photoshop_exe: None,
+            other_editor_exe: None,
+            default_editor: None,
         }
     }
 }
@@ -1870,6 +1902,14 @@ mod lenient_prefs_serde {
     pub fn split<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f32>, D::Error> {
         Ok(match Value::deserialize(deserializer)? {
             Value::Number(n) => n.as_f64().map(|v| v as f32),
+            _ => None,
+        })
+    }
+
+    /// Stickers P9b: the default editor's key; anything but `"photoshop"`, `"photocraft"` or `"other"` is `None`.
+    pub fn editor_key<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+        Ok(match Value::deserialize(deserializer)? {
+            Value::String(key) if [wte_core::link::EDITOR_PHOTOSHOP, wte_core::link::EDITOR_PHOTOCRAFT, wte_core::link::EDITOR_OTHER].contains(&key.as_str()) => Some(key),
             _ => None,
         })
     }

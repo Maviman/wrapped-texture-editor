@@ -611,10 +611,12 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `link/mod.rs` | stickers P9a | the editor link in the app (8.16): `LinkUi` (`AppState::link_ui`), `LinkSession`, `LinkAction`, `EditRequest`, `SendRequest`, `LinkTarget`, `LinkQuestion` / `QuestionKind`, `pump` (every frame), `on_event`, `busy_for`, `badge`, `ask`, `press`, `unsaved_line` |
 | `link/flows.rs` | stickers P9a | Edit in, Send, Update now, the answers, Restore, Unlink, Show file, the command-line conversion, Import PSD as sticker; the save / Save As / load hooks (`before_save`, `after_save`, `save_failed`, `after_load`) |
 | `link/watch.rs` | stickers P9a | the watcher thread (`LinkWatcher`, `WatchEntry`, `LinkEvent`, `WatchTimes`), `OwnWrites`, `OwnWritesIo` |
-| `link/launch.rs` | stickers P9a | `command_for`, `convert_command`, `Launcher` / `ChildProc`, `StubLauncher`, the real launcher (not in a test build), `launcher_for`, `RegistryReader` (`WindowsRegistry` through `raw-dylib` `advapi32`, `NoRegistry`), `discover`, `exe_of_command` |
-| `link/editor.rs` | stickers P9a | `ExternalEditor { PhotoCraft, Photoshop, Other(PathBuf) }`, `name()`, `key()`, `from_key`, `name_of_key` |
-| `link/ui.rs` | stickers P9a | the Sticker tab's link block and the canvas header's badge with Edit in |
-| `link/testkit.rs` | stickers P9a | files "as the editor saved them" (the sticker writer, temp file + rename) for the tests and scenarios |
+| `link/launch.rs` | stickers P9a | `command_for`, `convert_command`, `Launcher` / `ChildProc`, `StubLauncher`, the real launcher (not in a test build), `launcher_for`, `RegistryReader` (`WindowsRegistry` through `raw-dylib` `advapi32`, `NoRegistry`), `discover`, `exe_of_command`; P9b: `RegView` (64- / 32-bit registry view), Photoshop's keys, `registry_keys` |
+| `link/editor.rs` | stickers P9a | `ExternalEditor { PhotoCraft, Photoshop, Other(PathBuf) }`, `name()`, `key()`, `from_key`, `name_of_key`; P9b: `KEYS`, `exe_pref` / `set_exe_pref`, `editor_of_key`, `known_editors`, `ensure_discovered`, `refresh_known`, `default_of`, `quiet_editor` |
+| `link/ui.rs` | stickers P9a | the Sticker tab's link block and the canvas header's badge with Edit in; P9b: the "Edit in..." list button, `editor_list`, `listed_editors` |
+| `link/testkit.rs` | stickers P9a | files "as the editor saved them" (the sticker writer, temp file + rename) for the tests and scenarios; P9b: `with_foreign_layer` (an editor's own layer record and channel data spliced into a file WTE wrote) |
+| `link/editor_tests.rs` | stickers P9b | test-only: the editor list's tests (8.16 "Tests") |
+| `dialogs/editors.rs` | stickers P9b | Help > Editor locations... (`Dialog::EditorLocations`): the three programs with Browse... / Clear, the default editor |
 | `selftest/scenarios/sticker_tab.rs` | stickers P6b | the scenarios `sticker_styles`, `sticker_tray`, `sticker_controls` (8.11) |
 | `selftest/scenarios/sticker_paint.rs` | stickers P7a | the scenarios `sticker_edit` and `sticker_pen` (8.11) |
 | `selftest/scenarios/sticker_cutout.rs` | stickers P7b | the scenario `sticker_cutout` (8.11) |
@@ -773,7 +775,9 @@ calls of `pen/win.rs` are `#[link(name = "user32", kind = "raw-dylib")]` imports
 
 Stickers P9a: no new dependency. The registry is read (never written) through `#[link(name = "advapi32", kind =
 "raw-dylib")]` `RegGetValueW` (`link/launch.rs`, only in an interactive run of a non-test build); processes are started
-with `std::process::Command` and `CREATE_NO_WINDOW` (`std::os::windows::process::CommandExt`).
+with `std::process::Command` and `CREATE_NO_WINDOW` (`std::os::windows::process::CommandExt`). Stickers P9b: the same
+call reads Photoshop's keys, in the 64-bit and the 32-bit view (`RRF_SUBKEY_WOW6464KEY` / `RRF_SUBKEY_WOW6432KEY`); no new
+dependency.
 
 Branch `companion`: no new dependency (`Cargo.lock` unchanged). JPEG goes through `wte_core::encode_jpeg` (the `image`
 crate's "jpeg" feature, already a `wte_core` dependency); crypto is local code; the OS random generator
@@ -6471,6 +6475,9 @@ clipboard). Stickers P9a: `AppState::link_ui: link::LinkUi` (8.16; the stub laun
 `Dialog::Link(Box<link::LinkQuestion>)`, `AppAction::Link(link::LinkAction)`, `Prefs::photocraft_exe`,
 `StickerEdit::held_update` in use, `PanelHit` gains `LinkEditIn`, `LinkUpdateNow`, `LinkSend`, `LinkShowFile`,
 `LinkUnlink`, `LinkRestore`, `LinkConvert`, `StickerHeaderEditIn`, `StickerNameField`, `LinkDialogButton(u8)`;
+Stickers P9b: `Prefs::photoshop_exe`, `Prefs::other_editor_exe`, `Prefs::default_editor` (lenient: only a known key
+reads), `Dialog::EditorLocations`, `PanelHit` gains `LinkEditInList`, `StickerHeaderEditInList`, `LinkEditorItem(u8)`,
+`LinkChooserAlways`, `EditorBrowse(u8)`, `EditorClear(u8)`, `EditorDefault(u8)`;
 `jobs::JobOutput::Built` gains `links` (what `project::load` found) and `Saved` carries `jobs::Saved` (path, history
 state, reuse, `links_revision`, the save's warnings). `PanelHit` gains `StickerTabEdit`, `StickerTabExport`, `StylePresetButton(u8)`, `StyleCopy`, `StylePaste`,
 `StyleClear`, `StyleBlockToggle(u8)`, `StyleEditor`, `TrayItem(u64)`, `TrayNew`, `TrayNewFromPicture`, `TrayEdit`,
@@ -7480,7 +7487,10 @@ carries a catalog face).
   enabled when `hidden_object_count() > 0`; Frame Selection (Shift+F), enabled with a document; Select All (with a
   document) / Deselect All (with a selection); below a separator "Objects Panel" (always enabled, checked while shown):
   sets `state.upper_tab = Objects` (a setting, like the Background entries; WP4). Help: Shortcuts,
-  Tablet setup (branch `pen-input`, `Dialog::TabletHelp`), About. Shortcut texts come from `shortcuts::shortcut_text`. Entries are enabled exactly when they can act (review round 2,
+  Tablet setup (branch `pen-input`, `Dialog::TabletHelp`), Tablet companion... (branch `companion`), Editor locations...
+  (stickers P9b, `LinkAction::ShowEditorLocations`), About. Stickers P9a / P9b: the Layer menu also has "Edit in <editor>"
+  (the selected stamp's sticker; "Edit in..." while the chooser has to ask) and the submenu "Edit in" with the editor list
+  (8.16). Shortcut texts come from `shortcuts::shortcut_text`. Entries are enabled exactly when they can act (review round 2,
   finding merge-down-enabled-onto-locked-base): Merge Down (menu and Layers footer alike) = `panels::layers::can_merge_down`
   (the active layer is unlocked and directly above an unlocked paint layer: the checks of `Document::merge_down`, so on a new
   document "Paint 1" above the locked "Base" cannot merge); Rasterize = a stamp/text layer that is not locked; Layer > Delete =
@@ -8037,6 +8047,17 @@ click outside are `CloseDialog`. The buttons record `LinkDialogButton(i)`. Quest
 open wait in `LinkUi::questions` and are shown by `link::pump` when the slot is free. `Dialog::Unsaved` adds the line
 of `link::unsaved_line` (stickers linked since the last save) in the warning colour.
 
+**Stickers P9b.** The chooser "Edit in which program?" is a `Dialog::Link` of kind `ChooseEditor` with the box
+**Always use this one** (`LinkUi::chooser_always`, ticked when it opens; `PanelHit::LinkChooserAlways`) and the buttons
+Cancel, Other program..., then one per known editor; a chooser button (`QuestionButton::choice`) queues
+`SetDefaultEditor` first while the box is ticked (`link::button_actions`, also used by `link::press`). The question before a
+link opens in a second editor is kind `OtherEditor` ("<name> may still have this file open. Two programs saving the same
+file overwrite each other." **Open in <new> anyway** / Cancel). `Dialog::EditorLocations` (`dialogs/editors.rs`, Help >
+Editor locations...): heading, one row per editor (Photoshop, PhotoCraft, the other program) with its program or "not
+found" / "none chosen", **Browse...** (`LocateEditor`, the file dialog) and **Clear** (`ClearEditor`); the default editor
+as radio items (Ask = not chosen, then each editor whose program is known, PhotoCraft always); a note that the registry is
+only read and that another program gets the PSD as its one argument; Close. Opening it runs discovery again.
+
 ```rust
 pub struct DialogsState { /* import: egui textures of the UV thumbnails; export: cached plan + the options it was built from */ }
 impl DialogsState { pub fn new() -> DialogsState; }
@@ -8423,7 +8444,10 @@ pub const MAX_WIDTH: f32 = 380.0;                     // widest toast, frame inc
   `docs/protocol/COMPANION_PROTOCOL.md`.
 
 Stickers P9a: `prefs.json` has `photocraft_exe` (written only when set; found in the registry or chosen with "Where is
-photocraft.exe?" / Help > PhotoCraft location...; never set by a self-test, whose prefs are not loaded or saved).
+photocraft.exe?" / Help > Editor locations...; never set by a self-test, whose prefs are not loaded or saved). Stickers
+P9b: also `photoshop_exe`, `other_editor_exe` and `default_editor` (each written only when set; an older file without
+them loads unchanged; a `default_editor` that is not `"photoshop"`, `"photocraft"` or `"other"` reads as not chosen).
+The link code writes the prefs when a program or the default changes, never in a self-test or a test build.
 `io_flows`: `install_document` resets `link_ui`; `start_save` calls `link::flows::before_save` (Save As copies the link
 files and notes the aliases) and the job returns `jobs::Saved`; a successful `Saved` calls `after_save`
 (`mark_links_saved`, aliases, the warnings as toasts, an "Edit in" that waited), a failed one `save_failed`; `Built`
@@ -8828,7 +8852,7 @@ counted down) instead of failing (`export_errors`).
 | `sticker_edit` | Stickers P7a (`selftest/scenarios/sticker_paint.rs`). Sphere, 3D; the sample logo placed as an image stamp; 4; a new empty picture layer; the sticker Brush (16 px, hard, red) dragged along y = 60 (shot `edit_brush`), undo, redo; the sticker Eraser (24 px) across it, undo, redo; ClassicSticker on the layer; a brush stroke along y = 180 (shot `edit_styled`); the logo layer selected, the Fill tool clicked at its corner (yellow); a new layer, `SelectRect` 40..216 x 204..240, the Gradient tool dragged across it (red to blue; shot `edit_final`); undo every step; Esc. Every stroke is a `Step::Pointer` on `Target::StickerCanvas` | each stroke one entry ("Sticker Brush" / "Sticker Eraser") with the paint where it went and the model changed; undo / redo give the composite of the step before / after; on the styled layer the header's "styles update when you lift" was drawn during the stroke (`LiveCounters::note_frames`) and is gone after it, one full recomposite entered stroke mode and the restyle job landed; the finished sticker has an opaque white contour pixel just below the new paint where the layer itself is transparent; Fill one entry, the logo's outside yellow and its inside kept; the new layer plus the gradient two entries, red at the start, blue at the end, nothing outside the selection; undoing everything gives the start (document state, the image stamp, composite) |
 | `sticker_text` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; a generated 512 x 256 picture (transparent with a light grey 4-px frame) placed as an image stamp; 4; X and a click at (256, 150) (the Text tool's text "H I", letter spacing 0.3, navy); Esc (leaves the content field); U (a yellow star) and a canvas drag (20, 40)-(130, 150); Ctrl+[; the text layer selected and `SetLayerStyles` (a 2-px white outside stroke); a 512 x 256 striped picture (magenta / cyan, 16-px stripes) as a layer above the text; the Layers footer's Clip clicked (shot `text_clipped`); `SetLayerText` Preview ("H I !") and Final (warped: Arc, bend 0.5) (shot `text_warped`); Done; a text stamp "WTE" placed with the Text tool; the Sticker tab's Convert to layered sticker clicked (shot `text_converted`); undo every step | the text layer one entry (promotion inside), "H I" in navy at the click, active, its content field focused; the star one entry and the reorder one: picture, shape, text from the bottom; Clip one entry, the top layer clipped; pattern inside text: on the text's fullest row the pixel in the middle of the widest gap between letters is transparent in the finished picture, and a pixel with a 3 x 3 neighbourhood of full ink has a stripe colour (within 4); the text edit one entry with the new content, a warp and the layer's name following, still clipped; the conversion one entry, a sticker stamp with one text layer "WTE"; undoing everything gives the start |
 | `sticker_layout` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; a generated 200 x 120 picture (an orange box (20, 20)-(180, 100), a 12 x 12 green mark at (124, 52), transparent margin) placed as an image stamp; 4; C, the Ellipse shape (shot `layout_crop_box`), Enter; `Layout(Trim(0))`; the Add Padding popover (10 px) and its Apply; `Layout(Rotate(90))` (shot `layout_rotated`) and `Layout(Rotate(-90))`; the Resize popover at 200 % and its Apply; `Layout(Flatten)` (shot `layout_done`); undo every step; Esc twice | the green mark's texel centroid in the stamp's texture layers: within 1.5 texels of the start after the crop (one "Crop Sticker" entry with the promotion, an ellipse), the trim (one entry, 160 x 80), the padding (one entry, 180 x 100), the turn back (one entry each; after the CW turn the sides swap and the mark is at least 4 texels away), the resize (one entry, 360 x 200, the placement kept) and the flatten (one entry, one layer); undoing everything gives the start |
-| `sticker_link` | Stickers P9a (`selftest/scenarios/sticker_link.rs`). Sphere, 3D; a stub `photocraft.exe` (empty file) in `<out_stem>_stub` set in the prefs; the sample logo placed twice; Save As `<out_stem>.wtep`; (1) the first logo selected, the Sticker tab's Edit in PhotoCraft clicked (shot `link_shared`), Only this one (shot `link_made`); (2) the scenario saves the PSD with a red layer added (`link::testkit`, temp file + rename) (shot `link_updated`); (3) Undo, `WaitMs(3000)`, Update now; (4) Save; then (check-P9a) the whole `<out_stem>_links\` folder deleted, `Until` the watcher reports it missing, Restore from project clicked, `WaitMs(1500)`; (5) the Sticker view, `SelectRect`, the bottom layer active, a click into the name field, the PSD saved without the bottom layer, `WaitMs(2500)`, a click in the 3D half (shot `link_held_applied`), Done; (6) Import Sticker from PSD of fixture `f1w_pc.psd`, Edit in on that tray sticker, fixture `f5_f1_plus_text.psd` copied over its PSD, then `f4_mask_stroke.psd` (shot `link_merged`), Undo; (7) the Sticker view, opacity 50 %, the PSD saved with a new layer (shot `link_conflict`), Take PhotoCraft's version; again, Keep WTE's version, Send anyway; (8) Send to PhotoCraft, Send anyway, the PSD saved again (shot `link_saved_over`), Take; Done; (9) Save, reopen; the PSD deleted, reopen; the PSD changed, reopen (shot `link_changed_closed`), Update | (1) the shared-picture question and no links folder, no stub call before the answer; after it the PSD in `<out_stem>_links\` reads back with one layer, the stub saw exactly (photocraft, the exe, that path), the other stamp is still an image stamp, one entry, the badge "linked"; (2) one more applied update (`Until`), one entry "Update Linked Sticker", two layers, the model changed; (3) 3 s after the undo: no update, the same composite, `LinkUi::repaints` unchanged (the idle check), the badge exactly "changed in WTE"; Update now applies it again, "linked"; (4) the PSD's CRC and time unchanged, the archive entry readable; the deleted folder: the badge "file missing", after Restore the same CRC, no update applied, no question, no entry, "linked"; (5) while the field has the focus nothing is applied (`held_update`, the selection still there); after the click one update: one layer "red bar", no selection, the top layer active, the toast "Updated from PhotoCraft", one entry; (6) three layers photo / text / shape, linked at scale 1 with a three-entry map; after f5 the three layer ids unchanged and a fourth picture layer "pc text", `editor_native`; after f4 one layer "PhotoCraft picture", mode Merged, the toast "This sticker now uses layer effects, which only PhotoCraft can show. ..."; undo gives the four layers; (7) the question "Both WTE and PhotoCraft changed Logo." with nothing applied; Take: the file's two layers, opacity 1, one entry, "linked"; Keep: the warning "PhotoCraft may still have this file open. ...", then the file with opacity 128 and a `.bak.psd`, "linked"; (8) the warning again; the editor's save is never applied: "PhotoCraft saved over the changes WTE sent to Logo."; (9) the link (editor photocraft) and "linked" after the reopen; the deleted PSD restored with the same CRC; "Linked sticker Logo changed while the project was closed.", Update: the layer "while closed" on top, one entry |
+| `sticker_link` | Stickers P9a (`selftest/scenarios/sticker_link.rs`). Sphere, 3D; a stub `photocraft.exe` (empty file) in `<out_stem>_stub` set in the prefs; the sample logo placed twice; Save As `<out_stem>.wtep`; (1) the first logo selected, the Sticker tab's Edit in PhotoCraft clicked (shot `link_shared`), Only this one (shot `link_made`); (2) the scenario saves the PSD with a red layer added (`link::testkit`, temp file + rename) (shot `link_updated`); (3) Undo, `WaitMs(3000)`, Update now; (4) Save; then (check-P9a) the whole `<out_stem>_links\` folder deleted, `Until` the watcher reports it missing, Restore from project clicked, `WaitMs(1500)`; (5) the Sticker view, `SelectRect`, the bottom layer active, a click into the name field, the PSD saved without the bottom layer, `WaitMs(2500)`, a click in the 3D half (shot `link_held_applied`), Done; (6) Import Sticker from PSD of fixture `f1w_pc.psd`, Edit in on that tray sticker, fixture `f5_f1_plus_text.psd` copied over its PSD, then `f4_mask_stroke.psd` (shot `link_merged`), Undo; (7) the Sticker view, opacity 50 %, the PSD saved with a new layer (shot `link_conflict`), Take PhotoCraft's version; again, Keep WTE's version, Send anyway; (8) Send to PhotoCraft, Send anyway, the PSD saved again (shot `link_saved_over`), Take; Done; (9) Save, reopen; the PSD deleted, reopen; the PSD changed, reopen (shot `link_changed_closed`), Update | (1) the shared-picture question and no links folder, no stub call before the answer; after it the PSD in `<out_stem>_links\` reads back with one layer, the stub saw exactly (photocraft, the exe, that path), the other stamp is still an image stamp, one entry, the badge "linked"; (2) one more applied update (`Until`), one entry "Update Linked Sticker", two layers, the model changed; (3) 3 s after the undo: no update, the same composite, `LinkUi::repaints` unchanged (the idle check), the badge exactly "changed in WTE"; Update now applies it again, "linked"; (4) the PSD's CRC and time unchanged, the archive entry readable; the deleted folder: the badge "file missing", after Restore the same CRC, no update applied, no question, no entry, "linked"; (5) while the field has the focus nothing is applied (`held_update`, the selection still there); after the click one update: one layer "red bar", no selection, the top layer active, the toast "Updated from PhotoCraft", one entry; (6) three layers photo / text / shape, linked at scale 1 with a three-entry map; after f5 the three layer ids unchanged and a fourth picture layer "pc text", `editor_native`; after f4 one layer "PhotoCraft picture", mode Merged, the toast "This sticker now uses layer effects, which only PhotoCraft can show. ..."; undo gives the four layers; (7) the question "Both WTE and PhotoCraft changed Logo." with nothing applied; Take: the file's two layers, opacity 1, one entry, "linked"; Keep: the warning "PhotoCraft may still have this file open. ...", then the file with opacity 128 and a `.bak.psd`, "linked"; (8) the warning again; the editor's save is never applied: "PhotoCraft saved over the changes WTE sent to Logo."; (9) the link (editor photocraft) and "linked" after the reopen; the deleted PSD restored with the same CRC; "Linked sticker Logo changed while the project was closed.", Update: the layer "while closed" on top, one entry. Shot `link_pc_done`. **Stickers P9b, the Photoshop pass** (steps 1-3 and 6 again): an injected registry whose App Paths key names a stub `Photoshop.exe` in `<out_stem>_stub`, a fresh stub log, no default editor; two more logos; (1) Photoshop found, two editors known, the main button "Edit in..."; its click opens the chooser (shot `link_chooser`; buttons Cancel / Other program... / Photoshop / PhotoCraft, the box ticked, nothing started), Photoshop: the shared-picture question, Only this one: the default is Photoshop, the link's editor `photoshop`, the stub saw (photoshop, the stub exe, the PSD), the other logo still an image, one entry, "linked" (shot `link_made_ps`); the editor list opened from Edit in... (five items, shot `link_editor_list`), Default: Photoshop clicked; (2) the editor's save: one entry, two layers, "Updated from Photoshop"; (3) undo, 3 s idle check, "changed in WTE", Update now; (6) Import Sticker from PSD of `photoshop\layers\shape-layer.psd` (one layer, 32 x 32), placed, Edit in (no question: the default), linked at scale 1 with a one-entry map; Photoshop's own type layer added to the linked file (`testkit::with_foreign_layer` with the layer of `photoshop\layers\type-layer.psd`, id above the seed): the WTE layer kept (same id), a picture layer "A" on top, `editor_native`, one entry; `photoshop\effects\outside-stroke.psd`: one layer "Photoshop picture", Merged, "This sticker now uses layer effects, which only Photoshop can show."; `photoshop\layers\smartobject-layer.psd`: merged with "This sticker now uses smart objects, which only Photoshop can show. ..." (shot `link_merged_ps`); `photoshop\layers-minimal\shape-layer.psd`: nothing applied, the problem NeedsMerged, the badge "needs a merged picture", Photoshop's sentence word for word in the Sticker tab (shot `link_needs_merged_ps`); two undos: the WTE layer and "A" again |
 | `sticker_link_path` | Stickers P9a. PATH = a `.psd` / `.psb` file (gate: `crates/wte_core/tests/fixtures/psd/f1w_pc.psd`); Sphere, 3D; `OpenPath(PATH)`; a click on the model (shot `psd_placed`) | one "Add Sticker" entry: a kept tray sticker from the file layer by layer, the Stamp tool's source and tool; the placed stamp is a sticker stamp with layers |
 | `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
@@ -9333,8 +9357,9 @@ Shape; the Sticker and Layer commands; 3.2; 3.8).**
 ### 8.16 Editor link (`link/*`, stickers P9a; STICKER_PLAN 5.1, 5.3 app parts, 5.5-5.8, 13.1)
 
 The app side of the editor link of 5.28 / 6.13: a sticker's PSD that WTE and an outside editor both use. P9a builds it
-with the editor's name a parameter of every text and PhotoCraft as the only discoverable editor (and the default for a
-new link); P9b adds Photoshop, the editor list and the default editor (plan 13.1). The user's rule: placement and style
+with the editor's name a parameter of every text and PhotoCraft as the only discoverable editor; P9b adds Photoshop's
+discovery, the editor list, the chooser, the default editor and Help > Editor locations... (plan 13.1; "Editor list"
+below). The user's rule: placement and style
 work in WTE never touches the link (stamps, placements, styles are not in the PSD), and an editor's Ctrl+S updates the
 sticker in place on the model, keeping every stamp's placement.
 
@@ -9366,17 +9391,27 @@ sticker in place on the model, keeping every stamp's placement.
   a self-test and in tests): `HKCU` then `HKLM`, `Software\Classes\Photocraft.PhotoshopDocument\shell\open\command` then
   `Software\Classes\Applications\photocraft.exe\shell\open\command`; the quoted (or up-to-".exe") path must exist. Else
   the file dialog "Where is photocraft.exe?" once (a name other than `photocraft.exe` is taken with a warning), also
-  Help > "PhotoCraft location...". No guessed folders.
+  Help > Editor locations.... No guessed folders. Stickers P9b: Photoshop from the App Paths key
+  `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Photoshop.exe` (a plain path), then
+  `Software\Classes\Applications\Photoshop.exe\shell\open\command` (a quoted path and `"%1"`); every key under
+  `HKCU` then `HKLM`, each in the 64-bit view
+  (`RRF_SUBKEY_WOW6464KEY`) then the 32-bit one (`RRF_SUBKEY_WOW6432KEY`), `RegView`; not found = not listed, no
+  question. "Where is Photoshop.exe?" only for a link whose editor is Photoshop on a machine without it. Discovery runs
+  once per session (`editor::ensure_discovered`: the first "Edit in" control drawn or used) and again when Help > Editor
+  locations... opens; found programs are remembered in the prefs, `LinkUi::known` caches the editors whose program
+  exists (the labels drawn every frame read it).
 - **Edit in (`flows::edit_in`, 5.1, 5.5).** In order, each question re-entering with its answer: a saved project (an
   external link needs none: else "Save the project first..." **Save...** / Cancel; Save... saves and continues); the
-  editor's exe; a text stamp is converted after "Convert and edit"; the shared-picture question (Only this one / Edit
+  editor (P9b, `choose_editor`: the request's `editor`, else the link's, else the default, else the only known one,
+  which becomes the default; two or more known and no default: the chooser); a link opened in another editor in this
+  session: "<name> may still have this file open..." (P9b); the editor's exe; a text stamp is converted after "Convert and edit"; the shared-picture question (Only this one / Edit
   all / Cancel) **before any file is written** (an image stamp is promoted, alone or with every stamp of its picture; a
   shared sticker stamp gets its own copy); no link yet: the PSD is written into `<project>_links\<name>_k<id>.psd`
   (`prepare_link_file` + `write_link_file` registering `own_writes` before the rename + `finish_link_write`) with a
   one-time note that styles are not in the file; a link whose file is missing: written again; a sticker changed in WTE
   since the sync: "Send WTE's changes to the file first?" (**Send and open** / **Open the file as it is** / Cancel); the
-  two-copies guard (a kept child that still runs: "This sticker is already open in <editor>..." **Open anyway** / **Show
-  file** / Cancel; never for Photoshop); `stale_in_editor` cleared when the previous child exited; the launcher.
+  two-copies guard (a kept child of the same editor that still runs: "This sticker is already open in <editor>..."
+  **Open anyway** / **Show file** / Cancel; PhotoCraft and another program; never for Photoshop, `guards_two_copies`); `stale_in_editor` cleared when the previous child exited; the launcher.
 - **Send (5.5).** A link opened in this session gets the warning first (`rewrite_warning`: child running or unknown;
   **Send anyway** / Cancel); then the atomic write (`.bak.psd` kept), `stale_in_editor` set when it was opened. "Keep
   WTE's version" of a conflict is a send that answers it. A failed write is an OK message with the core's sentence
@@ -9412,6 +9447,23 @@ sticker in place on the model, keeping every stamp's placement.
   the PNG becomes a merged update). Canvas header: the badge and **Edit in <editor>**. Layer menu and the row menu of a
   stamp layer: **Edit in <editor>**. File > **Import Sticker from PSD...** and **Import Sticker from PSD, Keep
   Linked...**; a dropped or opened `.psd` / `.psb` is imported as a tray sticker (5.8, `Document::add_sticker_from_psd`).
+- **Editor list (P9b, plan 13.1).** Prefs `photoshop_exe`, `photocraft_exe`, `other_editor_exe`, `default_editor` (a
+  key; decision D1: none until the user picks one in the chooser with **Always use this one**, or the only known editor
+  becomes it). The main button of the Sticker tab and the canvas header is `link::edit_in_label`: "Edit in <link's
+  editor>", else "Edit in <default / only known editor>", else **Edit in...** (two or more known, none the default: the
+  click opens the chooser, whose buttons are Cancel, **Other program...** and one per known editor). Beside an "Edit in
+  <name>" button a small **Edit in...** button opens the list (`ui::editor_list`): one item per listed editor (Photoshop
+  when known, PhotoCraft always since it can be located, the other program when chosen) = "Edit in" that editor
+  (`EditRequest::editor`), **Other program...** (`PickOther`: the file dialog, then the edit in that exe), a separator,
+  then **Default: <name>** radio items. The Layer menu has "Edit in <name>" and the submenu **Edit in** with the same
+  list; a stamp layer's row menu too. Help > **Editor locations...** (`ShowEditorLocations`, `Dialog::EditorLocations`).
+  Every text names the link's editor (`StickerLink::editor`, set at every launch): badges, questions, toasts, the
+  MaxCompat sentence of "needs a merged picture" (Photoshop's: Edit > Preferences > File Handling ... Always; the
+  command-line button only on a PhotoCraft link); the close prompt and the Save As alias toast name every editor of
+  their links ("Photoshop and PhotoCraft"). A send whose rename the editor blocks (A8) is the OK message "<file> could
+  not be replaced because another program has it open. Close it in <name> (or save it there), then choose Send to
+  <name> again." with nothing changed. An import without a link counts as "not PhotoCraft" for smart objects (13.2):
+  with PhotoCraft as the default the import passes the key `other` (the generic sentences).
 - **Project flows (5.3; `io_flows`).** Save: the core archives the link files (it never writes one); the job returns the
   snapshot's `links_revision` and the save's warnings (`jobs::Saved`): `mark_links_saved`, the links the save held
   taken out of `made_since_save`,
@@ -9441,7 +9493,18 @@ sticker in place on the model, keeping every stamp's placement.
   file and archives it, Save As copies the files with aliases; after a load a missing file restored, a changed one asked
   about (held until the answer; Ignore keeps it from applying); Import PSD as sticker (layers, keep linked, refused);
   the command-line conversion as a merged update. Also `link::editor::tests`, `dnd::tests` (a `.psd` drop), the
-  scenarios `sticker_link` and `sticker_link_path` (8.11).
+  scenarios `sticker_link` and `sticker_link_path` (8.11). Stickers P9b, `link::editor_tests` (13): Photoshop's discovery
+  (App Paths plain path, the quoted command, the 32-bit view alone, 64 before 32, `HKCU` before `HKLM`, a path that does
+  not exist, nothing; Photoshop's keys never give PhotoCraft); discovery once per session and again for Editor
+  locations (a gone program is not known); `command_for` for Photoshop (spaces, non-ASCII) through the stub; the chooser
+  only without a default and with two editors (Always use this one sets it, off does not, one known editor becomes the
+  default, Cancel promotes nothing); the list and an explicit "Edit in" the other program; a running child asks for
+  PhotoCraft and another program, never for Photoshop; a link opened in PhotoCraft asks before Photoshop (and back), not
+  when it was not opened in this session; texts with the link's editor, the close prompt with two editors; Editor
+  locations Browse / Clear / Default; an old prefs file loads and the new keys round-trip (a bad default is none); a file
+  held without sharing gives the "could not be replaced" message and changes nothing; an unlinked import of a smart
+  object is merged whatever the default; `testkit::with_foreign_layer` reads back with the type layer's `TySh`. The
+  menu sweep: Help > Editor locations....
 
 ---
 
@@ -10120,7 +10183,8 @@ selection and cut-out tests of 8.15 (`sticker/tools/tests_p7b.rs`), Ctrl+A / Ctr
 Stickers P8: the tests of 8.15 "Layout, text, shapes" (`sticker/tests_p8.rs` and the modules' own tests) and the
 scenario count (65: `sticker_text`, `sticker_layout`, `sticker_library`). Stickers P9a: `link::tests` and
 `link::editor::tests` (8.16 "Tests"), `dnd::tests` (a `.psd` / `.psb` drop) and the scenario count (67: `sticker_link`,
-`sticker_link_path`).
+`sticker_link_path`). Stickers P9b: `link::editor_tests` (8.16 "Tests"), the menu sweep's Help > Editor locations...,
+and the Photoshop pass of `sticker_link` (no new scenario).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

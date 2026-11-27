@@ -45,10 +45,9 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut AppState) {
             if item(ui, "Tablet companion...", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::Companion));
             }
-            // Stickers P9a (STICKER_PLAN 5.7): where the outside editor's program is.
-            let editor = crate::link::default_editor().name();
-            if item(ui, &format!("{editor} location..."), "", true, false) {
-                actions.push(AppAction::Link(crate::link::LinkAction::LocateEditor(None)));
+            // Stickers P9a / P9b (STICKER_PLAN 5.7, 13.1): where the outside editors' programs are, and the default one.
+            if item(ui, "Editor locations...", "", true, false) {
+                actions.push(AppAction::Link(crate::link::LinkAction::ShowEditorLocations));
             }
             if item(ui, "About", "", true, false) {
                 actions.push(AppAction::ShowDialog(Dialog::About));
@@ -302,17 +301,23 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
     if item(ui, "Edit Sticker", "Edit Sticker", stamp_selected && state.view_mode != ViewMode::Sticker, false) {
         actions.push(AppAction::Sticker(crate::sticker::StickerAction::Enter(None)));
     }
-    // Stickers P9a (STICKER_PLAN 5.1): the selected stamp's sticker in the outside editor.
+    // Stickers P9a / P9b (STICKER_PLAN 5.1, 13.1): the selected stamp's sticker in the outside editor (its link's
+    // editor, else the default one; "Edit in..." asks), and the submenu "Edit in" with the editor list.
     let selected = session.and_then(|s| s.selected_stamp.filter(|id| s.doc.stamp(*id).is_some()));
-    let edit_in_label = wte_core::link::texts::edit_in(&selected.and_then(|id| crate::link::sticker_of_stamp(state, id)).map_or_else(
-        || crate::link::default_editor().name(),
-        |id| crate::link::editor_name(state, id),
-    ));
+    let edit_in_label = crate::link::edit_in_label(state, selected.and_then(|id| crate::link::sticker_of_stamp(state, id)));
     if item(ui, &edit_in_label, "", selected.is_some(), false)
         && let Some(id) = selected
     {
         actions.push(AppAction::Link(crate::link::LinkAction::EditIn(crate::link::EditRequest::new(crate::link::LinkTarget::Stamp(id)))));
     }
+    ui.add_enabled_ui(selected.is_some(), |ui| {
+        ui.menu_button("Edit in", |ui| {
+            if let Some(id) = selected {
+                let mut hits = Vec::new();
+                crate::link::ui::editor_list(ui, state, crate::link::LinkTarget::Stamp(id), actions, &mut hits);
+            }
+        });
+    });
     ui.separator();
     if item(ui, "New Paint Layer", "New Paint Layer", has_doc, false) {
         actions.push(AppAction::AddPaintLayer);

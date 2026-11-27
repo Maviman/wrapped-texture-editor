@@ -7,9 +7,12 @@
 //! only the stub** ([`launcher_for`]; `RealLauncher` is not even compiled into a test build): no test, scenario or
 //! agent ever starts PhotoCraft or Photoshop (rule 3 of 0.4).
 //!
-//! Discovery of PhotoCraft (5.7, review A19): the registry only, read-only, through an injected [`RegistryReader`]
-//! (`HKCU` then `HKLM`, two `shell\open\command` keys of the installed build); the quoted exe path must exist. No
-//! guessed folders. The portable copy leaves no trace: the app then asks once with a file dialog.
+//! Discovery (5.7, 13.1, review A19): the registry only, read-only, through an injected [`RegistryReader`]: for each
+//! editor its keys in order, each under `HKCU` then `HKLM`, each in the 64-bit then the 32-bit registry view; the exe
+//! of the value must exist. PhotoCraft: two `shell\open\command` keys of the installed build; Photoshop (stickers
+//! P9b): the App Paths key (a plain path) and `Applications\Photoshop.exe\shell\open\command` (a quoted path and
+//! `"%1"`). No guessed folders. The portable PhotoCraft leaves no trace: the app then asks once with a file dialog;
+//! "Other program..." is only ever the user's own choice.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -243,17 +246,25 @@ pub enum Hive {
     LocalMachine,
 }
 
+/// A registry view (13.1): the 64-bit one (`RRF_SUBKEY_WOW6464KEY`) and the 32-bit one (`RRF_SUBKEY_WOW6432KEY`) of a
+/// 64-bit Windows. Discovery tries the 64-bit view first.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RegView {
+    Bits64,
+    Bits32,
+}
+
 /// Reads registry values (read-only; injected so tests never touch the real registry).
 pub trait RegistryReader: Send {
-    /// The default value of `subkey` as a string, `None` when the key or value is missing.
-    fn default_value(&self, hive: Hive, subkey: &str) -> Option<String>;
+    /// The default value of `subkey` in `view` as a string, `None` when the key or value is missing.
+    fn default_value(&self, hive: Hive, view: RegView, subkey: &str) -> Option<String>;
 }
 
 /// A registry with nothing in it (self-test runs and tests).
 pub struct NoRegistry;
 
 impl RegistryReader for NoRegistry {
-    fn default_value(&self, _hive: Hive, _subkey: &str) -> Option<String> {
+    fn default_value(&self, _hive: Hive, _view: RegView, _subkey: &str) -> Option<String> {
         None
     }
 }
@@ -263,11 +274,13 @@ pub struct WindowsRegistry;
 
 impl RegistryReader for WindowsRegistry {
     #[cfg(windows)]
-    fn default_value(&self, hive: Hive, subkey: &str) -> Option<String> {
+    fn default_value(&self, hive: Hive, view: RegView, subkey: &str) -> Option<String> {
         use std::ffi::c_void;
         const HKEY_CURRENT_USER: isize = 0x8000_0001_u32 as i32 as isize;
         const HKEY_LOCAL_MACHINE: isize = 0x8000_0002_u32 as i32 as isize;
         const RRF_RT_REG_SZ: u32 = 0x0000_0002;
+        const RRF_SUBKEY_WOW6464KEY: u32 = 0x0001_0000;
+        const RRF_SUBKEY_WOW6432KEY: u32 = 0x0002_0000;
         #[link(name = "advapi32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn RegGetValueW(
@@ -284,17 +297,22 @@ impl RegistryReader for WindowsRegistry {
             Hive::CurrentUser => HKEY_CURRENT_USER,
             Hive::LocalMachine => HKEY_LOCAL_MACHINE,
         };
+        let flags = RRF_RT_REG_SZ
+            | match view {
+                RegView::Bits64 => RRF_SUBKEY_WOW6464KEY,
+                RegView::Bits32 => RRF_SUBKEY_WOW6432KEY,
+            };
         let key: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
         let mut len: u32 = 0;
         // SAFETY: valid NUL-terminated key, a null value name (the default value), null data to ask for the size.
-        let status = unsafe { RegGetValueW(root, key.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut len) };
+        let status = unsafe { RegGetValueW(root, key.as_ptr(), std::ptr::null(), flags, std::ptr::null_mut(), std::ptr::null_mut(), &mut len) };
         if status != 0 || !(2..=64 * 1024).contains(&len) {
             return None;
         }
         let mut buf = vec![0u16; (len as usize).div_ceil(2)];
         // SAFETY: `buf` holds `len` bytes; the call writes at most `len` bytes and updates it.
         let status = unsafe {
-            RegGetValueW(root, key.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len)
+            RegGetValueW(root, key.as_ptr(), std::ptr::null(), flags, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len)
         };
         if status != 0 {
             return None;
@@ -305,7 +323,7 @@ impl RegistryReader for WindowsRegistry {
     }
 
     #[cfg(not(windows))]
-    fn default_value(&self, _hive: Hive, _subkey: &str) -> Option<String> {
+    fn default_value(&self, _hive: Hive, _view: RegView, _subkey: &str) -> Option<String> {
         None
     }
 }
@@ -337,19 +355,33 @@ pub fn exe_of_command(line: &str) -> Option<PathBuf> {
     (!exe.is_empty()).then(|| PathBuf::from(exe))
 }
 
-/// Discovery of `editor` (5.7, 13.1): the first registry entry whose exe exists. P9a knows PhotoCraft's keys only
-/// (P9b adds Photoshop); another program is never discovered.
-pub fn discover(editor: &ExternalEditor, reader: &dyn RegistryReader, exists: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
-    let keys: &[&str] = match editor {
+/// Photoshop's two keys (13.1): the App Paths key (default value = the exe, a plain path; `Path` names its folder) and
+/// the `Applications` key (a quoted path followed by `"%1"`), each tried under `HKCU`, then `HKLM`.
+const PHOTOSHOP_KEYS: [&str; 2] = [
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Photoshop.exe",
+    r"Software\Classes\Applications\Photoshop.exe\shell\open\command",
+];
+
+/// The registry keys an editor is discovered from (none for another program: only the user picks it).
+pub fn registry_keys(editor: &ExternalEditor) -> &'static [&'static str] {
+    match editor {
         ExternalEditor::PhotoCraft => &PHOTOCRAFT_KEYS,
-        ExternalEditor::Photoshop | ExternalEditor::Other(_) => &[],
-    };
-    for key in keys {
+        ExternalEditor::Photoshop => &PHOTOSHOP_KEYS,
+        ExternalEditor::Other(_) => &[],
+    }
+}
+
+/// Discovery of `editor` (5.7, 13.1): the first registry entry whose exe exists, key by key, `HKCU` before `HKLM`, the
+/// 64-bit view before the 32-bit one. Another program is never discovered.
+pub fn discover(editor: &ExternalEditor, reader: &dyn RegistryReader, exists: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    for key in registry_keys(editor) {
         for hive in [Hive::CurrentUser, Hive::LocalMachine] {
-            if let Some(exe) = reader.default_value(hive, key).as_deref().and_then(exe_of_command)
-                && exists(&exe)
-            {
-                return Some(exe);
+            for view in [RegView::Bits64, RegView::Bits32] {
+                if let Some(exe) = reader.default_value(hive, view, key).as_deref().and_then(exe_of_command)
+                    && exists(&exe)
+                {
+                    return Some(exe);
+                }
             }
         }
     }

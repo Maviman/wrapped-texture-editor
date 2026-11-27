@@ -501,3 +501,48 @@ fn k12_the_badge_does_not_hash_the_texture_during_a_stroke() {
     assert_eq!(doc.sticker_state.layer_crcs.get(&id).map(|(v, _)| *v), Some(doc.layer(id).unwrap().version()));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// check-P12: an editor's save of the unchanged picture over a layer that keeps colours under alpha 0 (an eraser
+/// leaves them; the link file holds normalised pixels) is no change: no undo step "Update Linked Layer", the same
+/// layer version, the link in sync with the new file.
+#[test]
+fn check_p12_an_unchanged_picture_over_rgb_under_alpha_0_is_no_undo_step() {
+    let (dir, _project, mut doc, id, _path) = linked("check_p12_same", EDITOR_PHOTOCRAFT);
+    let stored = dense(&doc, id);
+    assert!(stored.data.as_chunks::<4>().0.iter().any(|p| p[3] == 0 && p[..3] != [0, 0, 0]), "the fixture keeps RGB under alpha 0");
+    let version = doc.layer(id).unwrap().version();
+    let undo = doc.history.undo_len();
+    // The editor re-saves the same picture (its own bytes: another file content).
+    let bytes = one_layer_file(&normalised(&stored));
+    let stamp = stamp_of(&bytes);
+    assert_ne!(stamp.crc32, doc.layer_link(id).unwrap().synced.crc32);
+    let r = doc.apply_layer_link_update(id, &read(&bytes), stamp, "PhotoCraft", "Dirt_l.psd").unwrap();
+    assert!(matches!(r, LinkApplied::Updated { .. }));
+    assert_eq!(doc.history.undo_len(), undo, "no undo step for an invisible difference");
+    assert_eq!(doc.layer(id).unwrap().version(), version, "the layer is untouched");
+    assert_eq!(dense(&doc, id), stored);
+    assert_eq!(doc.layer_link_state(id, Some(&stamp)).unwrap(), LinkState::Linked);
+    // A one-pixel change is still applied.
+    let mut changed = normalised(&stored);
+    changed.set(0, 0, [1, 2, 3, 255]);
+    let bytes = one_layer_file(&changed);
+    doc.apply_layer_link_update(id, &read(&bytes), stamp_of(&bytes), "PhotoCraft", "Dirt_l.psd").unwrap();
+    assert_eq!(doc.history.undo_len(), undo + 1);
+    assert_eq!(dense(&doc, id), changed);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// check-P12 (5.9): WTE's largest texture (8192 a side, `MAX_TEXTURE_SIDE`) links, and its file reads back within the
+/// reader's limits and applies (the "too large to link" branch guards textures WTE cannot make).
+#[test]
+fn check_p12_the_largest_texture_side_links_and_reads_back() {
+    assert_eq!(crate::doc_build::MAX_TEXTURE_SIDE, crate::link::MAX_PAINT_LINK_SIDE);
+    let mut doc = cube_doc(&noise_texture(8193, 2, 3));
+    assert_eq!(doc.set(S0).map(|s| [s.width, s.height]), Some([8192, 2]), "textures are capped at 8192");
+    let id = doc.add_raster_layer(S0, Some("Wide")).unwrap();
+    let prepared = doc.prepare_layer_link_file(id, LinkFile::InFolder("w.psd".into()), EDITOR_PHOTOCRAFT).unwrap();
+    let psd = read(&prepared.bytes);
+    assert!(!psd.too_large);
+    let back = paint_source(&psd, [8192, 2], EDITOR_PHOTOCRAFT).unwrap();
+    assert_eq!(back.pixels, PixelBuf::new(8192, 2));
+}

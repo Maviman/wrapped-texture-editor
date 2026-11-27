@@ -618,12 +618,12 @@ fn choose_editor(state: &mut AppState, req: &EditRequest, sticker: Option<Sticke
             Some(one.clone())
         }
         several => {
-            let mut q = LinkQuestion::new(
-                QuestionKind::ChooseEditor,
-                sticker.map(LinkId::from),
-                "Edit in which program?",
-                vec!["WTE opens the sticker's layers in it; Ctrl+S there updates the sticker on the model.".to_owned()],
-            )
+            // check-P12: a paint layer's chooser speaks of the layer (its file is one picture layer, not the sticker's).
+            let (link, line) = match req.target {
+                LinkTarget::Layer(l) => (Some(LinkId::Layer(l)), "WTE opens the layer's pixels in it; Ctrl+S there updates the layer on the model."),
+                _ => (sticker.map(LinkId::from), "WTE opens the sticker's layers in it; Ctrl+S there updates the sticker on the model."),
+            };
+            let mut q = LinkQuestion::new(QuestionKind::ChooseEditor, link, "Edit in which program?", vec![line.to_owned()])
             .cancel("Cancel")
             .choice("Other program...", EDITOR_OTHER, vec![act(LinkAction::PickOther(EditRequest { editor: None, ..req.clone() }))]);
             for e in several {

@@ -174,7 +174,12 @@ impl Document {
                 return Ok(LinkApplied::Problem(self.layer_link_state(id, Some(&stamp))?));
             }
         };
-        self.replace_layer_pixels(id, picture.pixels, PAINT_UPDATE_LABEL)?;
+        // check-P12: a picture that differs from the layer only by RGB under alpha 0 (the layer keeps an eraser's
+        // colours there, the file holds normalised pixels) is the same picture: no undo step, no new layer version.
+        let same = matches!(self.layer(id).map(|l| &l.kind), Some(LayerKind::Raster(buf)) if same_normalised(buf, &picture.pixels));
+        if !same {
+            self.replace_layer_pixels(id, picture.pixels, PAINT_UPDATE_LABEL)?;
+        }
         link.synced = stamp;
         link.synced_pixels = self.layer_pixels_crc(id)?;
         link.editor_layers = picture.editor_layers;
@@ -278,6 +283,18 @@ impl Document {
     pub(crate) fn set_loaded_layer_links(&mut self, links: std::collections::BTreeMap<LayerId, PaintLink>) {
         self.sticker_state.layer_links = links;
     }
+}
+
+/// True when raster `layer` (its texture-sized buffer, or `0 x 0` = never painted) shows exactly `picture` (texture
+/// sized): every pixel equal, or transparent in both (RGB under alpha 0 does not count). check-P12.
+fn same_normalised(layer: &PixelBuf, picture: &PixelBuf) -> bool {
+    if layer.data.is_empty() {
+        return picture.data.as_chunks::<4>().0.iter().all(|p| p[3] == 0);
+    }
+    if layer.width != picture.width || layer.height != picture.height || layer.data.len() != picture.data.len() {
+        return false;
+    }
+    layer.data.as_chunks::<4>().0.iter().zip(picture.data.as_chunks::<4>().0).all(|(a, b)| a == b || (a[3] == 0 && b[3] == 0))
 }
 
 /// `src` scaled to fit into `width x height` with its aspect kept and centred on a transparent picture (Paste as New

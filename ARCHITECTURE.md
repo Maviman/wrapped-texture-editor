@@ -5588,7 +5588,8 @@ a merged picture" and the editor's MaxCompat sentence). The result is normalised
 `editor_layers` = the file held more than one layer, a forcing feature or the editor's own layer kinds (the "Send
 first?" question then adds that a rewrite replaces them). `apply_layer_link_update` = `paint_source` +
 `replace_layer_pixels(.., "Update Linked Layer")` (one `Edit::Pixels` entry with the changed tiles, none when nothing
-changed), then the link takes the stamp and the new pixel CRC and loses its problem. The state table is the sticker's
+changed; check-P12: none either when the picture differs from the layer only by RGB under alpha 0, which the layer may
+keep and the file never holds), then the link takes the stamp and the new pixel CRC and loses its problem. The state table is the sticker's
 (`state_of`) with `wte_changed` = `layer_pixels_crc != synced_pixels`, so an undo of an update is "changed in WTE" and
 nothing is applied again by itself (R6). The writes, `.bak.psd`, the save rule and the watcher are the sticker link's.
 
@@ -9660,8 +9661,8 @@ sticker in place on the model, keeping every stamp's placement.
   of exited children dropped, the conversion polled, a queued question shown when no dialog is open. An event: the
   observed stamp; an ignored content (`ignore_crc`) or a pending "changed while closed" / conflict answer keeps it
   held; **busy** (`busy_for`: a 3D tool interaction, a pending Preview edit or an open sticker stroke anywhere; in the
-  Sticker view on that sticker a canvas drag or a focused text field) holds it (`StickerEdit::held_update`) until the
-  first idle frame; otherwise the table of 5.5 (`sync_action` with `stale_in_editor`): apply, or the conflict question
+  Sticker view on that sticker a canvas drag or a focused text field; for a paint layer's link, check-P12, also an open
+  texture stroke) holds it (`StickerEdit::held_update`) until the first idle frame; otherwise the table of 5.5 (`sync_action` with `stale_in_editor`): apply, or the conflict question
   ("Both WTE and <editor> changed <name>." / "<editor> saved over the changes WTE sent to <name>."; **Take <editor>'s
   version** / **Keep WTE's version** / Decide later). Applying = `apply_link_update` (one entry "Update Linked
   Sticker"; none when nothing changed), the toast "Updated from <editor>", the merged reason, the colour-profile note
@@ -9766,7 +9767,7 @@ sticker in place on the model, keeping every stamp's placement.
   clipboard's PNG, CF_DIBV5, CF_DIB or picture / PSD file (`clipboard::picture_item`, `LAYER_PASTE_ORDER`; WTE's sticker
   data is skipped, a WTE copy has its PNG) is decoded and fitted (`fit_centred`) on a worker; `poll` adds the layer
   ("Pasted", or the file's stem) above the active one as one entry "Paste as New Paint Layer"; a document opened
-  meanwhile gets nothing. Tests: `link::layer_tests` (7: the PSD and the stub; locked and stamp layers refused; an
+  meanwhile gets nothing; a picture ready during an open stroke waits for its end (check-P12). Tests: `link::layer_tests` (7: the PSD and the stub; locked and stamp layers refused; an
   update and the undo that stays "changed in WTE"; the conflict with both answers; a size change and a CMYK file on the
   layer badge with Photoshop's wording; Unlink and restore / "changed while closed" after a load; Paste as New Paint
   Layer through the in-memory clipboard); scenario `layer_link` (8.11).
@@ -10648,6 +10649,10 @@ and text layers (exactly those two files, each = `dense(layer)`).
   entry, `links/l<id>.psd`, reader 4, the link and its state after a load, Changed and Missing, a deleted layer's link
   not saved); Paste as New Paint Layer at equal and other sizes (one entry, active, undo / redo; `fit_centred` of a
   square and a wide picture).
+- Branch `stickers`, P12 check: core `check_p12_an_unchanged_picture_over_rgb_under_alpha_0_is_no_undo_step`,
+  `check_p12_the_largest_texture_side_links_and_reads_back` (8192, `MAX_TEXTURE_SIDE` = `MAX_PAINT_LINK_SIDE`); app
+  `link::layer_tests::{check_p12_an_update_waits_for_an_open_texture_stroke, check_p12_the_layer_chooser_speaks_of_the_layer,
+  check_p12_paste_as_a_layer_waits_for_an_open_stroke}`.
 - Branch `stickers`, P6a (`doc_stickers_tests.rs`): `k6a_layer_at_and_layer_thumbnail` (the top visible layer under a
   point, hidden layers skipped, a masked pixel not hit, NaN and outside points none; a layer's thumbnail alone at half
   scale; no history entry). The app-side tests of the Sticker view are listed in 8.15.

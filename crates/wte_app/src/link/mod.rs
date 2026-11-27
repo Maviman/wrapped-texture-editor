@@ -619,7 +619,12 @@ pub fn busy_for(state: &AppState, id: impl Into<LinkId>, tools_busy: bool) -> bo
     if tools_busy || session.doc.has_pending_edit() || session.doc.sticker_stroke_active() {
         return true;
     }
-    let LinkId::Sticker(id) = id.into() else { return false };
+    // check-P12: an open texture stroke (also one whose button is already up) refuses `replace_layer_pixels`; the
+    // update waits for its end instead of being lost with an error toast.
+    let id = match id.into() {
+        LinkId::Sticker(id) => id,
+        LinkId::Layer(_) => return session.doc.stroke_active(),
+    };
     let in_view = session.sticker_edit.as_ref().is_some_and(|e| match e.target {
         crate::state::StickerTarget::Tray(s) => s == id,
         crate::state::StickerTarget::Stamp(stamp) => session.doc.stamp(stamp).is_some_and(|o| {
@@ -805,11 +810,17 @@ fn drop_finished_aliases(state: &mut AppState) {
 /// The "linked since the last save" line of the unsaved-changes prompt (5.3, review B8); `None` without such links.
 pub fn unsaved_line(state: &AppState) -> Option<String> {
     let session = state.session.as_ref()?;
-    let names: Vec<String> = state
+    // check-P12: a paint layer deleted since (its link stays for an undo, but a save leaves it out) is not named.
+    let pending: Vec<LinkId> = state
         .link_ui
         .made_since_save
         .iter()
-        .filter(|id| common(&session.doc, **id).is_some_and(|l| matches!(l.file, LinkFile::InFolder(_))))
+        .copied()
+        .filter(|id| common(&session.doc, *id).is_some_and(|l| matches!(l.file, LinkFile::InFolder(_))))
+        .filter(|id| id.layer().is_none() || is_live(&session.doc, *id))
+        .collect();
+    let names: Vec<String> = pending
+        .iter()
         .map(|id| match id {
             LinkId::Sticker(_) => link_name(state, *id),
             LinkId::Layer(_) => format!("{} (paint layer)", link_name(state, *id)),
@@ -820,7 +831,7 @@ pub fn unsaved_line(state: &AppState) -> Option<String> {
     }
     let folder = session.path.as_deref().map(wte_core::link::links_folder).map_or_else(String::new, |p| p.display().to_string());
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let editors = editors_of(state, state.link_ui.made_since_save.iter().copied());
+    let editors = editors_of(state, pending.into_iter());
     Some(texts::unsaved_links(&refs, &editors, &folder))
 }
 

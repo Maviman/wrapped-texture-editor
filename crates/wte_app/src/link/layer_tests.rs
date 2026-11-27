@@ -321,3 +321,97 @@ fn paste_as_new_paint_layer_through_the_clipboard() {
     assert!(state.toasts.visible_labels().iter().any(|t| t.starts_with("Nothing WTE can paste.")));
     assert!(!state.clip_ui.busy());
 }
+
+/// check-P12: an editor's save that arrives during an open texture stroke (the button may already be up while the
+/// stroke finishes) is held, not refused with an error toast and lost; it is applied once the stroke ends.
+#[test]
+fn check_p12_an_update_waits_for_an_open_texture_stroke() {
+    let (mut state, layer, _dir) = layer_state("layer_stroke_wait");
+    edit_layer(&mut state, layer);
+    let [w, h] = texture(&state, layer);
+    let doc = state.doc_mut().unwrap();
+    let base = doc.add_raster_layer(S0, Some("Other")).unwrap();
+    doc.set_active_layer(S0, Some(base)).unwrap();
+    doc.stroke_begin(&wte_core::BrushParams::default()).unwrap();
+    doc.stroke_to_2d(S0, glam::Vec2::new(5.0, 5.0), 1.0);
+    assert!(doc.stroke_active());
+    let green = rect(w, h, [50, 60, 120, 90], [20, 220, 40, 255]);
+    editor_saves(&state, layer, &green);
+    deliver(&mut state, layer);
+    assert!(busy_for(&state, LinkId::Layer(layer), false), "an open texture stroke holds a layer's update");
+    assert_ne!(dense(&state, layer), green, "not applied during the stroke");
+    assert!(state.link_ui.sessions.get(&LinkId::Layer(layer)).is_some_and(|s| s.held.is_some()), "held, not lost");
+    assert!(!state.toasts.visible_labels().iter().any(|t| t.contains("stroke")), "no error toast");
+    assert!(state.doc_mut().unwrap().stroke_end());
+    super::retry_held(&mut state, false);
+    assert_eq!(dense(&state, layer), green, "applied after the stroke");
+    assert_eq!(state.doc().unwrap().undo_label(), Some(PAINT_UPDATE_LABEL));
+}
+
+/// check-P12: the chooser of "Edit Layer in..." (two editors, no default) speaks of the layer, not of a sticker.
+#[test]
+fn check_p12_the_layer_chooser_speaks_of_the_layer() {
+    let (mut state, layer, dir) = layer_state("layer_chooser");
+    let ps = dir.join("ps").join("Photoshop.exe");
+    std::fs::create_dir_all(ps.parent().unwrap()).unwrap();
+    std::fs::write(&ps, b"").unwrap();
+    state.prefs.photoshop_exe = Some(ps);
+    state.prefs.default_editor = None;
+    edit_layer(&mut state, layer);
+    assert_eq!(question_kind(&state), Some(QuestionKind::ChooseEditor));
+    let q = open_question(&state).unwrap();
+    assert_eq!(q.link, Some(LinkId::Layer(layer)));
+    assert_eq!(q.lines, ["WTE opens the layer's pixels in it; Ctrl+S there updates the layer on the model."]);
+    assert!(state.link_ui.launcher.calls().is_empty());
+}
+
+/// check-P12: Paste as New Paint Layer whose picture is ready during an open stroke waits for the stroke's end (the
+/// new layer would be refused and the picture lost).
+#[test]
+fn check_p12_paste_as_a_layer_waits_for_an_open_stroke() {
+    use crate::clip::{ClipAction, run_with};
+    use crate::ole::clipboard::ClipFormat;
+    let ctx = eframe::egui::Context::default();
+    let (mut state, layer, _dir) = layer_state("layer_paste_stroke");
+    let [w, h] = texture(&state, layer);
+    let pic = rect(w, h, [3, 3, 30, 20], [9, 99, 199, 255]);
+    let png = wte_core::encode_png(w, h, &pic.data, wte_core::PngLevel::Fast).unwrap();
+    state.clipboard.write(vec![(ClipFormat::Png, png)]).unwrap();
+    let layers = state.doc().unwrap().set(S0).unwrap().layers.len();
+    run_with(&ctx, &mut state, ClipAction::PasteAsLayer);
+    let doc = state.doc_mut().unwrap();
+    doc.set_active_layer(S0, Some(layer)).unwrap();
+    doc.stroke_begin(&wte_core::BrushParams::default()).unwrap();
+    doc.stroke_to_2d(S0, glam::Vec2::new(5.0, 5.0), 1.0);
+    // Long enough for the worker to finish; the job stays while the stroke is open.
+    for _ in 0..40 {
+        crate::clip::poll(&mut state);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(state.clip_ui.busy(), "the paste waits");
+    assert_eq!(state.doc().unwrap().set(S0).unwrap().layers.len(), layers);
+    assert!(state.doc_mut().unwrap().stroke_end());
+    for _ in 0..1000 {
+        crate::clip::poll(&mut state);
+        if !state.clip_ui.busy() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let set = state.doc().unwrap().set(S0).unwrap();
+    assert_eq!(set.layers.len(), layers + 1, "pasted after the stroke");
+    assert_eq!(dense(&state, set.active.unwrap()), pic);
+}
+
+/// check-P12: the close prompt's "linked since the last save" line does not name a paint layer deleted since (its
+/// link stays for an undo, a save leaves it out); an undo of the delete names it again.
+#[test]
+fn check_p12_a_deleted_linked_layer_is_not_named_by_the_close_prompt() {
+    let (mut state, layer, _dir) = layer_state("layer_deleted_prompt");
+    edit_layer(&mut state, layer);
+    assert!(unsaved_line(&state).unwrap().contains("Dirt (paint layer)"));
+    state.doc_mut().unwrap().remove_layer(layer).unwrap();
+    assert!(unsaved_line(&state).is_none_or(|l| !l.contains("(paint layer)")), "{:?}", unsaved_line(&state));
+    state.doc_mut().unwrap().undo().unwrap();
+    assert!(unsaved_line(&state).unwrap().contains("Dirt (paint layer)"));
+}

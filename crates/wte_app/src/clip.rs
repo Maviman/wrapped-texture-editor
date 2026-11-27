@@ -570,6 +570,10 @@ pub(crate) fn layer_picture(item: crate::ole::DropItem) -> Result<(String, Pixel
 /// meanwhile gets nothing.
 fn poll_layer(state: &mut AppState) {
     let Some(job) = &state.clip_ui.layer else { return };
+    // check-P12: an open stroke would refuse the new layer (and the picture would be lost); it waits for the stroke's end.
+    if state.session.as_ref().is_some_and(|s| s.scene_generation == job.generation && (s.doc.stroke_active() || s.doc.sticker_stroke_active())) {
+        return;
+    }
     let made = match job.rx.try_recv() {
         Ok(made) => made,
         Err(mpsc::TryRecvError::Empty) => return,

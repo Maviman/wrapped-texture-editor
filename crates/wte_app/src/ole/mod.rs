@@ -30,6 +30,8 @@ pub mod com;
 #[cfg(windows)]
 pub mod data_object;
 #[cfg(windows)]
+pub mod drag_source;
+#[cfg(windows)]
 pub mod drop_target;
 #[cfg(windows)]
 pub mod subclass;
@@ -85,6 +87,29 @@ pub enum OleEvent {
     Drop { pos: [f32; 2], items: Vec<DropItem>, skipped: usize },
     /// Stickers P10b: a clipboard chord of the key subclass (taken by `take_chords` in `raw_input_hook`).
     Chord(Chord),
+}
+
+/// Stickers P11: a finished `DoDragDrop` - the app's tag of the drag and the effect the drop target chose
+/// (`DROPEFFECT_NONE` = cancelled or refused).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DragEnded {
+    pub tag: u64,
+    pub effect: u32,
+}
+
+static ENDED: Mutex<Vec<DragEnded>> = Mutex::new(Vec::new());
+
+/// Queues a finished drag and asks for a frame (the subclass after `DoDragDrop`, or a self-test's delivered post).
+pub fn push_drag_ended(ended: DragEnded) {
+    ENDED.lock().unwrap_or_else(PoisonError::into_inner).push(ended);
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
+/// Takes the finished drags (`dragout::input_hook`).
+pub fn take_drag_ended() -> Vec<DragEnded> {
+    std::mem::take(&mut *ENDED.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// At most this many events wait in the queue (the oldest go first; a stream of `Hover`s is all that can pile up).
@@ -148,6 +173,12 @@ pub fn window() -> Option<isize> {
 }
 
 static WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static SUBCLASSED: AtomicBool = AtomicBool::new(false);
+
+/// Stickers P11: the app window when WTE's subclass is installed on it (it runs the posted drag); `None` otherwise.
+pub fn drag_window() -> Option<isize> {
+    window().filter(|_| SUBCLASSED.load(Ordering::Acquire))
+}
 
 /// True when WTE's drop target is registered on the window.
 pub fn installed() -> bool {
@@ -172,9 +203,15 @@ pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
             }
         };
         WINDOW.store(hwnd, Ordering::Release);
+        // Stickers P11: the drag message is registered before the subclass looks for it.
+        let msg = drag_source::message_id();
+        log::info!("ole: the drag-out message {} is {msg:#06x}", drag_source::MESSAGE_NAME);
         // Stickers P10b: the key subclass (above the pen subclass, which `WteApp::new` installed first).
         match subclass::install(hwnd) {
-            Ok(line) => log::info!("{line}"),
+            Ok(line) => {
+                log::info!("{line}");
+                SUBCLASSED.store(true, Ordering::Release);
+            }
             Err(e) => log::warn!("ole: the key subclass could not be installed ({e}); Ctrl+V pastes text only (Edit > Paste works)"),
         }
         match register(hwnd) {

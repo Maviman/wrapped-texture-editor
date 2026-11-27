@@ -388,6 +388,40 @@ Copy and paste (new in this build; also in the Edit menu):
  19. Hold AltGr and press V on a keyboard that has AltGr (German, French,
      ...): nothing is pasted (AltGr is not Ctrl).
 
+Drag out of WTE (new in this build; with the mouse):
+ 20. Drag a stamp's row of the Layers list out of the WTE window onto the
+     desktop or an Explorer folder: a PNG appears there - the stamp as you
+     see it, border and shadow included. Inside the window the same drag
+     still reorders the rows, as before.
+ 21. Drag a paint layer's row onto the desktop: a PNG of the whole layer at
+     texture size (the same picture "Export this layer" writes).
+ 22. In the Sticker tab drag the selected stamp's picture (top left), and a
+     sticker of the tray, onto the desktop: a PNG each. In the Sticker view
+     drag a row of its Layers list out: that layer as a PNG.
+ 23. Drag the same things onto PhotoCraft v0.2.0: each opens as a new
+     document. Onto the latest PhotoCraft: onto its picture (expected: a new
+     layer) and onto its tab strip (expected: opens) - please write down
+     what really happens.
+ 24. Drag them into Photoshop: onto an open picture (expected: placed as a
+     layer, Enter confirms) and onto the tab bar (expected: opens as its own
+     document). Note what happens.
+ 25. The "PSD" handle under the stamp's picture in the Sticker tab ("drag to
+     your editor: stays linked"): in an unsaved project it asks you to save
+     first. Saved: drag it onto PhotoCraft, or onto Photoshop's TAB BAR;
+     the linked PSD opens there. Edit, Ctrl+S: the sticker on the model
+     updates by itself. After the first such drag a note says that in
+     Photoshop it stays linked only when it opened as its own tab (dropped
+     on a picture, Photoshop places a copy that is not linked).
+ 26. Press Esc during a drag out: nothing is dropped. After any drag out the
+     next mouse move in WTE drags nothing, and reordering the Layers rows
+     still works.
+ 27. The same drags with the pen (may not work: Windows may end a pen drag
+     at once; note what happens). The tablet companion cannot drag out: use
+     Copy, Export Picture... or Edit in <editor> there.
+Files dragged out are written to %LOCALAPPDATA%\WrappedTextureEditor\dragout(with a list of them, manifest.json). WTE removes only its own files there,
+only when they are older than a day and nobody changed them: a file you
+saved there yourself (for example with PhotoCraft's Save As) stays.
+
 Pen tablets (new in this build)
 -------------------------------
 With a drawing tablet or pen display (Windows Ink on in its driver):

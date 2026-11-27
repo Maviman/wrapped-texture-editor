@@ -312,6 +312,11 @@ fn drag_row(
     let row_resp = ui.interact(rect, drag_id, Sense::click_and_drag());
     // Only the primary button reorders: a right-button press that moves a little opens the menu instead.
     let dragging = row_resp.dragged_by(egui::PointerButton::Primary);
+    // Stickers P11 (STICKER_PLAN 6.4): the same drag becomes a drag out of WTE when the pointer leaves the window with
+    // the button held; its picture is prepared from now on (inside the window the row still reorders).
+    if row_resp.drag_started_by(egui::PointerButton::Primary) {
+        actions.push(AppAction::DragOut(crate::dragout::DragSource::Layer(layer.id)));
+    }
     if dragging {
         egui::DragAndDrop::set_payload(ui.ctx(), layer.id);
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -963,15 +968,17 @@ mod tests {
         let target = hit(&state, PanelHit::LayerRow(base));
         let to = Pos2::new(from.x, target.bottom() - 4.0);
         let points: Vec<Pos2> = (0..=8).map(|k| from + (to - from) * (k as f32 / 8.0)).collect();
+        // Stickers P11: the drag's start also prepares it as a drag out of the window (`DragOut`, which posts nothing
+        // while the pointer stays inside); the reorder itself is unchanged.
         let actions = d.drag(&mut state, &mut ps, &points);
         assert!(
-            matches!(actions[..], [AppAction::MoveLayer { layer, to_index: 0 }] if layer == paint),
+            matches!(actions[..], [AppAction::DragOut(crate::dragout::DragSource::Layer(l)), AppAction::MoveLayer { layer, to_index: 0 }] if layer == paint && l == paint),
             "{actions:?}"
         );
         // Releasing a short drag over its own row moves nothing.
         let from = hit(&state, PanelHit::LayerName(base)).center();
         let actions = d.drag(&mut state, &mut ps, &[from, from + vec2(0.0, 9.0), from + vec2(0.0, 12.0)]);
-        assert!(actions.is_empty(), "{actions:?}");
+        assert!(matches!(actions[..], [AppAction::DragOut(crate::dragout::DragSource::Layer(l))] if l == base), "{actions:?}");
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod crash;
 mod dialogs;
 mod dispatch;
 mod dnd;
+mod dragout;
 mod gpu;
 mod gpu_check;
 mod io_flows;

@@ -67,11 +67,19 @@ pub struct EditRequest {
     pub editor: Option<String>,
     /// Stickers P9b: "Open in <editor> anyway" to "<other editor> may still have this file open." (13.1).
     pub switch_ok: bool,
+    /// Stickers P11 (6.4): the PSD handle - the link and its file are made (or written again when missing), no editor
+    /// is started; the questions on the way (save first, the shared picture) come back here.
+    pub prepare_only: bool,
 }
 
 impl EditRequest {
     pub fn new(target: LinkTarget) -> EditRequest {
-        EditRequest { target, share: None, open_as_is: false, open_anyway: false, editor: None, switch_ok: false }
+        EditRequest { target, share: None, open_as_is: false, open_anyway: false, editor: None, switch_ok: false, prepare_only: false }
+    }
+
+    /// Stickers P11: the PSD handle's request for `stamp` (no editor is started).
+    pub fn for_handle(stamp: StampId) -> EditRequest {
+        EditRequest { prepare_only: true, ..EditRequest::new(LinkTarget::Stamp(stamp)) }
     }
 
     /// The same request in the editor with `key`.

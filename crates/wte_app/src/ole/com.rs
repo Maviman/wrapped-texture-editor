@@ -1,7 +1,8 @@
 //! Stickers P10a (STICKER_PLAN 6.1): the Windows declarations of the OLE code, hand-written like `pen/win.rs` (no new
 //! crate): `raw-dylib` imports from `ole32`, `shell32`, `user32` and `kernel32`, the `#[repr(C)]` structs and vtables
-//! of `IUnknown`, `IDataObject`, `IDropTarget`, `IEnumFORMATETC` and `IStream` (read only) as in the Windows SDK headers
-//! (`objidl.h`, `oleidl.h`), and the interface ids. The layout tests assert the SDK's sizes and offsets for x64.
+//! of `IUnknown`, `IDataObject`, `IDropTarget`, `IDropSource` (stickers P11), `IEnumFORMATETC` and `IStream` (read only)
+//! as in the Windows SDK headers (`objidl.h`, `oleidl.h`), and the interface ids. The layout tests assert the SDK's sizes
+//! and offsets for x64.
 //!
 //! Who frees what (the Win32 contracts the callers follow):
 //! - `IDataObject::GetData` fills a `STGMEDIUM` the caller owns; the caller ends it with `ReleaseStgMedium`, which
@@ -39,6 +40,12 @@ pub const DATADIR_GET: u32 = 1;
 pub const DROPEFFECT_NONE: u32 = 0;
 pub const DROPEFFECT_COPY: u32 = 1;
 pub const GMEM_MOVEABLE: u32 = 0x0002;
+/// Stickers P11: `IDropSource::QueryContinueDrag` / `GiveFeedback` answers and `DoDragDrop` results (`oleidl.h`).
+pub const DRAGDROP_S_DROP: Hresult = 0x0004_0100;
+pub const DRAGDROP_S_CANCEL: Hresult = 0x0004_0101;
+pub const DRAGDROP_S_USEDEFAULTCURSORS: Hresult = 0x0004_0102;
+/// `grfKeyState` bits of `QueryContinueDrag` (`winuser.h` `MK_*`).
+pub const MK_LBUTTON: u32 = 0x0001;
 
 /// `GUID`.
 #[repr(C)]
@@ -59,6 +66,7 @@ pub const IID_ISTREAM: Guid = com_iid(0x0000_000C);
 pub const IID_IENUMFORMATETC: Guid = com_iid(0x0000_0103);
 pub const IID_IDATAOBJECT: Guid = com_iid(0x0000_010E);
 pub const IID_IDROPTARGET: Guid = com_iid(0x0000_0122);
+pub const IID_IDROPSOURCE: Guid = com_iid(0x0000_0121);
 
 /// `FORMATETC`.
 #[repr(C)]
@@ -145,6 +153,14 @@ pub struct IDropTargetVtbl {
     pub drop: unsafe extern "system" fn(this: *mut c_void, data: *mut c_void, keys: u32, pt: PointL, effect: *mut u32) -> Hresult,
 }
 
+/// `IDropSourceVtbl` (stickers P11).
+#[repr(C)]
+pub struct IDropSourceVtbl {
+    pub base: IUnknownVtbl,
+    pub query_continue_drag: unsafe extern "system" fn(this: *mut c_void, escape_pressed: i32, keys: u32) -> Hresult,
+    pub give_feedback: unsafe extern "system" fn(this: *mut c_void, effect: u32) -> Hresult,
+}
+
 /// `IEnumFORMATETCVtbl`.
 #[repr(C)]
 pub struct IEnumFormatEtcVtbl {
@@ -194,6 +210,9 @@ unsafe extern "system" {
 unsafe extern "system" {
     pub fn RegisterClipboardFormatW(name: *const u16) -> u32;
     pub fn ScreenToClient(hwnd: Hwnd, point: *mut PointL) -> i32;
+    /// Stickers P11: the drag message (`WTE.OleDrag.v1`) and its post to the app window.
+    pub fn RegisterWindowMessageW(name: *const u16) -> u32;
+    pub fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -280,6 +299,10 @@ mod tests {
         assert_eq!(size_of::<IDropTargetVtbl>(), 7 * 8);
         assert_eq!(offset_of!(IDropTargetVtbl, drop), 6 * 8);
         assert_eq!(size_of::<IEnumFormatEtcVtbl>(), 7 * 8);
+        // IDropSource 3 + 2 (stickers P11).
+        assert_eq!(size_of::<IDropSourceVtbl>(), 5 * 8);
+        assert_eq!(offset_of!(IDropSourceVtbl, query_continue_drag), 3 * 8);
+        assert_eq!(offset_of!(IDropSourceVtbl, give_feedback), 4 * 8);
         assert_eq!(size_of::<IStreamVtbl>(), 14 * 8);
         assert_eq!(offset_of!(IStreamVtbl, read), 3 * 8);
         assert_eq!(offset_of!(IStreamVtbl, clone), 13 * 8);
@@ -290,6 +313,8 @@ mod tests {
         // {0000010E-0000-0000-C000-000000000046} and {00000122-0000-0000-C000-000000000046}.
         assert_eq!(IID_IDATAOBJECT.d1, 0x10E);
         assert_eq!(IID_IDROPTARGET.d1, 0x122);
+        // {00000121-0000-0000-C000-000000000046}.
+        assert_eq!(IID_IDROPSOURCE.d1, 0x121);
         assert_eq!(IID_IUNKNOWN.d4, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
     }
 

@@ -134,6 +134,8 @@ pub enum PanelHit {
     StickerTabExport,
     /// Stickers P10a: the selected stamp's thumbnail in the Sticker tab (a drop target, 6.2).
     StickerTabThumb,
+    /// Stickers P11: the PSD handle beside the selected stamp's thumbnail (drag out of the linked PSD, 6.4).
+    StickerTabPsdHandle,
     /// A preset button of the Sticker tab's style row (by its index in `StylePreset::ALL`).
     StylePresetButton(u8),
     /// Copy / Paste / Clear Style of the Sticker tab.
@@ -1676,6 +1678,8 @@ pub struct AppState {
     pub clipboard: Box<dyn crate::ole::clipboard::Clipboard>,
     /// Stickers P10b: the copies being encoded (`clip.rs`).
     pub clip_ui: crate::clip::ClipUi,
+    /// Stickers P11 (STICKER_PLAN 6.4): drag out of WTE - the drag being prepared or run, the folder, the port.
+    pub drag_out: crate::dragout::DragOutUi,
     /// Stickers P9a (STICKER_PLAN 5.3, 5.6, 5.7): the editor link's sessions, watcher, launcher (the stub in a self-test
     /// run) and questions (`link/mod.rs`).
     pub link_ui: crate::link::LinkUi,
@@ -1781,6 +1785,7 @@ impl AppState {
             style_clipboard: None,
             clipboard: crate::ole::clipboard::clipboard_for(selftest),
             clip_ui: crate::clip::ClipUi::default(),
+            drag_out: crate::dragout::DragOutUi::new(selftest),
             link_ui: crate::link::LinkUi::new(selftest),
         }
     }

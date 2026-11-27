@@ -147,7 +147,12 @@ fn rows(
             dragged = Some((index, layer.id));
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
-        if resp.drag_stopped() {
+        // Stickers P11 (STICKER_PLAN 6.4): the drag is prepared as a drag out of the window from its start.
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            actions.push(AppAction::DragOut(crate::dragout::DragSource::StickerLayer(layer.id)));
+        }
+        // The release injected after a drag out (the pointer is outside the window) is not a reorder.
+        if resp.drag_stopped() && !state.drag_out.released_this_frame {
             dropped = Some((index, layer.id));
         }
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("sticker_layer_body", layer.id.0)));

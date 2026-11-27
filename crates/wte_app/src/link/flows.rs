@@ -227,6 +227,13 @@ fn save_prefs(state: &AppState) {
 /// "Edit in which program?" asks. A link opened in another editor in this session asks "<name> may still have this
 /// file open..." before it opens in a second one.
 pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnMut(&Prefs, &ExternalEditor) -> Option<PathBuf>) {
+    // Stickers P11: an answer to a question the PSD handle asked comes back here; the link is made, nothing starts.
+    if req.prepare_only {
+        if let Some(ready) = prepare_handle(state, req) {
+            state.status_hint = format!("{} is ready: drag the PSD handle to {}", ready.file_name(), ready.editor_name);
+        }
+        return;
+    }
     let Some(session) = state.session.as_ref() else { return };
     let doc = &session.doc;
     let (stamp, sticker) = match req.target {
@@ -368,6 +375,90 @@ pub(crate) fn edit_in(state: &mut AppState, req: EditRequest, pick: &mut dyn FnM
         }
         Err(e) => ask(state, info(Some(id), &format!("{} could not be started", editor.name()), e)),
     }
+}
+
+/// Stickers P11 (STICKER_PLAN 6.4, 13.5, 13.9): what the PSD handle hands to the drag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HandleReady {
+    /// The linked PSD.
+    pub path: PathBuf,
+    pub sticker: StickerId,
+    /// The link's editor key and name (the default editor, 13.9).
+    pub editor: String,
+    pub editor_name: String,
+}
+
+impl HandleReady {
+    fn file_name(&self) -> String {
+        self.path.file_name().map_or_else(|| self.path.display().to_string(), |n| n.to_string_lossy().into_owned())
+    }
+}
+
+/// The status line when the PSD handle is pressed on a text stamp.
+pub(crate) const HANDLE_TEXT_HINT: &str = "Convert the text stamp to a layered sticker first (Sticker tab): then its PSD can be dragged out";
+
+/// The editor of a link the PSD handle makes or hands out (13.9: the default editor): the default editor (or the only
+/// known one), else the link's own, else the first known one, else PhotoCraft. Never a question: the handle is pressed
+/// and dragged in one gesture.
+fn handle_editor(state: &AppState, existing: Option<&StickerLink>) -> ExternalEditor {
+    editor::quiet_editor(state)
+        .or_else(|| existing.and_then(|l| editor::editor_of_key(&state.prefs, &l.editor)))
+        .or_else(|| state.link_ui.known.first().cloned())
+        .unwrap_or(ExternalEditor::PhotoCraft)
+}
+
+/// Stickers P11 (6.4): the PSD handle's press - the link of 5.1 step 1 without starting an editor. A saved project is
+/// needed (else "Save first", whose Save... comes back here), a picture several stamps show asks the shared-picture
+/// question first (its answers come back here), a text stamp is refused (status line). An image stamp is promoted, a
+/// new link's PSD is written into the links folder, a missing file is written again; the link's editor becomes the
+/// default editor (13.9). `None` when a question was asked or nothing can be handed out: the drag does not start.
+pub(crate) fn prepare_handle(state: &mut AppState, req: EditRequest) -> Option<HandleReady> {
+    let LinkTarget::Stamp(stamp) = req.target else { return None };
+    let session = state.session.as_ref()?;
+    let object = session.doc.stamp(stamp)?;
+    if matches!(object.source, StampSource::Text(_)) {
+        state.status_hint = HANDLE_TEXT_HINT.to_owned();
+        return None;
+    }
+    let sticker = super::sticker_of_stamp(state, stamp);
+    let existing = sticker.and_then(|id| session.doc.link(id).cloned());
+    let external = existing.as_ref().is_some_and(|l| matches!(l.file, LinkFile::External(_)));
+    if session.path.is_none() && !external {
+        let q = LinkQuestion::new(QuestionKind::SaveFirst, sticker, "Save first", vec![texts::SAVE_FIRST.to_owned()])
+            .cancel("Cancel")
+            .button("Save...", vec![act(LinkAction::SaveThenEdit(req))]);
+        ask(state, q);
+        return None;
+    }
+    editor::ensure_discovered(state, false);
+    let id = resolve_sticker(state, &req)?;
+    let existing = state.doc().and_then(|d| d.link(id).cloned());
+    let editor = handle_editor(state, existing.as_ref());
+    match existing {
+        None => {
+            if !make_link(state, id, &editor) {
+                return None;
+            }
+        }
+        Some(link) => {
+            if link.editor != editor.key()
+                && let Some(doc) = state.doc_mut()
+            {
+                let _ = doc.set_link_file_and_editor(id, None, Some(editor.key()));
+            }
+            if link_path(state, id).as_deref().is_none_or(|p| !p.is_file()) {
+                // The file is gone: written again from the sticker (WTE's content), as "Edit in" does.
+                if let Err(text) = write_file(state, id, link.file.clone(), editor.key()) {
+                    ask(state, info(Some(id), "Could not write the file", text));
+                    return None;
+                }
+            } else if wte_changed(state, id) {
+                state.status_hint = format!("The file does not have WTE's latest changes yet: Send to {} first to include them", editor.name());
+            }
+        }
+    }
+    let path = link_path(state, id)?;
+    Some(HandleReady { path, sticker: id, editor: editor.key().to_owned(), editor_name: editor.name() })
 }
 
 fn link_action(a: LinkAction) -> AppAction {

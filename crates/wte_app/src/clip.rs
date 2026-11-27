@@ -225,7 +225,8 @@ pub(crate) fn run_with(ctx: &egui::Context, state: &mut AppState, action: ClipAc
 
 /// A copy on a worker: `take` makes the picture (and the `.wtes`) from what the UI thread took; the PNG and the DIB
 /// are encoded there too.
-type Take = Box<dyn FnOnce() -> Result<(Arc<PixelBuf>, Option<Vec<u8>>), String> + Send>;
+/// Stickers P11: drag out (`dragout.rs`) takes its pictures the same way.
+pub(crate) type Take = Box<dyn FnOnce() -> Result<(Arc<PixelBuf>, Option<Vec<u8>>), String> + Send>;
 
 fn start_copy(ctx: &egui::Context, state: &mut AppState, what: String, take: Take) {
     // The copy being encoded is superseded: its result is dropped with its receiver, and its worker stops early.
@@ -297,15 +298,27 @@ fn copy(ctx: &egui::Context, state: &mut AppState, cut: bool) {
 /// A stamp's finished picture with its styles, and (a sticker stamp, an image stamp with styles) its `.wtes` with the
 /// stamp styles.
 fn copy_stamp(ctx: &egui::Context, state: &mut AppState, stamp: StampId) {
-    let Some(doc) = state.doc_mut() else { return };
-    let Some(object) = doc.stamp(stamp).cloned() else { return };
-    let picture = match doc.stamp_picture(stamp, true) {
-        Ok(p) => p,
-        Err(e) => {
-            state.toasts.warn(format!("Nothing was copied: {e}"));
-            return;
-        }
-    };
+    match stamp_take(state, stamp) {
+        Ok(Some(picked)) => start_copy(ctx, state, picked.what, picked.take),
+        Ok(None) => {}
+        Err(e) => state.toasts.warn(format!("Nothing was copied: {e}")),
+    }
+}
+
+/// What Copy (and drag out) takes of something: the status words, the name a file of it gets, and the worker part.
+pub(crate) struct Picked {
+    pub what: String,
+    pub name: String,
+    pub take: Take,
+}
+
+/// A stamp's finished picture with its styles ("what you see": `stamp_picture(id, true)`, rendered here) and, for a
+/// sticker stamp or an image stamp with styles, the worker part that writes its `.wtes` with the stamp styles (Copy,
+/// stickers P11 drag out). `Ok(None)` without a document or stamp.
+pub(crate) fn stamp_take(state: &mut AppState, stamp: StampId) -> Result<Option<Picked>, String> {
+    let Some(doc) = state.doc_mut() else { return Ok(None) };
+    let Some(object) = doc.stamp(stamp).cloned() else { return Ok(None) };
+    let picture = doc.stamp_picture(stamp, true).map_err(|e| e.to_string())?;
     let styles = (!object.styles.is_default()).then(|| object.styles.clone());
     let sticker: Option<StickerDoc> = match &object.source {
         StampSource::Sticker { sticker } => doc.sticker(*sticker).map(|d| (**d).clone()),
@@ -317,11 +330,10 @@ fn copy_stamp(ctx: &egui::Context, state: &mut AppState, stamp: StampId) {
     };
     let blobs = sticker.as_ref().map(|_| doc.blobs.clone());
     let what = format!("the stamp \"{}\" ({} x {} pixels)", object.name, picture.width, picture.height);
-    start_copy(
-        ctx,
-        state,
+    Ok(Some(Picked {
         what,
-        Box::new(move || {
+        name: object.name.clone(),
+        take: Box::new(move || {
             let wtes = match (sticker, blobs) {
                 (Some(s), Some(b)) => match wte_core::write_wtes(&s, styles.as_ref(), &b, Some(&picture)) {
                     Ok(bytes) => Some(bytes),
@@ -334,7 +346,7 @@ fn copy_stamp(ctx: &egui::Context, state: &mut AppState, stamp: StampId) {
             };
             Ok((Arc::new(picture), wtes))
         }),
-    );
+    }))
 }
 
 /// The Sticker view: the active picture layer's pixels (mask applied, no layer styles), cut to the selection.

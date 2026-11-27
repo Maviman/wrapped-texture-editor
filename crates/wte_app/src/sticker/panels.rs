@@ -3,7 +3,9 @@
 // (thumbnail, name, kind, Edit Sticker, Export Picture...), (2) Sticker style: the preset row, Copy / Paste / Clear and
 // the stamp-level style editor for image, text and sticker stamps without opening the editor (E3); with several stamp
 // layers selected it edits all of them (3.7), (3) the tray (`tray.rs`), (4) the library (P8). Stickers P9a: the
-// editor link's block under the selected stamp (`link/ui.rs`). Every command is an `AppAction`; every control has a button (tablet rule of 3.10) and a rect in
+// editor link's block under the selected stamp (`link/ui.rs`). Stickers P11 (6.4): the thumbnail and the tray items
+// are drag sources (a drag out of the window hands over their finished picture), and the "PSD" handle under the
+// thumbnail hands over the stamp's linked PSD (caption "drag to your editor: stays linked"). Every command is an `AppAction`; every control has a button (tablet rule of 3.10) and a rect in
 // `state.panel_rects`.
 
 use eframe::egui;
@@ -75,9 +77,16 @@ fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, 
         }
     };
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(STAMP_THUMB, STAMP_THUMB), Sense::hover());
+        let (rect, resp) = ui.allocate_exact_size(vec2(STAMP_THUMB, STAMP_THUMB), Sense::drag());
         // Stickers P10a (6.2): a picture dropped here replaces the stamp's picture or becomes a layer of its sticker.
         hits.push((PanelHit::StickerTabThumb, rect));
+        // Stickers P11 (6.4): dragged out of the window it hands over the finished picture (with its styles).
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            actions.push(AppAction::DragOut(crate::dragout::DragSource::Stamp(first)));
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
         let thumb = match &object.source {
             StampSource::Image { blob } => tray::blob_thumb(ui.ctx(), state, *blob),
             StampSource::Sticker { sticker } => tray::sticker_thumb(ui.ctx(), state, *sticker),
@@ -99,6 +108,9 @@ fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, 
             }
         });
     });
+    if psd_handle(ui, first, !matches!(object.source, StampSource::Text(_)) && !locked, actions, hits) {
+        state.status_hint = crate::dragout::HANDLE_CLICK_HINT.to_owned();
+    }
     let on_pc = if state.companion.session.is_some() { " (on the PC)" } else { "" };
     ui.horizontal_wrapped(|ui| {
         let key = crate::shortcuts::shortcut_text(ui.ctx(), "Sticker");
@@ -144,6 +156,51 @@ fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, 
     let text_note = matches!(object.source, StampSource::Text(_));
     let mut cx = EditorCx { ps, out: actions, hits, make: &make, k, text_note, mixed };
     styles_ui::editor(ui, "stamp", &object.styles, !locked, &mut cx);
+}
+
+/// Side of the PSD handle in points (6.4: a visible 24-pt handle).
+pub(crate) const PSD_HANDLE: f32 = 24.0;
+
+/// Stickers P11 (STICKER_PLAN 6.4, 13.9): the "PSD" handle and its caption under it (plain text, not a tooltip). A drag
+/// on it makes the stamp's link (save first and the shared-picture question at the press) and hands the linked PSD
+/// to the drag out; a click only says how it is used. Disabled for a text stamp (it must become a sticker first) and a
+/// locked one. True when it was clicked (the caller shows how it is used).
+fn psd_handle(ui: &mut egui::Ui, stamp: wte_core::StampId, enabled: bool, actions: &mut Vec<AppAction>, hits: &mut Vec<(PanelHit, Rect)>) -> bool {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
+        let (rect, resp) = ui.allocate_exact_size(vec2(PSD_HANDLE * 2.0, PSD_HANDLE), sense);
+        hits.push((PanelHit::StickerTabPsdHandle, rect));
+        let v = ui.visuals();
+        let (fill, stroke, text) = if enabled {
+            let w = v.widgets.style(&resp);
+            (w.weak_bg_fill, w.bg_stroke, w.fg_stroke.color)
+        } else {
+            (v.widgets.noninteractive.weak_bg_fill, v.widgets.noninteractive.bg_stroke, v.weak_text_color())
+        };
+        ui.painter().rect(rect, 4.0, fill, stroke, egui::StrokeKind::Inside);
+        // Grip dots left of the label: it is dragged, not clicked.
+        for dy in [-4.0, 0.0, 4.0] {
+            for dx in [0.0, 4.0] {
+                ui.painter().circle_filled(egui::pos2(rect.left() + 6.0 + dx, rect.center().y + dy), 1.2, text);
+            }
+        }
+        ui.painter().text(rect.center() + vec2(6.0, 0.0), egui::Align2::CENTER_CENTER, "PSD", egui::FontId::proportional(12.0), text);
+        if enabled && (resp.hovered() || resp.dragged()) {
+            ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        }
+        let resp = if enabled {
+            resp.on_hover_text("Drag this onto your editor (Photoshop: onto its tab bar) to open the linked PSD there; Ctrl+S there updates the sticker")
+        } else {
+            resp.on_hover_text("A text stamp becomes a layered sticker first (Convert to layered sticker); a locked stamp cannot be linked")
+        };
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            actions.push(AppAction::DragOut(crate::dragout::DragSource::PsdHandle(stamp)));
+        }
+        ui.weak(crate::dragout::HANDLE_CAPTION);
+        resp.clicked()
+    })
+    .inner
 }
 
 /// Copy / Paste / Clear Style for `target`.

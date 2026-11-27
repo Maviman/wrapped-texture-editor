@@ -129,7 +129,11 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Ap
             let (name, users) = state.doc().map_or((String::new(), 0), |d| {
                 (d.sticker(*id).map_or_else(String::new, |s| s.name.clone()), d.sticker_users(*id).len())
             });
-            let (rect, resp) = ui.allocate_exact_size(vec2(TRAY_THUMB, TRAY_THUMB), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(TRAY_THUMB, TRAY_THUMB), Sense::click_and_drag());
+            // Stickers P11 (6.4): dragged out of the window it hands over the sticker's picture.
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                actions.push(AppAction::DragOut(crate::dragout::DragSource::Tray(*id)));
+            }
             let aspect = thumb.map_or(1.0, |(_, [w, h])| w as f32 / h.max(1) as f32);
             crate::panels::paint_thumb(ui.painter(), rect.shrink(3.0), thumb.map(|(t, _)| t), aspect);
             if selected == Some(*id) {

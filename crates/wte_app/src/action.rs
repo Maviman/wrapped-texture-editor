@@ -184,6 +184,9 @@ pub enum AppAction {
     /// Stickers P10b (STICKER_PLAN 6.3): Copy, Cut, Paste, Paste at View Centre, Help > Clipboard contents... (logic in
     /// `clip.rs`).
     Clip(crate::clip::ClipAction),
+    /// Stickers P11 (STICKER_PLAN 6.4): a drag on a Layers row, a Sticker tab thumbnail or the PSD handle was
+    /// recognised; its file is prepared for a drag out of the window (logic in `dragout.rs`).
+    DragOut(crate::dragout::DragSource),
 }
 
 /// Severity of a toast.

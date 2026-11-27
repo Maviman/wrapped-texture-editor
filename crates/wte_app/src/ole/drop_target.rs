@@ -258,6 +258,9 @@ unsafe extern "system" fn target_drop(this: *mut c_void, data: *mut c_void, _key
     })
 }
 
+/// The bytes of a `WTE.Sticker.v1` block that say who offers it (magic, version, process id).
+const STICKER_HEADER: usize = 12;
+
 /// What `get_bytes` found.
 #[derive(Debug, PartialEq)]
 enum Read {
@@ -289,6 +292,24 @@ unsafe fn has(data: *mut c_void, format: u16) -> bool {
 /// # Safety
 /// `data` is a live `IDataObject`.
 unsafe fn get_bytes(data: *mut c_void, format: u16, lindex: i32, cap: usize) -> Read {
+    // SAFETY: as the caller's.
+    unsafe { get_medium(data, format, lindex, cap, false) }
+}
+
+/// At most the first `n` bytes of `format` (stickers P11: the header of a sticker block), the medium released.
+///
+/// # Safety
+/// `data` is a live `IDataObject`.
+unsafe fn get_prefix(data: *mut c_void, format: u16, n: usize) -> Read {
+    // SAFETY: as the caller's.
+    unsafe { get_medium(data, format, -1, n, true) }
+}
+
+/// `get_bytes` (`prefix` false: all of it up to `cap`) and `get_prefix` (`prefix` true: the first `cap` bytes).
+///
+/// # Safety
+/// `data` is a live `IDataObject`.
+unsafe fn get_medium(data: *mut c_void, format: u16, lindex: i32, cap: usize, prefix: bool) -> Read {
     let f = FormatEtc { lindex, ..FormatEtc::new(format, TYMED_HGLOBAL | TYMED_ISTREAM) };
     let mut medium = StgMedium::default();
     // SAFETY: see above; `medium` is ours to release after a success.
@@ -299,6 +320,8 @@ unsafe fn get_bytes(data: *mut c_void, format: u16, lindex: i32, cap: usize) -> 
             return Read::Missing;
         }
         let read = match medium.tymed {
+            TYMED_HGLOBAL if prefix => read_global_prefix(medium.data as Hglobal, cap),
+            TYMED_ISTREAM if prefix && !medium.data.is_null() => read_stream_prefix(medium.data, cap),
             TYMED_HGLOBAL => read_global(medium.data as Hglobal, cap),
             TYMED_ISTREAM if !medium.data.is_null() => read_stream(medium.data, cap),
             _ => Read::Missing,
@@ -327,6 +350,47 @@ unsafe fn read_global(mem: Hglobal, cap: usize) -> Read {
         GlobalUnlock(mem);
         Read::Bytes(bytes)
     }
+}
+
+/// Copies the first `n` bytes of an `HGLOBAL` (all of a smaller block): the header of a sticker block.
+///
+/// # Safety
+/// `mem` is a valid global memory block.
+unsafe fn read_global_prefix(mem: Hglobal, n: usize) -> Read {
+    // SAFETY: see above; at most `GlobalSize` bytes are read between Lock and Unlock.
+    unsafe {
+        let size = GlobalSize(mem).min(n);
+        let p = GlobalLock(mem);
+        if p.is_null() {
+            return Read::Missing;
+        }
+        let bytes = std::slice::from_raw_parts(p.cast::<u8>(), size).to_vec();
+        GlobalUnlock(mem);
+        Read::Bytes(bytes)
+    }
+}
+
+/// Reads at most the first `n` bytes of an `IStream`.
+///
+/// # Safety
+/// `stream` is a live `IStream`.
+unsafe fn read_stream_prefix(stream: *mut c_void, n: usize) -> Read {
+    let mut out = vec![0u8; n];
+    let mut got = 0usize;
+    while got < n {
+        let mut read = 0u32;
+        // SAFETY: see above; `out[got..]` holds `n - got` writable bytes.
+        let hr = unsafe {
+            ((*(*(stream as *mut ComObject<IStreamVtbl>)).vtbl).read)(stream, out[got..].as_mut_ptr().cast(), (n - got) as u32, &mut read)
+        };
+        let read = (read as usize).min(n - got);
+        if hr < 0 || read == 0 {
+            break;
+        }
+        got += read;
+    }
+    out.truncate(got);
+    Read::Bytes(out)
 }
 
 /// Reads an `IStream` to its end in 1-MiB chunks; more than `cap` bytes is `TooLarge` (an endless stream stops there).
@@ -370,10 +434,17 @@ fn takes_name(name: &str) -> bool {
 /// # Safety
 /// `data` is a live `IDataObject`.
 unsafe fn inspect(data: *mut c_void, f: &Formats, caps: &Caps) -> Option<DragKinds> {
+    // Stickers P11 (R3): a drag WTE itself runs (`DoDragDrop` of a drag out) is never taken back by WTE, whatever it
+    // carries (a texture layer's PNG has no WTE.Sticker.v1 marker).
+    if super::drag_source::own_drag_on_this_thread() {
+        return None;
+    }
     // SAFETY: see above, for every call below.
     unsafe {
+        // Stickers P11 (check P10a): only the 12-byte header of a sticker block is copied here (another WTE's drag out
+        // offers the whole `.wtes`; `Drop` copies it once).
         if has(data, f.sticker)
-            && let Read::Bytes(b) = get_bytes(data, f.sticker, -1, caps.item)
+            && let Read::Bytes(b) = get_prefix(data, f.sticker, STICKER_HEADER)
             && let Some((pid, _)) = formats::unwrap_sticker(&b)
         {
             if pid == std::process::id() {

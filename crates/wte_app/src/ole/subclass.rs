@@ -4,7 +4,12 @@
 //! Windows clipboard nothing would reach the app. The subclass sees `WM_KEYDOWN` before winit does: for the paste
 //! chords it queues `OleEvent::Chord(Paste)` (`raw_input_hook` handles it in the frame those keys make) and then
 //! forwards the message **unchanged** to the previous procedure, whose result it returns. It never eats a message,
-//! and every other message goes straight through. (P11 adds the drag message here.)
+//! and every other message goes straight through.
+//!
+//! Stickers P11 (6.4, critic C4): the registered drag message `WTE.OleDrag.v1` (`drag_source::message_id`) is the one
+//! message the subclass answers itself: it runs the posted drag (`drag_source::handle_message`: `DoDragDrop`, outside
+//! winit's event handler and outside any egui frame) and returns 0 without forwarding it. Every other message,
+//! including the key-downs it looked at, reaches the previous procedure unchanged.
 //!
 //! The chords, as egui-winit reads them (`is_paste_command`): V with Ctrl down and Shift and Alt up (Ctrl+Alt is
 //! AltGr on many keyboards: never a paste), Insert with Shift down and Ctrl and Alt up (Ctrl+Insert is Copy). Key
@@ -53,16 +58,25 @@ pub(crate) fn chord_of(msg: u32, wparam: usize, down: &dyn Fn(i32) -> bool) -> O
     }
 }
 
-/// One message through the subclass: its chord (if any) to `sink`, then the message unchanged to `forward`, whose
-/// result is returned. A panic while looking at the message is caught; the message is forwarded in every case.
+/// One message through the subclass. The drag message (`drag_msg`, 0 = none registered) runs `on_drag` and is answered
+/// with 0 (stickers P11); every other message: its chord (if any) to `sink`, then the message unchanged to `forward`,
+/// whose result is returned. A panic while looking at the message is caught; every other message is forwarded in every
+/// case.
+#[expect(clippy::too_many_arguments, reason = "one message and the subclass's four seams, as the tests drive them")]
 pub(crate) fn route(
     msg: u32,
     wparam: usize,
     lparam: isize,
+    drag_msg: u32,
+    on_drag: &dyn Fn(),
     down: &dyn Fn(i32) -> bool,
     sink: &dyn Fn(Chord),
     forward: &mut dyn FnMut(u32, usize, isize) -> isize,
 ) -> isize {
+    if drag_msg != 0 && msg == drag_msg {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_drag));
+        return 0;
+    }
     if msg == WM_KEYDOWN {
         let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| chord_of(msg, wparam, down)));
         if let Ok(Some(chord)) = found {
@@ -121,7 +135,11 @@ unsafe extern "system" fn wndproc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: i
         }
         HWND.store(0, Ordering::Release);
     }
-    route(msg, wparam, lparam, &key_down, &|chord| super::push(super::OleEvent::Chord(chord)), &mut |m, w, l| {
+    let drag_msg = super::drag_source::registered_id();
+    let on_drag = || {
+        super::drag_source::handle_message(super::drag_source::window_seam());
+    };
+    route(msg, wparam, lparam, drag_msg, &on_drag, &key_down, &|chord| super::push(super::OleEvent::Chord(chord)), &mut |m, w, l| {
         if prev == 0 {
             // SAFETY: the default procedure for a window whose previous one is unknown (cannot happen after `install`).
             return unsafe { DefWindowProcW(hwnd, m, w, l) };
@@ -142,10 +160,14 @@ mod tests {
         got: RefCell<Vec<(u32, usize, isize)>>,
     }
 
+    /// A registered-looking drag message id for the routing tests.
+    const DRAG: u32 = 0xC123;
+
     fn run(fake: &Fake, msg: u32, wparam: usize, lparam: isize, keys: &[i32]) -> (isize, Vec<Chord>) {
         let chords = RefCell::new(Vec::new());
         let down = |vk: i32| keys.contains(&vk);
-        let result = route(msg, wparam, lparam, &down, &|c| chords.borrow_mut().push(c), &mut |m, w, l| {
+        let on_drag = || panic!("only the drag message runs a drag");
+        let result = route(msg, wparam, lparam, DRAG, &on_drag, &down, &|c| chords.borrow_mut().push(c), &mut |m, w, l| {
             fake.got.borrow_mut().push((m, w, l));
             0x5A5A
         });
@@ -184,12 +206,38 @@ mod tests {
         let fake = Fake { got: RefCell::new(Vec::new()) };
         let down = |vk: i32| vk == VK_CONTROL;
         // (The test panic's message is printed; the panic itself is caught.)
-        let result = route(WM_KEYDOWN, VK_V as usize, 0, &down, &|_| panic!("test panic in the chord sink"), &mut |m, w, l| {
+        let result = route(WM_KEYDOWN, VK_V as usize, 0, DRAG, &|| (), &down, &|_| panic!("test panic in the chord sink"), &mut |m, w, l| {
             fake.got.borrow_mut().push((m, w, l));
             3
         });
         assert_eq!(result, 3);
         assert_eq!(fake.got.borrow().len(), 1);
+    }
+
+    /// Stickers P11: the drag message runs the drag and is not forwarded (answered with 0); with no message registered
+    /// (0) nothing is taken for it; a panic in the drag is caught.
+    #[test]
+    fn the_drag_message_runs_the_drag_and_is_not_forwarded() {
+        let fake = Fake { got: RefCell::new(Vec::new()) };
+        let drags = std::cell::Cell::new(0);
+        let none = |_: i32| false;
+        let mut forward = |m, w, l| {
+            fake.got.borrow_mut().push((m, w, l));
+            0x5A5A
+        };
+        let r = route(DRAG, 0, 0, DRAG, &|| drags.set(drags.get() + 1), &none, &|_| panic!("no chord"), &mut forward);
+        assert_eq!((r, drags.get()), (0, 1));
+        assert!(fake.got.borrow().is_empty(), "the drag message is WTE's own");
+        // Not registered: an id-0 message is an ordinary message.
+        let r = route(0, 1, 2, 0, &|| panic!("no drag"), &none, &|_| panic!("no chord"), &mut forward);
+        assert_eq!(r, 0x5A5A);
+        // Another message is forwarded even with the drag message registered.
+        let r = route(DRAG + 1, 3, 4, DRAG, &|| panic!("no drag"), &none, &|_| panic!("no chord"), &mut forward);
+        assert_eq!(r, 0x5A5A);
+        assert_eq!(fake.got.borrow().as_slice(), [(0, 1, 2), (DRAG + 1, 3, 4)]);
+        // A panic inside the drag is caught.
+        let r = route(DRAG, 0, 0, DRAG, &|| panic!("test panic inside the drag"), &none, &|_| (), &mut forward);
+        assert_eq!(r, 0);
     }
 
     static FAKE_CALLS: std::sync::Mutex<Vec<(u32, usize, isize)>> = std::sync::Mutex::new(Vec::new());

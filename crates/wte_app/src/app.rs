@@ -171,6 +171,19 @@ impl WteApp {
             crate::ole::install(cc);
             log::info!("drop target: {}", if crate::ole::installed() { "WTE's (OLE)" } else { "winit's (file paths only)" });
         }
+        // Stickers P11 (STICKER_PLAN 6.4): drag out - the folder (a self-test run: its own `<out_stem>_dragout`, never
+        // %LOCALAPPDATA%), the start-up cleanup of the files WTE wrote there, and the window port when WTE's subclass is
+        // installed (a self-test run keeps the test port: nothing reaches DoDragDrop).
+        let dragout_folder = if selftest_mode {
+            args.out_stem().map(|stem| {
+                let mut s = stem.into_os_string();
+                s.push("_dragout");
+                std::path::PathBuf::from(s)
+            })
+        } else {
+            crate::dragout::default_folder()
+        };
+        crate::dragout::install(&mut state, dragout_folder, crate::ole::drag_window());
         // Stickers P10b: a self-test run never touches the Windows clipboard.
         log::info!("clipboard: {}", if state.clipboard.is_memory() { "in memory (nothing reaches Windows)" } else { "the Windows clipboard" });
         let runner = selftest::Runner::new(&args, Arc::clone(&exit_code));
@@ -318,11 +331,16 @@ impl eframe::App for WteApp {
             for chord in runner.take_chords() {
                 crate::ole::push(crate::ole::OleEvent::Chord(chord));
             }
+            // Stickers P11: a drag out posted in the last frame reaches the recorder here, where the subclass would run
+            // DoDragDrop between two frames; its end is injected just below like a real one.
+            crate::dragout::deliver_test_post(&self.state);
         } else {
             crate::pen::drain_window_records(&mut self.state.pen.feed);
         }
         // Stickers P10b (STICKER_PLAN 6.3): Copy / Cut events without a text field, and the paste chord.
         crate::clip::input_hook(ctx, raw_input, &mut self.state);
+        // Stickers P11 (STICKER_PLAN 6.4): after an OS drag out, the button release OLE ate (and PointerGone).
+        crate::dragout::input_hook(ctx, raw_input, &mut self.state);
         // Branch `companion` (ARCHITECTURE 8.14): the tablet's input, in-process; nothing without a connected tablet.
         self.companion.inject(ctx, raw_input, &mut self.state);
         self.state.pen.route(&mut raw_input.events);
@@ -425,6 +443,8 @@ impl eframe::App for WteApp {
         for action in std::mem::take(&mut self.state.actions) {
             dispatch::dispatch(self, action, frame);
         }
+        // Stickers P11: a drag out's job, the release in the window, the post when the pointer has left.
+        crate::dragout::pump(ui.ctx(), &mut self.state);
         // Round 5 (R5-1): a Final of this frame gets its bake started in the next one, even without input.
         crate::stamp_bakes::after_dispatch(&mut self.state, ui.ctx());
         // Stickers P10b (6.3 item 4): text an egui field copied goes to the clipboard as well.

@@ -375,7 +375,9 @@ command-line conversion; core `Document::add_sticker_from_psd` (2.2, 3.3, 4.6, 5
 8.16, 9.2). Still to come, each documented by its package: the editor list (P9b: 8.16), drop target, clipboard and
 drag out (P10a, P10b, P11: 8.17), linked paint layers (P12: 8.16), docs and the version (P13). (P10b, done: the
 clipboard - Copy / Cut / Paste / Paste at View Centre in the Edit menu and with the keys, text in egui's fields both
-ways, Help > Clipboard contents...: 1.3, 2.2, 8.1, 8.2, 8.3, 8.7, 8.10, 8.11, 8.13, 8.17, 9.2.)
+ways, Help > Clipboard contents...: 1.3, 2.2, 8.1, 8.2, 8.3, 8.7, 8.10, 8.11, 8.13, 8.17, 9.2.) (P11, done: drag out of
+WTE - Layers rows, the Sticker tab's thumbnails and the "PSD" handle become an OS drag when the pointer leaves the window,
+`DoDragDrop` from WTE's subclass, the drag-out folder and its manifest: 2.2, 8.2, 8.3, 8.7, 8.11, 8.13, 8.17, 9.2.)
 
 ---
 
@@ -640,6 +642,9 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `selftest/scenarios/sticker_link.rs` | stickers P9a | the scenarios `sticker_link`, `sticker_link_path` (8.11) |
 | `selftest/scenarios/sticker_drop.rs` | stickers P10a | the scenario `sticker_drop` (8.11) |
 | `selftest/scenarios/sticker_clip.rs` | stickers P10b | the scenario `sticker_clip` (8.11) |
+| `dragout.rs`, `dragout/{files,tests}.rs` | stickers P11 | drag out of WTE (8.17 "Drag out"): `DragSource`, `DragOutUi`, `DragPort` (`TestPort`, `WindowPort`), `begin` / `start_job` / `step` / `pump` / `input_hook` / `finish`, `deliver_test_post`; `files.rs`: the drag-out folder's `manifest.json` (`Manifest`, `ManifestEntry`, `write_new`, `record`, `remove_unused`, `cleanup`, `file_name`) |
+| `ole/drag_source.rs` | stickers P11 | Windows only: `DragJob`, the slot and `DRAG_ACTIVE`, `request` / `handle_message` (the posted `WTE.OleDrag.v1` message), WTE's `IDropSource` (`DropSource`, `continue_answer`), the `DoDrag` seam (`DoDragDrop` in a non-test build; `Recorder` / `RecordedDrag` in tests and self-test runs), `own_drag_on_this_thread` |
+| `selftest/scenarios/sticker_dragout.rs` | stickers P11 | the scenario `sticker_dragout` (8.11) |
 | `tools/sticker/frame_spans.py` (repo root) | stickers P7a | the worst `sticker.*` / `link.*` / `ole.*` frame spans of a scenario's frame log (STICKER_PLAN 8.4; exit 1 over the limit) |
 | `control_sweep/sticker_panel_tests.rs` | stickers P6b | every new control of P6b clicked through egui (9.2) |
 | `selftest/mod.rs` | A1; round 4 Z | `Runner`, `Step`, `Scratch`, input injection, screenshot capture, report |
@@ -6515,7 +6520,10 @@ placing" makes the tool's picture a tray sticker first, so the tool's unplaced s
 clipboard). Stickers P10b: `AppState::clipboard: Box<dyn ole::clipboard::Clipboard>` (`clipboard_for(selftest)`: the
 in-memory one in a self-test run and in every test build), `AppState::clip_ui: clip::ClipUi`,
 `AppAction::Clip(clip::ClipAction { Copy, Cut, Paste, PasteAtViewCentre, ShowContents })` (not guarded: a Cut's
-deletion is its own guarded `StickerAction::DeleteSelected`, a paste's change its `DropReady`). Stickers P9a: `AppState::link_ui: link::LinkUi` (8.16; the stub launcher and an empty registry in a self-test),
+deletion is its own guarded `StickerAction::DeleteSelected`, a paste's change its `DropReady`). Stickers P11:
+`AppState::drag_out: dragout::DragOutUi` (the drag being prepared or run, the folder, the port, the counters),
+`AppAction::DragOut(dragout::DragSource { Layer, StickerLayer, Stamp, Tray, PsdHandle })` (guarded only for the PSD
+handle, which makes the link), `PanelHit::StickerTabPsdHandle`, `link::EditRequest::prepare_only`. Stickers P9a: `AppState::link_ui: link::LinkUi` (8.16; the stub launcher and an empty registry in a self-test),
 `Dialog::Link(Box<link::LinkQuestion>)`, `AppAction::Link(link::LinkAction)`, `Prefs::photocraft_exe`,
 `StickerEdit::held_update` in use, `PanelHit` gains `LinkEditIn`, `LinkUpdateNow`, `LinkSend`, `LinkShowFile`,
 `LinkUnlink`, `LinkRestore`, `LinkConvert`, `StickerHeaderEditIn`, `StickerNameField`, `LinkDialogButton(u8)`;
@@ -6558,6 +6566,11 @@ impl eframe::App for WteApp {
         // paste chord (r.take_chords); then clip::input_hook: Event::Copy / Event::Cut without a text field become
         // ClipAction::Copy / Cut, the paste chord becomes the clipboard's text in a text field or ClipAction::Paste
         clip::input_hook(ctx, raw, &mut self.state);
+        // stickers P11 (8.17 "Drag out"): a self-test run delivers its drag out's post to the recorder
+        // (dragout::deliver_test_post, after ole::discard); then dragout::input_hook: a finished OS drag (ole::DragEnded)
+        // injects the primary button's release and PointerGone that OLE ate, clears egui's drag payload, stops the row
+        // drag and marks the frame (`released_this_frame`: the sticker Layers rows do not take that release as a reorder)
+        dragout::input_hook(ctx, raw, &mut self.state);
         self.state.pen.route(&mut raw.events);
     }
     // branch companion (8.14), between the records and the router: self.companion.inject(ctx, raw, &mut self.state)
@@ -6594,6 +6607,7 @@ impl eframe::App for WteApp {
         // Commit::Final action, which must be dispatched before e.g. Save.
         self.state.actions.extend(late);
         for a in std::mem::take(&mut self.state.actions) { dispatch::dispatch(self, a, frame) }
+        dragout::pump(ui.ctx(), &mut self.state);         // stickers P11: the job, a release in the window, the post
         clip::after_ui(ui.ctx(), &mut self.state);        // stickers P10b: OutputCommand::CopyText -> clipboard too
     }
 }
@@ -8018,6 +8032,14 @@ framed), a click = `TrayUse`; New Sticker, From picture... ("(on the PC)"), Edit
 stamps), Export Picture.... The library (P8) and the PhotoCraft link (P9) are not built here. Thumbnails: at most two
 per frame, never while an edit is dragged, keyed by value (`canvas::sticker_key`, pitfall 23), dropped at a document
 change (`PictureThumbs::begin`).
+**Stickers P11 (STICKER_PLAN 6.4, 13.9): drag sources.** A drag that starts (`drag_started_by(Primary)`) on a Layers row
+(texture layers, stamp layers; the Sticker view's sticker layer rows), on the Sticker tab's thumbnail of the selected
+stamp (now `Sense::drag`) or on a tray thumbnail (now `Sense::click_and_drag`) queues `AppAction::DragOut(source)`
+(8.17 "Drag out"); inside the window nothing else changes (the rows still reorder). Under the selected stamp's
+thumbnail the **PSD handle** (`sticker::panels::psd_handle`): a 48 x 24-pt box with grip dots and "PSD", the caption "drag to
+your editor: stays linked" under it (plain text, not a tooltip; `PanelHit::StickerTabPsdHandle`); a drag on it queues
+`DragOut(PsdHandle(stamp))`, a click only shows how it is used in the status line; disabled (greyed) for a text stamp
+and a locked one.
 **Style editor** (`styles_ui.rs`): nine blocks (`BLOCKS`: Die-cut contour, Stroke, Drop shadow, Inner shadow, Outer
 glow, Inner glow, Color overlay, Gradient overlay, Bevel), each a `CollapsingState` header with an on/off box (a click is
 one Final; a block never used is created with defaults scaled by `k = reference side / 512`, unticking keeps the
@@ -8715,6 +8737,9 @@ pub enum Step {
     /// Primary button: press at the first point, one move per frame, release at the last; screen points (panel controls,
     /// e.g. the Layers rows of `state.panel_rects`). One point = a click.
     ScreenPointer { path: Vec<egui::Pos2> },
+    /// Stickers P11 (8.17 "Drag out"): `ScreenPointer` without the release - the button stays held at the last point,
+    /// which may lie outside the window, as in a real drag out (OLE takes the release; the app injects it afterwards).
+    ScreenHold { path: Vec<egui::Pos2> },
     /// Export-select: one click at a screen position with any button and modifiers (`click_frames`): Ctrl / Shift-click
     /// and the right-click on a Layers row, a click on an item of the row's context menu.
     ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
@@ -8935,6 +8960,7 @@ counted down) instead of failing (`export_errors`).
 | `sticker_link` | Stickers P9a (`selftest/scenarios/sticker_link.rs`). Sphere, 3D; a stub `photocraft.exe` (empty file) in `<out_stem>_stub` set in the prefs; the sample logo placed twice; Save As `<out_stem>.wtep`; (1) the first logo selected, the Sticker tab's Edit in PhotoCraft clicked (shot `link_shared`), Only this one (shot `link_made`); (2) the scenario saves the PSD with a red layer added (`link::testkit`, temp file + rename) (shot `link_updated`); (3) Undo, `WaitMs(3000)`, Update now; (4) Save; then (check-P9a) the whole `<out_stem>_links\` folder deleted, `Until` the watcher reports it missing, Restore from project clicked, `WaitMs(1500)`; (5) the Sticker view, `SelectRect`, the bottom layer active, a click into the name field, the PSD saved without the bottom layer, `WaitMs(2500)`, a click in the 3D half (shot `link_held_applied`), Done; (6) Import Sticker from PSD of fixture `f1w_pc.psd`, Edit in on that tray sticker, fixture `f5_f1_plus_text.psd` copied over its PSD, then `f4_mask_stroke.psd` (shot `link_merged`), Undo; (7) the Sticker view, opacity 50 %, the PSD saved with a new layer (shot `link_conflict`), Take PhotoCraft's version; again, Keep WTE's version, Send anyway; (8) Send to PhotoCraft, Send anyway, the PSD saved again (shot `link_saved_over`), Take; Done; (9) Save, reopen; the PSD deleted, reopen; the PSD changed, reopen (shot `link_changed_closed`), Update | (1) the shared-picture question and no links folder, no stub call before the answer; after it the PSD in `<out_stem>_links\` reads back with one layer, the stub saw exactly (photocraft, the exe, that path), the other stamp is still an image stamp, one entry, the badge "linked"; (2) one more applied update (`Until`), one entry "Update Linked Sticker", two layers, the model changed; (3) 3 s after the undo: no update, the same composite, `LinkUi::repaints` unchanged (the idle check), the badge exactly "changed in WTE"; Update now applies it again, "linked"; (4) the PSD's CRC and time unchanged, the archive entry readable; the deleted folder: the badge "file missing", after Restore the same CRC, no update applied, no question, no entry, "linked"; (5) while the field has the focus nothing is applied (`held_update`, the selection still there); after the click one update: one layer "red bar", no selection, the top layer active, the toast "Updated from PhotoCraft", one entry; (6) three layers photo / text / shape, linked at scale 1 with a three-entry map; after f5 the three layer ids unchanged and a fourth picture layer "pc text", `editor_native`; after f4 one layer "PhotoCraft picture", mode Merged, the toast "This sticker now uses layer effects, which only PhotoCraft can show. ..."; undo gives the four layers; (7) the question "Both WTE and PhotoCraft changed Logo." with nothing applied; Take: the file's two layers, opacity 1, one entry, "linked"; Keep: the warning "PhotoCraft may still have this file open. ...", then the file with opacity 128 and a `.bak.psd`, "linked"; (8) the warning again; the editor's save is never applied: "PhotoCraft saved over the changes WTE sent to Logo."; (9) the link (editor photocraft) and "linked" after the reopen; the deleted PSD restored with the same CRC; "Linked sticker Logo changed while the project was closed.", Update: the layer "while closed" on top, one entry. Shot `link_pc_done`. **Stickers P9b, the Photoshop pass** (steps 1-3 and 6 again): an injected registry whose App Paths key names a stub `Photoshop.exe` in `<out_stem>_stub`, a fresh stub log, no default editor; two more logos; (1) Photoshop found, two editors known, the main button "Edit in..."; its click opens the chooser (shot `link_chooser`; buttons Cancel / Other program... / Photoshop / PhotoCraft, the box ticked, nothing started), Photoshop: the shared-picture question, Only this one: the default is Photoshop, the link's editor `photoshop`, the stub saw (photoshop, the stub exe, the PSD), the other logo still an image, one entry, "linked" (shot `link_made_ps`); the editor list opened from Edit in... (five items, shot `link_editor_list`), Default: Photoshop clicked; (2) the editor's save: one entry, two layers, "Updated from Photoshop"; (3) undo, 3 s idle check, "changed in WTE", Update now; (6) Import Sticker from PSD of `photoshop\layers\shape-layer.psd` (one layer, 32 x 32), placed, Edit in (no question: the default), linked at scale 1 with a one-entry map; Photoshop's own type layer added to the linked file (`testkit::with_foreign_layer` with the layer of `photoshop\layers\type-layer.psd`, id above the seed): the WTE layer kept (same id), a picture layer "A" on top, `editor_native`, one entry; `photoshop\effects\outside-stroke.psd`: one layer "Photoshop picture", Merged, "This sticker now uses layer effects, which only Photoshop can show."; `photoshop\layers\smartobject-layer.psd`: merged with "This sticker now uses smart objects, which only Photoshop can show. ..." (shot `link_merged_ps`); `photoshop\layers-minimal\shape-layer.psd`: nothing applied, the problem NeedsMerged, the badge "needs a merged picture", Photoshop's sentence word for word in the Sticker tab (shot `link_needs_merged_ps`); two undos: the WTE layer and "A" again |
 | `sticker_drop` | Stickers P10a (`selftest/scenarios/sticker_drop.rs`). Sphere, Split; files written to `<out_stem>_assets` (three PNGs, `Badge.wtes`); (1) a PNG hovered over the model (`DragHover`, shot `drop_hover_picture`) and let go there (shot `drop_model`); (2) a PNG on the 2D view; (3) a PNG on the corner of the 3D view (a miss); (4) `Badge.wtes` as a file on the model; (5) the three PNG files at once on the model (shot `drop_three`); (6) a DIB on the first stamp's Layers row (`Target::Screen`); that stamp selected, 4, (7) a virtual `badge.png` (`FileGroupDescriptorW` + `FileContents`) on the sticker canvas (shot `drop_canvas`), Esc; (8) a `.wtep` hovered (shot `drop_hover_project`), `DragLeave`; undo everything. Run again with `WTE_OLE=1` (the window's own target installed too): the same result | (1) the hover is known with its point, the overlay `Place`; a stamp "Dropped picture" centred at the drop point's hit (1e-3 of the diagonal; its texel logged), the Stamp tool's size, the Transform tool, no hover left, one entry; (2) a UV stamp "Dropped picture" (picture data has no name: the drop target calls it "Dropped picture.png") centred at the drop texel (+-2), one entry; (3) nothing placed, no entry, the picture "Dropped picture.png" is the Stamp tool's source and the tool the Stamp tool; (4) a sticker stamp "Badge" showing a one-layer sticker, one entry labelled "Drop"; (5) a stamp "one", "two" and "three" kept tray stickers, the toast "2 more added to the tray", one entry; (6) the first stamp's picture is the 30 x 30 DIB, one entry; (7) the image stamp promoted with a second layer "badge" centred at the point (+-1.5 px), one entry; (8) the overlay `Open`; after `DragLeave` no hover and nothing opened; six entries in all, undoing them gives the start's document hash and no stamp |
 | `sticker_clip` | Stickers P10b (`selftest/scenarios/sticker_clip.rs`). Sphere, 3D; only `Step::Chord` for the chords, the in-memory clipboard. (1) a 64-px sticker with the Outline stamp styles dropped on the model as `WTE.Sticker.v1` data; (2) Ctrl+C on it; (3) Ctrl+V (after the Stamp tool's styles were reset), a hover (shot `clip_paste_source`), a click on the model; (4) Edit > Paste at View Centre (`Do`, shot `clip_view_centre`); (5) the first stamp selected, 4, M, a Marquee over the disc's middle, Ctrl+C, Ctrl+X, Ctrl+V (shot `clip_sticker_layer`), Done; (6) the Text tool, text put on the clipboard, the content field emptied and focused, Ctrl+V; new text in the field, Ctrl+A, Ctrl+C (shot `clip_text`), Esc; undo everything | the clipboard empty at the start and in memory; (1) a styled sticker stamp "Badge"; (2) exactly PNG, CF_DIBV5, WTE.Sticker.v1, the DIB's pixels = the PNG's, transparent and opaque pixels, the sticker block of this process with the sticker and its styles, no entry; (3) the Stamp tool with the tray sticker "Badge" (kept) as its source and the copied stamp's styles, no stamp placed, one entry; the click places a sticker stamp with those styles (one more); (4) one more stamp centred where the view's centre meets the model (1e-3 of the diagonal), one entry; (5) Copy: exactly PNG + CF_DIBV5 of the selection's size in the disc's orange, no entry; Cut: the same picture, the selected pixels gone from the disc layer, "Delete Selected Pixels", one entry; Paste: a top layer "Pasted picture" of that size centred at the visible canvas's centre (+-1.5), one entry; (6) the field holds the clipboard's text, no paste of WTE's, no entry; then the clipboard holds only CF_UNICODETEXT with the field's text; six entries in all, undoing them gives the start's document hash, no stamp and no tray sticker |
+| `sticker_dragout` | Stickers P11 (`selftest/scenarios/sticker_dragout.rs`). Sphere, 3D; the test port (the recorder, never the OS) and `<out_stem>_dragout`. (1) a 64-px sticker with the Outline stamp styles dropped on the model; (2) `ScreenHold` from its Layers row out past the window's right edge (shot `dragout_after_row`); (3) a `Hover` over the list; (4) a `ScreenPointer` reorder of that row onto the lower half of the row below it, Undo; (5) the paint layer filled red and its row dragged out; (6) the Sticker tab, the recorder answering Esc, the thumbnail dragged out (shot `dragout_sticker_tab`); (7) the tray item revealed and dragged out; (8) the PSD handle dragged out of the unsaved project (released outside; shot `dragout_save_first`), Cancel; (9) Save As into the run folder, a stub `Photoshop.exe` as the default editor, the handle dragged out (shot `dragout_psd_toast`); (10) once more | the folder is the run's; (2) one recorded drag: exactly CF_HDROP (one PNG in the run's folder holding the offered PNG), PNG = `stamp_picture(id, true)`, CF_DIBV5 = the PNG's pixels, WTE.Sticker.v1 of this process; the drop source's answers right; the layer order unchanged, nothing dragged in egui or WTE; (3) nothing dragged, nothing recorded; (4) the row moved, nothing posted, its prepared file removed; (5) CF_HDROP, PNG, CF_DIBV5 only, the PNG at texture size and red; (6) the Esc'd drag offered all four formats and its file is gone; (7) the PNG = `sticker_picture(id, None, 1.0)`; (8) "Save first", no link, nothing posted or recorded; (9) CF_HDROP alone with the linked PSD (it exists), the link in Photoshop and counted as opened, the tab-bar toast once; (10) the same PSD, still one toast, six posts in all |
 | `sticker_link_path` | Stickers P9a. PATH = a `.psd` / `.psb` file (gate: `crates/wte_core/tests/fixtures/psd/f1w_pc.psd`); Sphere, 3D; `OpenPath(PATH)`; a click on the model (shot `psd_placed`) | one "Add Sticker" entry: a kept tray sticker from the file layer by layer, the Stamp tool's source and tool; the placed stamp is a sticker stamp with layers |
 | `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
@@ -9044,6 +9070,13 @@ built-in egui 0.37 fonts lack symbols egui's own widgets use (the colour picker'
     unchanged and returns the previous procedure's result. `OpenClipboard` needs the app window as owner for a write
     (with no owner `SetClipboardData` fails); the clipboard owns what `GetClipboardData` returns (never freed) and what
     `SetClipboardData` took (freed by WTE only when it refused it).
+27. Stickers P11 (8.17 "Drag out"): never call `DoDragDrop` inside `update` / a frame - only WTE's subclass calls it, for
+    the posted `WTE.OleDrag.v1` message, through the `DoDrag` seam (the real one is not compiled into a test build; a
+    self-test run and every test use the recorder). After an OS drag egui never got the button release: it is injected
+    in `raw_input_hook` (`dragout::input_hook`); a Layers row that reorders on `drag_stopped` must skip the frame marked
+    `released_this_frame`. Never remove a drag-out file that is not in the manifest, or that changed since WTE wrote
+    it, and never the folder (review B7); never put a linked PSD into the drag-out folder. A drag-out test writes under
+    `target\`, never `%LOCALAPPDATA%` (a self-test run uses `<out_stem>_dragout`).
 
 ### 8.14 Tablet companion (`companion/*`, branch `companion`)
 
@@ -9607,7 +9640,8 @@ sticker in place on the model, keeping every stamp's placement.
 
 **Why.** winit's drop target reads `CF_HDROP` only and drops the point (8.1), so a picture could not land where it was
 let go and picture data without a file (a browser's image) never arrived. WTE registers its own `IDropTarget` instead
-(hand-written `raw-dylib` FFI, no new crate). The clipboard (P10b, "Clipboard" below) and drag out (P11) add to `ole/`.
+(hand-written `raw-dylib` FFI, no new crate). The clipboard (P10b, "Clipboard" below) and drag out (P11, "Drag out"
+below) add to `ole/`.
 
 **Install.** `ole::install(cc)` from `WteApp::new` (interactive runs; a self-test run with `WTE_OLE=1`): the HWND from
 `cc.window_handle()`, `RevokeDragDrop(hwnd)`, `RegisterDragDrop(hwnd, target)`. The target is a leaked box (never
@@ -9769,6 +9803,95 @@ tool's styles; an unpainted layer, a painted layer at texture size, an image sta
 outside the view; `layer_pixels` with a mask and a selection; the "Nothing WTE can paste" toast and the contents dialog
 on the in-memory formats), `shortcuts::tests::neither_table_binds_the_clipboard_chords`,
 `selftest::tests::chords_are_injected_as_real_use_produces_them`; scenario `sticker_clip` (8.11).
+
+**Drag out (stickers P11, STICKER_PLAN 6.4, 6.5, 13.5, 13.9).** *Sources.* A Layers row (a paint layer: its full-canvas
+picture, the pixels "Export this layer" writes; a stamp or text layer: the stamp's finished picture), a row of the
+Sticker view's Layers list (that layer of the edited sticker: a picture layer's pixels with its mask applied and no
+layer styles, as Copy takes them; a text or shape layer drawn alone, `sticker_layer_on_artboard`, cut to what it
+covers), the Sticker tab's thumbnail of the selected stamp (`stamp_picture(id, true)`: what you see, with the stamp
+styles), a tray thumbnail (`sticker_picture(id, None, 1.0)`) and the PSD handle (8.7). Their egui drag's start queues
+`AppAction::DragOut(source)`; `dragout::begin` cancels a drag still pending and starts a **job** at once (review A23): the
+picture is taken on the UI thread like Copy's (`clip::stamp_take`, shared buffers; a stamp's styles are rendered there,
+as for Copy and Export Picture), a worker encodes the PNG (`PngLevel::Fast`), writes it as a new file into the drag-out
+folder (`files::write_new`: `files::file_name(name)` = the name with the characters Windows refuses as `_`, at most 80
+characters, never over an existing file: "Badge (2).png") and builds the entries in the order they are offered:
+`CF_HDROP` (that one file), `PNG`, `CF_DIBV5` and, for a sticker stamp, a styled image stamp and a tray sticker,
+`WTE.Sticker.v1` of this process (`clipboard::picture_entries`). The PSD handle has no job: `link::flows::prepare_handle`
+makes the link at the press (5.1 step 1 without starting an editor): a text stamp is refused ("Convert the text stamp to
+a layered sticker first (Sticker tab): then its PSD can be dragged out"); an unsaved project asks "Save first" (its
+Save... comes back with `EditRequest::prepare_only`, which `edit_in` routes to `prepare_handle`); a picture several
+stamps show asks the shared-picture question (its answers come back the same way and only make the link: the status line
+"<file> is ready: drag the PSD handle to <editor>"); then an image stamp is promoted, a new link's PSD is written into the
+links folder (`make_link`), a missing file is written again, and the link's editor becomes the **default editor** (13.9;
+`handle_editor`: the default or the only known editor, else the link's own, else the first known, else PhotoCraft; never
+a question); a file without WTE's latest changes is handed out as it is, with the status line "... Send to <editor> first
+to include them". Its one entry is `CF_HDROP` with the linked PSD (never in the drag-out folder, never removed).
+
+*The state machine* (`dragout::step`, every frame from `pump` after dispatch, with `PointerNow`: the primary button held,
+the pointer outside `viewport_rect()` or gone): the job's result is taken (and its file recorded in the manifest); the
+button released before the OS drag started cancels the drag and removes the file nobody took (a job still running stops
+before its next step and removes its own file); ready + held + outside -> `DragPort::post`; a job that is not done when
+the pointer leaves is posted in the frame it finishes, if the button is still held and the pointer still outside. A drag
+that never left the window (an ordinary reorder of the row) is cancelled at the release and its file removed.
+`DragPort`: `WindowPort(hwnd)` in an interactive Windows run whose subclass is installed (`ole::drag_window`); `TestPort`
+in every self-test run and test; none otherwise (drag out is off; the log says so at start).
+
+*The OS drag* (`ole/drag_source.rs`, critic C4, R3): `request` stores the `DragJob` (the data object's entries and the
+drag's tag) in a static slot and posts `RegisterWindowMessageW("WTE.OleDrag.v1")` to the window (`post_to_window`); a
+request while `DRAG_ACTIVE` is set is dropped (`Refused::Busy`), a failed post takes the job back. WTE's subclass answers
+that one message itself (it is not forwarded; every other message, the key-downs included, reaches the previous
+procedure unchanged): `handle_message` takes the job, sets `DRAG_ACTIVE` and the thread's own-drag flag, calls
+`DoDragDrop(data, source, DROPEFFECT_COPY, &effect)` through the `DoDrag` seam (`window_seam`: the real call only in a
+non-test build), clears the flags, releases both objects and queues `ole::DragEnded { tag, effect }` (its own small
+queue; `effect` none unless the result was `DRAGDROP_S_DROP`). `IDropSource` (`DropSource`): `QueryContinueDrag` - Esc
+cancels, the primary button up (`MK_LBUTTON` not in `grfKeyState`) drops, else continue; `GiveFeedback` - the default
+cursors; `QueryInterface` answers `IUnknown` and `IDropSource`; every body in `catch_unwind`. WTE's own drop target takes
+nothing while this thread runs one of WTE's drags (`own_drag_on_this_thread`: `DoDragDrop`'s loop calls it on the same
+thread), whatever the drag carries (R3: a paint layer's PNG has no sticker marker). Check P10a's open point: `DragEnter`
+copies only the 12-byte header of a `WTE.Sticker.v1` block (`get_prefix`), not the whole `.wtes` another WTE offers.
+
+*After the drag* (`dragout::input_hook` in `raw_input_hook`): egui never got the button release (OLE ate it), so a
+`PointerButton { Primary, pressed: false }` at the pointer's last position and `PointerGone` are injected,
+`DragAndDrop::clear_payload` and `Context::stop_dragging` end the row's drag, and `released_this_frame` tells the sticker
+Layers rows not to take that release as a reorder (the main list's drop zone is not under the pointer); winit's own mouse
+capture count is reset by the `WM_CAPTURECHANGED` that `DoDragDrop` causes. `finish`: a drag nobody took (Esc, a place
+that takes no files) removes its PNG; a taken PNG stays (Explorer copied it; PhotoCraft opens it from the folder) and
+the status line says "Dragged out <file>"; a taken PSD-handle drag counts the link as opened in the link's editor (5.5:
+`opened`, `opened_editor`, `stale_in_editor` as for "Edit in" again) and, when the link's editor is Photoshop or Photoshop
+is known on this machine, shows once per session (13.5): "In Photoshop the sticker stays linked only when it opened as
+its own tab. Drop it on the tab bar, not on a picture."
+
+*The folder and its cleanup* (`dragout/files.rs`, review B7): `%LOCALAPPDATA%\WrappedTextureEditor\dragout\`
+(`default_folder`; a self-test run: `<out_stem>_dragout`; tests: under `target\wte-test-tmp\dragout\`). `manifest.json`
+lists every file WTE wrote there (name, size, modification time in ns). At start (`dragout::install`) only files in the
+manifest that still have exactly that size and time and are older than one day are removed; a listed file that changed
+(or is gone) is forgotten by the manifest and never touched again; a file not in the manifest, a name with a path in it,
+the manifest and the folder are never removed. The log says how many were removed / kept / left alone.
+
+*Pen and tablet.* The pen reaches WTE as `WM_POINTER*`; OLE may not see a held button and end such a drag at once: no
+workaround is built (hand test 11; the Help of P13 says "drag out with the mouse"). The tablet companion cannot drag out; Copy,
+Export Picture... and Edit in <editor> cover it.
+
+*Self-test.* `Step::ScreenHold` (8.11) holds the button outside the window; the test port's post is delivered in the
+next frame's `raw_input_hook` (`dragout::deliver_test_post`, after `ole::discard`) to `drag_source::Recorder`, which reads
+the data object like a drop target (`EnumFormatEtc`, `GetData` of each format), asks the drop source its three
+questions and answers with `DragOutUi::test_effect` (copy, or 0 = Esc); `drag_source::recorded()` lists what it saw.
+`is_idle` waits while a drag out is prepared or posted.
+
+*Tests* (9.2): `ole::drag_source::tests` (one request -> one post -> one drag through the seam with the entries in
+order and the drop source's answers, the end queued; Esc; a second request inside a running drag is `Busy` and its
+message finds no job; a failed post; a panic inside the seam caught with the flag cleared; `QueryInterface`; the message
+registered once), `ole::subclass::tests::the_drag_message_runs_the_drag_and_is_not_forwarded`, the `IDropSourceVtbl`
+layout in `ole::com::tests`, `dragout::tests` (the data object of each kind: the thumbnail's PNG = the styled picture,
+CF_DIBV5 = the same pixels, the sticker block, the file in the folder and the manifest, the row of a stamp layer, a
+painted paint layer at texture size without a sticker, a tray sticker without stamp styles, a sticker layer's pixels;
+the state machine with a held job: nothing posted inside or before the job is done, posted once in the frame it
+finishes, the injected release and `PointerGone`, egui's payload cleared, the mark cleared in the next frame; releasing
+first posts nothing and removes the file, also while the job still runs; an Esc'd drag removes its file; a new drag
+replaces a prepared one; the cleanup cases of B7; safe and never-overwriting file names; the PSD handle: "Save first",
+the shared question, the link and its PSD in the default editor, `CF_HDROP` with the PSD only, the link opened, the
+toast once and only with Photoshop and a taken drag; a text stamp and a run without a port; WTE's drop target ignores
+WTE's own drag); scenario `sticker_dragout` (8.11).
 
 ---
 
@@ -10452,7 +10575,9 @@ and the Photoshop pass of `sticker_link` (no new scenario). Stickers P10a: `ole:
 `ole::data_object`, `ole::drop_target`, `ole::tests` and `dnd::tests` (8.17 "Tests") and the scenario count (68:
 `sticker_drop`). Stickers P10b: `ole::clipboard::tests`, `ole::subclass::tests`, `clip::tests` (8.17 "Clipboard"),
 `shortcuts::tests::neither_table_binds_the_clipboard_chords`, `selftest::tests::chords_are_injected_as_real_use_produces_them`
-and the scenario count (69: `sticker_clip`).
+and the scenario count (69: `sticker_clip`). Stickers P11: `ole::drag_source::tests`, the drag message of
+`ole::subclass::tests`, the `IDropSource` layout of `ole::com::tests`, `dragout::tests` (8.17 "Drag out") and the
+scenario count (70: `sticker_dragout`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`

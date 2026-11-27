@@ -81,6 +81,10 @@ pub enum Step {
     /// Primary-button press at the first point, moves through the others, release at the last one; positions in
     /// screen points (for panel controls, e.g. the Layers rows of `AppState::panel_rects`). One point = a click.
     ScreenPointer { path: Vec<egui::Pos2> },
+    /// Stickers P11 (STICKER_PLAN 6.4): `ScreenPointer` without the release - the button stays held at the last point
+    /// (which may lie outside the window), as in a real drag out, where OLE takes the release; after the drag the app
+    /// injects the release itself (`dragout::input_hook`).
+    ScreenHold { path: Vec<egui::Pos2> },
     /// One click at a screen position (points) with any button and modifiers: Ctrl / Shift-click and the right-click
     /// on a Layers row, a click on an item of the row's context menu.
     ScreenClick { at: egui::Pos2, button: egui::PointerButton, mods: egui::Modifiers },
@@ -159,6 +163,7 @@ impl Step {
             Step::Pointer { view, path, button, .. } => format!("Pointer({view:?}, {} points, {button:?})", path.len()),
             Step::Click { view, at, button, .. } => format!("Click({view:?}, {at:?}, {button:?})"),
             Step::ScreenPointer { path } => format!("ScreenPointer({} points from {:?})", path.len(), path.first()),
+            Step::ScreenHold { path } => format!("ScreenHold({} points from {:?} to {:?})", path.len(), path.first(), path.last()),
             Step::ScreenClick { at, button, mods } => format!("ScreenClick({at:?}, {button:?}, {mods:?})"),
             Step::Scroll { view, at, notches, .. } => format!("Scroll({view:?}, {at:?}, {notches})"),
             Step::ScreenScroll { at, notches } => format!("ScreenScroll({at:?}, {notches})"),
@@ -576,6 +581,12 @@ impl Runner {
                 self.inject.extend(pointer_frames(&path, egui::PointerButton::Primary, egui::Modifiers::NONE, 1));
                 self.active = Some((Active::Input, name));
             }
+            Step::ScreenHold { path } => {
+                let mut frames = pointer_frames(&path, egui::PointerButton::Primary, egui::Modifiers::NONE, 1);
+                frames.pop();
+                self.inject.extend(frames);
+                self.active = Some((Active::Input, name));
+            }
             Step::ScreenClick { at, button, mods } => {
                 self.inject.extend(click_frames(at, button, mods));
                 self.active = Some((Active::Input, name));
@@ -838,6 +849,7 @@ fn is_idle(state: &AppState, tools_busy: bool) -> bool {
         && !crate::ole::pending()
         && !state.drop_ui.busy()
         && !state.clip_ui.busy()
+        && !state.drag_out.busy()
         && state.doc().is_none_or(|d| !d.has_pending_edit() && !d.has_pending_composite())
 }
 

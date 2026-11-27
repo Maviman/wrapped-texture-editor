@@ -37,6 +37,7 @@ mod sticker;
 mod sticker_cutout;
 mod sticker_drop;
 mod sticker_clip;
+mod sticker_dragout;
 mod sticker_layout;
 mod sticker_link;
 mod sticker_paint;
@@ -113,6 +114,7 @@ const NAMES: &[&str] = &[
     "sticker_link_path",
     "sticker_drop",
     "sticker_clip",
+    "sticker_dragout",
 ];
 
 /// Colour of the 3D stroke of the default content.
@@ -207,6 +209,7 @@ pub fn scenario(name: &str, args: &CliArgs) -> Option<Vec<Step>> {
         "sticker_link_path" => sticker_link::sticker_link_path(args.path.clone()),
         "sticker_drop" => sticker_drop::sticker_drop(),
         "sticker_clip" => sticker_clip::sticker_clip(),
+        "sticker_dragout" => sticker_dragout::sticker_dragout(),
         _ => return None,
     };
     steps.push(Step::Screenshot);
@@ -9328,7 +9331,7 @@ mod tests {
             assert!(matches!(steps.last(), Some(Step::Exit)), "{name} does not end with Exit");
         }
         assert!(scenario("no such scenario", &args).is_none());
-        assert_eq!(scenario_names().len(), 69);
+        assert_eq!(scenario_names().len(), 70);
         // Stickers P6a (review B15): every shot of a sticker scenario says what it must show.
         for name in scenario_names().iter().filter(|n| n.starts_with("sticker")) {
             // Stickers P9a: a `*_path` scenario has its steps only with a PATH (`sticker_link_path`: a PSD file).

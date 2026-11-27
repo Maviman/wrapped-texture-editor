@@ -128,6 +128,8 @@ fn needs_interaction_guard(action: &AppAction) -> bool {
         A::Sticker(s) => s.changes_document(),
         // Stickers P9a: the link commands that change the document (an update, a promotion, a send).
         A::Link(l) => l.changes_document(),
+        // Stickers P11: the PSD handle makes the link (a promotion, the PSD) at the press.
+        A::DragOut(crate::dragout::DragSource::PsdHandle(_)) => true,
         _ => false,
     }
 }
@@ -1108,6 +1110,10 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::DropReady(p) => crate::dnd::apply(&mut app.state, &p),
         // ---- stickers P10b: the clipboard ----
         A::Clip(c) => crate::clip::run(app, c),
+        A::DragOut(source) => {
+            let ctx = app.ctx.clone();
+            crate::dragout::begin(&ctx, &mut app.state, source);
+        }
     }
 }
 

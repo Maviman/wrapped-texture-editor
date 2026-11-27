@@ -418,9 +418,11 @@ Drag out of WTE (new in this build; with the mouse):
  27. The same drags with the pen (may not work: Windows may end a pen drag
      at once; note what happens). The tablet companion cannot drag out: use
      Copy, Export Picture... or Edit in <editor> there.
-Files dragged out are written to %LOCALAPPDATA%\WrappedTextureEditor\dragout(with a list of them, manifest.json). WTE removes only its own files there,
+Files dragged out are written to %LOCALAPPDATA%\WrappedTextureEditor\dragout
+(with a list of them, manifest.json). WTE removes only its own files there,
 only when they are older than a day and nobody changed them: a file you
-saved there yourself (for example with PhotoCraft's Save As) stays.
+saved there yourself (for example with PhotoCraft's Save As) stays. A drag
+you cancel with Esc removes its file at once.
 
 Pen tablets (new in this build)
 -------------------------------

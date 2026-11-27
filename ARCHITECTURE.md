@@ -2920,6 +2920,8 @@ impl Document {
     pub(crate) fn bake_wrapped_projector(&self, stamp: StampId) -> Option<Projector>;
     pub fn stamp_source_frame2(&mut self, stamp: StampId) -> Result<SourceFrame, EditError>;   // reference frame (scale 1)
     pub fn stamp_picture(&mut self, stamp: StampId, with_styles: bool) -> Result<PixelBuf, EditError>;   // with_styles: tint + styles
+    pub fn stamp_picture_parts(&mut self, stamp: StampId, with_styles: bool) -> Result<StampPicture, EditError>; // P11 check: the base from the caches;
+                                                                                // StampPicture::finish (Send) draws tint + styles = stamp_picture
     pub fn sticker_picture(&mut self, id: StickerId, styles: Option<&StyleStack>, scale: f32) -> Result<PixelBuf, EditError>;
     pub(crate) fn bake_picture(&mut self, stamp: StampId, quality: BakeQuality) -> Result<BakePicture, EditError>;
     pub(crate) fn job_inputs_current(&self, out: &StampBakeOutput) -> bool;
@@ -9758,7 +9760,9 @@ preview) for a sticker stamp and for an image stamp with styles (a one-layer sti
 without styles and a text stamp offer no sticker (a paste in WTE gives the same kind of stamp back, a picture). Otherwise
 the active paint layer at texture size (`PNG` + `CF_DIBV5`; an unpainted layer: "Select a stamp, or a paint layer with
 pixels, to copy"). The pixels are taken on the UI thread (shared buffers: `Arc`s, a `StickerDoc` clone, the blob store's
-`Arc`s) and a worker thread renders the selection, encodes the PNG (`PngLevel::Fast`) and the DIB and writes the
+`Arc`s; a stamp's base picture from the caches, `stamp_picture_parts`) and a worker thread draws a stamp's tint and styles
+(`StampPicture::finish`; check P11: drawn on the UI thread they cost 34-77 ms for a 2048-px picture with a preset) and
+the size in the status line, renders the selection, encodes the PNG (`PngLevel::Fast`) and the DIB and writes the
 `.wtes`; only the latest Copy counts (check P10b: a new copy supersedes one still being encoded, whose worker stops before its next encoding step and whose result is never written, so a slow earlier copy cannot overwrite a later one and a held Ctrl+C does not encode many pictures at once); `clip::poll` (every `ui`) writes the finished copy to the clipboard (status line "Copied the stamp "Badge" (70 x
 70 pixels)"; a failure is a warning toast "Nothing was copied: ..."). The log names the formats. *Cut* (Sticker view
 only, Edit > Cut, Ctrl+X): a selection is needed ("Select an area first: Cut takes the selected pixels"); the copy as
@@ -9811,8 +9815,10 @@ layer styles, as Copy takes them; a text or shape layer drawn alone, `sticker_la
 covers), the Sticker tab's thumbnail of the selected stamp (`stamp_picture(id, true)`: what you see, with the stamp
 styles), a tray thumbnail (`sticker_picture(id, None, 1.0)`) and the PSD handle (8.7). Their egui drag's start queues
 `AppAction::DragOut(source)`; `dragout::begin` cancels a drag still pending and starts a **job** at once (review A23): the
-picture is taken on the UI thread like Copy's (`clip::stamp_take`, shared buffers; a stamp's styles are rendered there,
-as for Copy and Export Picture), a worker encodes the PNG (`PngLevel::Fast`), writes it as a new file into the drag-out
+picture is taken on the UI thread like Copy's (`clip::stamp_take`, shared buffers; a stamp's base picture from the
+caches), a worker draws a stamp's tint and styles (`StampPicture::finish`; check P11: every Layers-row drag of a stamp
+layer starts this job, also an in-window reorder, so the UI thread must not draw them; `perf_k11_a_styled_stamps_*`),
+encodes the PNG (`PngLevel::Fast`), writes it as a new file into the drag-out
 folder (`files::write_new`: `files::file_name(name)` = the name with the characters Windows refuses as `_`, at most 80
 characters, never over an existing file: "Badge (2).png") and builds the entries in the order they are offered:
 `CF_HDROP` (that one file), `PNG`, `CF_DIBV5` and, for a sticker stamp, a styled image stamp and a tray sticker,
@@ -9842,8 +9848,9 @@ request while `DRAG_ACTIVE` is set is dropped (`Refused::Busy`), a failed post t
 that one message itself (it is not forwarded; every other message, the key-downs included, reaches the previous
 procedure unchanged): `handle_message` takes the job, sets `DRAG_ACTIVE` and the thread's own-drag flag, calls
 `DoDragDrop(data, source, DROPEFFECT_COPY, &effect)` through the `DoDrag` seam (`window_seam`: the real call only in a
-non-test build), clears the flags, releases both objects and queues `ole::DragEnded { tag, effect }` (its own small
-queue; `effect` none unless the result was `DRAGDROP_S_DROP`). `IDropSource` (`DropSource`): `QueryContinueDrag` - Esc
+non-test build), clears the flags, releases both objects and queues `ole::DragEnded { tag, effect, dropped }` (its own
+small queue; `dropped` = the result was `DRAGDROP_S_DROP`; `effect` none unless it was). The entries are moved into the
+data object at the post (check P11: not kept twice while the drag runs). `IDropSource` (`DropSource`): `QueryContinueDrag` - Esc
 cancels, the primary button up (`MK_LBUTTON` not in `grfKeyState`) drops, else continue; `GiveFeedback` - the default
 cursors; `QueryInterface` answers `IUnknown` and `IDropSource`; every body in `catch_unwind`. WTE's own drop target takes
 nothing while this thread runs one of WTE's drags (`own_drag_on_this_thread`: `DoDragDrop`'s loop calls it on the same
@@ -9854,8 +9861,9 @@ copies only the 12-byte header of a `WTE.Sticker.v1` block (`get_prefix`), not t
 `PointerButton { Primary, pressed: false }` at the pointer's last position and `PointerGone` are injected,
 `DragAndDrop::clear_payload` and `Context::stop_dragging` end the row's drag, and `released_this_frame` tells the sticker
 Layers rows not to take that release as a reorder (the main list's drop zone is not under the pointer); winit's own mouse
-capture count is reset by the `WM_CAPTURECHANGED` that `DoDragDrop` causes. `finish`: a drag nobody took (Esc, a place
-that takes no files) removes its PNG; a taken PNG stays (Explorer copied it; PhotoCraft opens it from the folder) and
+capture count is reset by the `WM_CAPTURECHANGED` that `DoDragDrop` causes. `finish`: a drag that ended without a drop
+(Esc) removes its PNG; a drop no program took (no effect) keeps it in the manifest for the day-old cleanup (check P11: a
+program may answer "no effect" and still read the file after the drop); a taken PNG stays (Explorer copied it; PhotoCraft opens it from the folder) and
 the status line says "Dragged out <file>"; a taken PSD-handle drag counts the link as opened in the link's editor (5.5:
 `opened`, `opened_editor`, `stale_in_editor` as for "Edit in" again) and, when the link's editor is Photoshop or Photoshop
 is known on this machine, shows once per session (13.5): "In Photoshop the sticker stays linked only when it opened as

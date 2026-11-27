@@ -90,11 +90,14 @@ pub enum OleEvent {
 }
 
 /// Stickers P11: a finished `DoDragDrop` - the app's tag of the drag and the effect the drop target chose
-/// (`DROPEFFECT_NONE` = cancelled or refused).
+/// (`DROPEFFECT_NONE` = cancelled or refused), and whether it ended with a drop (`DRAGDROP_S_DROP`; false: Esc, or
+/// the drag failed). P11 check: a drop with no effect may still have reached a program that reads the file later, so
+/// only a drag that ended without a drop removes its file at once.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct DragEnded {
     pub tag: u64,
     pub effect: u32,
+    pub dropped: bool,
 }
 
 static ENDED: Mutex<Vec<DragEnded>> = Mutex::new(Vec::new());

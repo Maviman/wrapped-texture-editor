@@ -996,3 +996,30 @@ fn k10a_an_edit_group_is_one_undo_step() {
     doc.end_edit_group(g, "Drop");
     assert_eq!(doc.history.undo_len(), n);
 }
+
+/// Stickers P11 check: `stamp_picture_parts` + `StampPicture::finish` (on another thread, as Copy and drag out run it)
+/// give exactly `stamp_picture` - plain, tinted, styled, styled and tinted, without styles - and the parts carry the
+/// base picture only (the styles are drawn by `finish`).
+#[test]
+fn check_p11_stamp_picture_parts_finish_on_a_worker_to_the_same_picture() {
+    let (mut doc, _, ids) = identity_doc();
+    let id = ids[0];
+    let same = |doc: &mut Document, with_styles: bool, what: &str| {
+        let whole = doc.stamp_picture(id, with_styles).unwrap();
+        let parts = doc.stamp_picture_parts(id, with_styles).unwrap();
+        assert_eq!(parts.base_size(), [64, 64], "{what}: the parts hold the base picture");
+        let finished = std::thread::spawn(move || parts.finish()).join().unwrap();
+        assert!(finished == whole, "{what}: finish differs from stamp_picture");
+        whole
+    };
+    let plain = same(&mut doc, true, "plain");
+    doc.set_stamp_tint(id, [200, 120, 60, 230], Commit::Final).unwrap();
+    let tinted = same(&mut doc, true, "tinted");
+    assert!(tinted != plain, "the tint is drawn");
+    doc.set_stamp_styles(id, contour(5.0), Commit::Final).unwrap();
+    let styled = same(&mut doc, true, "styled and tinted");
+    assert_eq!(styled.width, 64 + 2 * contour(5.0).margin(1.0), "the styles are drawn by finish");
+    assert_eq!(same(&mut doc, false, "without styles"), plain, "without styles: the source itself");
+    doc.set_stamp_tint(id, [255; 4], Commit::Final).unwrap();
+    same(&mut doc, true, "styled");
+}

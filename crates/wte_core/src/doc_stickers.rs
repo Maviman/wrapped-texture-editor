@@ -197,6 +197,45 @@ fn styled(stamp: &StampObject) -> bool {
     stamp.styles.any_on()
 }
 
+/// A stamp's finished picture before its tint and styles are drawn (`Document::stamp_picture_parts`): `Send`, so the
+/// drawing can run on a worker.
+#[derive(Clone, Debug)]
+pub struct StampPicture {
+    base: Arc<PixelBuf>,
+    finish: PictureFinish,
+}
+
+#[derive(Clone, Debug)]
+enum PictureFinish {
+    None,
+    Tint([u8; 4]),
+    Styled(Box<Styling>),
+}
+
+impl StampPicture {
+    /// The base picture's size (before the styles add their margin).
+    pub fn base_size(&self) -> [u32; 2] {
+        [self.base.width, self.base.height]
+    }
+
+    /// The finished picture (straight RGBA8): exactly what `Document::stamp_picture` returns.
+    pub fn finish(self) -> PixelBuf {
+        match self.finish {
+            PictureFinish::None => Arc::unwrap_or_clone(self.base),
+            PictureFinish::Tint(tint) => {
+                let mut picture = Arc::unwrap_or_clone(self.base);
+                for p in picture.data.as_chunks_mut::<4>().0.iter_mut() {
+                    for (c, t) in p.iter_mut().zip(tint) {
+                        *c = crate::math::mul_u8(*c, t);
+                    }
+                }
+                picture
+            }
+            PictureFinish::Styled(styling) => styled_straight(&self.base, &styling),
+        }
+    }
+}
+
 impl Document {
     // ----- queries -----
 
@@ -660,8 +699,17 @@ impl Document {
 
     /// The finished picture of stamp `stamp` (straight RGBA8): the source at full resolution (image pixels, the full
     /// text picture, the sticker at its Full render scale) and, `with_styles`, the tint and the styles drawn around it
-    /// ("what you see": copy, drag out, Export Picture). Never a history command.
+    /// ("what you see": copy, drag out, Export Picture). Never a history command. The same as
+    /// `stamp_picture_parts(stamp, with_styles)?.finish()`.
     pub fn stamp_picture(&mut self, stamp: StampId, with_styles: bool) -> Result<PixelBuf, EditError> {
+        Ok(self.stamp_picture_parts(stamp, with_styles)?.finish())
+    }
+
+    /// `stamp_picture` in two parts (stickers P11 check): the base picture, taken here from the document's caches, and
+    /// the tint and styles, drawn by [`StampPicture::finish`] on any thread. Copy and drag out call `finish` on a worker:
+    /// drawing the styles of a large picture takes tens to hundreds of milliseconds, which a drag's start or a Copy
+    /// must not cost the UI thread.
+    pub fn stamp_picture_parts(&mut self, stamp: StampId, with_styles: bool) -> Result<StampPicture, EditError> {
         let object = self.stamp(stamp).ok_or(EditError::UnknownStamp)?.clone();
         let base: Arc<PixelBuf> = match &object.source {
             StampSource::Image { blob } => self.blob_picture(*blob)?,
@@ -672,27 +720,22 @@ impl Document {
                 self.sticker_render(&doc, s, BakeQuality::Full)?.picture
             }
         };
-        if !with_styles {
-            return Ok((*base).clone());
-        }
-        let mut picture = (*base).clone();
-        if styled(&object) {
-            let styling = Styling {
+        let finish = if !with_styles {
+            PictureFinish::None
+        } else if styled(&object) {
+            PictureFinish::Styled(Box::new(Styling {
                 styles: object.styles.sanitized(),
                 tint: object.tint,
                 ref_scale: self.ref_scale(&object),
                 texels: glam::Vec2::splat(f32::INFINITY),
                 quality: BakeQuality::Full,
-            };
-            picture = styled_straight(&picture, &styling);
+            }))
         } else if object.tint != [255; 4] {
-            for p in picture.data.as_chunks_mut::<4>().0.iter_mut() {
-                for (c, t) in p.iter_mut().zip(object.tint) {
-                    *c = crate::math::mul_u8(*c, t);
-                }
-            }
-        }
-        Ok(picture)
+            PictureFinish::Tint(object.tint)
+        } else {
+            PictureFinish::None
+        };
+        Ok(StampPicture { base, finish })
     }
 
     /// The finished picture of sticker `id` (a tray sticker, a thumbnail) at render scale `scale` (finite, 1/64..=4;

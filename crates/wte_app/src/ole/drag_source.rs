@@ -149,9 +149,10 @@ pub fn handle_message(seam: &dyn DoDrag) -> Option<DragEnded> {
         release(source);
     }
     ACTIVE.store(false, Ordering::Release);
-    let effect = if hr == DRAGDROP_S_DROP { effect } else { DROPEFFECT_NONE };
+    let dropped = hr == DRAGDROP_S_DROP;
+    let effect = if dropped { effect } else { DROPEFFECT_NONE };
     log::info!("drag out: DoDragDrop ended ({hr:#010x}, effect {effect})");
-    let ended = DragEnded { tag, effect };
+    let ended = DragEnded { tag, effect, dropped };
     super::push_drag_ended(ended);
     Some(ended)
 }
@@ -425,7 +426,7 @@ mod tests {
         }), Ok(()));
         assert_eq!(posts, 1);
         let ended = handle_message(&Recorder { effect: DROPEFFECT_COPY }).expect("the drag ran");
-        assert_eq!(ended, DragEnded { tag: 71, effect: DROPEFFECT_COPY });
+        assert_eq!(ended, DragEnded { tag: 71, effect: DROPEFFECT_COPY, dropped: true });
         assert!(!active(), "the flag is cleared after the drag");
         let rec = take_recorded();
         assert_eq!(rec.len(), 1);
@@ -439,7 +440,7 @@ mod tests {
         assert_eq!(handle_message(&Recorder { effect: DROPEFFECT_COPY }), None);
         // Esc: the effect is none.
         request(job(72), &mut || true).unwrap();
-        assert_eq!(handle_message(&Recorder { effect: DROPEFFECT_NONE }), Some(DragEnded { tag: 72, effect: DROPEFFECT_NONE }));
+        assert_eq!(handle_message(&Recorder { effect: DROPEFFECT_NONE }), Some(DragEnded { tag: 72, effect: DROPEFFECT_NONE, dropped: false }));
         take_recorded();
         crate::ole::take_drag_ended();
     }
@@ -461,7 +462,7 @@ mod tests {
     fn a_second_request_while_a_drag_runs_is_dropped() {
         let _one = test_lock();
         request(job(81), &mut || true).unwrap();
-        assert_eq!(handle_message(&Reentrant), Some(DragEnded { tag: 81, effect: DROPEFFECT_COPY }));
+        assert_eq!(handle_message(&Reentrant), Some(DragEnded { tag: 81, effect: DROPEFFECT_COPY, dropped: true }));
         assert!(!active());
         assert!(slot().is_none(), "nothing is left to start");
         // A failed post takes the job back.
@@ -475,7 +476,7 @@ mod tests {
             }
         }
         request(job(84), &mut || true).unwrap();
-        assert_eq!(handle_message(&Panics), Some(DragEnded { tag: 84, effect: DROPEFFECT_NONE }));
+        assert_eq!(handle_message(&Panics), Some(DragEnded { tag: 84, effect: DROPEFFECT_NONE, dropped: false }));
         assert!(!active());
         take_recorded();
         crate::ole::take_drag_ended();

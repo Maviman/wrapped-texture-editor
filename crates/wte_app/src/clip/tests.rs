@@ -344,6 +344,7 @@ fn check_p10b_a_later_copy_wins_over_a_slower_earlier_one() {
         &ctx,
         &mut state,
         "slow".into(),
+        false,
         Box::new(move || {
             let _ = started_tx.send(());
             let _ = release_rx.recv();
@@ -354,7 +355,7 @@ fn check_p10b_a_later_copy_wins_over_a_slower_earlier_one() {
     // The second copy is quick and is written first.
     let fast = solid(2, 3, [0, 255, 0, 255]);
     let expected = fast.clone();
-    start_copy(&ctx, &mut state, "fast".into(), Box::new(move || Ok((Arc::new(fast), None))));
+    start_copy(&ctx, &mut state, "fast".into(), false, Box::new(move || Ok((Arc::new(fast), None))));
     let pasted = |state: &AppState| {
         let png = state.clipboard.read(ClipFormat::Png).unwrap().unwrap();
         wte_core::decode_image(&png, Some("x.png"), 64).unwrap().pixels

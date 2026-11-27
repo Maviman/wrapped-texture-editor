@@ -94,8 +94,9 @@ struct Pending {
 
 /// How a prepared drag reaches `DoDragDrop`.
 pub trait DragPort {
-    /// Hands the entries to the window's drag message. `Err` = a sentence for the status line.
-    fn post(&mut self, tag: u64, entries: &[(ClipFormat, Vec<u8>)]) -> Result<(), String>;
+    /// Hands the entries to the window's drag message (moved: a large layer's PNG and DIB are not kept twice while
+    /// the drag runs). `Err` = a sentence for the status line.
+    fn post(&mut self, tag: u64, entries: Vec<(ClipFormat, Vec<u8>)>) -> Result<(), String>;
 }
 
 /// The port of every self-test run and every test: through `ole::drag_source`'s slot, guard and data object, but the
@@ -103,7 +104,7 @@ pub trait DragPort {
 pub struct TestPort;
 
 impl DragPort for TestPort {
-    fn post(&mut self, tag: u64, entries: &[(ClipFormat, Vec<u8>)]) -> Result<(), String> {
+    fn post(&mut self, tag: u64, entries: Vec<(ClipFormat, Vec<u8>)>) -> Result<(), String> {
         #[cfg(windows)]
         {
             let job = crate::ole::drag_source::DragJob { tag, entries: data_entries(entries) };
@@ -123,7 +124,7 @@ pub struct WindowPort(pub isize);
 
 #[cfg(all(windows, not(test)))]
 impl DragPort for WindowPort {
-    fn post(&mut self, tag: u64, entries: &[(ClipFormat, Vec<u8>)]) -> Result<(), String> {
+    fn post(&mut self, tag: u64, entries: Vec<(ClipFormat, Vec<u8>)>) -> Result<(), String> {
         let hwnd = self.0;
         let job = crate::ole::drag_source::DragJob { tag, entries: data_entries(entries) };
         crate::ole::drag_source::request(job, &mut || crate::ole::drag_source::post_to_window(hwnd)).map_err(refused_text)
@@ -140,11 +141,11 @@ fn refused_text(r: crate::ole::drag_source::Refused) -> String {
 
 /// The data object's entries (format ids) for `entries`.
 #[cfg(windows)]
-fn data_entries(entries: &[(ClipFormat, Vec<u8>)]) -> Vec<crate::ole::data_object::Entry> {
+fn data_entries(entries: Vec<(ClipFormat, Vec<u8>)>) -> Vec<crate::ole::data_object::Entry> {
     use crate::ole::formats;
     let f = crate::ole::drop_target::Formats::get();
     entries
-        .iter()
+        .into_iter()
         .map(|(format, bytes)| {
             let id = match format {
                 ClipFormat::Sticker => f.sticker,
@@ -154,7 +155,7 @@ fn data_entries(entries: &[(ClipFormat, Vec<u8>)]) -> Vec<crate::ole::data_objec
                 ClipFormat::HDrop => formats::CF_HDROP,
                 ClipFormat::UnicodeText => formats::CF_UNICODETEXT,
             };
-            crate::ole::data_object::Entry::global(id, bytes.clone())
+            crate::ole::data_object::Entry::global(id, bytes)
         })
         .collect()
 }
@@ -485,14 +486,14 @@ fn poll_job(state: &mut AppState) {
 /// Hands the ready drag to the port.
 fn post(state: &mut AppState, pos: Option<egui::Pos2>) {
     let Some(mut p) = state.drag_out.pending.take() else { return };
-    let Phase::Ready(offer) = p.phase else {
+    let Phase::Ready(mut offer) = p.phase else {
         state.drag_out.pending = Some(p);
         return;
     };
     let Some(port) = state.drag_out.port.as_mut() else { return };
-    match port.post(p.tag, &offer.entries) {
+    let names: Vec<&str> = offer.entries.iter().map(|(f, _)| f.name()).collect();
+    match port.post(p.tag, std::mem::take(&mut offer.entries)) {
         Ok(()) => {
-            let names: Vec<&str> = offer.entries.iter().map(|(f, _)| f.name()).collect();
             log::info!("drag out: {} ({:?}) handed to the OS drag as {}", offer.file.display(), p.source, names.join(", "));
             state.drag_out.posted += 1;
             state.drag_out.last_pos = pos;
@@ -555,17 +556,23 @@ pub(crate) fn input_hook(ctx: &egui::Context, raw: &mut egui::RawInput, state: &
             continue;
         }
         if let Some(Pending { phase: Phase::Posted(offer), .. }) = state.drag_out.pending.take() {
-            finish(state, offer, e.effect);
+            finish(state, offer, e.effect, e.dropped);
         }
     }
 }
 
-/// The OS drag ended with `effect` (0 = cancelled or not taken).
-fn finish(state: &mut AppState, offer: Offer, effect: u32) {
+/// The OS drag ended with `effect` (0 = cancelled or not taken); `dropped`: it ended with a drop.
+fn finish(state: &mut AppState, offer: Offer, effect: u32, dropped: bool) {
     let file = offer.file.file_name().map_or_else(|| offer.file.display().to_string(), |n| n.to_string_lossy().into_owned());
     if effect == 0 {
-        log::info!("drag out: {file} was not taken (cancelled, or the place does not take files)");
-        remove_unused(state, &offer);
+        if dropped {
+            // P11 check: a program may answer "no effect" and still read the file after the drop; a PNG of WTE's stays
+            // listed in the manifest and goes with the start-up cleanup a day later.
+            log::info!("drag out: {file} was dropped but not taken; it stays for the day-old cleanup");
+        } else {
+            log::info!("drag out: {file} was not taken (cancelled)");
+            remove_unused(state, &offer);
+        }
         return;
     }
     let Some(ready) = &offer.psd else {

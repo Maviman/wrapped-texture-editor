@@ -293,6 +293,43 @@ fn a_cancelled_drag_removes_its_file_and_a_new_drag_replaces_the_old() {
     crate::ole::take_drag_ended();
 }
 
+/// P11 check: a drop that a program answered with "no effect" (`DRAGDROP_S_DROP`, `DROPEFFECT_NONE`) keeps the PNG -
+/// the program may read it after the drop - listed in the manifest for the day-old cleanup; only a drag that ended
+/// without a drop (Esc) removes it at once.
+#[test]
+fn check_p11_a_drop_without_an_effect_keeps_the_file_for_the_cleanup() {
+    let _one = drag_source::test_lock();
+    drag_source::take_recorded();
+    crate::ole::take_drag_ended();
+    let dir = tmp("noeffect");
+    let ctx = egui::Context::default();
+    let (mut state, stamp) = state_in(&dir);
+    struct DroppedNoEffect;
+    impl drag_source::DoDrag for DroppedNoEffect {
+        fn do_drag(&self, _data: *mut std::ffi::c_void, _source: *mut std::ffi::c_void) -> (crate::ole::com::Hresult, u32) {
+            (crate::ole::com::DRAGDROP_S_DROP, crate::ole::com::DROPEFFECT_NONE)
+        }
+    }
+    begin(&ctx, &mut state, DragSource::Stamp(stamp));
+    wait_ready(&mut state);
+    let file = state.drag_out.current_file().unwrap().to_path_buf();
+    step(&mut state, HELD_OUT);
+    assert!(drag_source::deliver_test_post(&DroppedNoEffect).is_some_and(|e| e.dropped && e.effect == 0));
+    let mut raw = egui::RawInput::default();
+    input_hook(&ctx, &mut raw, &mut state);
+    assert_eq!(raw.events.len(), 2, "the release is injected");
+    assert!(file.exists(), "a dropped file stays");
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(files::read_manifest(&dir).files.iter().any(|e| e.name == name), "listed for the cleanup");
+    assert_eq!(state.drag_out.removed, 0);
+    assert!(state.drag_out.current().is_none());
+    // A day later the start-up cleanup removes it.
+    let later = SystemTime::now() + files::MAX_AGE + Duration::from_secs(60);
+    assert_eq!(files::cleanup(&dir, later).removed, [name]);
+    assert!(!file.exists());
+    crate::ole::take_drag_ended();
+}
+
 /// Cleanup (review B7): a file of the manifest older than a day is removed, a fresh one kept, a file not in the
 /// manifest kept, a manifest file whose size or time changed kept (and forgotten), a name with a path in it ignored,
 /// the folder and the manifest never removed.
@@ -577,4 +614,40 @@ fn perf_k11_a_4096_layer_is_prepared_off_the_ui_thread() {
     assert!(start_ui < Duration::from_millis(10) && worst_step < Duration::from_millis(10), "the UI thread waited");
     assert_eq!(state.drag_out.current().map(|(_, p)| p), Some("ready"));
     cancel(&mut state);
+}
+
+/// Stickers P11 check (8.4, review A23): the start of a drag of a large styled stamp (every Layers-row drag of a stamp
+/// layer, also an in-window reorder) takes its base picture from the caches only; the styles are drawn by the job. Was
+/// 34-77 ms on the UI thread for a 2048 x 2048 picture with a preset (release). Run with `--release --ignored`.
+#[test]
+#[ignore = "perf: run with --release --ignored perf_k11"]
+fn perf_k11_a_styled_stamps_drag_starts_without_drawing_its_styles() {
+    let _one = drag_source::test_lock();
+    let dir = tmp("perf_styled");
+    let ctx = egui::Context::default();
+    let (mut state, _) = state_in(&dir);
+    let doc = state.doc_mut().unwrap();
+    let mut img = PixelBuf::new(2048, 2048);
+    for (i, px) in img.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = ((i % 2048) as f32 - 1024.0, (i / 2048) as f32 - 1024.0);
+        *px = if x * x + y * y < 900.0 * 900.0 { [(i % 251) as u8, 120, 40, 255] } else { [0, 0, 0, 0] };
+    }
+    let png = wte_core::encode_png(2048, 2048, &img.data, wte_core::PngLevel::Fast).unwrap();
+    let blob = doc.add_image_blob("big.png", std::sync::Arc::from(png)).unwrap();
+    let p = wte_core::Projector::from_surface(glam::Vec3::new(0.0, 0.0, 0.5), glam::Vec3::Z, glam::Vec3::Y, glam::Vec2::splat(0.3), 0.6);
+    let stamp = doc.add_stamp("Big", wte_core::StampSource::Image { blob }, wte_core::Placement::Projected(p), wte_core::TextureSetId(0)).unwrap();
+    let _ = doc.stamp_picture(stamp, false);
+    for preset in [StylePreset::Outline, StylePreset::ClassicSticker, StylePreset::Glow] {
+        state.doc_mut().unwrap().set_stamp_styles(stamp, preset.styles([2048, 2048]), Commit::Final).unwrap();
+        let t = std::time::Instant::now();
+        begin(&ctx, &mut state, DragSource::Stamp(stamp));
+        let ui = t.elapsed();
+        println!("perf_k11 styled: {}: begin on the UI thread {ui:?}", preset.name());
+        assert!(ui < Duration::from_millis(10), "{}: the UI thread drew the styles ({ui:?})", preset.name());
+        wait_ready(&mut state);
+        let file = state.drag_out.current_file().unwrap().to_path_buf();
+        let expected = state.doc_mut().unwrap().stamp_picture(stamp, true).unwrap();
+        assert!(decode(&std::fs::read(&file).unwrap()) == expected, "{}: the job's PNG is the styled picture", preset.name());
+        cancel(&mut state);
+    }
 }

@@ -445,6 +445,8 @@ impl eframe::App for WteApp {
         }
         // Stickers P11: a drag out's job, the release in the window, the post when the pointer has left.
         crate::dragout::pump(ui.ctx(), &mut self.state);
+        // Stickers S1: a Cut Out Box asked for in this frame starts its job.
+        crate::sticker::tools::cut_box::after_dispatch(ui.ctx(), &mut self.state);
         // Round 5 (R5-1): a Final of this frame gets its bake started in the next one, even without input.
         crate::stamp_bakes::after_dispatch(&mut self.state, ui.ctx());
         // Stickers P10b (6.3 item 4): text an egui field copied goes to the clipboard as well.

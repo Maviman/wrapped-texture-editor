@@ -473,6 +473,17 @@ pub(crate) fn tool_page(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelS
                         .on_hover_text("Hide the colour on the layer mask instead of erasing it (a mask is added when needed)");
                     help(ui, "Click a colour to make it transparent (limited by the selection).");
                 }
+                // Stickers S1: the Cut Out Box.
+                StickerTool::CutOutBox => {
+                    let into = ui
+                        .checkbox(&mut state.sticker_ui.cut_box.into_mask, "Into mask (keep pixels)")
+                        .on_hover_text("Hide the background on the layer mask instead of erasing it (a mask is added when needed)");
+                    state.panel_rects.insert(PanelHit::StickerCutBoxInto, into.rect);
+                    if let Some(pc) = crate::sticker::tools::cut_box::progress(state) {
+                        ui.add(egui::ProgressBar::new(pc as f32 / 100.0).text(crate::sticker::tools::cut_box::note(pc)));
+                    }
+                    help(ui, "Drag a box around the object of a photo: what is outside the box is background, and the object inside is cut out from it (limited by the selection). Esc or Cancel stops a running cut.");
+                }
             }
             help(ui, "Right or middle drag: pan  |  Wheel: zoom  |  Esc or Done: back");
             position_fields(ui, state, ps, &mut actions);

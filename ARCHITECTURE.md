@@ -378,6 +378,9 @@ clipboard - Copy / Cut / Paste / Paste at View Centre in the Edit menu and with 
 ways, Help > Clipboard contents...: 1.3, 2.2, 8.1, 8.2, 8.3, 8.7, 8.10, 8.11, 8.13, 8.17, 9.2.) (P11, done: drag out of
 WTE - Layers rows, the Sticker tab's thumbnails and the "PSD" handle become an OS drag when the pointer leaves the window,
 `DoDragDrop` from WTE's subclass, the drag-out folder and its manifest: 2.2, 8.2, 8.3, 8.7, 8.11, 8.13, 8.17, 9.2.)
+(S1, stretch: the Cut Out Box tool - drag a box around the object of a photo and GrabCut cuts it out, on a job with a
+progress note, "Into mask", Shift+W; core `sticker/grabcut.rs` with the soft edge shared with Remove Background:
+2.2, 5.27, 6.12, 8.11, 8.15, 9.1, 9.2.)
 
 ---
 
@@ -441,7 +444,8 @@ A4 = `app-panels`, A5 = `app-dialogs`, A6 = `app-selftest`.
 | `sticker/shape.rs` | stickers P1 | `ShapeSpec`, `ShapeKind`, `Paint`, `rasterize`, `polygon_coverage`, `shape_points` |
 | `sticker/resample.rs` | stickers P1 | `transform_picture`, `transformed_bounds` (the affine resampler of 6.11) |
 | `sticker/select.rs` | stickers P2 | `Selection` (marquee, lasso, combine, invert, grow / shrink / feather, limit), `SelectMode`, colour-tolerance regions (`region`, `color_range`, `color_diff`), `erase` / `fill` (and their mask forms), `extract`, `mix_px` / `mix_selected` (5.27, 6.12) |
-| `sticker/cutout.rs` | stickers P2 | colour to alpha (`unmix_pixel`, `color_to_alpha`), `remove_matte`, `defringe`, `remove_background` / `BackgroundCut` (5.27, 6.12) |
+| `sticker/cutout.rs` | stickers P2 | colour to alpha (`unmix_pixel`, `color_to_alpha`), `remove_matte`, `defringe`, `remove_background` / `BackgroundCut` (5.27, 6.12); `soft_edge` (crate-internal, shared with S1) |
+| `sticker/grabcut.rs`, `sticker/grabcut/tests.rs` | stickers S1 | the GrabCut box cut-out `cut_out_box` / `BoxCutRefusal`: colour mixtures, the 8-neighbour grid cut, Boykov-Kolmogorov max-flow, the full-size re-cut (5.27, 6.12); the `k_s1_*` tests and the test scenes |
 | `sticker/filter.rs` | stickers P2 | Gaussian `blur` / `blur_mask` (three boxes), `sharpen`, `draw_gradient` / `draw_gradient_mask` (5.27, 6.12) |
 | `sticker/bench.rs` | stickers P1, P2 | the ignored `perf_k1_*` and `perf_k2_*` timings (test-only) |
 | `sticker/model.rs` | stickers P3a | `StickerDoc`, `StickerLayer`, `StickerContent`, `PicturePixels`, `LayerMask`, `ArtboardShape`; limits check, the trivial-path test (5.27 part 3) |
@@ -639,6 +643,8 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `selftest/scenarios/sticker_tab.rs` | stickers P6b | the scenarios `sticker_styles`, `sticker_tray`, `sticker_controls` (8.11) |
 | `selftest/scenarios/sticker_paint.rs` | stickers P7a | the scenarios `sticker_edit` and `sticker_pen` (8.11) |
 | `selftest/scenarios/sticker_cutout.rs` | stickers P7b | the scenario `sticker_cutout` (8.11) |
+| `selftest/scenarios/sticker_grabcut.rs` | stickers S1 | the scenario `sticker_grabcut` (8.11) |
+| `sticker/tools/cut_box.rs`, `sticker/tools/tests_s1.rs` | stickers S1 | the Cut Out Box tool: the box, the cut's job and its landing (8.15); its tests |
 | `sticker/tools/{transform,crop,text,shape}.rs` | stickers P8 | the Move tool's transform handles (`Handle`, `dragged`, `BoxCache`), the Crop tool (`CropOptions`, `CropGrip`, `apply`), the Text tool (`click`, `add`, `spec_of`), the Shape tool (`ShapeOptions`, `drag_box`, `add`) |
 | `sticker/{layout,adjust_ui,library}.rs` | stickers P8 | the Sticker and Layer commands (`Layout`, `merge_down`, `toggle_clip`, `layer_transform`, `export_psd` / `write_psd`), the Adjustments block, the sticker library (`LibraryState`, the listing job, `save`, `add`) |
 | `sticker/tests_p8.rs` | stickers P8 | the unit tests of P8 (8.15) |
@@ -3817,6 +3823,14 @@ impl BackgroundCut {
 }
 pub fn remove_background(src: &PixelBuf, opts: RemoveBgOptions) -> Result<BackgroundCut, RemoveBgRefusal>;
 
+// sticker/grabcut.rs (stickers S1; re-exported at the crate root: cut_out_box, BoxCutRefusal)
+pub const GAMMA: f32 = 50.0;  pub const COMPONENTS: usize = 5;  pub const ITERATIONS: usize = 5;
+pub const WORK_SIDE: u32 = 512;  pub const BAND: f32 = 6.0;  pub const MIN_BOX_SIDE: u32 = 4;
+pub enum BoxCutRefusal { Empty, BoxTooSmall, NoBackground, NothingFound, Cancelled }   // .message(): the UI note
+// The box (picture pixels, clipped) around the object; `progress(percent)` on the calling thread, false = stop.
+// The cut's `colors` is empty (the background is learnt as colour models); apply it like Remove Background's.
+pub fn cut_out_box(src: &PixelBuf, rect: IRect, progress: &dyn Fn(u32) -> bool) -> Result<BackgroundCut, BoxCutRefusal>;
+
 // sticker/filter.rs
 pub const MAX_BLUR_RADIUS: f32 = 64.0;  pub const MAX_SHARPEN_AMOUNT: f32 = 3.0;  pub const MAX_SHARPEN_RADIUS: f32 = 16.0;
 pub fn gaussian_boxes(sigma: f32) -> [u32; 3];                       // odd widths, ascending
@@ -3829,6 +3843,8 @@ pub fn draw_gradient_mask(mask: &mut AlphaBuf, from: Vec2, to: Vec2, gradient: &
 
 Crate-internal for P2 (no public API change of P1): `fx::cov`, `fx::over`, `shape::sd_round_box`, `shape::sd_ellipse`
 are now `pub(crate)`; `select::flood_plane`, `select::sel_at`, `select::mix_u8` are shared by `cutout` and `filter`.
+Stickers S1: `cutout::soft_edge(src, region, key_of) -> (keep, recolor)` (Remove Background's step 4 moved out of
+`remove_background` unchanged; the `k2_*` tests hold) is shared by `remove_background` and `grabcut::cut_out_box`.
 
 Part 3 (P3a; 6.10, 6.5 "Stickers"). The sticker document, its render and the stamp picture pipeline. `StickerDoc`,
 `StickerLayer`, `StickerContent`, `PicturePixels`, `LayerMask`, `ArtboardShape`, `SourceFrame`, `StickerRenderInput` are
@@ -5477,6 +5493,31 @@ shifted its colour; `k2_remove_background_on_three_synthetic_pictures` fails wit
 opacity < 0.05) = plain colour to alpha. 5. `BackgroundCut { keep, colors, region_pixels, recolor }`; `apply` (alpha
 times `keep`, soft edge recoloured, mixed by a selection) or `apply_to_mask` ("Into mask": the mask times `keep`, pixels
 untouched).
+
+**GrabCut box** (stickers S1, `grabcut.rs`; Rother, Kolmogorov and Blake 2004; Boykov and Kolmogorov 2004; ported with
+PhotoCraft's `segment/{grabcut,gmm,maxflow}.rs` open, MIT notice at the top). Input: the picture and a box (picture
+pixels, clipped; at least 4 x 4 or `BoxTooSmall`). 1. Window = the box plus a margin of `max(8, ceil(0.15 * longer
+side))`, clipped; step `= ceil(longer window side / 512)`; working copy = step x step blocks (the last ones partial):
+colour = the alpha-weighted mean of the block / 255, "solid" = mean alpha >= 128. 2. Trimap: a solid block whose centre
+lies in the box is probable object, everything else fixed background; when no solid block lies outside the box (a box
+over the whole picture) a ring of `max(1, min(lw, lh) / 50)` working pixels is background instead; no solid background
+= `NoBackground`. 3. Up to 5 iterations (stop when no label changed): colour models of both sides (5 full-covariance
+Gaussians each, covariance ridge `2e-5`; the first time k-means++ from a generator seeded by the sample count, 10 Lloyd
+steps, then the statistics of the hard assignment; afterwards each sample to its most likely component and the
+statistics again; at most 40,000 samples per side, every k-th), data costs `-ln p(z)` clamped to -50..=200, and one
+minimum cut of the 8-neighbour grid (`GAMMA = 50`, `beta = 1 / (2 <|z_p - z_q|^2>)` over the solid pairs, weight
+`GAMMA exp(-beta d^2) / dist`, no link to a transparent pixel; only the free pixels are nodes, the links to fixed
+pixels fold into the terminal capacities; ties go to the background). No object left = `NothingFound`. 4. With a step
+above 1: the labels scaled up (outside the box and transparent pixels cleared), then one more cut at full size over the
+**band** = the free pixels (in the box, opaque) within `BAND = 6` px of the other label (two `distance_to_ink`), the
+rest fixed, the final models' costs, `beta` of the full-size window. 5. Region = everything not kept; `soft_edge` (step
+4 of Remove Background) with the key = the colour of the closest region pixel (a photo's background has no plain
+colour). Result: a `BackgroundCut` with no `colors`. `progress(0, 5, 10 + 12 per iteration, 75, 90, 100)`, `false` =
+`Cancelled`. Deterministic for any thread count: `f64` sums in a fixed order, rows in parallel only for independent
+pixels and per-row sums added in row order, the max-flow on one thread. Not in the plan's text but kept from the
+reference: the 15 % window margin (the background models learn the colours near the object), the ring fallback, the
+early stop. Measured (release, this machine): the 2048 x 2048 star scene 862 ms, a box over the whole 2048 x 2048
+picture 1,215 ms (plan 8.4: 3 s); IoU 0.999 / 0.997 / 0.997 on the three test scenes.
 
 **Blur** (Gaussian, `sigma = radius`, 0.5..=64): `gaussian_boxes` = the standard three-box rule (`w = sqrt(12 s^2 / 3 +
 1)`, odd `wl <= w`, `wu = wl + 2`, `m = round((12 s^2 - 3 wl^2 - 12 wl - 9) / (-4 wl - 4))` boxes of `wl`); values
@@ -9090,6 +9131,7 @@ counted down) instead of failing (`export_errors`).
 | `sticker_link_path` | Stickers P9a. PATH = a `.psd` / `.psb` file (gate: `crates/wte_core/tests/fixtures/psd/f1w_pc.psd`); Sphere, 3D; `OpenPath(PATH)`; a click on the model (shot `psd_placed`) | one "Add Sticker" entry: a kept tray sticker from the file layer by layer, the Stamp tool's source and tool; the placed stamp is a sticker stamp with layers |
 | `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
+| `sticker_grabcut` | Stickers S1 (`selftest/scenarios/sticker_grabcut.rs`). Sphere, 3D; a generated 320 x 240 photo (an orange ball, radius 70, shaded, on grass: green with brown blotches and grain) placed as an image stamp; 4; Shift+W; a canvas drag of the box (72, 38)-(248, 212) (the ball plus a margin); WaitIdle (the cut's job is part of `live::pending`) (shot `grabcut_cut`); undo; a click on Into mask (`PanelHit::StickerCutBoxInto`) and the same drag (shot `grabcut_mask`); `ApplyPreset(ClassicSticker)` (shot `grabcut_die_cut`); undo every step; Esc | Shift+W chose the Cut Out Box and its option shows; one "Cut Out Box" entry that promotes the stamp: alpha 0 at the corner and between the box and the ball, 255 at the ball's centre and top, IoU of alpha >= 128 against the ball >= 0.9, no progress note left; undo: the image stamp and the start composite; Into mask: one entry, the layer's pixels equal the photo, a mask with 0 at the corner, 255 at the centre and IoU >= 0.9; the finished styled sticker: corner alpha 0, ball 255; undoing everything gives the start (document state, image stamp, composite); Esc leaves the view |
 | `sticker_pen` | Stickers P7a (`sticker_paint.rs`). The same start; the sticker Brush 24 px with pressure driving the size from 0; a pen stroke at pressure 0.2 along y = 70 and one at 1.0 along y = 170 (`Step::Pen` on the canvas); the inverted pen (eraser end) across both at x = 128 (shot `pen_canvas`); a barrel drag; Fit; undo every step; Esc | two "Sticker Brush" entries, the full stroke at least three times as wide as the light one in column 128 (and at least 20 px); the eraser end: one "Sticker Eraser" entry, both lines cut, the sticker Eraser in every contact frame (`pen_eraser_frames` counts the sticker tool in the view), the Brush back after the pen left; the barrel drag pans the canvas camera and changes nothing; undoing everything gives the start |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
 
@@ -9471,6 +9513,24 @@ selection; 3.4; the Cut-out, Filter and Selection commands).**
   Rasterize offer), times the selection seen from those pixels, then `select::erase` (one entry "Magic Eraser"); with
   "Into mask" or Paint on mask `erase_mask` on the layer mask, a mask of 255 added first when there is none (one
   `set_sticker` entry). An unchanged buffer makes no entry and does not promote (`tools::put`: "...: nothing changed").
+- **Cut Out Box** (stickers S1, `tools/cut_box.rs`; Shift+W, after the Magic Eraser in the tool strip; icon: a dashed
+  box around a figure): the press checks `paint_target` (a picture layer, shown, unlocked; text / shape: the Rasterize
+  offer) and holds `CanvasDrag::CutBox { start, to }`, drawn as an accent box; at the release a box of at least 2 x 2
+  layer-space px pushes `StickerAction::CutOutBox([x0, y0, x1, y1])` (a content edit: the shared-picture question
+  first). `cut_box::start` cancels a running cut and queues the box; `cut_box::after_dispatch` (the app after the
+  frame's dispatch, and every canvas frame) starts it when no cut thread runs (`CutThreads::alive`; at most one thread,
+  a cancelled one included): the box in the layer's content pixels (`content_rect`: the bounds of the four corners
+  through the inverse transform, rounded outward), pictures over 4,096 px a side refused, a box under 4 x 4 picture
+  pixels refused with `BoxTooSmall`'s sentence; the inputs taken as `Arc`s with the selection seen from the pixels and
+  the "Into mask (keep pixels)" option (`StickerUi::cut_box`); a named thread runs `wte_core::cut_out_box` and
+  `filters::apply_cut` (shared with Remove Background: the pixels, the mask it has, or a new all-shown mask) and sends
+  the change. While it runs: the canvas header shows "Cutting out... N %" and a Cancel button (`PanelHit::
+  StickerCutBoxCancel`), the Tool tab a progress bar, the status line the same note; Esc (first after a drag) and
+  Cancel stop it (`BoxCutRefusal::Cancelled`'s sentence); leaving the view or another target stops it silently.
+  `cut_box::frame` takes the result: during a drag or a stroke it waits; the layer must still hold the very pixels and
+  mask the cut was made from (`Arc::ptr_eq` or equal), else `CHANGED_NOTE` and nothing; a refusal is a status line and
+  an info toast; else one entry "Cut Out Box" through `tools::put` / `put_new_mask` (an image stamp promoted inside it).
+  `cut_box::pending` is part of `live::pending` (the self-test's idle check waits for the cut).
 - **Delete** (`commands::delete_selected`): Delete / Backspace in the view run `DeleteKey`; with a selection it runs
   `DeleteSelected` (through `run_in`, so the shared-picture question comes first): `select::erase` of the selection seen
   from the active picture layer (with Paint on mask: `fill_mask(.., 0)`), one entry "Delete Selected Pixels". The stamp,
@@ -10677,6 +10737,17 @@ and text layers (exactly those two files, each = `dense(layer)`).
   `check_p12_the_largest_texture_side_links_and_reads_back` (8192, `MAX_TEXTURE_SIDE` = `MAX_PAINT_LINK_SIDE`); app
   `link::layer_tests::{check_p12_an_update_waits_for_an_open_texture_stroke, check_p12_the_layer_chooser_speaks_of_the_layer,
   check_p12_paste_as_a_layer_waits_for_an_open_stroke}`.
+- Branch `stickers`, S1 (`sticker/grabcut/tests.rs`, names `k_s1_*`): three synthetic photo-like scenes with textured
+  backgrounds (a shaded ball on grass 400 x 300, a mug with a band and a handle on wood under a wall 640 x 480, a star
+  with a rim and a centre on a two-colour carpet 1200 x 900, the last through the scaled working copy and the full-size
+  re-cut) reach IoU >= 0.9 (measured 0.999 / 0.997 / 0.997); everything outside the box keep 0 and the edge soft; the
+  same result for 1 and 8 threads and for two runs; the refusals (empty, a box under 4 x 4, outside the picture, a
+  transparent picture = `NoBackground`, cancelled at once and after some steps); a box over plain grass keeps little;
+  the progress rises from 0 to 100; a box over the whole picture learns from the ring (IoU 0.999); transparent pixels
+  stay background; apply / apply_to_mask of the cut; the grid cut equals the brute-force minimum on 40 random 4 x 3
+  grids; fixed neighbours fold into the terminals; colour models prefer their own colours (and one colour = one
+  component). `perf_s1_grabcut_box_2048` (ignored, release, `sticker/bench.rs`): 862 ms, and 1,215 ms for a box over
+  the whole picture (budget 3 s). The `k2_*` Remove Background tests guard the move of its soft edge into `soft_edge`.
 - Branch `stickers`, P6a (`doc_stickers_tests.rs`): `k6a_layer_at_and_layer_thumbnail` (the top visible layer under a
   point, hidden layers skipped, a masked pixel not hit, NaN and outside points none; a layer's thumbnail alone at half
   scale; no history entry). The app-side tests of the Sticker view are listed in 8.15.
@@ -10765,7 +10836,13 @@ count (71: `layer_link`). Stickers P13: `dialogs::about::tests` (the Licences wi
 `dialogs::editor_help::tests` (the plan's Help sentences, the Photoshop table, the company named only in the trademark
 sentence), the menu sweep's Help > Working with PhotoCraft and Photoshop, the GPU control sweep (About > Licences...
 shows the licence text and the trademark sentence; Back / Close / Esc; the help dialog; the Shortcuts dialog's
-Sticker view keys) and the scenario count (72: `sticker_flow_path`).
+Sticker view keys) and the scenario count (72: `sticker_flow_path`). Stickers S1: `sticker::tools::tests_s1` (the canvas
+drag cuts the object out as one entry "Cut Out Box" and promotes; Into mask, also on a layer with a mask; the selection
+limits it; a click cuts nothing; Cancel; a second box while one runs waits for its thread and only the last lands, at
+most one thread; a layer changed meanwhile drops the result with `CHANGED_NOTE`; a result waits for a running drag;
+leaving the view stops the cut; refusals (box under 4 x 4 picture pixels, outside the picture, a text layer's
+Rasterize offer); `content_rect` of a moved and scaled layer), the colliding chord Shift+W of `shortcuts::tests`, the
+`sticker_keys` scenario's Shift+W row, and the scenario count (73: `sticker_grabcut`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`
@@ -11320,3 +11397,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | P11 | drag out: the posted message and `DoDragDrop` in the subclass, prepared files, the manifest cleanup, the PSD handle and its toast | `dragout.rs`, `dragout/{files,tests}.rs`, `ole/drag_source.rs` | a styled stamp's row drag draws its styles on the worker |
 | P12 | linked texture paint layers ("Edit Layer in <editor>"), Paste as New Paint Layer | core `link/paint.rs`, `doc_layer_links.rs`; app `link/*` (`LinkId`), `panels/layers.rs`, `clip.rs` | an update during a stroke waits; an unchanged save is no undo step |
 | P13 | docs and the version: Help > Working with PhotoCraft and Photoshop, the Sticker view's keys in Help > Shortcuts, About > Licences... (the MIT text word for word, the trademark sentence), the installer's `licenses\*` (`[Files]`, CI staging, smoke test), README, release notes, `dist/HOW_TO_TEST.txt` ("Working with Photoshop" = hand tests 19-25, "Stickers: the hand tests to report (1-25)"), HANDOFF 1 / 4.1 / 5 / 5.4 / 8, workspace version 0.4.0 (no tag), scenario `sticker_flow_path` | `dialogs/{about,editor_help}.rs`, `selftest/scenarios/sticker_flow.rs`, `installer/WrappedTextureEditor.iss`, `.github/workflows/installer.yml`, `installer/smoke-test.ps1`, `Cargo.toml` | every hand test of plan 8.7 in HOW_TO_TEST with its expected result; the installer script lists the licence folder (no installer is built by an agent); greps for the forbidden name and for "Adobe" (8.6 item 7) |
+| S1 | stretch: the GrabCut box cut-out - the Cut Out Box tool (Shift+W) on a job with a progress note and Cancel, Into mask; the soft edge shared with Remove Background | core `sticker/grabcut.rs`, `sticker/cutout.rs` (`soft_edge`); app `sticker/tools/cut_box.rs`, `selftest/scenarios/sticker_grabcut.rs` | IoU >= 0.9 on three textured scenes, determinism, 2048 x 2048 within 3 s, at most one cut thread, a stale result dropped |

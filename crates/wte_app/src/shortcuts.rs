@@ -135,7 +135,7 @@ const fn tool(label: &'static str, modifiers: Modifiers, key: Key, make: fn(&App
 /// Stickers P6a (STICKER_PLAN 3.3): the keys of the Sticker view, ordered most-specific-first. They win over the global
 /// table there (`sticker_order`). Stickers P7b: Ctrl+A / Ctrl+D / Ctrl+Shift+I (Select All, Select None, Invert
 /// Selection).
-static STICKER_SHORTCUTS: [ShortcutDef; 34] = [
+static STICKER_SHORTCUTS: [ShortcutDef; 35] = [
     // selections (stickers P7b)
     def("Invert Selection", CMD_SHIFT, Key::I, None, false, |_| sticker(StickerAction::InvertSelection)),
     def("Select All", CMD, Key::A, None, false, |_| sticker(StickerAction::SelectAll)),
@@ -144,6 +144,8 @@ static STICKER_SHORTCUTS: [ShortcutDef; 34] = [
     tool("Move", NONE, Key::V, |_| Some(AppAction::SetStickerTool(StickerTool::Move))),
     tool("Marquee", NONE, Key::M, |_| Some(AppAction::SetStickerTool(StickerTool::Marquee))),
     tool("Lasso", NONE, Key::L, |_| Some(AppAction::SetStickerTool(StickerTool::Lasso))),
+    // Stickers S1: Shift+W before W (as Shift+E before E).
+    tool("Cut Out Box", SHIFT, Key::W, |_| Some(AppAction::SetStickerTool(StickerTool::CutOutBox))),
     tool("Magic Wand", NONE, Key::W, |_| Some(AppAction::SetStickerTool(StickerTool::Wand))),
     tool("Crop", NONE, Key::C, |_| Some(AppAction::SetStickerTool(StickerTool::Crop))),
     tool("Brush", NONE, Key::B, |_| Some(AppAction::SetStickerTool(StickerTool::Brush))),
@@ -497,6 +499,8 @@ mod tests {
             // is ignored by a pattern without it), as before.
             (SHIFT, Key::E, one(AppAction::SetTool(ToolKind::Eraser)), one(AppAction::SetStickerTool(StickerTool::MagicEraser))),
             (SHIFT, Key::G, one(AppAction::SetTool(ToolKind::Fill)), one(AppAction::SetStickerTool(StickerTool::Gradient))),
+            // Stickers S1: Shift+W outside the view is W's Wireframe (logical match), inside it the Cut Out Box.
+            (SHIFT, Key::W, one(AppAction::ToggleWireframe), one(AppAction::SetStickerTool(StickerTool::CutOutBox))),
             (NONE, Key::ArrowLeft, none.clone(), one(AppAction::Sticker(S::Nudge(-1, 0)))),
             (SHIFT, Key::ArrowDown, none.clone(), one(AppAction::Sticker(S::Nudge(0, 10)))),
             // Not bound in the sticker table: the global binding runs in both modes.

@@ -34,7 +34,8 @@ pushed; the installer script is [`installer/WrappedTextureEditor.iss`](installer
 - A **sticker** is a small layered picture: open a stamp in the **Sticker view** (key 4, or Edit Sticker) to change its
   layers with the model beside it, which follows every change. Picture, text and shape layers with opacity, blend
   mode, mask, clipping, adjustments and their own styles; Brush, Eraser (pen pressure), Fill, Gradient, Eyedropper;
-  Marquee, Lasso, Magic Wand, Magic Eraser, Remove Background, Color to Alpha, Defringe, Blur, Sharpen; Move with
+  Marquee, Lasso, Magic Wand, Magic Eraser, Remove Background, Cut Out Box (drag a box around the object of a photo:
+  GrabCut, colour models and a graph cut, no AI), Color to Alpha, Defringe, Blur, Sharpen; Move with
   transform handles, Crop, Trim, Canvas Size, Resize, Rotate, Flip, Merge Down, Flatten. Help > Shortcuts lists the
   Sticker view's keys.
 - The **sticker tray** keeps the project's stickers: make one from a picture or blank, place it with the Stamp tool

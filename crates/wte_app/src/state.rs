@@ -173,6 +173,9 @@ pub enum PanelHit {
     StickerPaintOnMask,
     StickerRasterize,
     StickerHeaderRasterize,
+    /// Stickers S1: Cancel of a running Cut Out Box (canvas header) and the tool's "Into mask" option (Tool tab).
+    StickerCutBoxCancel,
+    StickerCutBoxInto,
     /// Stickers P7a: the Gradient tool's options (the mode list, Reverse, Add stop).
     StickerGradientMode,
     StickerGradientReverse,
@@ -273,6 +276,8 @@ pub enum StickerTool {
     Eraser,
     Fill,
     MagicEraser,
+    /// Stickers S1: drag a box around the object of a photo; GrabCut cuts it out.
+    CutOutBox,
     Eyedropper,
     Gradient,
     Text,
@@ -282,7 +287,7 @@ pub enum StickerTool {
 
 impl StickerTool {
     /// The tools in the order of the tool strip.
-    pub const ALL: [StickerTool; 14] = [
+    pub const ALL: [StickerTool; 15] = [
         StickerTool::Move,
         StickerTool::Hand,
         StickerTool::Marquee,
@@ -293,6 +298,7 @@ impl StickerTool {
         StickerTool::Eraser,
         StickerTool::Fill,
         StickerTool::MagicEraser,
+        StickerTool::CutOutBox,
         StickerTool::Eyedropper,
         StickerTool::Gradient,
         StickerTool::Text,
@@ -311,6 +317,7 @@ impl StickerTool {
             StickerTool::Eraser => "Eraser",
             StickerTool::Fill => "Fill",
             StickerTool::MagicEraser => "Magic Eraser",
+            StickerTool::CutOutBox => "Cut Out Box",
             StickerTool::Eyedropper => "Eyedropper",
             StickerTool::Gradient => "Gradient",
             StickerTool::Text => "Text",
@@ -328,7 +335,10 @@ impl StickerTool {
     /// Stickers P7a (STICKER_PLAN 3.3 "Layer-kind rules"): the tools that change pixels of a picture layer (on a text or
     /// shape layer they offer Rasterize instead).
     pub fn paints(self) -> bool {
-        matches!(self, StickerTool::Brush | StickerTool::Eraser | StickerTool::Fill | StickerTool::Gradient | StickerTool::MagicEraser)
+        matches!(
+            self,
+            StickerTool::Brush | StickerTool::Eraser | StickerTool::Fill | StickerTool::Gradient | StickerTool::MagicEraser | StickerTool::CutOutBox
+        )
     }
 }
 

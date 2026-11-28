@@ -17,7 +17,7 @@
 use wte_core::sticker::{cutout, filter, select};
 use std::sync::Arc;
 
-use wte_core::{AlphaBuf, Matte, PixelBuf, PixelData, PixelTarget, RemoveBgOptions, Selection, StickerContent};
+use wte_core::{AlphaBuf, BackgroundCut, Matte, PixelBuf, PixelData, PixelTarget, RemoveBgOptions, Selection, StickerContent};
 
 use crate::state::{AppState, StickerTool};
 use crate::sticker::popover::PopKind;
@@ -117,24 +117,7 @@ impl Prepared {
         Ok(match self.cut {
             CutOut::RemoveBackground(ui) => {
                 let found = cutout::remove_background(pixels, ui.opts)?;
-                if ui.into_mask {
-                    match mask {
-                        Some(m) => {
-                            let mut out = (**m).clone();
-                            found.apply_to_mask(&mut out, sel);
-                            Change::Data(PixelData::Alpha(out))
-                        }
-                        None => {
-                            let mut out = AlphaBuf::filled(t.size[0], t.size[1], 255);
-                            found.apply_to_mask(&mut out, sel);
-                            Change::NewMask(out)
-                        }
-                    }
-                } else {
-                    let mut out = (**pixels).clone();
-                    found.apply(&mut out, sel);
-                    Change::Data(PixelData::Rgba(out))
-                }
+                apply_cut(&found, pixels, mask.as_deref(), t.size, sel, ui.into_mask)
             }
             CutOut::ColorToAlpha(key) => {
                 let mut out = (**pixels).clone();
@@ -164,6 +147,30 @@ impl Prepared {
                 Change::Data(PixelData::Rgba(filter::sharpen(pixels, amount, radius, sel)))
             }
         })
+    }
+}
+
+/// What a found cut (Remove Background, stickers S1: the Cut Out Box) changes: the pixels' alpha (and the soft
+/// edge's colours), or with `into_mask` the layer mask (a new one, all shown, when the layer has none); limited by
+/// `sel` (content pixels).
+pub(crate) fn apply_cut(found: &BackgroundCut, pixels: &PixelBuf, mask: Option<&AlphaBuf>, size: [u32; 2], sel: Option<&AlphaBuf>, into_mask: bool) -> Change {
+    if into_mask {
+        match mask {
+            Some(m) => {
+                let mut out = m.clone();
+                found.apply_to_mask(&mut out, sel);
+                Change::Data(PixelData::Alpha(out))
+            }
+            None => {
+                let mut out = AlphaBuf::filled(size[0], size[1], 255);
+                found.apply_to_mask(&mut out, sel);
+                Change::NewMask(out)
+            }
+        }
+    } else {
+        let mut out = pixels.clone();
+        found.apply(&mut out, sel);
+        Change::Data(PixelData::Rgba(out))
     }
 }
 

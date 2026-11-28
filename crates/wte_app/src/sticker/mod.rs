@@ -283,6 +283,13 @@ pub enum StickerAction {
     ChooseLibraryFolder(Option<PathBuf>),
     /// "Convert to layered sticker" of a text stamp from the Sticker tab (also outside the Sticker view).
     ConvertTextStamp(StampId),
+
+    // ---- stickers S1 ----
+    /// The Cut Out Box tool's box `[x0, y0, x1, y1]` (layer space): GrabCut on the active picture layer, on a job; one
+    /// entry "Cut Out Box" when it lands (a running cut is cancelled first).
+    CutOutBox([f32; 4]),
+    /// Cancel (or Esc) of a running Cut Out Box.
+    CancelCutOutBox,
 }
 
 impl StickerAction {
@@ -410,6 +417,8 @@ impl StickerAction {
                 | S::AddShapeLayer(_)
                 | S::ApplyCrop
                 | S::Layout(_)
+                // Stickers S1: asked before the cut starts (it lands as an entry of its own).
+                | S::CutOutBox(_)
         )
     }
 }
@@ -488,6 +497,8 @@ pub(crate) enum CanvasDrag {
     Crop { grip: tools::crop::CropGrip, from: [f32; 4], start: glam::Vec2, button: egui::PointerButton },
     /// Stickers P8: the Shape tool's drag between two layer-space corners; the layer is added at the release.
     Shape { start: glam::Vec2, to: glam::Vec2, button: egui::PointerButton },
+    /// Stickers S1: the Cut Out Box tool's drag between two layer-space corners; the cut starts at the release.
+    CutBox { start: glam::Vec2, to: glam::Vec2, button: egui::PointerButton },
 }
 
 /// UI state of the Sticker view (`AppState::sticker_ui`): caches and the running drag; nothing of it is saved.
@@ -565,6 +576,10 @@ pub struct StickerUi {
     /// The artboard size the canvas camera was fitted to (another size is fitted again).
     pub(crate) fitted_size: Option<[u32; 2]>,
     pub(crate) library: library::LibraryState,
+    /// Stickers S1: the Cut Out Box tool's option, its running cut and its threads.
+    pub cut_box: tools::cut_box::CutBoxOptions,
+    pub(crate) cut_job: Option<tools::cut_box::CutJob>,
+    pub(crate) cut_threads: tools::cut_box::CutThreads,
     /// Tests: a CPU copy of every upload to the canvas texture.
     #[cfg(test)]
     pub(crate) mirror: Option<PixelBuf>,
@@ -614,6 +629,9 @@ impl Default for StickerUi {
             text_edit: None,
             fitted_size: None,
             library: library::LibraryState::default(),
+            cut_box: tools::cut_box::CutBoxOptions::default(),
+            cut_job: None,
+            cut_threads: tools::cut_box::CutThreads::default(),
             #[cfg(test)]
             mirror: None,
         }
@@ -835,6 +853,8 @@ pub(crate) fn leave_in(state: &mut AppState, to: Option<ViewMode>) {
     state.sticker_ui.focus_text = false;
     state.sticker_ui.fitted_size = None;
     state.sticker_ui.text_edit = None;
+    // Stickers S1: a running cut stops.
+    tools::cut_box::clear(state);
     // The editor's status lines (Delete without a selection, a tool that is not built) end with it.
     state.status_hint.clear();
 }
@@ -1282,6 +1302,11 @@ pub(crate) fn run_in(app_state: &mut AppState, action: StickerAction) {
         S::LayerViaCut => tools::move_selection::layer_via(app_state, true),
         S::MoveSelection(source, offset, commit) => tools::move_selection::run(app_state, source, glam::Vec2::from_array(offset), commit),
         S::MagicErase(at) => tools::magic_eraser::erase_at(app_state, glam::Vec2::from_array(at)),
+        // Stickers S1.
+        S::CutOutBox(b) => tools::cut_box::start(app_state, b),
+        S::CancelCutOutBox => {
+            tools::cut_box::cancel(app_state);
+        }
         S::RemoveBackground => {
             let opts = app_state.sticker_ui.remove_bg;
             filters::run(app_state, filters::CutOut::RemoveBackground(opts));
@@ -1543,6 +1568,10 @@ fn put_style(state: &mut AppState, target: StyleTarget, styles: StyleStack, labe
 fn escape(app: &mut WteApp, frame: &eframe::Frame) {
     if app.state.sticker_ui.drag.is_some() {
         cancel_drag(&mut app.state);
+        return;
+    }
+    // Stickers S1: a running Cut Out Box stops (a busy tool).
+    if tools::cut_box::cancel(&mut app.state) {
         return;
     }
     // Stickers P7b: a popover closes, then an open lasso is dropped (a busy tool), before the selection.

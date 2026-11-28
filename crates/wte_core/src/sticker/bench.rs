@@ -299,3 +299,23 @@ fn perf_k3a_render_three_layers_1024() {
     let preview = median_ms(|| changed(RasterQuality::Preview { max_pixels: crate::doc_stamps::TEXT_EDIT_PREVIEW_PIXELS }));
     report("sticker render at Preview quality, one layer changed, 1024", preview, 33.0);
 }
+
+/// STICKER_PLAN 8.4 "GrabCut (S1) 2048x2048": 3 s (on a job with a progress note). The star scene at 2048 x 2048,
+/// the box around the star (working copy 512 px, step 4, then the full-size re-cut and the soft edge).
+#[test]
+#[ignore = "perf: run serially in release (cargo test -p wte_core --release --lib perf_s1 -- --ignored --test-threads=1)"]
+fn perf_s1_grabcut_box_2048() {
+    use crate::sticker::grabcut::cut_out_box;
+    use crate::sticker::grabcut::tests::{Scene, scene};
+    let (img, _, b) = scene(Scene::StarOnCarpet, 2048, 2048);
+    let ms = median_ms(|| {
+        std::hint::black_box(cut_out_box(&img, b, &|_| true).unwrap());
+    });
+    report("GrabCut box 2048 x 2048 (found, not applied)", ms, 3000.0);
+    // The box over the whole picture (the largest window, the ring background).
+    let whole = crate::math::IRect::from_size(2048, 2048);
+    let ms = median_ms(|| {
+        std::hint::black_box(cut_out_box(&img, whole, &|_| true).unwrap());
+    });
+    report("GrabCut box over the whole 2048 x 2048 picture", ms, 3000.0);
+}

@@ -425,10 +425,12 @@ pub(super) fn sticker_keys() -> Vec<Step> {
         undo_since(s, sc, 0)
     }));
     // Inside: the sticker tools.
-    let tools: [(egui::Modifiers, egui::Key, T); 14] = [
+    let tools: [(egui::Modifiers, egui::Key, T); 15] = [
         (N, K::M, T::Marquee),
         (N, K::L, T::Lasso),
         (N, K::W, T::Wand),
+        // Stickers S1.
+        (SH, K::W, T::CutOutBox),
         (N, K::C, T::Crop),
         (N, K::B, T::Brush),
         (N, K::E, T::Eraser),
@@ -459,6 +461,12 @@ pub(super) fn sticker_keys() -> Vec<Step> {
             }),
             T::Eraser => Step::Assert("inside: E = sticker Eraser", |s, _| sticker_tool_is(s, T::Eraser)),
             T::MagicEraser => Step::Assert("inside: Shift+E = Magic Eraser", |s, _| sticker_tool_is(s, T::MagicEraser)),
+            T::CutOutBox => Step::Assert("inside: Shift+W = Cut Out Box, the wireframe unchanged", |s, sc| {
+                if u64::from(s.flags.wireframe) != remembered(sc, "wire")? {
+                    return Err("Shift+W toggled the wireframe".into());
+                }
+                sticker_tool_is(s, T::CutOutBox)
+            }),
             T::Fill => Step::Assert("inside: G = sticker Fill", |s, _| sticker_tool_is(s, T::Fill)),
             T::Gradient => Step::Assert("inside: Shift+G = Gradient", |s, _| sticker_tool_is(s, T::Gradient)),
             T::Eyedropper => Step::Assert("inside: I = sticker Eyedropper", |s, _| sticker_tool_is(s, T::Eyedropper)),

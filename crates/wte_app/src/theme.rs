@@ -255,6 +255,16 @@ pub fn sticker_tool_icon(painter: &egui::Painter, rect: Rect, tool: StickerTool,
             tool_icon(painter, Rect::from_min_max(at(0.0, 0.2), at(0.8, 1.0)), ToolKind::Eraser, color);
             star(painter, at(0.78, 0.22), s * 0.14);
         }
+        // Stickers S1: a dashed box around a filled figure.
+        StickerTool::CutOutBox => {
+            let r = Rect::from_min_max(at(0.1, 0.12), at(0.9, 0.88));
+            let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            for pair in corners.windows(2) {
+                painter.add(egui::Shape::dashed_line(&[pair[0], pair[1]], Stroke::new(w * 0.7, color), s * 0.09, s * 0.06));
+            }
+            painter.circle_filled(at(0.5, 0.38), s * 0.12, color);
+            painter.rect_filled(Rect::from_min_max(at(0.32, 0.54), at(0.68, 0.76)), s * 0.08, color);
+        }
         StickerTool::Gradient => {
             let r = Rect::from_min_max(at(0.15, 0.25), at(0.85, 0.75));
             for k in 0..4 {

@@ -184,6 +184,16 @@ tab's Selection, Cut-out and Filter blocks hold the same commands.
      follows its edge.
  12. From the tablet companion: every selection mode and command has a
      button (no key or Alt needed); the lasso closes with "Close lasso".
+ 13. Cut Out Box (Shift+W, the tool under the Magic Eraser; new with S1):
+     place a photo of an object on a busy background (grass, a table, a
+     carpet), press 4 and drag a box around the object, not cutting into
+     it. Expected: "Cutting out... N %" shows in the canvas header for up
+     to a few seconds, then the background is gone and the object stays
+     with a soft edge (one Ctrl+Z brings it back). Esc or Cancel while it
+     runs stops it and changes nothing. "Into mask (keep pixels)" in the
+     Tool tab hides the background on a layer mask instead. A box that
+     cuts through the object, or a background with the object's colours,
+     can leave parts out: drag again or touch up with the Eraser / mask.
 
 Stickers, part 4: layout, text, shapes and the library (new in this build)
 --------------------------------------------------------------------------

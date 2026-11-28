@@ -92,7 +92,7 @@ text_preview_path brush_hover final_bake_async wrap_surface export_selected expo
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
 companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen
 sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path sticker_drop sticker_clip sticker_dragout
-layer_link sticker_flow_path` (72; `scenarios::tests` checks the count and that every shot of a `sticker*` / `layer_link` scenario says
+layer_link sticker_flow_path sticker_grabcut` (73; `scenarios::tests` checks the count and that every shot of a `sticker*` / `layer_link` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -150,6 +150,10 @@ a second picture dropped and the style copied onto it, a paint stroke linked wit
 selection and everything as one zip with the `export_flow` checks; shots `flow_dropped`, `flow_sticker_view`,
 `flow_styled_wrapped`, `flow_linked`, `flow_updated`, `flow_style_pasted`, `flow_saved`, `flow_reopened`; run it with `WTE_OLE=1
 WTE_PEN_SUBCLASS=1` too).
+S1: `sticker_grabcut` (a generated photo, an orange ball on textured grass: Shift+W, a box dragged around the ball =
+one "Cut Out Box" on a job (alpha 0 outside the ball, 255 inside, IoU >= 0.9), undo, "Into mask" clicked and the same
+box (the pixels kept, a mask), the Classic sticker preset, all undone, Esc; shots `grabcut_cut`, `grabcut_mask`,
+`grabcut_die_cut`).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
@@ -321,8 +325,11 @@ lists the Sticker view's keys; About > **Licences...** shows `licenses/photocraf
 trademark sentence; the installer installs `licenses\*` into `{app}\licenses` (CI stages it, the smoke test checks
 it); README "Stickers", "Working with PhotoCraft and Photoshop", "Licences"; release notes 0.4.0; `dist/HOW_TO_TEST.txt`
 chapters "Working with Photoshop" (hand tests 19-25 word for word from plan 13.6) and "Stickers: the hand tests to
-report (1-25)"; the workspace version **0.4.0** (no tag, no release); scenario `sticker_flow_path`).
-Next: S1 / S2 only if everything is green; then the gate (plan 8.6) and its completeness critic.
+report (1-25)"; the workspace version **0.4.0** (no tag, no release); scenario `sticker_flow_path`), **S1** (stretch)
+the **Cut Out Box** tool (Shift+W; `sticker/grabcut.rs`, `sticker/tools/cut_box.rs`): drag a box around the object of
+a photo and GrabCut cuts it out (colour models and a graph cut, no AI), on a job with "Cutting out... N %" and Cancel /
+Esc in the canvas header, "Into mask (keep pixels)", one undo step "Cut Out Box"; scenario `sticker_grabcut`.
+Next: S2 only if everything is green; then the gate (plan 8.6) and its completeness critic.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open

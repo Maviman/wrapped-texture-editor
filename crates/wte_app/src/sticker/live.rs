@@ -113,6 +113,8 @@ pub(crate) fn pending(state: &AppState) -> bool {
     state.sticker_ui.live.is_some()
         || state.sticker_ui.jobs.running()
         || crate::sticker::popover::pending(state)
+        // Stickers S1: a running Cut Out Box.
+        || crate::sticker::tools::cut_box::pending(state)
         // Stickers P8: the library's listing job.
         || state.sticker_ui.library.busy()
 }

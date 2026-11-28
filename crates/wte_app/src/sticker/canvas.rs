@@ -202,6 +202,8 @@ pub(crate) fn refresh(ctx: &egui::Context, state: &mut AppState) {
     crate::sticker::live::frame(ctx, state);
     // P7b check: and the open popover's preview (its job), as `canvas_side`.
     crate::sticker::popover::frame(ctx, state);
+    // Stickers S1: and a running Cut Out Box.
+    crate::sticker::tools::cut_box::frame(ctx, state);
 }
 
 /// Stickers P10a (6.2): the layer-space point of the open editor under screen position `pos` (points), for a drop
@@ -278,6 +280,8 @@ fn canvas_side(ui: &mut egui::Ui, state: &mut AppState, left: Rect) {
     crate::sticker::live::frame(ui.ctx(), state);
     // Stickers P7b: the open popover's live preview.
     crate::sticker::popover::frame(ui.ctx(), state);
+    // Stickers S1: a running Cut Out Box (its progress, its result).
+    crate::sticker::tools::cut_box::frame(ui.ctx(), state);
     let texture = state.sticker_ui.canvas.as_ref().map(|c| c.tex.id()).or(texture.map(|t| t.0));
     draw(ui, state, rect, geom, texture, &shown);
     crate::sticker::popover::show(ui, state, rect);
@@ -357,7 +361,15 @@ fn header_bar(ui: &mut egui::Ui, state: &mut AppState, header: Rect, shown: &Sho
         };
         crate::link::ui::header(ui, state, target, narrow, &mut actions, &mut hits);
         // Stickers P7a: stroke mode (3.5) and the Rasterize offer of the paint tools (3.3 "Layer-kind rules").
-        if state.sticker_ui.live.as_ref().is_some_and(|l| l.stroke_mode()) {
+        if let Some(pc) = crate::sticker::tools::cut_box::progress(state) {
+            // Stickers S1: the running Cut Out Box (plan 8.4: on a job with a progress note).
+            ui.colored_label(crate::theme::ACCENT, crate::sticker::tools::cut_box::note(pc));
+            let c = ui.button("Cancel").on_hover_text("Stop cutting out (Esc)");
+            hits.push((PanelHit::StickerCutBoxCancel, c.rect));
+            if c.clicked() {
+                actions.push(crate::action::AppAction::Sticker(StickerAction::CancelCutOutBox));
+            }
+        } else if state.sticker_ui.live.as_ref().is_some_and(|l| l.stroke_mode()) {
             ui.colored_label(crate::theme::ACCENT, crate::sticker::live::STROKE_MODE_NOTE);
             state.sticker_ui.counters.note_frames += 1;
         } else if state.sticker_ui.rasterize_offer.is_some() {
@@ -479,7 +491,7 @@ pub(crate) fn handle_input(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom
         Some(CanvasDrag::MoveSelection { .. }) => Some(egui::CursorIcon::Move),
         // Stickers P8.
         Some(CanvasDrag::Transform { .. }) => Some(egui::CursorIcon::Move),
-        Some(CanvasDrag::Crop { .. } | CanvasDrag::Shape { .. }) => Some(egui::CursorIcon::Crosshair),
+        Some(CanvasDrag::Crop { .. } | CanvasDrag::Shape { .. } | CanvasDrag::CutBox { .. }) => Some(egui::CursorIcon::Crosshair),
         Some(
             CanvasDrag::Stroke { .. } | CanvasDrag::Gradient { .. } | CanvasDrag::Pick { .. } | CanvasDrag::Marquee { .. } | CanvasDrag::Lasso { .. },
         ) => Some(egui::CursorIcon::Crosshair),
@@ -506,7 +518,8 @@ fn drag_button(state: &AppState) -> Option<egui::PointerButton> {
         | CanvasDrag::MoveSelection { button, .. }
         | CanvasDrag::Transform { button, .. }
         | CanvasDrag::Crop { button, .. }
-        | CanvasDrag::Shape { button, .. } => Some(*button),
+        | CanvasDrag::Shape { button, .. }
+        | CanvasDrag::CutBox { button, .. } => Some(*button),
     }
 }
 
@@ -561,6 +574,19 @@ fn press(
             }
             StickerTool::Wand => state.push(crate::action::AppAction::Sticker(StickerAction::WandAt(p.to_array(), mode))),
             _ => state.push(crate::action::AppAction::Sticker(StickerAction::MagicErase(p.to_array()))),
+        }
+        return;
+    }
+    // Stickers S1: the Cut Out Box (a picture layer that can be painted; else the paint tools' notes).
+    if tool == StickerTool::CutOutBox {
+        if hit == Hit::ReadOnly {
+            state.status_hint = crate::sticker::tools::TEXT_STAMP_HINT.to_owned();
+            return;
+        }
+        let Some(cam) = edit_of(state).map(|e| e.camera) else { return };
+        let p = geom.to_layer(&cam, rect, pos);
+        if crate::sticker::tools::paint_target(state, tool, false).is_some() {
+            state.sticker_ui.drag = Some(CanvasDrag::CutBox { start: p, to: p, button });
         }
         return;
     }
@@ -680,6 +706,10 @@ fn motion(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f32
         Some(CanvasDrag::Shape { start, button, .. }) => {
             state.sticker_ui.drag = Some(CanvasDrag::Shape { start, to: geom.to_layer(&cam, rect, pos), button });
         }
+        // Stickers S1.
+        Some(CanvasDrag::CutBox { start, button, .. }) => {
+            state.sticker_ui.drag = Some(CanvasDrag::CutBox { start, to: geom.to_layer(&cam, rect, pos), button });
+        }
         Some(CanvasDrag::Stroke { .. }) => crate::sticker::tools::brush::sample(state, geom.to_layer(&cam, rect, pos), pressure),
         Some(CanvasDrag::Gradient { from, button, .. }) => {
             state.sticker_ui.drag = Some(CanvasDrag::Gradient { from, to: geom.to_layer(&cam, rect, pos), button });
@@ -729,6 +759,12 @@ fn release(state: &mut AppState, rect: Rect, geom: Geom, pos: Pos2, pressure: f3
         Some(CanvasDrag::Shape { start, to, .. }) => {
             let b = crate::sticker::tools::shape::drag_box(start, to);
             state.push(crate::action::AppAction::Sticker(StickerAction::AddShapeLayer(Some(b))));
+        }
+        // Stickers S1: the box is cut (a click cuts nothing).
+        Some(CanvasDrag::CutBox { start, to, .. }) => {
+            if let Some(b) = crate::sticker::tools::cut_box::drag_box(start, to) {
+                state.push(crate::action::AppAction::Sticker(StickerAction::CutOutBox(b)));
+            }
         }
         Some(CanvasDrag::Move { layer, sent: Some(to), .. }) => {
             state.push(crate::action::AppAction::Sticker(StickerAction::SetLayerPosition(layer, to.to_array(), Commit::Final)));
@@ -796,6 +832,13 @@ fn draw(ui: &egui::Ui, state: &mut AppState, rect: Rect, geom: Geom, texture: Op
         let _p = frame_profile::scope("sticker.outline");
         let outline = state.sticker_ui.outline.get(&sel);
         crate::sticker::outline::draw(&painter, &outline, geom, &cam, rect);
+    }
+    // Stickers S1: the Cut Out Box's box while it is dragged (white over a dark line, like the Marquee's, in the
+    // accent colour).
+    if let Some(CanvasDrag::CutBox { start, to, .. }) = state.sticker_ui.drag {
+        let r = Rect::from_two_pos(geom.to_screen(&cam, rect, start), geom.to_screen(&cam, rect, to));
+        painter.rect_stroke(r, 0.0, Stroke::new(3.0, Color32::from_black_alpha(140)), egui::StrokeKind::Middle);
+        painter.rect_stroke(r, 0.0, Stroke::new(1.5, crate::theme::ACCENT), egui::StrokeKind::Middle);
     }
     if let Some(CanvasDrag::Marquee { start, to, .. }) = state.sticker_ui.drag {
         let (a, b) = crate::sticker::tools::marquee::drag_box(state, start, to);

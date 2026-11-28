@@ -4,8 +4,8 @@
   or a bevel (Sticker tab; presets such as Classic sticker; Copy / Paste Style). Press **4** on a stamp to open the
   **Sticker view**: the sticker on the left, the model on the right, following every change. A sticker has layers -
   pictures, text and shapes - and you can paint, erase, fill, select, cut out a background (Remove Background, Magic
-  Eraser, Color to Alpha), crop, resize, mask and clip, with the mouse, a pen or the tablet companion. The sticker
-  tray and a sticker library keep stickers for later.
+  Eraser, Color to Alpha, or Cut Out Box: drag a box around the object of a photo), crop, resize, mask and clip, with
+  the mouse, a pen or the tablet companion. The sticker tray and a sticker library keep stickers for later.
 - **Edit in PhotoCraft or Photoshop:** "Edit in <editor>" opens a sticker, or a texture paint layer, in your editor;
   press Ctrl+S there and the model updates by itself, in place. Layers come back one by one; text you did not change
   stays text. Help > Working with PhotoCraft and Photoshop explains the settings (in Photoshop: Maximize PSD and PSB

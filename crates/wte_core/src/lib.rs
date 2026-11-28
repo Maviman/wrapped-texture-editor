@@ -117,6 +117,7 @@ pub use stamp_job::{FinalBake, StampBakeJob, StampBakeOutput, StampJobKind, Wrap
 pub use sticker::adjust::Adjustment;
 pub use sticker::layout::LayerBox;
 pub use sticker::cutout::{BackgroundCut, Matte, RemoveBgOptions, RemoveBgRefusal};
+pub use sticker::grabcut::{BoxCutRefusal, cut_out_box};
 pub use sticker::file::{
     WTES_EXTENSION, WTES_FORMAT, WTES_MIMETYPE, WtesFile, WtesManifest, read_wtes, read_wtes_preview, read_wtes_preview_from, write_wtes,
 };

@@ -26,6 +26,7 @@ use crate::sticker::{Shown, edit_of, edit_ref, shown};
 
 pub mod brush;
 pub mod crop;
+pub mod cut_box;
 pub mod eyedropper;
 pub mod fill;
 pub mod gradient;
@@ -231,3 +232,5 @@ pub(crate) fn grey(c: [u8; 4]) -> u8 {
 mod tests;
 #[cfg(test)]
 mod tests_p7b;
+#[cfg(test)]
+mod tests_s1;

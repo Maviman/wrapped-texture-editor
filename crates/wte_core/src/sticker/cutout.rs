@@ -228,7 +228,8 @@ impl RemoveBgRefusal {
 pub struct BackgroundCut {
     /// 0 = background (cleared), 255 = kept, between = the soft edge.
     pub keep: AlphaBuf,
-    /// The background colours found (1..=3), most frequent first.
+    /// The background colours found (1..=3), most frequent first; empty for the GrabCut box (S1, `grabcut.rs`), whose
+    /// background is learnt as colour models.
     pub colors: Vec<[u8; 3]>,
     /// Pixels in the background region (keep = 0).
     pub region_pixels: u64,
@@ -366,6 +367,75 @@ fn mean<'a>(pixels: impl Iterator<Item = &'a [u8; 4]>) -> [u8; 3] {
     std::array::from_fn(|c| ((s[c] + n / 2) / n) as u8)
 }
 
+/// The soft edge of a cut (4.5 step 4, shared by Remove Background and the GrabCut box of S1): `region` (the picture's
+/// size, 0 = kept, 255 = background) becomes `keep = 255 - region`, and the pixels outside the region within
+/// [`BG_SOFT_BAND`] pixels of it lose the background tint by colour to alpha. The key of a band pixel is
+/// `key_of(the colour of the closest region pixel)` (the pixel's own colour without a region pixel within
+/// `SEARCH_RADIUS`). Returns `keep` (an `AlphaBuf` of the picture's size) and the band pixels' unmixed RGB.
+pub(crate) fn soft_edge(src: &PixelBuf, region: &[u8], key_of: impl Fn([u8; 4]) -> [u8; 3] + Sync) -> (AlphaBuf, Vec<(u32, [u8; 3])>) {
+    let (w, h) = (src.width as usize, src.height as usize);
+    let n = w * h;
+    let d = distance_to_ink(region, w as u32, h as u32);
+    let class = |i: usize| -> Zone {
+        if region[i] != 0 {
+            Zone::Region
+        } else if d[i] <= BG_SOFT_BAND {
+            Zone::Band
+        } else {
+            Zone::Inside
+        }
+    };
+    let offsets = window_offsets(SEARCH_RADIUS);
+    let nearest = |i: usize, zone: Zone| -> Option<usize> {
+        let (x, y) = ((i % w) as i32, (i / w) as i32);
+        offsets.iter().find_map(|&(dx, dy)| {
+            let (nx, ny) = (x + dx, y + dy);
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                return None;
+            }
+            let j = ny as usize * w + nx as usize;
+            (class(j) == zone).then_some(j)
+        })
+    };
+    let mut keep: Vec<u8> = region.iter().map(|&r| 255 - r).collect();
+    let band: Vec<(usize, [u8; 3], u8)> = (0..n)
+        .into_par_iter()
+        .with_min_len(1 << 14)
+        .filter_map(|i| {
+            if class(i) != Zone::Band {
+                return None;
+            }
+            let p = px(src, i);
+            if p[3] == 0 {
+                return None;
+            }
+            let rc = nearest(i, Zone::Region).map(|s| px(src, s)).unwrap_or(p);
+            let key = key_of(rc);
+            let opacity = |q: [u8; 4]| unmix_pixel([q[0], q[1], q[2], 255], key, 0.0, 1.0).1 as f32 / 255.0;
+            let a_obj = nearest(i, Zone::Inside).map(|s| opacity(px(src, s))).filter(|&a| a >= 0.05).unwrap_or(1.0);
+            let k = (opacity(p) / a_obj).min(1.0);
+            if k >= 1.0 {
+                return None;
+            }
+            let a = byte(k);
+            let rgb: [u8; 3] = std::array::from_fn(|c| {
+                let (pc, kc) = (p[c] as f32 / 255.0, key[c] as f32 / 255.0);
+                if k > 0.0 { byte((pc - kc) / k + kc) } else { key[c] }
+            });
+            (a < 255).then_some((i, rgb, a))
+        })
+        .collect();
+    let mut recolor = Vec::with_capacity(band.len());
+    for (i, rgb, a) in band {
+        keep[i] = a;
+        if a > 0 {
+            recolor.push((i as u32, rgb));
+        }
+    }
+    let keep = AlphaBuf::from_raw(src.width, src.height, keep).unwrap_or_else(|| AlphaBuf::new(src.width, src.height));
+    (keep, recolor)
+}
+
 /// Remove Background (4.5) for plain backgrounds: finds the background colours along the border, floods the
 /// background from the border, softens a 2-px band outside it with colour to alpha, and returns the cut (nothing is
 /// changed yet). Deterministic; linear in the picture.
@@ -448,68 +518,14 @@ pub fn remove_background(src: &PixelBuf, opts: RemoveBgOptions) -> Result<Backgr
     // the same key, so the object's own opaque pixels along the edge stay opaque and keep their colour, and an
     // anti-aliased pixel `k O + (1 - k) C` gets back `O` at alpha `k`. Without an inside pixel nearby, plain colour
     // to alpha.
-    let d = distance_to_ink(&region, w as u32, h as u32);
-    let class = |i: usize| -> Zone {
-        if region[i] != 0 {
-            Zone::Region
-        } else if d[i] <= BG_SOFT_BAND {
-            Zone::Band
+    let follow = opts.follow_gradients;
+    let (keep, recolor) = soft_edge(src, &region, |rc| {
+        if follow {
+            [rc[0], rc[1], rc[2]]
         } else {
-            Zone::Inside
+            *colors.iter().min_by_key(|&&c| color_diff(rc, opaque(c))).unwrap_or(&colors[0])
         }
-    };
-    let offsets = window_offsets(SEARCH_RADIUS);
-    let nearest = |i: usize, zone: Zone| -> Option<usize> {
-        let (x, y) = ((i % w) as i32, (i / w) as i32);
-        offsets.iter().find_map(|&(dx, dy)| {
-            let (nx, ny) = (x + dx, y + dy);
-            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                return None;
-            }
-            let j = ny as usize * w + nx as usize;
-            (class(j) == zone).then_some(j)
-        })
-    };
-    let mut keep: Vec<u8> = region.iter().map(|&r| 255 - r).collect();
-    let band: Vec<(usize, [u8; 3], u8)> = (0..n)
-        .into_par_iter()
-        .with_min_len(1 << 14)
-        .filter_map(|i| {
-            if class(i) != Zone::Band {
-                return None;
-            }
-            let p = px(src, i);
-            if p[3] == 0 {
-                return None;
-            }
-            let rc = nearest(i, Zone::Region).map(|s| px(src, s)).unwrap_or(p);
-            let key = if opts.follow_gradients {
-                [rc[0], rc[1], rc[2]]
-            } else {
-                *colors.iter().min_by_key(|&&c| color_diff(rc, opaque(c))).unwrap_or(&colors[0])
-            };
-            let opacity = |q: [u8; 4]| unmix_pixel([q[0], q[1], q[2], 255], key, 0.0, 1.0).1 as f32 / 255.0;
-            let a_obj = nearest(i, Zone::Inside).map(|s| opacity(px(src, s))).filter(|&a| a >= 0.05).unwrap_or(1.0);
-            let k = (opacity(p) / a_obj).min(1.0);
-            if k >= 1.0 {
-                return None;
-            }
-            let a = byte(k);
-            let rgb: [u8; 3] = std::array::from_fn(|c| {
-                let (pc, kc) = (p[c] as f32 / 255.0, key[c] as f32 / 255.0);
-                if k > 0.0 { byte((pc - kc) / k + kc) } else { key[c] }
-            });
-            (a < 255).then_some((i, rgb, a))
-        })
-        .collect();
-    let mut recolor = Vec::with_capacity(band.len());
-    for (i, rgb, a) in band {
-        keep[i] = a;
-        if a > 0 {
-            recolor.push((i as u32, rgb));
-        }
-    }
-    let keep = AlphaBuf::from_raw(src.width, src.height, keep).unwrap_or_else(|| AlphaBuf::new(src.width, src.height));
+    });
     Ok(BackgroundCut { keep, colors, region_pixels, recolor })
 }
 

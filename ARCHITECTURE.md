@@ -10148,7 +10148,9 @@ State `AppState::doors: DoorsUi` (the copies, the watched folder, the folder wor
 belong to the open document: `io_flows::install_document` resets them (`DoorsUi::reset`) and restores those of the
 loaded project's `ui_state` (`UiState::live_copies`, `UiState::watch_folder`, 7.2: written only while used, read
 leniently); turning a copy on or off, choosing a folder and Stop watching call `Document::mark_kept_settings_changed`
-(the modified flag, no history entry). The self-test's idle check waits only for a copy being written
+(the modified flag, no history entry), and so does an applied picture that changes the folder's record (check-S2:
+the record is saved outside the history, so an undo back to the saved state still leaves the project modified and a
+close without saving cannot lose it). The self-test's idle check waits only for a copy being written
 (`DoorsUi::busy`).
 
 **(a) The live PNG copy** (`doors/live.rs`), for PhotoCraft's File > Place Linked (v0.2.0 refreshes a placed file with

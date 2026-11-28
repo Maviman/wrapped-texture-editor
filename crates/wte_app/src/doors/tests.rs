@@ -503,6 +503,38 @@ fn pictures_become_and_update_tray_stickers() {
     assert_eq!(state.doors.watch.as_ref().unwrap().files.len(), 3);
 }
 
+/// check-S2: the folder's record is saved with the project outside the history, so a changed record keeps the project
+/// modified after an undo back to the saved state (a close without saving would lose it and a reopen would apply the
+/// undone file again by itself); a picture that changes nothing (the record stays) leaves a saved project unmodified.
+#[test]
+fn check_s2_a_changed_folder_record_keeps_the_project_modified_after_an_undo() {
+    let dir = tmp("record_modified");
+    let mut state = watched_state(&dir);
+    let save = |state: &mut AppState| {
+        let doc = state.doc_mut().unwrap();
+        let h = doc.history_state();
+        doc.mark_saved(h);
+        doc.mark_links_saved(doc.links_revision());
+        assert!(!doc.is_modified());
+    };
+    save(&mut state);
+    apply(&mut state, vec![changed("badge.png", &filled(8, 8, [200, 0, 0, 255]))]);
+    save(&mut state);
+    apply(&mut state, vec![changed("badge.png", &filled(8, 8, [0, 200, 0, 255]))]);
+    assert_eq!(state.doc().unwrap().undo_label(), Some(FOLDER_UPDATE_LABEL));
+    state.doc_mut().unwrap().undo().unwrap();
+    assert!(state.doc().unwrap().is_modified(), "the record changed since the save: still modified after the undo");
+    state.doc_mut().unwrap().redo().unwrap();
+    save(&mut state);
+    // The same picture again ("Read again" of an unchanged folder): no entry, the record stays, not modified.
+    let undo = state.doc().unwrap().history.undo_len();
+    apply(&mut state, vec![changed("badge.png", &filled(8, 8, [0, 200, 0, 255]))]);
+    assert_eq!(state.doors.folder_counters.same, 1);
+    let doc = state.doc().unwrap();
+    assert_eq!(doc.history.undo_len(), undo);
+    assert!(!doc.is_modified(), "an unchanged record does not mark the project modified");
+}
+
 /// A file whose sticker was deleted becomes a new sticker; a locked user refuses the update with a toast (the record
 /// keeps the old content, so "Read again" can apply it later); a picture that does not decode is refused.
 #[test]

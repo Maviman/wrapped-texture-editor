@@ -538,8 +538,13 @@ fn apply_one(state: &mut AppState, name: &str, bytes: Arc<[u8]>, crc: u32) -> Op
             (id, layer, Applied::New)
         }
     };
-    if let Some(w) = state.doors.watch.as_mut() {
-        w.files.insert(name.to_owned(), WatchedFile { sticker, layer, size, crc, pixels });
+    // check-S2: the record is saved with the project (`ui_state`), outside the history. A changed record marks the
+    // project modified until the next save, so an undo back to the saved state followed by a close without saving
+    // cannot lose it (a reopen would then apply the undone file again by itself).
+    let record = WatchedFile { sticker, layer, size, crc, pixels };
+    let changed = state.doors.watch.as_mut().is_some_and(|w| w.files.insert(name.to_owned(), record.clone()).as_ref() != Some(&record));
+    if changed && let Some(doc) = state.doc_mut() {
+        doc.mark_kept_settings_changed();
     }
     Some(applied)
 }

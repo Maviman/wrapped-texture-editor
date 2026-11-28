@@ -76,7 +76,7 @@ through the existing `replace_sticker_pixels` / `set_sticker` paths.
   instead of an index loop and a NaN test spelled differently: no change in the work).
 - IoU: ball on grass 0.9990, mug on wood 0.9968, star on carpet 0.9965 (through the re-cut), whole-picture box 0.9990;
   the scenario's photo >= 0.9 (asserted).
-- Scenarios (`target\sticker\s1uns\`, off-screen, no focus taken): `sticker_grabcut` ok (4 s; again with
+- Scenarios (`target\sticker\s1\runs\`, off-screen, no focus taken): `sticker_grabcut` ok (4 s; again with
   `WTE_OLE=1 WTE_PEN_SUBCLASS=1`: ok), `sticker_keys` ok (Shift+W row), `sticker_cutout` ok (Remove Background after the
   `soft_edge` move, the halo bound holds), `sticker_view` ok, `smoke` ok. Shots looked at: `grabcut_cut` (the ball
   alone on the checkerboard, round clean edge, the sphere shows the ball without grass, the Tool tab shows "Into mask"),

@@ -73,7 +73,7 @@ Nothing missing.
 - `cargo test -p wte_app --no-fail-fast`: 778 passed, 0 failed, 27 ignored (the new test included; `wte_core` is
   unchanged since the full run above). The new test fails without the fix (the project is unmodified after the undo).
 - clippy `--workspace --all-targets`: 0 warnings. Release build OK (exe SHA-256 f7939144...).
-- sticker_live_copy, sticker_watch_folder, smoke: `"ok": true` (`target\sticker\check_s2uns2\`).
+- sticker_live_copy, sticker_watch_folder, smoke: `"ok": true` (`target\sticker\check_s2\runs2\`).
 
 ## Verdict
 

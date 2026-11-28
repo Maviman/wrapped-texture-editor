@@ -419,3 +419,144 @@ fn k_s1_colour_models_prefer_their_own_colours() {
     assert_eq!(f.comps.len(), 1);
     assert!(f.neg_log([0.5, 0.5, 0.5]).is_finite() && f.neg_log([0.0, 1.0, 0.0]).is_finite());
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// S1 check: the Boykov-Kolmogorov max-flow against an independent max-flow on larger graphs
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Dinic's max-flow in `f64` on a graph given as terminal capacities (`> 0` from the source, `< 0` to the sink, as
+/// `Graph::tr_cap`) and arcs `(i, j, cap, rev_cap)`.
+fn dinic_value(n: usize, tr: &[f32], arcs: &[(usize, usize, f32, f32)]) -> f64 {
+    let (s, t) = (n, n + 1);
+    let mut head: Vec<usize> = Vec::new();
+    let mut cap: Vec<f64> = Vec::new();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n + 2];
+    let add = |head: &mut Vec<usize>, cap: &mut Vec<f64>, adj: &mut Vec<Vec<usize>>, a: usize, b: usize, c: f64, rc: f64| {
+        adj[a].push(head.len());
+        head.push(b);
+        cap.push(c);
+        adj[b].push(head.len());
+        head.push(a);
+        cap.push(rc);
+    };
+    for (i, &v) in tr.iter().enumerate() {
+        if v > 0.0 {
+            add(&mut head, &mut cap, &mut adj, s, i, v as f64, 0.0);
+        } else if v < 0.0 {
+            add(&mut head, &mut cap, &mut adj, i, t, -v as f64, 0.0);
+        }
+    }
+    for &(i, j, c, rc) in arcs {
+        add(&mut head, &mut cap, &mut adj, i, j, c as f64, rc as f64);
+    }
+    let mut flow = 0.0f64;
+    loop {
+        let mut level = vec![usize::MAX; n + 2];
+        level[s] = 0;
+        let mut q = std::collections::VecDeque::from([s]);
+        while let Some(u) = q.pop_front() {
+            for &e in &adj[u] {
+                if cap[e] > 1e-12 && level[head[e]] == usize::MAX {
+                    level[head[e]] = level[u] + 1;
+                    q.push_back(head[e]);
+                }
+            }
+        }
+        if level[t] == usize::MAX {
+            return flow;
+        }
+        let mut it = vec![0usize; n + 2];
+        #[allow(clippy::too_many_arguments)]
+        fn dfs(u: usize, t: usize, f: f64, head: &[usize], cap: &mut [f64], adj: &[Vec<usize>], level: &[usize], it: &mut [usize]) -> f64 {
+            if u == t {
+                return f;
+            }
+            while it[u] < adj[u].len() {
+                let e = adj[u][it[u]];
+                let v = head[e];
+                if cap[e] > 1e-12 && level[v] == level[u] + 1 {
+                    let d = dfs(v, t, f.min(cap[e]), head, cap, adj, level, it);
+                    if d > 0.0 {
+                        cap[e] -= d;
+                        cap[e ^ 1] += d;
+                        return d;
+                    }
+                }
+                it[u] += 1;
+            }
+            0.0
+        }
+        loop {
+            let f = dfs(s, t, f64::INFINITY, &head, &mut cap, &adj, &level, &mut it);
+            if f <= 0.0 {
+                break;
+            }
+            flow += f;
+        }
+    }
+}
+
+#[test]
+fn check_s1_the_max_flow_equals_an_independent_max_flow_on_larger_graphs() {
+    // Random 8-neighbour grids of up to 30 x 30 with asymmetric arc capacities (some near zero), terminal capacities of
+    // both signs (some zero), and a few long-range arcs: the cut the BK solver labels must cost the max-flow value
+    // computed by Dinic's algorithm (min-cut = max-flow), i.e. the labelling is a true minimum cut.
+    let mut rng = XorShift::new(2026);
+    for case in 0..60 {
+        let (w, h) = (5 + (rng.next_u32() % 26) as usize, 5 + (rng.next_u32() % 26) as usize);
+        let n = w * h;
+        let mut tr = vec![0.0f32; n];
+        let mut g = Graph::with_capacity(n, n * 5);
+        for (i, v) in tr.iter_mut().enumerate() {
+            let r = rng.next_f32();
+            let (cs, ct) = if r < 0.2 { (0.0, 0.0) } else { ((rng.next_f32() * 200.0).max(0.0), (rng.next_f32() * 200.0).max(0.0)) };
+            g.add_tweights(i, cs, ct);
+            *v = g.tr_cap[i];
+        }
+        let mut arcs = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                for (dx, dy, _) in NB {
+                    let (nx, ny) = (x as i32 + dx, y + dy as usize);
+                    if nx < 0 || nx as usize >= w || ny >= h {
+                        continue;
+                    }
+                    let (i, j) = (y * w + x, ny * w + nx as usize);
+                    let scale = if rng.next_f32() < 0.1 { 1e-4 } else { 60.0 };
+                    let (c, rc) = (rng.next_f32() * scale, rng.next_f32() * scale);
+                    g.add_edge(i, j, c, rc);
+                    arcs.push((i, j, c, rc));
+                }
+            }
+        }
+        for _ in 0..n / 10 {
+            let (i, j) = ((rng.next_u32() as usize) % n, (rng.next_u32() as usize) % n);
+            if i != j {
+                let (c, rc) = (rng.next_f32() * 30.0, rng.next_f32() * 30.0);
+                g.add_edge(i, j, c, rc);
+                arcs.push((i, j, c, rc));
+            }
+        }
+        g.maxflow();
+        let side: Vec<bool> = (0..n).map(|i| g.in_source(i)).collect();
+        let mut cut = 0.0f64;
+        for (i, &v) in tr.iter().enumerate() {
+            if side[i] && v < 0.0 {
+                cut += -v as f64;
+            }
+            if !side[i] && v > 0.0 {
+                cut += v as f64;
+            }
+        }
+        for &(i, j, c, rc) in &arcs {
+            if side[i] && !side[j] {
+                cut += c as f64;
+            }
+            if side[j] && !side[i] {
+                cut += rc as f64;
+            }
+        }
+        let best = dinic_value(n, &tr, &arcs);
+        assert!((cut - best).abs() <= 1e-3 * best.max(1.0), "case {case} ({w} x {h}): BK cut {cut}, max-flow {best}");
+    }
+}

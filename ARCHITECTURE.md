@@ -10748,6 +10748,11 @@ and text layers (exactly those two files, each = `dense(layer)`).
   grids; fixed neighbours fold into the terminals; colour models prefer their own colours (and one colour = one
   component). `perf_s1_grabcut_box_2048` (ignored, release, `sticker/bench.rs`): 862 ms, and 1,215 ms for a box over
   the whole picture (budget 3 s). The `k2_*` Remove Background tests guard the move of its soft edge into `soft_edge`.
+  S1 check: `check_s1_the_max_flow_equals_an_independent_max_flow_on_larger_graphs` (60 random 8-neighbour grids up
+  to 30 x 30 with asymmetric and near-zero arc capacities, terminal capacities of both signs and long-range arcs: the
+  cost of the cut the BK solver labels equals Dinic's max-flow value, so the labelling is a true minimum cut) and
+  `perf_check_s1_grabcut_fragmented_worst_case_2048` (ignored, release: salt-and-pepper red / green cells of the working
+  step inside the box on a green picture, so the re-cut band covers the whole window: 534 ms, budget 3 s).
 - Branch `stickers`, P6a (`doc_stickers_tests.rs`): `k6a_layer_at_and_layer_thumbnail` (the top visible layer under a
   point, hidden layers skipped, a masked pixel not hit, NaN and outside points none; a layer's thumbnail alone at half
   scale; no history entry). The app-side tests of the Sticker view are listed in 8.15.

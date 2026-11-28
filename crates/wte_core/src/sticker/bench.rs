@@ -319,3 +319,30 @@ fn perf_s1_grabcut_box_2048() {
     });
     report("GrabCut box over the whole 2048 x 2048 picture", ms, 3000.0);
 }
+
+/// S1 check: the worst case of the full-size re-cut - a box over fine red / green noise on a green picture
+/// (2048 x 2048). The red pixels are the "object", so the result is salt and pepper and the re-cut band covers the
+/// whole window; the cut must still stay within the 8.4 budget.
+#[test]
+#[ignore = "perf: run serially in release (cargo test -p wte_core --release --lib perf_check_s1 -- --ignored --test-threads=1)"]
+fn perf_check_s1_grabcut_fragmented_worst_case_2048() {
+    use crate::sticker::grabcut::cut_out_box;
+    let mut img = crate::pixel::PixelBuf::new(2048, 2048);
+    let mut rng = crate::testutil::XorShift::new(5);
+    let b = crate::math::IRect::new(200, 200, 1848, 1848);
+    // Inside the box: red and green noise in cells of the working copy's step (4 px), so the working result is the
+    // same salt and pepper; outside: green only (the red cells are the "object").
+    let cells: Vec<bool> = (0..512 * 512).map(|_| rng.next_f32() < 0.5).collect();
+    for y in 0..2048 {
+        for x in 0..2048 {
+            let red = b.contains(x as i32, y as i32) && cells[(y as usize / 4) * 512 + x as usize / 4];
+            img.set(x, y, if red { [200, 60, 40, 255] } else { [40, 160, 60, 255] });
+        }
+    }
+    let ms = median_ms(|| {
+        let _ = std::hint::black_box(cut_out_box(&img, b, &|_| true));
+    });
+    let kept = cut_out_box(&img, b, &|_| true).map(|c| c.keep.data.iter().filter(|&&k| k >= 128).count());
+    eprintln!("kept pixels: {kept:?}");
+    report("GrabCut box over 2048 x 2048 two-colour noise (fragmented)", ms, 3000.0);
+}

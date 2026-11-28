@@ -140,6 +140,13 @@ fn selected_block(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, 
 
     // Stickers P9a (STICKER_PLAN 3.9, 5.1, 5.5): Edit in <editor> and the link's badge and commands.
     crate::link::ui::tab_block(ui, state, crate::link::LinkTarget::Stamp(first), actions, hits);
+    // Stickers S2 (STICKER_PLAN 7 "S2" (a)): the stamp's sticker as a live PNG copy for PhotoCraft's Place Linked.
+    let live = match object.source {
+        StampSource::Sticker { sticker } => Some(crate::doors::live::LiveTarget::Sticker(sticker)),
+        _ => None,
+    };
+    let why = "An image or text stamp becomes a sticker first (Edit Sticker, then any change; or Convert to layered sticker)";
+    crate::doors::live_copy_row(ui, state, live, why, (PanelHit::LiveCopyStamp, PanelHit::LiveCopyStampShow), actions, hits);
 
     heading(ui, "Sticker style");
     if locked {

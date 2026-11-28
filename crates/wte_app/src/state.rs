@@ -261,6 +261,23 @@ pub enum PanelHit {
     LayerMenuEditIn,
     /// "Paste as New Paint Layer" in the "+" button's menu of the Layers tab.
     LayersPasteAsLayer,
+    // ---- stickers S2: the live PNG copy and the watched folder ----
+    /// "Keep a PNG copy up to date" of the selected stamp's sticker (Sticker tab) and its "Show file".
+    LiveCopyStamp,
+    LiveCopyStampShow,
+    /// The same for the selected tray sticker.
+    LiveCopyTray,
+    LiveCopyTrayShow,
+    /// The same for the active paint layer (Layers tab, shown while its copy is on).
+    LiveCopyLayer,
+    LiveCopyLayerShow,
+    /// "Keep a PNG Copy up to Date" in a layer row's context menu.
+    LayerMenuLiveCopy,
+    /// The tray's "Watch a folder...", and while one is watched "Read again", "Show folder", "Stop watching".
+    TrayWatchFolder,
+    TrayWatchRescan,
+    TrayWatchShow,
+    TrayWatchStop,
 }
 
 /// Stickers P6a (STICKER_PLAN 3.3): the tools of the Sticker view. They replace the paint tools in the tool strip while
@@ -1713,6 +1730,8 @@ pub struct AppState {
     /// Stickers P9a (STICKER_PLAN 5.3, 5.6, 5.7): the editor link's sessions, watcher, launcher (the stub in a self-test
     /// run) and questions (`link/mod.rs`).
     pub link_ui: crate::link::LinkUi,
+    /// Stickers S2 (STICKER_PLAN 7 "S2"): the live PNG copies and the watched folder of the open document (`doors/`).
+    pub doors: crate::doors::DoorsUi,
 }
 
 /// When the deferred stamp Preview bakes (`Document::bake_stale_previews`) may run next: after a bake that took `t`,
@@ -1817,6 +1836,7 @@ impl AppState {
             clip_ui: crate::clip::ClipUi::default(),
             drag_out: crate::dragout::DragOutUi::new(selftest),
             link_ui: crate::link::LinkUi::new(selftest),
+            doors: crate::doors::DoorsUi::default(),
         }
     }
 

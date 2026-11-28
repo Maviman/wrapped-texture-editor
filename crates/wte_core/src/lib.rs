@@ -97,7 +97,7 @@ pub use doc_sticker_layout::{
     CANVAS_SIZE_LABEL, CROP_LABEL, FLATTEN_LABEL, FLIP_H_LABEL, FLIP_V_LABEL, MERGE_DOWN_LABEL, PADDING_LABEL, RESIZE_LABEL,
     ROTATE_LABEL, TRIM_LABEL,
 };
-pub use doc_stickers::{STYLE_LABEL, ShareScope, StampPicture, StickerCaches, StickerRef};
+pub use doc_stickers::{STYLE_LABEL, ShareScope, StampPicture, StickerCaches, StickerPictureJob, StickerRef};
 pub use document::*;
 pub use error::*;
 pub use fill::*;

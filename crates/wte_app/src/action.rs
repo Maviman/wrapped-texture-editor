@@ -187,6 +187,8 @@ pub enum AppAction {
     /// Stickers P11 (STICKER_PLAN 6.4): a drag on a Layers row, a Sticker tab thumbnail or the PSD handle was
     /// recognised; its file is prepared for a drag out of the window (logic in `dragout.rs`).
     DragOut(crate::dragout::DragSource),
+    /// Stickers S2 (STICKER_PLAN 7 "S2"): the live PNG copy and the watched folder (logic in `doors/mod.rs`).
+    Doors(crate::doors::DoorAction),
 }
 
 /// Severity of a toast.

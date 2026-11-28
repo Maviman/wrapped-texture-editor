@@ -1110,6 +1110,16 @@ fn run(app: &mut WteApp, action: AppAction, frame: &eframe::Frame) {
         A::DropReady(p) => crate::dnd::apply(&mut app.state, &p),
         // ---- stickers P10b: the clipboard ----
         A::Clip(c) => crate::clip::run(app, c),
+        // Stickers S2: File > Watch Folder for Stickers... asks for the folder here.
+        A::Doors(crate::doors::DoorAction::WatchFolder(p)) => {
+            if app.state.session.is_none() {
+                return;
+            }
+            if let Some(dir) = resolve_path(app, p, |prefs| io_flows::pick_folder(frame, prefs)) {
+                crate::doors::run(&mut app.state, crate::doors::DoorAction::WatchFolder(Some(dir)));
+            }
+        }
+        A::Doors(d) => crate::doors::run(&mut app.state, d),
         A::DragOut(source) => {
             let ctx = app.ctx.clone();
             crate::dragout::begin(&ctx, &mut app.state, source);

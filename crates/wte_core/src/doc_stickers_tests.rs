@@ -1023,3 +1023,58 @@ fn check_p11_stamp_picture_parts_finish_on_a_worker_to_the_same_picture() {
     doc.set_stamp_tint(id, [255; 4], Commit::Final).unwrap();
     same(&mut doc, true, "styled");
 }
+
+/// Stickers S2 (the live PNG copy): `sticker_picture_job` + `StickerPictureJob::run` on another thread give exactly
+/// `sticker_picture(id, None, scale)` - a layered sticker with a styled text layer drawn from its input (before and
+/// after its render is cached), a trivial blob sticker (the decoded picture itself), a trivial owned one, a scale
+/// below 1 and an artboard over the 4096 px render limit (halved as `sticker_picture` halves it); an unknown id is
+/// `UnknownSticker`. `mark_kept_settings_changed` sets the modified flag without a history entry.
+#[test]
+fn s2_sticker_picture_job_runs_on_a_worker_to_the_same_picture() {
+    let mut doc = doc_from_raw(samples::two_material_model(), 64);
+    let on_worker = |doc: &mut Document, id: StickerId, scale: f32| {
+        let job = doc.sticker_picture_job(id, scale).unwrap();
+        std::thread::spawn(move || job.run()).join().unwrap()
+    };
+    // A layered sticker: a disc, a text layer with a stroke style, a half-transparent shape on top.
+    let picture = owned(&mut doc, disc(96, 40.0, [30, 160, 220, 255]));
+    let mut layered = StickerDoc::from_picture("layered", picture, [96, 96]);
+    let t = layered.alloc_layer();
+    let mut txt = StickerLayer::new(t, "text", StickerContent::Text(Box::new(text(&mut doc, "S2"))));
+    txt.styles = contour(3.0);
+    layered.layers.push(txt);
+    layered.layers[0].opacity = 0.9;
+    let layered = doc.add_sticker(layered).unwrap();
+    let first = on_worker(&mut doc, layered, 1.0);
+    let whole = doc.sticker_picture(layered, None, 1.0).unwrap();
+    assert!(first == whole, "drawn from the input on a worker: the same picture");
+    assert!(on_worker(&mut doc, layered, 1.0) == whole, "taken from the cached render: the same picture");
+    let half = doc.sticker_picture(layered, None, 0.5).unwrap();
+    assert!(on_worker(&mut doc, layered, 0.5) == half, "at scale 1/2");
+    // A trivial blob sticker and a trivial owned one.
+    let blob = doc.add_image_blob("stamp.png", png(&samples::sample_stamp_image(64))).unwrap();
+    let plain = doc.add_sticker(StickerDoc::from_picture("blob", PicturePixels::Blob(blob), [64, 64])).unwrap();
+    assert!(on_worker(&mut doc, plain, 1.0) == doc.sticker_picture(plain, None, 1.0).unwrap(), "a trivial blob sticker");
+    let picture = owned(&mut doc, PixelBuf::filled(10, 7, [9, 200, 30, 255]));
+    let small = doc.add_sticker(StickerDoc::from_picture("owned", picture, [10, 7])).unwrap();
+    let got = on_worker(&mut doc, small, 1.0);
+    assert!(got == doc.sticker_picture(small, None, 1.0).unwrap() && got.width == 10, "a trivial owned sticker");
+    // Over the render limit: halved like `sticker_picture`.
+    let mut big = StickerDoc::new("big", 4096, 64);
+    let l = big.alloc_layer();
+    big.layers.push(StickerLayer::new(l, "fill", StickerContent::Picture(owned(&mut doc, PixelBuf::filled(64, 64, [200, 10, 10, 255])))));
+    let big = doc.add_sticker(big).unwrap();
+    let got = on_worker(&mut doc, big, 2.0);
+    assert!(got == doc.sticker_picture(big, None, 2.0).unwrap() && got.width == 4096, "the scale is halved to the limit");
+    assert!(matches!(doc.sticker_picture_job(StickerId(9999), 1.0), Err(EditError::UnknownSticker)));
+    // The kept settings: modified, no entry.
+    let saved = doc.history_state();
+    doc.mark_saved(saved);
+    doc.mark_links_saved(doc.links_revision());
+    assert!(!doc.is_modified());
+    let undo = doc.history.undo_len();
+    doc.mark_kept_settings_changed();
+    assert!(doc.is_modified() && doc.history.undo_len() == undo);
+    doc.mark_links_saved(doc.links_revision());
+    assert!(!doc.is_modified());
+}

@@ -12,6 +12,9 @@
   File Compatibility = Always).
 - **Drag and drop, copy and paste:** drop pictures from Explorer or a browser exactly where you want them on the
   model; drag stickers and layers out as PNG files; copy and paste pictures and text with other programs.
+- **Live PNG copies and a watched folder:** keep a PNG of a sticker or a paint layer up to date for PhotoCraft's Place
+  Linked; File > Watch Folder for Stickers... turns every PNG of a folder (PhotoCraft's Image Assets) into a tray
+  sticker that updates itself.
 - Projects with stickers need this version or newer to open; projects from 0.3.0 open and export exactly as before.
 - Help > About > Licences... lists the licence of the PhotoCraft code the sticker editor adapts (also installed in
   the `licenses` folder).

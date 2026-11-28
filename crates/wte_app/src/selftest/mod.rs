@@ -850,6 +850,7 @@ fn is_idle(state: &AppState, tools_busy: bool) -> bool {
         && !state.drop_ui.busy()
         && !state.clip_ui.busy()
         && !state.drag_out.busy()
+        && !state.doors.busy()
         && state.doc().is_none_or(|d| !d.has_pending_edit() && !d.has_pending_composite())
 }
 

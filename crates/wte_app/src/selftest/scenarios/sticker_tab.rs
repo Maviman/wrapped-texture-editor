@@ -29,7 +29,7 @@ macro_rules! tap {
 }
 
 /// A wheel step over the upper page that brings `hit` inside it (nothing when it is inside already).
-fn reveal(s: &AppState, hit: PanelHit) -> Result<Vec<Step>, String> {
+pub(super) fn reveal(s: &AppState, hit: PanelHit) -> Result<Vec<Step>, String> {
     let rect = panel_rect(s, hit)?;
     let page = s.side_rects.upper_page;
     if !page.is_positive() {
@@ -48,7 +48,7 @@ fn reveal(s: &AppState, hit: PanelHit) -> Result<Vec<Step>, String> {
 }
 
 /// A click on the recorded rect of `hit`.
-fn hit_click(s: &AppState, hit: PanelHit) -> Result<Vec<Step>, String> {
+pub(super) fn hit_click(s: &AppState, hit: PanelHit) -> Result<Vec<Step>, String> {
     let rect = panel_rect(s, hit)?;
     Ok(vec![Step::ScreenClick { at: rect.center(), button: egui::PointerButton::Primary, mods: egui::Modifiers::NONE }])
 }
@@ -84,7 +84,7 @@ fn placement_hash(s: &AppState, stamp: StampId) -> Result<u64, String> {
 
 /// A hash of what the user sees of the document, independent of ids: the composite, every stamp (kind, placement,
 /// tint, styles) with the layers of its sticker, and the tray's stickers.
-fn doc_hash(doc: &Document) -> u64 {
+pub(super) fn doc_hash(doc: &Document) -> u64 {
     let mut h = composite_hash(doc);
     let layers = |h: u64, d: &wte_core::StickerDoc| {
         d.layers.iter().fold(wte_core::fnv1a64(h, format!("{}|{:?}", d.name, d.artboard).as_bytes()), |h, l| {

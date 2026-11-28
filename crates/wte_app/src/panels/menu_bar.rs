@@ -110,6 +110,13 @@ fn file_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActio
     if item(ui, "Import Sticker from PSD, Keep Linked...", "", has_doc, false) {
         actions.push(AppAction::Link(crate::link::LinkAction::ImportPsd { path: None, keep_linked: true }));
     }
+    // Stickers S2 (STICKER_PLAN 7 "S2" (b)): every PNG of a folder as a tray sticker (PhotoCraft's Image Assets).
+    if item(ui, "Watch Folder for Stickers...", "", has_doc, false) {
+        actions.push(AppAction::Doors(crate::doors::DoorAction::WatchFolder(None)));
+    }
+    if state.doors.watch.is_some() && item(ui, "Stop Watching Folder", "", has_doc, false) {
+        actions.push(AppAction::Doors(crate::doors::DoorAction::StopWatching));
+    }
     if item(ui, "Export...", "Export...", has_doc, false) {
         actions.push(AppAction::ShowExport);
     }
@@ -369,6 +376,16 @@ fn layer_menu(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<AppActi
             }
         });
     });
+    // Stickers S2 (STICKER_PLAN 7 "S2" (a)): the active paint layer as a live PNG copy for PhotoCraft's Place Linked.
+    match raster_active {
+        Some(id) => {
+            let mut hits = Vec::new();
+            super::layers::live_copy_item(ui, state, id, crate::state::PanelHit::LayerMenuLiveCopy, actions, &mut hits);
+        }
+        None => {
+            ui.add_enabled(false, Button::new("Keep a PNG Copy up to Date"));
+        }
+    }
     ui.separator();
     if item(ui, "New Paint Layer", "New Paint Layer", has_doc, false) {
         actions.push(AppAction::AddPaintLayer);

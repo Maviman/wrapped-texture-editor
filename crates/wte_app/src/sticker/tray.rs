@@ -153,6 +153,9 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Ap
     });
     if let Some(name) = selected.and_then(|id| state.doc().and_then(|d| d.sticker(id)).map(|s| s.name.clone())) {
         ui.label(format!("Selected: {name}"));
+        // Stickers S2: the selected tray sticker as a live PNG copy.
+        let target = selected.map(crate::doors::live::LiveTarget::Sticker);
+        crate::doors::live_copy_row(ui, state, target, "", (PanelHit::LiveCopyTray, PanelHit::LiveCopyTrayShow), actions, hits);
     }
     let on_pc = if state.companion.session.is_some() { " (on the PC)" } else { "" };
     let has_doc = state.session.is_some();
@@ -212,6 +215,8 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Ap
             selected.map(|id| StickerAction::SaveToLibrary(Some(id))),
         );
     });
+    // Stickers S2 (STICKER_PLAN 7 "S2" (b)): the watched folder (PhotoCraft's Image Assets).
+    crate::doors::folder_block(ui, state, actions, hits);
 }
 
 // ---- commands ----

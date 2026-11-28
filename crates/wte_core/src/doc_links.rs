@@ -101,6 +101,13 @@ impl Document {
         self.sticker_state.links_saved = revision;
     }
 
+    /// Stickers S2: something the project saves outside the history changed (the app's live PNG copies and watched
+    /// folder, kept in `ui_state`): `links_revision` moves, so `is_modified` is true until the next save. No history
+    /// entry; nothing else changes.
+    pub fn mark_kept_settings_changed(&mut self) {
+        self.sticker_state.links_revision += 1;
+    }
+
     /// The hash of sticker `id` that `StickerLink::synced_sticker` holds (module docs): every field that goes into
     /// the PSD by value, pictures and masks by size and CRC-32 (computed once per picture version and cached).
     pub fn sticker_link_hash(&mut self, id: StickerId) -> Result<u64, EditError> {

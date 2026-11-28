@@ -92,7 +92,7 @@ text_preview_path brush_hover final_bake_async wrap_surface export_selected expo
 save_unsettled export_nouv export_errors export_checks side_tabs objects objects_path objects_flow_path pen companion
 companion_host sticker_view sticker_keys sticker_styles sticker_tray sticker_controls sticker_edit sticker_pen
 sticker_cutout sticker_text sticker_layout sticker_library sticker_link sticker_link_path sticker_drop sticker_clip sticker_dragout
-layer_link sticker_flow_path sticker_grabcut` (73; `scenarios::tests` checks the count and that every shot of a `sticker*` / `layer_link` scenario says
+layer_link sticker_flow_path sticker_grabcut sticker_live_copy sticker_watch_folder` (75; `scenarios::tests` checks the count and that every shot of a `sticker*` / `layer_link` scenario says
 what it must show; `pen` = branch `pen-input`, recorded pen samples fed in-process, see 5.2; `sticker_view` = branch
 `stickers` P6a: the Sticker view on the sample logo, shots `sticker_enter`, `sticker_moved`, `sticker_reordered`,
 `sticker_small` (900x600 inside the run), `sticker_left`; each shot's `expect` text is in `<out>.json` under `"shots"`;
@@ -154,6 +154,13 @@ S1: `sticker_grabcut` (a generated photo, an orange ball on textured grass: Shif
 one "Cut Out Box" on a job (alpha 0 outside the ball, 255 inside, IoU >= 0.9), undo, "Into mask" clicked and the same
 box (the pixels kept, a mask), the Classic sticker preset, all undone, Esc; shots `grabcut_cut`, `grabcut_mask`,
 `grabcut_die_cut`).
+S2: `sticker_live_copy` (a tray sticker's "Keep a PNG copy up to date" disabled before the save, ticked after it: the PNG
+in `<run>_links\` is the sticker's picture; a nudge in the Sticker view writes it again after the delay, the undo once
+more; Paint 1's copy from its row menu; save, reopen: both back, not rewritten; unticked: the file stays; shots
+`live_copy_on`, `live_copy_edited`, `live_copy_layer`), `sticker_watch_folder` (a folder with two PNGs watched: two
+tray stickers in one entry; the badge placed; the "editor" saves a blue badge: the same sticker in place, the placement
+kept; a wider one in place: the artboard follows; undo stays, Read again applies; undo all / redo all; save, reopen:
+nothing applied again; Stop watching keeps them; shots `watch_two`, `watch_updated`, `watch_reopened`).
 `tools/sticker/frame_spans.py OUT.log` prints the worst `sticker.*` spans of a run
 made with `WTE_FRAME_LOG=1`)
 
@@ -328,8 +335,14 @@ chapters "Working with Photoshop" (hand tests 19-25 word for word from plan 13.6
 report (1-25)"; the workspace version **0.4.0** (no tag, no release); scenario `sticker_flow_path`), **S1** (stretch)
 the **Cut Out Box** tool (Shift+W; `sticker/grabcut.rs`, `sticker/tools/cut_box.rs`): drag a box around the object of
 a photo and GrabCut cuts it out (colour models and a graph cut, no AI), on a job with "Cutting out... N %" and Cancel /
-Esc in the canvas header, "Into mask (keep pixels)", one undo step "Cut Out Box"; scenario `sticker_grabcut`.
-Next: S2 only if everything is green; then the gate (plan 8.6) and its completeness critic.
+Esc in the canvas header, "Into mask (keep pixels)", one undo step "Cut Out Box"; scenario `sticker_grabcut`, **S2**
+(stretch, `doors/*`, ARCHITECTURE 8.18) the **live PNG copy** ("Keep a PNG copy up to date" of a sticker or a raster
+paint layer: `<project>_links\<name>_k<id>.png` / `_l<id>.png` written 500 ms after the last change, one write at a
+time, equal bytes not rewritten; for PhotoCraft's Place Linked) and **File > Watch Folder for Stickers...** (every PNG
+of the folder becomes or updates a kept tray sticker named after the file, one undo step per batch, a reopened project
+applies nothing again; for PhotoCraft's Image Assets); both saved in `ui_state` (`live_copies`, `watch_folder`, only
+while used); scenarios `sticker_live_copy`, `sticker_watch_folder`.
+Next: the gate (plan 8.6) and its completeness critic.
 
 **Landing rule (plan 8.6):** no tag, no release, no merge to `main` until the gate passes **and** the user has reported
 hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 of plan 8.7 / 13.6, or has said "land, tests owed" with the open

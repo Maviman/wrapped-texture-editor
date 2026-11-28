@@ -381,6 +381,11 @@ WTE - Layers rows, the Sticker tab's thumbnails and the "PSD" handle become an O
 (S1, stretch: the Cut Out Box tool - drag a box around the object of a photo and GrabCut cuts it out, on a job with a
 progress note, "Into mask", Shift+W; core `sticker/grabcut.rs` with the soft edge shared with Remove Background:
 2.2, 5.27, 6.12, 8.11, 8.15, 9.1, 9.2.)
+(S2, stretch: two more doors to PhotoCraft, plain files only - "Keep a PNG copy up to date" of a sticker or a raster
+paint layer (a PNG in the links folder written 500 ms after the last change, for PhotoCraft's File > Place Linked) and
+File > Watch Folder for Stickers... (every PNG of a folder, e.g. PhotoCraft's Generate > Image Assets folder, becomes or
+updates a tray sticker); both saved in `ui_state`; core `Document::sticker_picture_job`, `mark_kept_settings_changed`:
+2.2, 5.20, 5.28, 7.2, 8.11, 8.18, 9.1, 9.2.)
 
 ---
 
@@ -644,6 +649,11 @@ Integration tests (`crates/wte_core/tests/`, outside `src`):
 | `selftest/scenarios/sticker_paint.rs` | stickers P7a | the scenarios `sticker_edit` and `sticker_pen` (8.11) |
 | `selftest/scenarios/sticker_cutout.rs` | stickers P7b | the scenario `sticker_cutout` (8.11) |
 | `selftest/scenarios/sticker_grabcut.rs` | stickers S1 | the scenario `sticker_grabcut` (8.11) |
+| `doors/mod.rs` | stickers S2 | the live PNG copy and the watched folder in the app: `DoorAction`, `DoorsUi` (`AppState::doors`), `run`, `pump`, the folder's `apply` (one entry per batch), `saved` / `restore` (`ui_state`), the controls `live_copy_row` / `folder_block` (8.18) |
+| `doors/live.rs` | stickers S2 | `LiveTarget`, `LiveEntry`, `LiveStatus`, `LiveCopies`: the content key, the 500 ms delay, at most one write job (`sticker_picture_job` or the layer's `Arc`, PNG, compare, `write_atomic`), retry (8.18) |
+| `doors/watch.rs` | stickers S2 | `FolderWatcher` (one polling thread per watched folder), `FolderEvent`, `FolderTimes`, `Known`, `MAX_FOLDER_PICTURES` (8.18) |
+| `doors/tests.rs` | stickers S2 | the unit tests of S2 (9.2) |
+| `selftest/scenarios/sticker_doors.rs` | stickers S2 | the scenarios `sticker_live_copy`, `sticker_watch_folder` (8.11) |
 | `sticker/tools/cut_box.rs`, `sticker/tools/tests_s1.rs` | stickers S1 | the Cut Out Box tool: the box, the cut's job and its landing (8.15); its tests |
 | `sticker/tools/{transform,crop,text,shape}.rs` | stickers P8 | the Move tool's transform handles (`Handle`, `dragged`, `BoxCache`), the Crop tool (`CropOptions`, `CropGrip`, `apply`), the Text tool (`click`, `add`, `spec_of`), the Shape tool (`ShapeOptions`, `drag_box`, `add`) |
 | `sticker/{layout,adjust_ui,library}.rs` | stickers P8 | the Sticker and Layer commands (`Layout`, `merge_down`, `toggle_clip`, `layer_transform`, `export_psd` / `write_psd`), the Adjustments block, the sticker library (`LibraryState`, the listing job, `save`, `add`) |
@@ -2950,6 +2960,9 @@ impl Document {
     pub fn stamp_picture_parts(&mut self, stamp: StampId, with_styles: bool) -> Result<StampPicture, EditError>; // P11 check: the base from the caches;
                                                                                 // StampPicture::finish (Send) draws tint + styles = stamp_picture
     pub fn sticker_picture(&mut self, id: StickerId, styles: Option<&StyleStack>, scale: f32) -> Result<PixelBuf, EditError>;
+    pub fn sticker_picture_job(&mut self, id: StickerId, scale: f32) -> Result<StickerPictureJob, EditError>; // S2: a cached render
+                                                                                // or the trivial picture taken here, else the render input;
+                                                                                // StickerPictureJob::run (Send) = sticker_picture(id, None, scale)
     pub(crate) fn bake_picture(&mut self, stamp: StampId, quality: BakeQuality) -> Result<BakePicture, EditError>;
     pub(crate) fn job_inputs_current(&self, out: &StampBakeOutput) -> bool;
 }
@@ -4081,6 +4094,7 @@ pub fn backup_path(target: &Path) -> PathBuf;                       // <stem>.ba
 pub fn link(&self, id: StickerId) -> Option<&StickerLink>;
 pub fn links(&self) -> impl Iterator<Item = (StickerId, &StickerLink)>;
 pub fn links_revision(&self) -> u64;  pub fn mark_links_saved(&mut self, revision: u64);   // is_modified counts links
+pub fn mark_kept_settings_changed(&mut self);   // S2: the app's live copies / watched folder (ui_state) changed: modified, no entry
 pub fn sticker_link_hash(&mut self, id: StickerId) -> Result<u64, EditError>;
 pub fn link_layer_hash(&mut self, l: &StickerLayer) -> u64;     // content, mask, adjustments, scale, rotation (check-P5c)
 pub fn link_state(&mut self, id: StickerId, observed: Option<&FileStamp>) -> Result<LinkState, EditError>;
@@ -5945,8 +5959,10 @@ A picture entry names its PNG as a `FileRef` (entry, size, CRC-32), like the lay
 
 Plain arrays instead of glam serde keep the JSON stable. A manually chosen texture is linked to its set by the key of its
 `extras` entry (`textures/set<NN>/<name>`, 5.15); `SetEntry` therefore needs no separate reference field. `ui_state` is written by the app (camera, UV view, view mode, active set,
-colours, swatches; objects-tabs: `hidden_objects`, the names of the hidden objects, written only when one is hidden) and
-ignored by the core. No version change (7.3): older builds ignore the unknown key and show everything; older projects load
+colours, swatches; objects-tabs: `hidden_objects`, the names of the hidden objects, written only when one is hidden;
+stickers S2: `live_copies` = `[{ "kind": "sticker" | "layer", "id", "file" }]` and `watch_folder` = `{ "folder", "files":
+[{ "name", "sticker", "layer", "size", "crc", "width", "height" }] }`, each written only while used, read leniently: a
+value that does not read counts as none, 8.18) and ignored by the core. No version change (7.3): older builds ignore the unknown key and show everything; older projects load
 with nothing hidden.
 
 A text without round-4 features is written with exactly the keys of version 1. Names
@@ -5985,6 +6001,8 @@ manifest like any malformed field.
   a text stamp). It loads without a warning into the state hashes recorded on the code before P4, bakes again to the same
   pictures, and a re-save (images copied, and every image encoded again) writes the same layer PNGs, stamps and sets with
   `min_reader_version` 2. Never replace the file.
+- Stickers S2: the live PNG copies and the watched folder live in `ui_state` too (`live_copies`, `watch_folder`, written
+  only while used). No version change: older builds ignore the keys; `required_reader` is unchanged.
 - objects-tabs (1.9): the names of the hidden objects live in `ui_state` (`UiState::hidden_objects`, written only when
   one is hidden). No version change: `FORMAT_VERSION` stays 3, `required_reader` and `IMPORTER_VERSION` (2) are unchanged;
   older builds ignore the key and show every object; a project without it opens with nothing hidden.
@@ -9132,6 +9150,8 @@ counted down) instead of failing (`export_errors`).
 | `sticker_library` | Stickers P8 (`selftest/scenarios/sticker_layout.rs`). Sphere, 3D; the library folder `<out_stem>_library` (made empty) set in the prefs; the Sticker tab; New Sticker, Edit, `AddTextLayer` ("LIB", navy), Done, Save to Library clicked (shot `library_saved`); a new document (`ConfirmPending(OpenSample)`); the library entry clicked; the Stamp tool and a click on the model (shot `library_placed`) | one `.wtes` file in the folder and Save made no entry; the listing job lists it (`Until`); after the new document the tray is empty and the library lists the file again; the click is one "Add Sticker" entry: a kept tray sticker with two layers, the Stamp tool's source; the placed stamp is a sticker stamp of it with visible texels |
 | `sticker_cutout` | Stickers P7b (`selftest/scenarios/sticker_cutout.rs`). Sphere, 3D; a generated 256 x 256 picture (an orange disc, radius 80, soft edge, on opaque white) placed as an image stamp; 4; M and a canvas drag over the top-left corner, the Delete key (shot `cutout_delete`); Ctrl+D; W and a click on the white, G and a click (the selection is filled yellow), undo; Ctrl+D, Shift+E and a click on the white, undo; `RemoveBackground` (shot `cutout_removed`); the picture again as a second layer, the Color to Alpha popover (shot `cutout_color_to_alpha`) and its Apply button clicked; the first layer active, `Defringe(2)`; M over the left half, the Blur popover (radius 4) and Apply; M inside the disc, V and a drag of 30 px to the right; Ctrl+D; `ApplyPreset(ClassicSticker)` (shot `cutout_die_cut`); undo every step; Esc | Delete: one "Delete Selected Pixels" entry that promotes the stamp, the corner transparent, the stamp still there and selected, the view open; the wand selects the white and neither the disc nor the cleared corner; Fill / Magic Eraser one entry each with the colour / transparency where expected, undone; Remove Background: corner alpha 0, disc alpha 255, the halo measure (mean blue excess of the soft edge pixels over the disc's blue) at most 40 over at least 100 edge pixels; the popover shows its preview before anything is applied, Color to Alpha one entry (white alpha 0, the disc 200..=240); Defringe keeps the halo under the bound; Blur one entry, the right half byte-identical, the left edge soft; Move Selection one entry: a third layer of about 40 x 40 at (130, 100), a hole in the first layer, the selection moved; the stamp's style on, the finished sticker's corner alpha 0 and the disc alpha 255; undoing everything gives the start (document state, the image stamp, composite); Esc leaves the view |
 | `sticker_grabcut` | Stickers S1 (`selftest/scenarios/sticker_grabcut.rs`). Sphere, 3D; a generated 320 x 240 photo (an orange ball, radius 70, shaded, on grass: green with brown blotches and grain) placed as an image stamp; 4; Shift+W; a canvas drag of the box (72, 38)-(248, 212) (the ball plus a margin); WaitIdle (the cut's job is part of `live::pending`) (shot `grabcut_cut`); undo; a click on Into mask (`PanelHit::StickerCutBoxInto`) and the same drag (shot `grabcut_mask`); `ApplyPreset(ClassicSticker)` (shot `grabcut_die_cut`); undo every step; Esc | Shift+W chose the Cut Out Box and its option shows; one "Cut Out Box" entry that promotes the stamp: alpha 0 at the corner and between the box and the ball, 255 at the ball's centre and top, IoU of alpha >= 128 against the ball >= 0.9, no progress note left; undo: the image stamp and the start composite; Into mask: one entry, the layer's pixels equal the photo, a mask with 0 at the corner, 255 at the centre and IoU >= 0.9; the finished styled sticker: corner alpha 0, ball 255; undoing everything gives the start (document state, image stamp, composite); Esc leaves the view |
+| `sticker_live_copy` | Stickers S2 (`selftest/scenarios/sticker_doors.rs`). Sphere, 3D; `<out_stem>_assetsadge.png` (a 96 x 96 orange disc with a dark ring), no links folder; the Sticker tab; `NewStickerFromPicture`; the tray's box clicked (`PanelHit::LiveCopyTray`, through `ScreenClick`) before and after Save As into the run folder (shot `live_copy_on`); `EnterTray`, `Nudge(12, 0)` (shot `live_copy_edited`), undo, `Leave`; a red brush stroke on Paint 1; the Layers tab, its row right-clicked and `PanelHit::LayerMenuLiveCopy` clicked (shot `live_copy_layer`); Save; `OpenProject` of the saved file; the tray's box clicked again | before the save the box is disabled: no copy, no entry; ticked: `<run>_linksadge_k<id>.png` = `sticker_picture(id, None, 1)`, "up to date", modified, no entry; after the nudge (one entry) not written at once, then once as the new picture; after the undo once more, equal to the original file's pixels; the layer's copy `Paint 1_l<id>.png` = the layer at the texture's size, no entry; reopened: both copies back, found equal (`same` = 2, no write), not modified; unticked: no copy, the file stays, no entry |
+| `sticker_watch_folder` | Stickers S2 (`sticker_doors.rs`). Sphere, 3D; `<out_stem>_assets\doc-assets\` with badge.png (96 x 96 orange), star.png (64 x 64 green) and a text file; the poll 200 ms; `Doors(WatchFolder(Some(folder)))` (shot `watch_two`); the badge as the Stamp tool's source and a click on the model; badge.png saved blue through a temp file and a rename (shot `watch_updated`); a 160 x 96 badge written in place; undo, 1.5 s; Read again (`PanelHit::TrayWatchRescan`); undo everything, redo everything; Save As, `OpenProject`, 1.5 s (shot `watch_reopened`); Stop watching | two kept tray stickers badge / star, one entry "Stickers from Folder"; the update: the same sticker, one entry "Update Sticker from Folder", the stamp's placement unchanged, the composite changed; the wide file: artboard 160 x 96, the stamp still its user; after the undo nothing comes back by itself; Read again: one entry, the wide badge again, the unchanged star counted as `same`; undoing everything gives the start (document hash, empty tray) and the folder applies nothing again, redoing everything the end; reopened: the folder watched with its two files known, nothing applied, not modified, no entry; Stop watching: no folder, both stickers stay, modified, no entry, "Watch a folder..." back |
 | `sticker_pen` | Stickers P7a (`sticker_paint.rs`). The same start; the sticker Brush 24 px with pressure driving the size from 0; a pen stroke at pressure 0.2 along y = 70 and one at 1.0 along y = 170 (`Step::Pen` on the canvas); the inverted pen (eraser end) across both at x = 128 (shot `pen_canvas`); a barrel drag; Fit; undo every step; Esc | two "Sticker Brush" entries, the full stroke at least three times as wide as the light one in column 128 (and at least 20 px); the eraser end: one "Sticker Eraser" entry, both lines cut, the sticker Eraser in every contact frame (`pen_eraser_frames` counts the sticker tool in the view), the Brush back after the pen left; the barrel drag pans the canvas camera and changes nothing; undoing everything gives the start |
 | `companion_host` | Branch companion: the desktop side of the Android end-to-end run (`tablet-companion/tools/e2e.sh`) and of `tools/companion/host_probe.py`. Sphere, 2D, brush as `pen`; listens on 127.0.0.1:`WTE_COMPANION_PORT` (47811) with `WTE_COMPANION_TEST_CODE` (fixed code, pairing window always open) and `WTE_COMPANION_AUTO_ALLOW=1` (confirm mode); `WTE_COMPANION_ADB_SERIAL` starts the adb watcher for that serial only. Writes `<out_stem>_coords.json` (port, surface, ppp, 2D view centre, stroke row in surface pixels), waits up to 300 s (step timeout; run 330 s) until `WTE_COMPANION_EXPECT_SESSIONS` (default 1) sessions each drew a stroke with varying pressure (>= 20 % of the range, >= 3 samples), asserts paint and undo steps, keeps serving for `WTE_COMPANION_LINGER_MS` (default 0, at most 60 s; the tablet test takes its screenshot meanwhile), then the screenshot. The variables are read only in `--screenshot` runs. |
 
@@ -10119,6 +10139,79 @@ the shared question, the link and its PSD in the default editor, `CF_HDROP` with
 toast once and only with Photoshop and a taken drag; a text stamp and a run without a port; WTE's drop target ignores
 WTE's own drag); scenario `sticker_dragout` (8.11).
 
+### 8.18 More doors: the live PNG copy and the watched folder (`doors/*`, stickers S2; STICKER_PLAN 7 "S2")
+
+Two doors between WTE and PhotoCraft (or any program) that are plain files: no FFI, nothing started, no new crate.
+State `AppState::doors: DoorsUi` (the copies, the watched folder, the folder worker's times, counters), commands
+`AppAction::Doors(DoorAction)` (`doors::run`; `WatchFolder(None)` is the folder dialog, resolved in `dispatch` with
+`resolve_path`: a self-test ignores it), the frame hook `doors::pump` (`App::logic`, after `link::pump`). Both settings
+belong to the open document: `io_flows::install_document` resets them (`DoorsUi::reset`) and restores those of the
+loaded project's `ui_state` (`UiState::live_copies`, `UiState::watch_folder`, 7.2: written only while used, read
+leniently); turning a copy on or off, choosing a folder and Stop watching call `Document::mark_kept_settings_changed`
+(the modified flag, no history entry). The self-test's idle check waits only for a copy being written
+(`DoorsUi::busy`).
+
+**(a) The live PNG copy** (`doors/live.rs`), for PhotoCraft's File > Place Linked (v0.2.0 refreshes a placed file with
+Layer > Smart Objects > Update Modified Content; later versions by themselves, `win-dnd.md` 5.2).
+- Where: the Sticker tab - the box "Keep a PNG copy up to date" under the selected stamp's link block (a sticker stamp;
+  disabled with a sentence for an image or text stamp, which become a sticker first) and under "Selected: <name>" of the
+  tray; for a raster paint layer (locked ones too: the copy only reads it) the item "Keep a PNG Copy up to Date" in the
+  Layer menu and the row menu (ticked while on), and while it is on a block at the top of the Layers tab's list (the box,
+  the status line, "Show file"). Every control has a `PanelHit` (`LiveCopy{Stamp,Tray,Layer}[Show]`, `LayerMenuLiveCopy`).
+- A copy needs a saved project, as a link does (5.3): without one the box is disabled and the command says `NEEDS_SAVE`.
+  The file is `<project>_links\<name>_k<id>.png` (a sticker, `link_file_name` with `.png`) or `<name>_l<id>.png` (a
+  layer, `paint_link_file_name`), fixed when the copy is turned on (a renamed sticker keeps its file and PhotoCraft's
+  placed link). Off: the file stays (it may be placed in a PhotoCraft document); the status line says so.
+- `live::pump` every frame: each copy's key = the picture's key by value (`sticker::canvas::sticker_key`: layers by
+  value, pixels by version; a layer's `Layer::version` and texture size) plus the file's path (a Save As moves the
+  links folder: the copy is written into the new one). A key equal to the one written: "up to date". Otherwise the copy
+  is due `LIVE_COPY_DELAY` (500 ms) after the key last changed (a copy just turned on or restored: at once). At most one
+  write runs; none starts while `doors::interacting` (a tool interaction, a pending Preview edit, a texture or sticker
+  stroke, a canvas drag, a focused text field). The job takes on the UI thread what the document holds
+  (`Document::sticker_picture_job(id, 1.0)`: a cached render or the trivial picture, else the render input; a layer's
+  `Arc<PixelBuf>`, a never painted layer drawn transparent at the texture's size) and on a named thread draws it,
+  encodes the PNG (`PngLevel::Balanced`), leaves the file alone when it holds those bytes already (a reopened project
+  rewrites nothing, its time stays) and else writes it with `project::atomic::write_atomic` (temp file, fsync, rename;
+  the links folder made when missing). A failed write (the file held by another program) is "could not be written
+  (...); trying again" and is tried again after `RETRY_DELAY` (2 s). A sticker or layer that is not in the document is
+  "not written" and stays listed (an undo can bring it back); `saved` writes only the copies whose target exists. The
+  repaint after the delay is asked with `request_repaint_after`; the job's thread asks one when it ends.
+- Status line (`live::status_text`): "PNG copy: <file>, up to date / waiting for changes to settle / writing... / save
+  the project first / not written (its picture is not in the project) / could not be written (<why>); trying again".
+
+**(b) The watched folder** (`doors/mod.rs`, worker `doors/watch.rs`), for PhotoCraft's File > Generate > Image Assets
+(a layer named like `badge.png` is written to `<document>-assets\badge.png` at every save, trimmed to its bounds;
+`OPTIONS.md` critic D1). File > Watch Folder for Stickers... (and the tray's "Watch a folder..."), File > Stop Watching
+Folder; the tray shows "Watching: <folder>" (full path on hover), the count line ("The folder is not there any more"
+while it is gone) and Read again / Show folder / Stop watching (`PanelHit::TrayWatch{Folder,Rescan,Show,Stop}`).
+- Choosing: not a folder = a warning; the project's links folder is refused (WTE's own copies are there); the same
+  folder again keeps its record and polls at once; another folder starts afresh. One folder per project.
+- The worker (`FolderWatcher`, thread "wte-folder-watcher", started by `pump` for the folder, again when it ended):
+  `read_dir` + `metadata` every `FolderTimes::poll` (1 s), at once on a `Poke` (the window gained focus), every 250 ms
+  while a change settles. It follows the `*.png` files (any case; not `.`- or `~`-names; no subfolders), at most
+  `MAX_FOLDER_PICTURES` (256, by name: more is said once, `TooMany`), each at most 64 MB. A change is reported when two
+  polls agree, the bytes read have that size and they decode as a picture (an in-place write is waited for); after
+  30 s without a decodable file one `Unreadable` (a warning toast), then quiet until it changes. A file whose size and
+  CRC-32 equal what the app applied (`Known`, given at the start from the record) is not reported: a reopened project
+  applies nothing again. `Missing` / `Back` for the folder itself (a warning toast once). `rescan` ("Read again")
+  forgets `Known` and what was seen: every picture is reported again. Every repaint is counted
+  (`DoorsUi::folder_repaints`).
+- Applying (`apply`, in `pump`; held while `interacting`, the latest event per file kept): one history group per batch
+  (`begin_edit_group` / `end_edit_group`, label `FOLDER_BATCH_LABEL` "Stickers from Folder" for two or more entries).
+  Each picture is added as an image blob (a picture that does not decode: a warning toast). A file without a sticker of
+  its own (none recorded, or its sticker or layer is gone, e.g. deleted) becomes a kept tray sticker named after the
+  file stem (`StickerDoc::from_picture`, one entry "Add Sticker"); the record maps the file name to that sticker and its
+  picture layer. A recorded file updates its sticker in place through `set_sticker` (one entry `FOLDER_UPDATE_LABEL`
+  "Update Sticker from Folder"): the layer's content becomes the new blob, and when the artboard is still the size of
+  the picture the layer shows now (as the file made it; after an undo the older picture's) it follows the new size, so
+  every stamp showing it is refitted by the rule of 2.9 (same size: the placements stay exactly). A locked user refuses
+  the update (a warning toast; the record keeps the old content, so Read again can apply it later). A picture that is
+  what the sticker shows already makes no entry (counted as `same`). The record's content is not part of the history:
+  undoing an update does not make the folder apply the file again (as R6 for links); Read again does. Info toast and
+  status line: "<file> from the watched folder is a new tray sticker", "Updated the sticker of <file> from the watched
+  folder", "From the watched folder: N new tray stickers, M stickers updated". Removed files leave their stickers.
+- Scenarios `sticker_live_copy`, `sticker_watch_folder` (8.11); tests in 9.2.
+
 ---
 
 ## 9. Test plan
@@ -10748,6 +10841,11 @@ and text layers (exactly those two files, each = `dense(layer)`).
   grids; fixed neighbours fold into the terminals; colour models prefer their own colours (and one colour = one
   component). `perf_s1_grabcut_box_2048` (ignored, release, `sticker/bench.rs`): 862 ms, and 1,215 ms for a box over
   the whole picture (budget 3 s). The `k2_*` Remove Background tests guard the move of its soft edge into `soft_edge`.
+- Branch `stickers`, S2 (`doc_stickers_tests.rs`): `s2_sticker_picture_job_runs_on_a_worker_to_the_same_picture` (a
+  layered sticker with a styled text layer drawn from its input and again from the cached render, scale 1/2, a trivial
+  blob and a trivial owned sticker, an artboard over the 4096 px limit halved as `sticker_picture` halves it: `run` on
+  another thread equals `sticker_picture(id, None, scale)`; an unknown id; `mark_kept_settings_changed` sets the
+  modified flag without an entry).
   S1 check: `check_s1_the_max_flow_equals_an_independent_max_flow_on_larger_graphs` (60 random 8-neighbour grids up
   to 30 x 30 with asymmetric and near-zero arc capacities, terminal capacities of both signs and long-range arcs: the
   cost of the cut the BK solver labels equals Dinic's max-flow value, so the labelling is a true minimum cut) and
@@ -10847,7 +10945,23 @@ limits it; a click cuts nothing; Cancel; a second box while one runs waits for i
 most one thread; a layer changed meanwhile drops the result with `CHANGED_NOTE`; a result waits for a running drag;
 leaving the view stops the cut; refusals (box under 4 x 4 picture pixels, outside the picture, a text layer's
 Rasterize offer); `content_rect` of a moved and scaled layer), the colliding chord Shift+W of `shortcuts::tests`, the
-`sticker_keys` scenario's Shift+W row, and the scenario count (73: `sticker_grabcut`).
+`sticker_keys` scenario's Shift+W row, and the scenario count (73: `sticker_grabcut`). Stickers S2 (`doors/tests.rs`):
+the live copy - a sticker's copy written at once when turned on and then only after the delay since its last change, as
+`sticker_picture` draws it, no job while nothing changes, off keeps the file; quick changes give one write; a paint
+layer's copy is its pixels (a never painted one transparent; a stamp layer is not offered); no copy without a project
+file (`NEEDS_SAVE`); a restored copy whose file holds the picture is not written again (its time stays) and bad saved
+entries are left out; nothing starts while busy and a Save As writes into the new links folder; a failed write is tried
+again and a deleted sticker is `Gone` until an undo; a renamed sticker keeps its file. The folder worker - new and
+changed PNGs reported once (others, subfolders and unchanged files not; no repaints while quiet), Read again; known
+content not reported; a half-written file waited for, a broken one reported once after the give-up time, the folder's
+loss and return; more than `MAX_FOLDER_PICTURES` said once. The folder in the app - a new picture a kept tray sticker
+("Add Sticker"), a change the same sticker in place ("Update Sticker from Folder", the placement kept), a new size refits,
+after an undo the artboard follows the layer's current picture, a batch one entry ("Stickers from Folder"); a deleted
+sticker's file a new sticker, a locked user refused with a toast, bad bytes refused; choosing (not a folder, the links
+folder refused; the same folder keeps its record, another starts afresh) and Stop watching; the whole path through
+`pump`, held while busy, saved and restored (nothing applied again), Read again of an unchanged picture makes no entry.
+`io_flows::tests::ui_state_keeps_the_live_copies_and_the_watched_folder` (no keys while unused; both round-trip; garbage
+ignored without losing the other fields). The scenario count (75: `sticker_live_copy`, `sticker_watch_folder`).
 
 - Unit tests (no GPU, no window): `cli::parse`; `OrbitCamera` (`project(ray-at-t)` round trip, `frame` puts the bounds in view,
   after a pan to the clamp limit and an orbit the whole model is still between near and far); `UvViewState`
@@ -11403,3 +11517,4 @@ One builder and one checker per package, in order; notes `docs/notes/sticker/bui
 | P12 | linked texture paint layers ("Edit Layer in <editor>"), Paste as New Paint Layer | core `link/paint.rs`, `doc_layer_links.rs`; app `link/*` (`LinkId`), `panels/layers.rs`, `clip.rs` | an update during a stroke waits; an unchanged save is no undo step |
 | P13 | docs and the version: Help > Working with PhotoCraft and Photoshop, the Sticker view's keys in Help > Shortcuts, About > Licences... (the MIT text word for word, the trademark sentence), the installer's `licenses\*` (`[Files]`, CI staging, smoke test), README, release notes, `dist/HOW_TO_TEST.txt` ("Working with Photoshop" = hand tests 19-25, "Stickers: the hand tests to report (1-25)"), HANDOFF 1 / 4.1 / 5 / 5.4 / 8, workspace version 0.4.0 (no tag), scenario `sticker_flow_path` | `dialogs/{about,editor_help}.rs`, `selftest/scenarios/sticker_flow.rs`, `installer/WrappedTextureEditor.iss`, `.github/workflows/installer.yml`, `installer/smoke-test.ps1`, `Cargo.toml` | every hand test of plan 8.7 in HOW_TO_TEST with its expected result; the installer script lists the licence folder (no installer is built by an agent); greps for the forbidden name and for "Adobe" (8.6 item 7) |
 | S1 | stretch: the GrabCut box cut-out - the Cut Out Box tool (Shift+W) on a job with a progress note and Cancel, Into mask; the soft edge shared with Remove Background | core `sticker/grabcut.rs`, `sticker/cutout.rs` (`soft_edge`); app `sticker/tools/cut_box.rs`, `selftest/scenarios/sticker_grabcut.rs` | IoU >= 0.9 on three textured scenes, determinism, 2048 x 2048 within 3 s, at most one cut thread, a stale result dropped |
+| S2 | stretch: more doors - the live PNG copy of a sticker or paint layer (Place Linked) and File > Watch Folder for Stickers... (Image Assets) | core `doc_stickers.rs` (`sticker_picture_job`), `doc_links.rs` (`mark_kept_settings_changed`); app `doors/*`, `io_flows.rs` (`UiState`), `selftest/scenarios/sticker_doors.rs` | at most one write, the 500 ms delay, equal bytes not rewritten; files settled before they are read, known content not applied again, one entry per batch, an undo not undone by the folder |

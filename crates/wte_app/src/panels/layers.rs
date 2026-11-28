@@ -86,6 +86,12 @@ fn row_menu(
         });
         ui.separator();
     }
+    // Stickers S2 (STICKER_PLAN 7 "S2" (a)): a raster paint layer (locked ones too: the copy only reads it) kept as a
+    // PNG in the links folder for PhotoCraft's Place Linked.
+    if stamp.is_none() && state.doc().and_then(|d| d.layer(layer)).is_some_and(|l| l.is_raster()) {
+        live_copy_item(ui, state, layer, PanelHit::LayerMenuLiveCopy, actions, hits);
+        ui.separator();
+    }
     if selection.len() > 1 && selection.contains(&layer) {
         let resp = ui.button(format!("Export selected layers... ({})", selection.len()));
         hits.push((PanelHit::LayerMenuExportSelected, resp.rect));
@@ -98,6 +104,23 @@ fn row_menu(
     hits.push((PanelHit::LayerMenuExportThis, resp.rect));
     if resp.clicked() {
         actions.push(AppAction::ShowExportLayers(vec![layer]));
+        ui.close();
+    }
+}
+
+/// Stickers S2: the menu item "Keep a PNG Copy up to Date" of raster layer `layer` (ticked while its copy is on; needs
+/// a saved project to be turned on). Shared by the row menu and the Layer menu.
+pub(crate) fn live_copy_item(ui: &mut egui::Ui, state: &AppState, layer: LayerId, hit: PanelHit, actions: &mut Vec<AppAction>, hits: &mut Vec<(PanelHit, Rect)>) {
+    let target = crate::doors::live::LiveTarget::Layer(layer);
+    let on = state.doors.live.entries.contains_key(&target);
+    let saved = state.session.as_ref().is_some_and(|s| s.path.is_some());
+    let resp = ui
+        .add_enabled(saved || on, egui::Button::new("Keep a PNG Copy up to Date").selected(on))
+        .on_hover_text("For PhotoCraft's File > Place Linked: a PNG of this layer in the project's links folder, written again half a second after every change")
+        .on_disabled_hover_text(crate::doors::NEEDS_SAVE);
+    hits.push((hit, resp.rect));
+    if resp.clicked() {
+        actions.push(AppAction::Doors(crate::doors::DoorAction::SetLiveCopy(target, !on)));
         ui.close();
     }
 }
@@ -195,6 +218,10 @@ fn body(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &
     // Stickers P12 (STICKER_PLAN 5.9): a linked active paint layer shows its link block (badge, Edit Layer in, Update
     // now, Send to, Show file, Unlink, Restore) at the top of the list's scroll area.
     let block = linked.map(|layer| crate::link::ui::layer_block_data(state, layer));
+    // Stickers S2: the active raster layer's live PNG copy, while it is on.
+    let live = state.session.as_ref().and_then(|s| s.doc.set(s.active_set)).and_then(|set| set.active_layer()).map(|l| l.id).filter(|id| {
+        state.doors.live.entries.contains_key(&crate::doors::live::LiveTarget::Layer(*id))
+    });
     let state: &AppState = state;
     let Some(session) = state.session.as_ref() else { return };
     let Some(set) = session.doc.set(session.active_set) else { return };
@@ -208,6 +235,11 @@ fn body(ui: &mut egui::Ui, state: &mut AppState, ps: &mut PanelState, actions: &
         .show(ui, |ui| {
             if let Some(b) = &block {
                 crate::link::ui::layer_block(ui, state, b, actions, hits);
+                ui.separator();
+            }
+            if let Some(layer) = live {
+                let target = Some(crate::doors::live::LiveTarget::Layer(layer));
+                crate::doors::live_copy_row(ui, state, target, "", (PanelHit::LiveCopyLayer, PanelHit::LiveCopyLayerShow), actions, hits);
                 ui.separator();
             }
             layer_list(ui, state, ps, set, actions, hits)

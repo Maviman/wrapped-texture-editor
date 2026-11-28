@@ -49,6 +49,23 @@ struct UiState {
     /// other fields still load.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_names")]
     hidden_objects: Vec<String>,
+    /// Stickers S2: the live PNG copies (`doors::live`). Left out while there are none (an old project keeps its bytes);
+    /// a value that does not read counts as none and the other fields still load.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient")]
+    live_copies: Vec<crate::doors::live::SavedLiveCopy>,
+    /// Stickers S2: the watched folder and its files' stickers (`doors`). Left out while none is watched; read leniently.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    watch_folder: Option<crate::doors::SavedWatch>,
+}
+
+/// Stickers S2: any field from any JSON value - what reads as `T`, else `T::default()` (logged), so a damaged entry
+/// never costs the rest of the view state.
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(deserializer: D) -> Result<T, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|e| {
+        log::warn!("ignoring a stored setting that does not read: {e}");
+        T::default()
+    }))
 }
 
 /// `UiState::hidden_objects` from any JSON value: the strings of an array, nothing otherwise.
@@ -71,6 +88,7 @@ impl UiState {
     fn capture(state: &crate::state::AppState, session: &Session) -> UiState {
         // Stickers P6a: never Preview, never the Sticker view (the mode it returns to is written).
         let view_mode = state.remembered_view_mode();
+        let (live_copies, watch_folder) = crate::doors::saved(&state.doors, &session.doc);
         UiState {
             camera: Some(session.camera),
             preview_camera: Some(session.preview_camera),
@@ -79,6 +97,8 @@ impl UiState {
             active_set: Some(session.active_set.0),
             colors: Some(state.colors.clone()),
             hidden_objects: crate::object_ops::hidden_names(&session.doc),
+            live_copies,
+            watch_folder,
         }
     }
 }
@@ -740,6 +760,8 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
     }
     // Stickers P9a: the link sessions, the watcher and the questions belong to the old document.
     app.state.link_ui.reset();
+    // Stickers S2: and so do the live PNG copies and the watched folder.
+    app.state.doors.reset();
     // Stickers P6a: the Sticker view belongs to the document it was opened on.
     if app.state.view_mode == ViewMode::Sticker {
         crate::sticker::leave(app, None);
@@ -790,6 +812,7 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
         object_reveal: None,
         sticker_edit: None,
     };
+    let saved_doors = restored.as_ref().map(|ui| (ui.live_copies.clone(), ui.watch_folder.clone()));
     if let Some(ui) = restored {
         if let Some(c) = ui.camera.filter(camera_is_sane) {
             session.camera = c;
@@ -826,6 +849,10 @@ pub fn install_document(app: &mut WteApp, mut doc: Document, path: Option<PathBu
     }
     session.validate();
     app.state.session = Some(session);
+    // Stickers S2: the live PNG copies and the watched folder saved with the project.
+    if let Some(ui) = &saved_doors {
+        crate::doors::restore(&mut app.state, &ui.0, ui.1.as_ref());
+    }
     app.scene = None; // rebuilt for the new generation by the views; frees the old GPU resources now
     app.state.tools.stamp.source = crate::state::StampToolSource::None;
     app.state.tools.stamp.source_name.clear();
@@ -1034,6 +1061,35 @@ mod tests {
         let v: UiState = serde_json::from_value(serde_json::json!({ "hidden_objects": ["Cube", 3, null, "Ball"] })).unwrap();
         assert_eq!(v.hidden_objects, ["Cube", "Ball"]);
         assert!(!camera_is_sane(&OrbitCamera { distance: f32::NAN, ..OrbitCamera::default() }));
+    }
+
+    /// Stickers S2: no live copy and no watched folder write nothing (an old project keeps its bytes); both round-trip;
+    /// a value that does not read is ignored without losing the other fields.
+    #[test]
+    fn ui_state_keeps_the_live_copies_and_the_watched_folder() {
+        let mut state = AppState::new(Prefs::default(), true);
+        let session = session_of(Document::sample(wte_core::SampleKind::Cube));
+        let value = serde_json::to_value(UiState::capture(&state, &session)).unwrap();
+        assert!(value.get("live_copies").is_none() && value.get("watch_folder").is_none(), "{value}");
+        let layer = session.doc.sets[0].layers.iter().find(|l| l.is_raster()).unwrap().id;
+        let target = crate::doors::live::LiveTarget::Layer(layer);
+        state.doors.live.entries.insert(target, crate::doors::live::LiveEntry::new("Paint 1_l3.png".into()));
+        let saved_watch = crate::doors::SavedWatch {
+            folder: PathBuf::from("C:/assets"),
+            files: vec![crate::doors::SavedWatchFile { name: "a.png".into(), sticker: 4, layer: 1, size: 10, crc: 7, width: 2, height: 3 }],
+        };
+        state.doors.watch = Some(crate::doors::tests_support::folder(&saved_watch));
+        let ui = UiState::capture(&state, &session);
+        assert_eq!(ui.live_copies.len(), 1);
+        assert_eq!(ui.watch_folder.as_ref(), Some(&saved_watch));
+        let value = serde_json::to_value(&ui).unwrap();
+        assert_eq!(value["live_copies"][0]["kind"], "layer");
+        assert_eq!(serde_json::from_value::<UiState>(value).unwrap(), ui);
+        for garbage in [serde_json::json!(7), serde_json::json!("x"), serde_json::json!({ "folder": 3 }), serde_json::json!([{ "kind": 1 }])] {
+            let v: UiState = serde_json::from_value(serde_json::json!({ "active_set": 2, "live_copies": garbage, "watch_folder": garbage })).unwrap();
+            assert_eq!(v.active_set, Some(2), "{garbage}");
+            assert!(v.live_copies.is_empty() && v.watch_folder.is_none(), "{garbage}");
+        }
     }
 
     fn session_of(doc: Document) -> Session {

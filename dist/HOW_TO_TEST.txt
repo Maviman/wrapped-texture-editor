@@ -355,6 +355,47 @@ groups and other blend modes make the sticker one finished picture; 16-bit
 files come back as 8-bit; parts outside the canvas are cut off. There is
 no drag from PhotoCraft into WTE: use Ctrl+S on a linked sticker.
 
+Two more doors to PhotoCraft (new in this build)
+------------------------------------------------
+Both are plain files: WTE starts nothing and never comes to the front.
+  1. Live PNG copy (PhotoCraft's File > Place Linked). Save the project,
+     select a tray sticker (or a placed sticker stamp) in the Sticker tab
+     and tick "Keep a PNG copy up to date". Expected: the line "PNG copy:
+     <name>_k<number>.png, up to date"; "Show file" shows the PNG in
+     <project>_links. In PhotoCraft open any document and File > Place
+     Linked... that PNG. Change the sticker in WTE (a layer moved, a
+     style, a brush stroke). Expected: about half a second after the last
+     change the PNG is written again (once, not during the stroke); in
+     PhotoCraft 0.2.0 use Layer > Smart Objects > Update Modified Content
+     to see it (later PhotoCraft versions should refresh by themselves:
+     write down whether they do). Untick: the PNG stays, no longer
+     updated.
+  2. The same for a texture paint layer: right-click its row (or the Layer
+     menu) > "Keep a PNG Copy up to Date". Expected: <layer>_l<number>.png
+     at the texture's size; the Layers tab shows the line above the rows.
+     Before the project is saved the box and the item are greyed out.
+  3. Save, close and reopen the project. Expected: both copies are still
+     on (the lines show again) and the PNGs are not written again until
+     something changes.
+  4. Watched folder (PhotoCraft's File > Generate > Image Assets). In
+     PhotoCraft name a layer "badge.png", turn on File > Generate > Image
+     Assets and save: PhotoCraft writes <document>-assets\badge.png. In
+     WTE: File > Watch Folder for Stickers... and choose that
+     <document>-assets folder (or the tray's "Watch a folder..."). Expected:
+     within a second or two a tray sticker "badge" appears (one Undo step);
+     the tray says "Watching: <folder>".
+  5. Place that sticker on the model, change the layer in PhotoCraft and
+     press Ctrl+S. Expected: the sticker on the model updates in place
+     (one Undo step "Update Sticker from Folder"); a changed size keeps it
+     where it is. Ctrl+Z: the old picture, and it does not come back by
+     itself; "Read again" takes the file again.
+  6. Copy any other PNG into the folder: a new tray sticker. Save, reopen
+     the project: the folder is watched again and nothing is added twice.
+     "Stop watching": the stickers stay in the tray.
+Image Assets writes each layer trimmed to its content, so a sticker made
+from it has no position of its own; PhotoCraft may need Generate > Image
+Assets turned on again after reopening a document.
+
 Working with Photoshop (new in this build)
 ------------------------------------------
 The same link works with Photoshop (CC 2019 is what this was made for).
@@ -625,6 +666,9 @@ detail; the number in brackets is the step there.
      they did before.
  19-25: the chapter "Working with Photoshop" above (19, 21, 23 and 24 are
      needed before landing).
+Optional (new with the stretch work): the chapter "Two more doors to
+PhotoCraft" above, steps 1, 4 and 5 (the live PNG copy with Place Linked,
+the watched Image Assets folder).
 Also try once: Help > About > Licences... shows the licence text and a
 trademark line; Help > Working with PhotoCraft and Photoshop shows the
 help; Help > About says Version 0.4.0.

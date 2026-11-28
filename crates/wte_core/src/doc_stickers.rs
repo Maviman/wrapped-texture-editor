@@ -236,6 +236,33 @@ impl StampPicture {
     }
 }
 
+/// Stickers S2: a sticker's finished picture to be drawn on any thread (`Document::sticker_picture_job`).
+pub struct StickerPictureJob {
+    draw: JobDraw,
+}
+
+enum JobDraw {
+    /// The document had the picture already.
+    Ready(Arc<PixelBuf>),
+    /// Drawn from the input at this scale.
+    Render(Box<StickerRenderInput>, f32),
+}
+
+const _: fn() = || {
+    fn send_static<T: Send + 'static>() {}
+    send_static::<StickerPictureJob>();
+};
+
+impl StickerPictureJob {
+    /// The finished picture (straight RGBA8): exactly what `Document::sticker_picture(id, None, scale)` returns.
+    pub fn run(self) -> PixelBuf {
+        match self.draw {
+            JobDraw::Ready(p) => Arc::unwrap_or_clone(p),
+            JobDraw::Render(input, s) => render(&input, s, crate::doc_stamps::raster_quality(BakeQuality::Full)),
+        }
+    }
+}
+
 impl Document {
     // ----- queries -----
 
@@ -761,6 +788,36 @@ impl Document {
             }
             None => Ok((*picture).clone()),
         }
+    }
+
+    /// Stickers S2 (STICKER_PLAN 7 "S2" (a)): `sticker_picture(id, None, scale)` in two parts, so the drawing can run
+    /// on a worker (the live PNG copy): what the document holds already (a cached render at that scale, the trivial
+    /// picture of a one-picture sticker) is taken here, everything else is drawn by [`StickerPictureJob::run`] from
+    /// the render input. `run` returns exactly the pixels `sticker_picture(id, None, scale)` returns. Never a
+    /// history command; `UnknownSticker` for an unknown id.
+    pub fn sticker_picture_job(&mut self, id: StickerId, scale: f32) -> Result<StickerPictureJob, EditError> {
+        let doc = Arc::clone(self.sticker_state.map.get(&id).ok_or(EditError::UnknownSticker)?);
+        let mut s = if scale.is_finite() { scale.clamp(1.0 / 64.0, 4.0) } else { 1.0 };
+        while s > 1.0 / 64.0 && render_size(&doc, s).iter().any(|&v| v > 4096) {
+            s /= 2.0;
+        }
+        if let Some(e) = self.sticker_state.cache.find_render(&doc, s, BakeQuality::Full, true) {
+            return Ok(StickerPictureJob { draw: JobDraw::Ready(e.picture) });
+        }
+        // The trivial fast path of `sticker_render` (the same bytes as `render`'s own fast path).
+        if s == 1.0
+            && let Some(picture) = doc.trivial_picture()
+        {
+            let shared = match picture {
+                PicturePixels::Blob(b) => self.blob_picture(*b).ok(),
+                PicturePixels::Owned { pixels, .. } => Some(Arc::clone(pixels)),
+            };
+            if let Some(p) = shared.filter(|p| [p.width, p.height] == doc.size()) {
+                return Ok(StickerPictureJob { draw: JobDraw::Ready(p) });
+            }
+        }
+        let input = self.sticker_render_input(&doc)?;
+        Ok(StickerPictureJob { draw: JobDraw::Render(Box::new(input), s) })
     }
 
     // ----- the editor's read-outs (stickers P6a) -----

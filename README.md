@@ -63,6 +63,10 @@ pushed; the installer script is [`installer/WrappedTextureEditor.iss`](installer
   model, the 2D view, the sticker canvas, a layer row); a layer row, the Sticker tab's picture or a tray sticker dragged
   out of the window becomes a PNG; Ctrl+C / Ctrl+V move pictures and text to and from other programs. There is no drag
   out of PhotoCraft or Photoshop into WTE (use Ctrl+S on a link, copy / paste, or the saved file).
+- **Two more doors** (plain files): "Keep a PNG copy up to date" on a sticker (Sticker tab) or a paint layer (Layer
+  menu, a row's right-click menu) keeps a PNG in `<project>_links\` written half a second after every change, for
+  PhotoCraft's File > Place Linked; **File > Watch Folder for Stickers...** turns every PNG of a folder (such as the
+  folder PhotoCraft's File > Generate > Image Assets writes) into a tray sticker that updates when the file changes.
 - Help > **Working with PhotoCraft and Photoshop** has the details; the hand tests are in `dist/HOW_TO_TEST.txt`.
 
 ## Licences

@@ -387,6 +387,8 @@ impl eframe::App for WteApp {
         io_flows::feed_waiting_snapshot(self);
         // Stickers P9a (STICKER_PLAN 5.6): the editor link's watcher events, held updates and questions.
         crate::link::pump(&mut self.state, ctx, self.tools.is_busy());
+        // Stickers S2: the live PNG copies and the watched folder.
+        crate::doors::pump(&mut self.state, ctx, self.tools.is_busy());
         self.state.busy = self.jobs.busy();
         drop(jobs);
         // Branch `companion`: events, STATE, the capture of this frame, undo / redo from the tablet.

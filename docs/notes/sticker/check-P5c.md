@@ -126,7 +126,7 @@ WTE layer (`k5_link_check_renumbered_after_a_delete_or_a_reorder_in_the_editor`)
   38, `wte_app` 524 / 0 / 24, integration 15 + 9 + 8 + 25). Against the builder (1,638 / 1 / 62): +8 checker tests.
   Before the fixes I reproduced the builder's numbers exactly (`test1.log`).
 - `cargo clippy --workspace --all-targets`: 0 warnings.
-- `cargo build --release -p wte_app`: OK, `targetelease\wrapped_texture_editor.exe` 29,395,968 bytes, SHA-256
+- `cargo build --release -p wte_app`: OK, `target\release\wrapped_texture_editor.exe` 29,395,968 bytes, SHA-256
   `c90fb4659004b8bbe86da69b5612047e3d81f1d2f7c97d910cf039182f059771` (only test code changed after this build).
 - Identity sweep (8.5, P5c has no scenario of its own): `tools/objtabs/sweep.sh` with that exe and
   `tools/sticker/jobs_identity.txt` into `target\sticker\p5c_check\sweep\`, off-screen, no focus taken: **21 / 21

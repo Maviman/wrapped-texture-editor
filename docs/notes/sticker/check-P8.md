@@ -112,7 +112,7 @@ its expect text.
 - `cargo clippy --workspace --all-targets`: 0 warnings (`clippy2.log`).
 - `cargo build --release -p wte_app`: OK, exe 31,864,320 bytes, SHA-256
   `bc535a5d2dd70ec62b8bafafd284e46e035f0489cee1f00e667fcd9d7e8eec33`.
-- Scenarios with the fixed exe (`target\sticker\p8checkun2\`, off-screen, no focus taken, `WTE_FRAME_LOG=1`): `smoke`,
+- Scenarios with the fixed exe (`target\sticker\p8check\run2\`, off-screen, no focus taken, `WTE_FRAME_LOG=1`): `smoke`,
   `sticker_text`, `sticker_layout`, `sticker_library`, `sticker_keys`, `sticker_view`, `sticker_edit`, `sticker_cutout`,
   `sticker_styles`, `sticker_tray`, `sticker_controls`, `sticker_pen`: all `"ok": true`. Frame spans
   (`tools/sticker/frame_spans.py`, limit 50 ms): worst `sticker.canvas` 3.90 ms (`sticker_library`). `library_saved`

@@ -396,3 +396,101 @@ Image Assets folder.
 
 Also unverified: the real App Paths discovery on another machine (`REG_EXPAND_SZ` values), the explorer `/select,` quoting,
 pen behaviour with a real tablet and the S Pen through the companion, and WTE's clipping rule as seen in Photoshop.
+
+## Critic
+
+Completeness critic (plan 7 "Gate"), 2026-11-27, on `22d83bc` (the gate report). What I read: this report, plan sections
+0-0.4, 3.3, 5.4, 6.2, 8.2, 8.4-8.6 and 13, the build and check notes where a claim led there, the scenario sources of
+`sticker_flow_path`, `sticker_link` and `layer_link`, and the hand-test sheet. What I looked at: every
+`sticker_flow_path` shot on both models (zoomed crops of the sticker in `target\sticker\critic\`), `sticker_styles`,
+`sticker_link`'s Photoshop shots and `layer_link_ps_merged`.
+
+**Verdict: PASS after fixes.** The user's request is built as the plan and its accepted defaults say; no red was found.
+The fixes below are a test of the user's own Photoshop workflow, one hand-test step and four text corrections. After them:
+`cargo test --workspace` 1,965 passed / 1 failed (WA20) / 71 ignored (`target\sticker\critic\test.log`), clippy 0 warnings.
+The release exe was not rebuilt: only a test and three `expect` texts changed, so the gate's sweep outputs keep the old
+texts.
+
+### The user's workflow, end to end
+
+`sticker_flow_path` walks the whole workflow on ABeautifulGame and DamagedHelmet, and its shots show what they claim: a
+photo dropped on the model; Remove Background (the cut-out); a "GO!" text layer; Classic sticker (die-cut contour + drop
+shadow); Wrap; Save As; "Edit in PhotoCraft" through the stub; the sticker moved and scaled in WTE (the badge stays
+"linked" and the PSD is untouched); the editor's simulated save (`testkit::save_as_editor`, temp file + rename) updates
+it in place as one "Update Linked Sticker", keeping the placement, the styles and the text; Copy / Paste Style; a linked
+paint layer updated; save; reopen; export of one layer, a selection and a zip, each checked file by file.
+
+**Gap: the user's own words name Photoshop, but the flow uses PhotoCraft.** The user: "I would be able to manuver the
+sticker in the wrapped app, and I can edit the sticker itself in photoshop". `sticker_flow_path` runs with PhotoCraft as
+the default editor. `sticker_link`'s Photoshop pass never moves the sticker between the link and Photoshop's save: its
+"placement unchanged" means unchanged since it was placed. Hand test 19 did not ask for it either. The code path does not
+depend on the editor, but nothing proved it for Photoshop. **Fixed:**
+
+- New test `link::editor_tests::critic_photoshop_placement_edits_keep_the_link_and_each_save_updates_the_sticker_in_place`.
+  It makes a Photoshop link, then in WTE moves, turns (0.4 rad), scales (x1.4), mirrors and wraps the sticker, gives it
+  the Classic sticker styles and a tint. It asserts that the badge stays "linked", the PSD is byte-identical and nothing
+  is started again. Then Photoshop's save adds Photoshop's own type layer (`type-layer.psd`'s bytes, spliced in): one
+  step "Update Linked Sticker", two layers, placement, styles and tint exactly as the user left them, "linked", toast
+  "Updated from Photoshop". The sticker is moved again and saved again: the newer placement is kept. An undo of the update
+  does not move the sticker. It passes.
+- `dist/HOW_TO_TEST.txt` hand test 19 gains step (c): move, scale and turn the sticker in WTE, add a style and switch
+  Wrap on between two Photoshop saves; the badge stays "linked" and the update lands where the user put it.
+
+### Fixed small items
+
+| # | Item | Fix |
+|---|---|---|
+| C1 | G1: the three check notes with a raw carriage return (`check-P10b.md`, `check-P5c.md`, `check-P8.md`) | the byte replaced by the two characters `\r`; git now sees them as LF text |
+| C2 | G3: `sticker_view`'s `sticker_small` expect says "all 14 sticker tools" | "all 15 sticker tools (S1's Cut Out Box included)" |
+| C3 | `flow_updated`'s expect says the red bar lies "partly over the disc". On DamagedHelmet the link's scale is 2 (the PSD is 384 x 512 against 192 x 256 on the chess set), so the stub's fixed-pixel bar lands half size, beside the disc. The shot is right; the text was too narrow | "(partly over the disc, or just beside it when the link's scale is 2)" |
+| C4 | the user's Photoshop workflow was not shown with placement edits (above) | test + hand test 19 (c) |
+
+### Scenarios that prove less than they say (not fixed; minor)
+
+1. **The drop shadow is hard to see in the flow's shots.** `flow_styled_wrapped` and later shots say "a soft dark
+   shadow". On both models the sticker is small, and the shadow is faint even in a 3x crop; the white die-cut border is
+   clear. The step asserts the shadow in state ("the stamp has the white contour and the drop shadow"). The shadow shows
+   plainly in `sticker_styles` and `sticker_edit`.
+2. **"Change colours" (plan 0.3) appears in no shot.** The adjustments (Brightness / Contrast, Hue / Saturation, Levels,
+   Invert, Black & White, Posterize, Threshold; the Tool tab's Adjustments block) are covered by unit tests
+   (`sticker::tests_p8`) and the control sweeps, not by a scenario picture.
+3. **"After undoing everything the document equals the start" (plan 8.2, "in each")** is asserted in neither
+   `sticker_flow_path` (reported as P13's deviation) nor `sticker_link`, `layer_link` or `sticker_dragout`. Those three
+   assert the undo of each update instead, and `sticker_link` asserts that an undone update does not come back by itself.
+   This report names only the flow.
+4. **"Every 8.4 budget met" is slightly more than was measured.** The Preview restyle job's first serial run was 66.8 ms
+   against 60 (G5; 8.4 lets the gate decide misses under 50 %, and it did). The 1.5 s "settled change -> updated" budget
+   is for a 1024 x 1024 sticker but was measured only on 256-px stickers (1.17-1.23 s, mostly the watcher's settle time).
+   So that budget is unverified at the size it names.
+
+### Still owed or half there against the user's request (for the main session)
+
+- **"Sticker editing just like PhotoCraft ... plenty to include".** The editor has 15 tools, cut-out commands, blur /
+  sharpen, layout commands, text, shapes, clipping, masks, 7 adjustments, layer and stamp styles and a library. The parts
+  of PhotoCraft left for later (plan 0.2, the list the user saw in section 11) are the visible distance from "just like":
+  - layer groups;
+  - Curves and colour balance;
+  - filters other than blur and sharpen;
+  - quick selection and refine edge;
+  - satin and pattern overlays;
+  - several strokes per layer and per-style blend modes;
+  - perspective, warp and liquify;
+  - healing and clone;
+  - brush presets;
+  - a history panel.
+
+  If the user expects any of these now, it is new work.
+- **"Drag and drop between the apps"** works in one direction only. Neither PhotoCraft nor Photoshop can drag into
+  another program, so the substitutes are Ctrl+S on a link, Ctrl+C / Ctrl+V and a drag from Explorer (Help says so).
+  The direction that is built, out of WTE (rows, thumbnails, the PSD handle), has never run against a real program:
+  hand tests 8-11 and 23. Whether `DoDragDrop`'s modal loop and eframe's frames get along on the real window is
+  untested.
+- **"Seamlessly link photos / layers"** is built: sticker links, linked paint layers, the live PNG copy and the watched
+  folder. Every statement about how Photoshop and the latest PhotoCraft behave rests on assumptions A1-A8 and on reading
+  source code (section 9). Until hand tests 19-25 and 6 are reported, the link has been tested only against files WTE's
+  tests wrote the way an editor would.
+- **G2 matters for the user's main workflow.** In `layer_link_ps_merged`, the exact Photoshop case (a linked paint layer
+  that needs a merged picture), no layer row is visible at 1280x800 until the list is scrolled or the split is dragged.
+  The upper group (Tool tab) has about 180 pt of empty space above the split in that shot. This is a layout decision
+  for the user (open issue 4).
+- Hand tests 1, 3, 4, 7, 8, 12, 15, 19, 21, 23 and 24 are owed before landing (8.6). No tag, release or merge was made.

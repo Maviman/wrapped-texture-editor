@@ -412,7 +412,11 @@ opens a sticker, answer "Leave as is". Write down anything that differs.
      "Leave as is"). (b) Paint on the picture layer, Ctrl+S (if Photoshop
      asks about maximizing compatibility, leave it on): within about a
      second the model in WTE updates, the text is still an editable text
-     layer in WTE, the badge reads "linked". (c) Once more.
+     layer in WTE, the badge reads "linked". (c) In WTE move, scale and
+     turn the sticker on the model, give it a style (Classic sticker) and
+     switch Wrap on: the badge still reads "linked" and Photoshop's tab is
+     not reloaded. Paint again in Photoshop, Ctrl+S: the sticker updates
+     where you put it, with its style. (d) Once more.
  20. New layers. In Photoshop add an empty layer and paint on it, add a
      text layer, rename one layer, delete one, drag one to another place
      in the stack, Ctrl+S: WTE shows the same stack; the Photoshop text is

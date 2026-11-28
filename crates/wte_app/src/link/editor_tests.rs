@@ -482,3 +482,73 @@ fn a_foreign_layer_spliced_into_a_wte_file_reads_back_with_its_tagged_blocks() {
     assert!(super::testkit::with_foreign_layer(&base, &donor, 3, 40).is_err());
     assert!(super::testkit::with_foreign_layer(b"nope", &donor, 0, 40).is_err());
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Completeness critic: the user's own Photoshop workflow (STICKER_PLAN 13; "I would be able to manuver the sticker in
+// the wrapped app, and I can edit the sticker itself in photoshop")
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The stamp's placement, styles and tint (what the user changes on the model).
+fn on_model(state: &AppState, stamp: wte_core::StampId) -> (wte_core::Placement, wte_core::StyleStack, [u8; 4]) {
+    let s = state.doc().unwrap().stamp(stamp).unwrap();
+    (s.placement, s.styles.clone(), s.tint)
+}
+
+#[test]
+fn critic_photoshop_placement_edits_keep_the_link_and_each_save_updates_the_sticker_in_place() {
+    let (mut state, stamp, _dir) = two_editors("critic_ps_flow");
+    state.prefs.default_editor = Some(EDITOR_PHOTOSHOP.to_owned());
+    edit(&mut state, stamp);
+    let id = sticker_id(&state, stamp);
+    assert_eq!(state.doc().unwrap().link(id).unwrap().editor, EDITOR_PHOTOSHOP);
+    assert_eq!(badge_text(&mut state, id), "linked");
+    let path = link_path(&state, id).unwrap();
+    let sent = std::fs::read(&path).unwrap();
+    // Maneuvering the sticker in WTE: moved, scaled, turned, mirrored, laid on the surface; a style preset and a tint.
+    let wte_core::Placement::Projected(p) = state.doc().unwrap().stamp(stamp).unwrap().placement else { panic!("a 3D stamp") };
+    let moved = wte_core::Projector {
+        origin: p.origin + p.rotation * glam::Vec3::X * (p.half_size.x * 0.3),
+        rotation: p.rotation * glam::Quat::from_rotation_z(0.4),
+        half_size: p.half_size * 1.4,
+        flip_x: !p.flip_x,
+        mode: wte_core::SurfaceMode::Wrap,
+        ..p
+    };
+    let doc = state.doc_mut().unwrap();
+    doc.set_stamp_placement(stamp, wte_core::Placement::Projected(moved), Commit::Final).unwrap();
+    doc.set_stamp_styles(stamp, wte_core::StylePreset::ClassicSticker.styles([64, 64]), Commit::Final).unwrap();
+    doc.set_stamp_tint(stamp, [255, 230, 200, 255], Commit::Final).unwrap();
+    let placed = on_model(&state, stamp);
+    // None of it touches the link: the badge stays "linked", the file is the one WTE sent, nothing was started again.
+    assert_eq!(badge_text(&mut state, id), "linked", "a placement edit disturbed the link");
+    assert_eq!(std::fs::read(&path).unwrap(), sent, "a placement edit rewrote the linked PSD");
+    assert_eq!(state.link_ui.launcher.calls().len(), 1);
+    // Ctrl+S in Photoshop with Photoshop's own type layer added: the sticker updates in place, as one undo step.
+    let undo = state.doc().unwrap().history.undo_len();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../wte_core/tests/fixtures/psd/photoshop");
+    let donor = std::fs::read(fixtures.join("layers/type-layer.psd")).unwrap();
+    let saved = super::testkit::with_foreign_layer(&sent, &donor, 0, 40).unwrap();
+    super::testkit::save_bytes(&path, &saved).unwrap();
+    super::tests::deliver(&mut state, id, false);
+    assert_eq!(state.doc().unwrap().undo_label(), Some("Update Linked Sticker"));
+    assert_eq!(state.doc().unwrap().history.undo_len(), undo + 1);
+    assert_eq!(state.doc().unwrap().sticker(id).unwrap().layers.len(), 2, "WTE's layer and Photoshop's text");
+    assert_eq!(on_model(&state, stamp), placed, "Photoshop's save moved, restyled or retinted the sticker on the model");
+    assert_eq!(badge_text(&mut state, id), "linked");
+    assert!(state.toasts.visible_texts().contains(&"Updated from Photoshop"));
+    // Moved again in WTE, then a second save in Photoshop (one more layer): the newest placement is kept.
+    let again = wte_core::Projector { origin: moved.origin - moved.rotation * glam::Vec3::Y * (moved.half_size.y * 0.2), ..moved };
+    state.doc_mut().unwrap().set_stamp_placement(stamp, wte_core::Placement::Projected(again), Commit::Final).unwrap();
+    assert_eq!(badge_text(&mut state, id), "linked");
+    let placed = on_model(&state, stamp);
+    let psd = super::testkit::with_new_layer(&path, "red bar", 41, wte_core::IRect::from_xywh(2, 2, 12, 6)).unwrap();
+    super::testkit::save_as_editor(&path, &psd).unwrap();
+    super::tests::deliver(&mut state, id, false);
+    assert_eq!(state.doc().unwrap().sticker(id).unwrap().layers.len(), 3);
+    assert_eq!(on_model(&state, stamp), placed, "the second save lost the newer placement");
+    assert_eq!(badge_text(&mut state, id), "linked");
+    // Undoing the update gives back the sticker of the first save, still where the user put it last.
+    state.doc_mut().unwrap().undo().unwrap();
+    assert_eq!(state.doc().unwrap().sticker(id).unwrap().layers.len(), 2);
+    assert_eq!(on_model(&state, stamp).0, wte_core::Placement::Projected(again), "undoing an update moved the sticker");
+}

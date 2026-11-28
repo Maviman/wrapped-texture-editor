@@ -78,7 +78,7 @@ Noted, not changed:
 - `cargo test --workspace --no-fail-fast`: app 716 / 0 / 24 (one new test), core 1,102 / 1 (WA20) / 41, integration
   15 + 9 + 8 + 25 (`test2.log` with the label test's first form, `app_tests3.log` final). Clippy 0 warnings
   (`clippy3.log`). Release build OK: 32,949,248 bytes, SHA-256 4e91d5ffea907a20...
-- Off-screen with that exe (`target\sticker\check-p10buns_fixed\`): `sticker_clip`, `sticker_drop`, `sticker_view`,
+- Off-screen with that exe (`target\sticker\check-p10b\runs_fixed\`): `sticker_clip`, `sticker_drop`, `sticker_view`,
   `smoke` plain and `sticker_clip`, `smoke`, `pen`, `companion` with `WTE_PEN_SUBCLASS=1 WTE_OLE=1`: all `"ok": true`.
   The `sticker_drop`, `sticker_view` and `smoke` shots are byte-identical to the run before the fixes (drops keep
   "Drop"); `clip_view_centre` now shows "Undo: Paste". No core code changed, so the P0 identity sweep is unaffected.

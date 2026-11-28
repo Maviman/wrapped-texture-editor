@@ -668,7 +668,7 @@ pub(super) fn sticker_flow_path(has_path: bool) -> Vec<Step> {
         Step::Shot {
             name: "flow_updated",
             expect: "3D view: the styled sticker a little larger and moved to the side, now with a red bar at its upper \
-                     left (partly over the disc), the white border around it too; the Sticker tab reads \"Sticker, 3 \
+                     left (partly over the disc, or just beside it when the link's scale is 2), the white border around it too; the Sticker tab reads \"Sticker, 3 \
                      layers\" and \"Link: linked\"; the toast \"Updated from PhotoCraft\"",
         },
         // (8) A second picture; the style copied over.

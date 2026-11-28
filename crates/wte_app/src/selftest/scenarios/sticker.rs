@@ -192,8 +192,8 @@ pub(super) fn sticker_view() -> Vec<Step> {
         }),
         Step::Shot {
             name: "sticker_small",
-            expect: "900x600: the same Sticker view, smaller: canvas left with the sticker, sphere right, all 14 sticker \
-                     tools and the colour chip in the tool strip",
+            expect: "900x600: the same Sticker view, smaller: canvas left with the sticker, sphere right, all 15 sticker \
+                     tools (S1's Cut Out Box included) and the colour chip in the tool strip",
         },
         Step::Resize([1280, 800]),
         Step::WaitIdle,

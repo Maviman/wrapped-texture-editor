@@ -1,0 +1,24 @@
+# New scenarios again with WTE_OLE=1 WTE_PEN_SUBCLASS=1 (plan 8.6 item 3).
+sticker_view|-|
+sticker_keys|-|
+sticker_styles|-|
+sticker_tray|-|
+sticker_controls|-|
+sticker_edit|-|
+sticker_pen|-|
+sticker_cutout|-|
+sticker_text|-|
+sticker_layout|-|
+sticker_library|-|
+sticker_link|-|
+sticker_link_path|@REPO@/crates/wte_core/tests/fixtures/psd/f1w_pc.psd|f1w
+sticker_link_path|@REPO@/crates/wte_core/tests/fixtures/psd/photoshop/layers/type-layer.psd|pstype
+sticker_drop|-|
+sticker_clip|-|
+sticker_dragout|-|
+layer_link|-|
+sticker_flow_path|@SAMPLES@/ABeautifulGame.glb|abg
+sticker_flow_path|@SAMPLES@/DamagedHelmet.glb|helmet
+sticker_grabcut|-|
+sticker_live_copy|-|
+sticker_watch_folder|-|
